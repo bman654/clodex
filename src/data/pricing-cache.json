@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.2.0",
+  "generated_at": "2026-06-09T00:00:00.000Z",
+  "models": [
+    {
+      "provider": "groq",
+      "model_id": "llama-3.3-70b-versatile",
+      "aliases": { "groq": "llama-3.3-70b-versatile" },
+      "pricing": [
+        {
+          "platform": "groq",
+          "tier": "standard",
+          "modality": "text",
+          "input_per_1m_tokens": 0.59,
+          "output_per_1m_tokens": 0.79
+        }
+      ]
+    },
+    {
+      "provider": "anthropic",
+      "model_id": "claude-sonnet-4-20250514",
+      "aliases": { "anthropic": "claude-sonnet-4-20250514" },
+      "pricing": [
+        {
+          "platform": "anthropic",
+          "tier": "standard",
+          "modality": "text",
+          "input_per_1m_tokens": 3.0,
+          "output_per_1m_tokens": 15.0
+        }
+      ]
+    },
+    {
+      "provider": "moonshot",
+      "model_id": "moonshotai/kimi-k2.6",
+      "aliases": {
+        "openrouter": "moonshotai/kimi-k2.6",
+        "nvidia": "moonshotai/kimi-k2.6"
+      },
+      "pricing": [
+        {
+          "platform": "openrouter",
+          "tier": "standard",
+          "modality": "text",
+          "input_per_1m_tokens": 0.6,
+          "output_per_1m_tokens": 2.4
+        }
+      ]
+    }
+  ]
+}

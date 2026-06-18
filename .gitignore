@@ -1,0 +1,23 @@
+node_modules/
+docs/superpowers/
+docs/plans/
+*.js.map
+.env
+.env.*
+.DS_Store
+*.log
+npm-debug.log*
+coverage/
+*.tsbuildinfo
+spike/
+vertex-models.json
+
+# IDE / Editor folders
+.vscode/
+.idea/
+.cursor/
+
+# Local agent planning / logs
+.claude/
+.gemini/
+

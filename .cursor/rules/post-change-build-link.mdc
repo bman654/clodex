@@ -1,0 +1,19 @@
+---
+description: After relay-ai code changes, always build and npm link — Jacob does not run this manually
+alwaysApply: true
+---
+
+# Post-change build + link (relay-ai)
+
+Jacob tests relay-ai via the **global npm-linked** CLI. He does **not** want to run build/link himself.
+
+After **any** code change to this repo that affects runtime behavior (`src/`, `package.json`, dependencies, etc.):
+
+1. Run **`npm run build`** — required before manual testing
+2. Run **`npm link`** — refreshes the global `relay-ai` command to point at this workspace
+
+Do this **automatically** at the end of the task. Do not tell Jacob to run it unless the command failed and needs his attention.
+
+Skip only when the session was **read-only** (questions, review with no edits).
+
+On success, a short note like “Built and linked — ready to test” is enough.
