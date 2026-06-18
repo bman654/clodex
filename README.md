@@ -82,13 +82,47 @@ Bare `relay-ai` prints help and migration guidance. Use `relay-ai claude` for th
 
 ## Installation
 
-```bash
-# Install globally
-npm install -g @jacobbd/relay-ai
+To install the CLI globally:
 
-# Upgrade to the latest version
+```bash
+npm install -g @jacobbd/relay-ai
+```
+
+### Upgrading
+
+To upgrade to the latest version:
+
+```bash
 npm update -g @jacobbd/relay-ai
 ```
+
+### Uninstallation
+
+To uninstall the CLI globally:
+
+```bash
+npm uninstall -g @jacobbd/relay-ai
+```
+
+> [!NOTE]
+> If you use a Node version manager like **NVM**, make sure you run the uninstall command using the active Node version that was used to install it (e.g., run `nvm use <version>` first).
+
+To fully remove the tool and all its configuration data, you can delete the configuration directory (`.relay-ai`) on your operating system:
+
+- **macOS / Linux**:
+  ```bash
+  rm -rf ~/.relay-ai
+  ```
+- **Windows**:
+  - In Command Prompt:
+    ```cmd
+    rmdir /s /q "%USERPROFILE%\.relay-ai"
+    ```
+  - In PowerShell:
+    ```powershell
+    Remove-Item -Recurse -Force "$env:USERPROFILE\.relay-ai"
+    ```
+
 
 ## Setup
 
