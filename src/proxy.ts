@@ -76,6 +76,8 @@ export interface ProxyRoute {
   npm?: string;      // OpenCode api.npm — when SDK-migrated, routes via the adapter
   baseURL?: string;  // base URL for openai-compatible / openrouter SDK providers
   providerId?: string;
+  authType?: 'api' | 'oauth' | 'none';
+  oauthAccountId?: string;
   supportedParameters?: string[];
   reasoning?: boolean;
   interleavedReasoningField?: string;
@@ -218,6 +220,7 @@ export function startProxyCatalog(
       // format, endpoint selection, and provider quirks.
       if (isSdkMigratedNpm(route.npm)) {
         const params = sdkTranslateRequest(anthropicBody, route.npm!, {
+          openAiOAuth: route.npm === '@ai-sdk/openai' && route.authType === 'oauth',
           reasoningMetadata: {
             providerId: route.providerId,
             apiBaseUrl: route.baseURL,
@@ -237,6 +240,8 @@ export function startProxyCatalog(
             apiKey,
             baseURL: route.baseURL,
             providerId: route.aliasId,
+            authType: route.authType,
+            oauthAccountId: route.oauthAccountId,
           });
           if (clientWantsStream) {
             res.writeHead(200, {
@@ -304,6 +309,8 @@ export function startProxy(
     baseURL?: string;
     upstreamModelId?: string;
     providerId?: string;
+    authType?: 'api' | 'oauth' | 'none';
+    oauthAccountId?: string;
     supportedParameters?: string[];
     reasoning?: boolean;
     interleavedReasoningField?: string;
@@ -322,6 +329,8 @@ export function startProxy(
     npm: sdk?.npm,
     baseURL: sdk?.baseURL,
     providerId: sdk?.providerId,
+    authType: sdk?.authType,
+    oauthAccountId: sdk?.oauthAccountId,
     supportedParameters: sdk?.supportedParameters,
     reasoning: sdk?.reasoning,
     interleavedReasoningField: sdk?.interleavedReasoningField,

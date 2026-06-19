@@ -4,6 +4,7 @@
 import type { LanguageModel } from 'ai';
 import { wrapLanguageModel, extractReasoningMiddleware } from 'ai';
 import { VERTEX_ANTHROPIC_NPM } from './constants.js';
+import { extractOpenAiAccountId } from './oauth/openai.js';
 
 /** Models that must use /v1/responses instead of /v1/chat/completions. */
 const RESPONSES_ONLY_PREFIXES = [
@@ -54,6 +55,9 @@ export interface ProviderModelSpec {
   baseURL?: string;
   /** Provider id for naming openai-compatible instances (diagnostics only). */
   providerId?: string;
+  /** Registry authentication mode. OpenAI OAuth uses the ChatGPT Codex backend. */
+  authType?: 'api' | 'oauth' | 'none';
+  oauthAccountId?: string;
   /** Google Vertex AI — uses Application Default Credentials, not apiKey. */
   vertex?: VertexProviderConfig;
 }
@@ -110,7 +114,19 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
 
   if (npm === '@ai-sdk/openai') {
     const { createOpenAI } = await import('@ai-sdk/openai');
-    const openai = createOpenAI({ apiKey });
+    const accountId = spec.authType === 'oauth'
+      ? spec.oauthAccountId ?? extractOpenAiAccountId({ access_token: apiKey })
+      : undefined;
+    const openai = createOpenAI(spec.authType === 'oauth'
+      ? {
+          apiKey,
+          baseURL: 'https://chatgpt.com/backend-api/codex',
+          headers: {
+            ...(accountId ? { 'ChatGPT-Account-Id': accountId } : {}),
+            originator: 'relay-ai',
+          },
+        }
+      : { apiKey });
     return modelPrefersResponsesApi(modelId) ? openai.responses(modelId) : openai.chat(modelId);
   }
   if (npm === '@ai-sdk/xai') {

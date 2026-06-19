@@ -245,28 +245,37 @@ export function parseArgs(args: string[]): ParsedArgs {
 
 export function rootHelpText(): string {
   return `${pc.bold('relay-ai')} v${VERSION}
-Launch AI coding tools with OpenCode Zen, Go, or local providers (Groq, Mistral,
+Launch AI coding tools with OpenCode Zen / Go or local providers (Groq, Mistral,
 OpenAI, Gemini, Ollama, and more).
 
 ${pc.bold('Usage:')}
   relay-ai claude [options] [claude-flags]
+  relay-ai claude-app [options]
+  relay-ai codex [options] [codex-flags]
+  relay-ai codex-app [options]
+  relay-ai server [options]
   relay-ai models
+  relay-ai favorites
   relay-ai providers
-  relay-ai codex [codex-flags]
-  relay-ai codex-app
-  relay-ai server
   relay-ai --help
   relay-ai --version
   relay-ai --ai              Full reference for AI agents (run this when unsure)
   relay-ai --ai --install    Install or upgrade agent skill when version changed
   relay-ai --ai --install --force  Reinstall skill even if already current
 
+${pc.bold('Root options:')}
+  -h, --help       Show this help
+  -v, --version    Show version
+  --ai             Print the full reference for AI agents
+  --ai --install   Install or upgrade the relay-ai agent skill
+  --force          Reinstall the agent skill when used with --ai --install
+
 ${pc.bold('Commands:')}
   claude      Launch Claude Code — pick a provider from your registry
   models      Manage favorite models for mid-session /model switching (max ${MAX_MODEL_CATALOG})
   favorites   Alias for models
   providers   Add, import, and manage your AI providers
-  server      Run a foreground API gateway (Zen, Go, and local providers)
+  server      Run a foreground API gateway (OpenCode Zen / Go and local providers)
   codex       Launch OpenAI Codex CLI with registry providers
   codex-app   Launch Codex desktop app with registry providers (macOS + Windows)
   claude-app  Launch Claude Desktop app with registry providers (macOS + Windows)
@@ -278,8 +287,10 @@ ${pc.bold('Migration:')}
 ${pc.bold('Examples:')}
   relay-ai claude
   relay-ai models
+  relay-ai providers
   relay-ai codex
   relay-ai codex-app
+  relay-ai claude-app
   relay-ai server
   relay-ai claude -c
   relay-ai claude --resume abc-123
@@ -876,6 +887,8 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
           baseURL: selectedModel.apiBaseUrl,
           upstreamModelId: selectedModel.upstreamModelId,
           providerId: activeProvider.id,
+          authType: activeProvider.authType,
+          oauthAccountId: activeProvider.oauthAccountId,
           supportedParameters: selectedModel.supportedParameters,
           reasoning: selectedModel.reasoning,
           interleavedReasoningField: selectedModel.interleavedReasoningField,

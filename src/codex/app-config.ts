@@ -29,6 +29,8 @@ export interface CodexAppRestoreState {
   modelProvider?: string;
   hadModelCatalogJson: boolean;
   modelCatalogJson?: string;
+  hadOpenAIBaseUrl?: boolean;
+  openAIBaseUrl?: string;
   hadModelReasoningEffort: boolean;
   modelReasoningEffort?: string;
 }
@@ -61,6 +63,7 @@ export function captureRestoreState(text: string): CodexAppRestoreState {
   const model = rootString(config, 'model');
   const modelProvider = rootString(config, 'model_provider');
   const modelCatalog = rootString(config, 'model_catalog_json');
+  const openAIBaseUrl = rootString(config, 'openai_base_url');
   const reasoning = rootString(config, 'model_reasoning_effort');
   return {
     hadProfile: profile.had,
@@ -71,6 +74,8 @@ export function captureRestoreState(text: string): CodexAppRestoreState {
     modelProvider: modelProvider.value,
     hadModelCatalogJson: modelCatalog.had,
     modelCatalogJson: modelCatalog.value,
+    hadOpenAIBaseUrl: openAIBaseUrl.had,
+    openAIBaseUrl: openAIBaseUrl.value,
     hadModelReasoningEffort: reasoning.had,
     modelReasoningEffort: reasoning.value,
   };
@@ -79,7 +84,12 @@ export function captureRestoreState(text: string): CodexAppRestoreState {
 export function isAppManagedConfig(text: string): boolean {
   const config = parseCodexConfig(text);
   const mp = rootString(config, 'model_provider');
-  return mp.had && mp.value === CODEX_APP_PROVIDER_ID;
+  if (mp.had && mp.value === CODEX_APP_PROVIDER_ID) return true;
+  const baseUrl = rootString(config, 'openai_base_url');
+  const catalog = rootString(config, 'model_catalog_json');
+  return mp.value === 'openai'
+    && /^http:\/\/127\.0\.0\.1:\d+\/v1$/.test(baseUrl.value)
+    && /(?:^|[\\/])app-models-[^\\/]+\.json$/.test(catalog.value);
 }
 
 function mergeAppConfig(existing: TomlRecord, spec: CodexAppConfigSpec): TomlRecord {
@@ -88,6 +98,7 @@ function mergeAppConfig(existing: TomlRecord, spec: CodexAppConfigSpec): TomlRec
   delete out.profile;
   out.model = patch.model;
   out.model_provider = patch.model_provider;
+  out.openai_base_url = patch.openai_base_url;
   out.model_catalog_json = patch.model_catalog_json;
   const providers = asRecord(out.model_providers);
   delete providers[CODEX_APP_PROVIDER_ID];
@@ -98,10 +109,11 @@ function mergeAppConfig(existing: TomlRecord, spec: CodexAppConfigSpec): TomlRec
   } else {
     out.profiles = profiles;
   }
-  out.model_providers = {
-    ...providers,
-    ...patch.model_providers,
-  };
+  if (Object.keys(providers).length === 0) {
+    delete out.model_providers;
+  } else {
+    out.model_providers = providers;
+  }
 
   const existingEffort = typeof out.model_reasoning_effort === 'string' ? out.model_reasoning_effort : undefined;
   if (existingEffort !== undefined) {
@@ -134,8 +146,12 @@ export function validateAppConfigText(text: string, spec: CodexAppConfigSpec): v
     throw new Error('Generated config still contains legacy profiles table');
   }
   const mp = rootString(config, 'model_provider');
-  if (mp.value !== CODEX_APP_PROVIDER_ID) {
-    throw new Error('Generated config missing relay-ai model_provider');
+  if (mp.value !== 'openai') {
+    throw new Error('Generated config must keep the built-in OpenAI model_provider');
+  }
+  const baseUrl = rootString(config, 'openai_base_url');
+  if (baseUrl.value !== `http://127.0.0.1:${spec.proxyPort}/v1`) {
+    throw new Error('Generated config openai_base_url mismatch');
   }
   const catalog = rootString(config, 'model_catalog_json');
   if (catalog.value !== spec.catalogPath) {
@@ -186,6 +202,11 @@ export function restoreConfigFromState(state: CodexAppRestoreState, configPath =
   applyRestoreKey(config, 'model', state.hadModel, state.model);
   applyRestoreKey(config, 'model_provider', state.hadModelProvider, state.modelProvider);
   applyRestoreKey(config, 'model_catalog_json', state.hadModelCatalogJson, state.modelCatalogJson);
+  // Restore states written by relay-ai <= 0.2.6 predate this field. The old
+  // overlay preserved openai_base_url, so leave it untouched during recovery.
+  if ('hadOpenAIBaseUrl' in state) {
+    applyRestoreKey(config, 'openai_base_url', Boolean(state.hadOpenAIBaseUrl), state.openAIBaseUrl);
+  }
   applyRestoreKey(config, 'model_reasoning_effort', state.hadModelReasoningEffort, state.modelReasoningEffort);
 
   const sidecar = getCodexAppSidecarProfilePath();

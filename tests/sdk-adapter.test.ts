@@ -135,6 +135,20 @@ describe('translateRequest', () => {
     });
   });
 
+  it('supplies required instructions and omits max tokens for OpenAI OAuth', () => {
+    const params = translateRequest({
+      model: 'gpt-5.5',
+      messages: [{ role: 'user', content: 'hello' }],
+      max_tokens: 32000,
+    }, '@ai-sdk/openai', { openAiOAuth: true });
+
+    expect(params.system).toBeUndefined();
+    expect(params.providerOptions?.openai).toMatchObject({
+      instructions: 'You are a coding assistant.',
+    });
+    expect(params.maxOutputTokens).toBeUndefined();
+  });
+
   it('maps output_config.effort to Google thinking budget without dropping includeThoughts', () => {
     const params = translateRequest({
       model: 'gemini-2.5-pro',

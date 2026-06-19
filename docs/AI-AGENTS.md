@@ -1,6 +1,6 @@
 # AI agents & non-interactive launch
 
-relay-ai is built so **AI agents** (scripts, CI, [alef-agent](https://github.com/jacob-bd/alef-agent), Cursor subagents, etc.) can launch Claude Code or OpenAI Codex against your provider registry **without interactive wizards**, with **clean machine-readable stdout** when needed.
+relay-ai is built so **AI agents** (scripts, CI, alef-agent, Cursor subagents, etc.) can launch Claude Code or OpenAI Codex against your provider registry **without interactive wizards**, with **clean machine-readable stdout** when needed.
 
 For the full machine-readable reference (including your live provider/model list), run:
 
@@ -207,7 +207,7 @@ Non-OpenAI models routed through relay-ai's Codex proxy use the Responses API ad
 
 ## Alef-agent integration
 
-[alef-agent](https://github.com/jacob-bd/alef-agent) shells out to CLI backends and parses **NDJSON/JSONL on stdout**. Use relay-ai as the **wrapper executable** with boot flags prepended.
+alef-agent shells out to CLI backends and parses **NDJSON/JSONL on stdout**. Use relay-ai as the **wrapper executable** with boot flags prepended.
 
 ### Recommended spawn configs
 

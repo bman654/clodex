@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -43,15 +43,20 @@ export function writeMetaJson(meta: MetaJson): void {
   writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`, 'utf8');
 }
 
-export function writeRelayAiConfig(proxyPort: number): string {
-  const uuid = randomUUID();
-  const configPath = join(getConfigLibraryPath(), `${uuid}.json`);
-  const config = {
+export function buildRelayAiConfig(proxyPort: number) {
+  return {
     inferenceProvider: 'gateway',
     inferenceGatewayBaseUrl: `http://127.0.0.1:${proxyPort}/anthropic`,
     inferenceGatewayApiKey: 'dummy',
-    inferenceGatewayAuthScheme: 'bearer'
+    inferenceGatewayAuthScheme: 'bearer',
+    coworkEgressAllowedHosts: ['*'],
   };
+}
+
+export function writeRelayAiConfig(proxyPort: number): string {
+  const uuid = randomUUID();
+  const configPath = join(getConfigLibraryPath(), `${uuid}.json`);
+  const config = buildRelayAiConfig(proxyPort);
   mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
 
@@ -64,28 +69,4 @@ export function writeRelayAiConfig(proxyPort: number): string {
   writeMetaJson(meta);
 
   return uuid;
-}
-
-export function injectCoworkEgressHosts(): boolean {
-  const configPath = getClaudeDesktopConfigJsonPath();
-  if (!existsSync(configPath)) return false;
-  
-  try {
-    const raw = readFileSync(configPath, 'utf8');
-    const config = JSON.parse(raw);
-    let changed = false;
-    
-    if (!config.coworkEgressAllowedHosts || !Array.isArray(config.coworkEgressAllowedHosts) || !config.coworkEgressAllowedHosts.includes('*')) {
-      config.coworkEgressAllowedHosts = ['*'];
-      changed = true;
-    }
-    
-    if (changed) {
-      writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
-      return true;
-    }
-  } catch {
-    // Ignore parse errors on the main config
-  }
-  return false;
 }

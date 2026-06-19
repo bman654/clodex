@@ -45,7 +45,6 @@ export function localProviderToRegistry(
       ...(apiUrl ? { url: apiUrl } : {}),
     },
     addedAt: new Date().toISOString(),
-    refreshedAt: new Date().toISOString(),
     modelsCache: {
       fetchedAt: new Date().toISOString(),
       models: provider.models.map(modelToCached),

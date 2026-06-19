@@ -114,7 +114,7 @@ ${pc.bold('Usage:')}
 ${pc.bold('Subcommands:')}
   (none)      Provider hub wizard ${pc.dim('[Phase 1.1]')}
   add         Add a provider (Groq, Mistral, Together AI, …) ${pc.dim('[Phase 1.1]')}
-  import      import providers from 'open code CLI' (one-time) ${pc.dim('[Phase 1.0]')}
+  import      Import providers from OpenCode CLI (one-time) ${pc.dim('[Phase 1.0]')}
   auth        Sign in with OAuth (xAI, OpenAI ChatGPT) ${pc.dim('[Phase 2]')}
   list        Show configured providers ${pc.dim('[Phase 1.0]')}
   remove      Remove a provider by id ${pc.dim('[Phase 1.1]')}
@@ -203,12 +203,13 @@ export async function runProvidersImport(): Promise<number> {
   if (result.imported.length > 0) {
     const refreshSpinner = p.spinner();
     refreshSpinner.start('Fetching model capabilities from providers...');
-    await Promise.all(result.imported.map(async provider => {
+    const registry = loadRegistry();
+    for (const provider of result.imported) {
       const key = await resolveRefreshCredential(provider, async pr =>
         resolveProviderCredential(pr.id, pr.authRef),
       );
-      await refreshProviderModels(provider.id, key);
-    }));
+      await refreshProviderModels(provider.id, key, registry);
+    }
     refreshSpinner.stop('Model capabilities refreshed.');
   }
 
@@ -257,8 +258,12 @@ export async function runProvidersRefreshModels(providerId?: string): Promise<nu
       p.log.error(`${result.name}: ${result.reason ?? 'Refresh failed.'}`);
       return 1;
     }
-    const diff = (result.modelCount ?? 0) - (result.previousModelCount ?? 0);
-    const diffStr = diff > 0 ? ` (+${diff})` : diff < 0 ? ` (${diff})` : '';
+    const diff = result.previousModelCount === undefined
+      ? 0
+      : (result.modelCount ?? 0) - result.previousModelCount;
+    const diffStr = result.previousModelCount === undefined
+      ? ''
+      : diff > 0 ? ` (+${diff})` : diff < 0 ? ` (${diff})` : '';
     p.log.success(`${result.name}: ${result.modelCount} model${result.modelCount === 1 ? '' : 's'} updated${diffStr}.`);
     return 0;
   }
@@ -275,8 +280,12 @@ export async function runProvidersRefreshModels(providerId?: string): Promise<nu
   if (ok.length > 0) {
     p.log.success(`Updated ${ok.length} provider${ok.length === 1 ? '' : 's'}.`);
     for (const r of ok) {
-      const diff = (r.modelCount ?? 0) - (r.previousModelCount ?? 0);
-      const diffStr = diff > 0 ? ` (+${diff})` : diff < 0 ? ` (${diff})` : '';
+      const diff = r.previousModelCount === undefined
+        ? 0
+        : (r.modelCount ?? 0) - r.previousModelCount;
+      const diffStr = r.previousModelCount === undefined
+        ? ''
+        : diff > 0 ? ` (+${diff})` : diff < 0 ? ` (${diff})` : '';
       p.log.info(`  ${r.name}: ${r.modelCount} model${r.modelCount === 1 ? '' : 's'}${diffStr}`);
     }
   }
@@ -402,21 +411,27 @@ async function runTemplateAddFlow(): Promise<number> {
     const spinner = p.spinner();
     spinner.start(`Adding ${template.name}...`);
 
-    const stub = template.id === 'zen' ? addZenRegistryStub() : addGoRegistryStub();
-    if (!stub.added && stub.reason) {
+    const zenStub = addZenRegistryStub();
+    const goStub = addGoRegistryStub();
+    if (!zenStub.added && !goStub.added) {
       spinner.stop('');
-      p.log.warn(stub.reason);
+      p.log.warn('OpenCode Zen / Go is already configured.');
       return 0;
     }
 
     const registry = loadRegistry();
-    const refreshResult = await refreshProviderModels(template.id, apiKey, registry);
+    const refreshResults = [
+      await refreshProviderModels('zen', apiKey, registry),
+      await refreshProviderModels('go', apiKey, registry),
+    ];
     spinner.stop('');
 
-    if (refreshResult.ok) {
-      p.log.success(`Added ${template.name} — ${fmtCount(refreshResult.modelCount ?? 0, 'model')} updated.`);
+    const modelCount = refreshResults.reduce((total, result) => total + (result.modelCount ?? 0), 0);
+    const failed = refreshResults.filter(result => !result.ok);
+    if (failed.length === 0) {
+      p.log.success(`Added ${template.name} — ${fmtCount(modelCount, 'model')} updated.`);
     } else {
-      p.log.warn(`Added ${template.name}, but model refresh failed: ${refreshResult.reason ?? 'Unknown error'}`);
+      p.log.warn(`Added ${template.name}, but ${failed.length} catalog refresh${failed.length === 1 ? '' : 'es'} failed.`);
     }
     return 0;
   }
@@ -551,7 +566,7 @@ export async function runProvidersAdd(): Promise<number> {
   const options: Array<{ value: string; label: string; hint: string }> = [
     {
       value: 'import',
-      label: "import providers from 'open code CLI'",
+      label: 'Import providers from OpenCode CLI',
       hint: hasOpencode ? 'Import Groq, OpenAI, etc. from your OpenCode config' : 'Requires OpenCode CLI',
     },
   ];
@@ -619,9 +634,26 @@ export async function runProvidersRemove(id: string, interactive = false): Promi
   return 0;
 }
 
-async function runCloudBuiltinDetail(id: 'zen' | 'go'): Promise<'back'> {
-  const name = id === 'zen' ? 'OpenCode Zen' : 'OpenCode Go';
-  printCloudProviderPanel(name);
+async function runOpenCodeCloudDetail(): Promise<'back'> {
+  const registry = loadRegistry();
+  const routes = registry.providers.filter(provider => provider.id === 'zen' || provider.id === 'go');
+  printCloudProviderPanel('OpenCode Zen / Go');
+  if (routes.length === 0) return 'back';
+
+  const choice = await p.select({
+    message: 'Manage an OpenCode catalog',
+    options: [
+      ...routes.map(provider => ({
+        value: provider.id,
+        label: provider.name,
+        hint: `${provider.modelsCache?.models.length ?? 0} cached models`,
+      })),
+      { value: 'back', label: 'Back', hint: '' },
+    ],
+  });
+  if (!p.isCancel(choice) && choice !== 'back') {
+    await runProviderDetail(String(choice));
+  }
   return 'back';
 }
 
@@ -714,7 +746,7 @@ export async function runProvidersHub(): Promise<number> {
       options.push({ value: 'refresh-all', label: '↺ Refresh all models', hint: 'Update model lists for all providers' });
     }
     if (hasOpencode) {
-      options.push({ value: 'import', label: "→ import providers from 'open code CLI'", hint: 'One-time import' });
+      options.push({ value: 'import', label: '→ Import providers from OpenCode CLI', hint: 'One-time import' });
     }
     options.push({ value: 'done', label: 'Done', hint: '' });
 
@@ -750,7 +782,7 @@ export async function runProvidersHub(): Promise<number> {
     }
     if (typeof choice === 'string' && choice.startsWith('cloud:')) {
       const id = choice.slice('cloud:'.length);
-      if (id === 'zen' || id === 'go') await runCloudBuiltinDetail(id);
+      if (id === 'opencode') await runOpenCodeCloudDetail();
       continue;
     }
     if (typeof choice === 'string' && choice.startsWith('provider:')) {

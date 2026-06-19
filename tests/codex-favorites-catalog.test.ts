@@ -116,23 +116,23 @@ describe('buildFavoritesCodexCatalog', () => {
 });
 
 describe('buildFavoritesAppCatalog', () => {
-  it('uses App-form slugs (relay-ai-launch-codex-app/{modelId}) and bytes truncation', () => {
+  it('uses provider-qualified slugs and bytes truncation', () => {
     const resolved: ResolvedFavorite[] = [
       { providerId: 'anthropic', providerName: 'Anthropic', model: anthropicModel, apiKey: 'k' },
     ];
     const file = buildFavoritesAppCatalog(resolved);
-    expect(file.models[0]?.slug).toBe('relay-ai-launch-codex-app/claude-sonnet-4.5');
+    expect(file.models[0]?.slug).toBe('anthropic__claude-sonnet-4.5');
     expect(file.models[0]?.truncation_policy).toEqual({ mode: 'bytes', limit: 10_000 });
   });
 
-  it('cross-provider favorites all get App-form slugs', () => {
+  it('cross-provider favorites get unique provider-qualified slugs', () => {
     const resolved: ResolvedFavorite[] = [
       { providerId: 'anthropic', providerName: 'Anthropic', model: anthropicModel, apiKey: 'k' },
       { providerId: 'openai', providerName: 'OpenAI', model: openaiModel, apiKey: 'k' },
     ];
     const file = buildFavoritesAppCatalog(resolved);
     expect(file.models).toHaveLength(2);
-    expect(file.models[0]?.slug).toBe('relay-ai-launch-codex-app/claude-sonnet-4.5');
-    expect(file.models[1]?.slug).toBe('relay-ai-launch-codex-app/gpt-5.5');
+    expect(file.models[0]?.slug).toBe('anthropic__claude-sonnet-4.5');
+    expect(file.models[1]?.slug).toBe('openai__gpt-5.5');
   });
 });

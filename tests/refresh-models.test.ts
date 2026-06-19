@@ -44,4 +44,50 @@ describe('refreshProviderModels', () => {
     expect(fetchTemplateModels).not.toHaveBeenCalled();
     expect(saveRegistry).not.toHaveBeenCalled();
   });
+
+  it('does not report an imported snapshot as a model-count change on first live refresh', async () => {
+    const registry: ProviderRegistry = {
+      version: 1,
+      providers: [{
+        id: 'groq',
+        templateId: 'groq',
+        name: 'Groq',
+        enabled: true,
+        authRef: 'keyring:provider:groq',
+        authType: 'api',
+        api: { npm: '@ai-sdk/groq', url: 'https://api.groq.com/openai/v1' },
+        addedAt: '2026-06-18T00:00:00.000Z',
+        modelsCache: {
+          fetchedAt: '2026-06-18T00:00:00.000Z',
+          models: [{
+            id: 'imported-model',
+            name: 'Imported model',
+            upstreamModelId: 'imported-model',
+            modelFormat: 'openai',
+          }],
+        },
+      }],
+    };
+    vi.mocked(fetchTemplateModels).mockResolvedValue({
+      baseUrl: 'https://api.groq.com/openai/v1',
+      models: [{
+        id: 'live-a',
+        name: 'Live A',
+        upstreamModelId: 'live-a',
+        modelFormat: 'openai',
+      }, {
+        id: 'live-b',
+        name: 'Live B',
+        upstreamModelId: 'live-b',
+        modelFormat: 'openai',
+      }],
+    });
+
+    const first = await refreshProviderModels('groq', 'gsk-real-key', registry);
+    const second = await refreshProviderModels('groq', 'gsk-real-key', registry);
+
+    expect(first).toMatchObject({ ok: true, modelCount: 2 });
+    expect(first.previousModelCount).toBeUndefined();
+    expect(second).toMatchObject({ ok: true, modelCount: 2, previousModelCount: 2 });
+  });
 });

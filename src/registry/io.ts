@@ -15,6 +15,7 @@ import { dirname } from 'node:path';
 import { getAppHome, getProvidersPath } from '../paths.js';
 import type { ProviderRegistry, RegistryProvider } from './types.js';
 import { REGISTRY_SCHEMA_VERSION } from './types.js';
+import { migrateLegacyCloudProviders } from './migrate.js';
 import { isValidProviderId } from './validate.js';
 
 const DIR_MODE = 0o700;
@@ -116,7 +117,15 @@ export function loadRegistry(path = getProvidersPath()): ProviderRegistry {
   }
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8'));
-    return parseRegistry(raw);
+    const registry = parseRegistry(raw);
+    if (migrateLegacyCloudProviders(registry)) {
+      try {
+        saveRegistry(registry, path);
+      } catch {
+        // Parsed data remains usable even when migration persistence fails.
+      }
+    }
+    return registry;
   } catch {
     return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
   }

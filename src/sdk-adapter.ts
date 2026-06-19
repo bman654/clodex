@@ -55,6 +55,8 @@ export interface TranslateRequestOptions {
   /** Fallback when the client omits effort (e.g. Claude Desktop gateway). */
   defaultEffort?: string;
   reasoningMetadata?: ReasoningMetadata;
+  /** ChatGPT Codex OAuth requires instructions and manages its own output limit. */
+  openAiOAuth?: boolean;
 }
 
 /** Read reasoning effort from an Anthropic-format request body. */
@@ -227,7 +229,8 @@ export function translateRequest(
   // system prompt so they aren't dropped.
   const baseSystem = systemToString(body.system);
   const inlineParts = inlineSystemText(messages);
-  const system = [baseSystem, ...inlineParts].filter(s => s && s.trim()).join('\n\n') || undefined;
+  const systemText = [baseSystem, ...inlineParts].filter(s => s && s.trim()).join('\n\n')
+    || (options?.openAiOAuth ? 'You are a coding assistant.' : undefined);
 
   // resolveUpstreamTools uses the shared proxy types; the adapter keeps its own
   // minimal request shapes, so cast at this boundary.
@@ -237,15 +240,20 @@ export function translateRequest(
   ) as unknown as AnthropicTool[];
   const effort = anthropicEffortFromRequest(body) ?? options?.defaultEffort;
   const providerOptions = deepMergeProviderOptions(
-    thinkingProviderOptions(npm),
-    effortProviderOptions(npm, effort, body.model, options?.reasoningMetadata),
+    deepMergeProviderOptions(
+      thinkingProviderOptions(npm),
+      effortProviderOptions(npm, effort, body.model, options?.reasoningMetadata),
+    ),
+    options?.openAiOAuth && systemText
+      ? { openai: { instructions: systemText } }
+      : undefined,
   );
   return {
-    system,
+    system: options?.openAiOAuth ? undefined : systemText,
     messages: translateMessages(messages, npm),
     tools: translateTools(upstreamTools.length ? upstreamTools : undefined),
     toolChoice: translateToolChoice(body.tool_choice),
-    maxOutputTokens: body.max_tokens,
+    maxOutputTokens: options?.openAiOAuth ? undefined : body.max_tokens,
     temperature: body.temperature,
     providerOptions,
   };

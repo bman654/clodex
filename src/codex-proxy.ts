@@ -23,6 +23,8 @@ export interface CodexProxyRoute {
   baseURL?: string;
   upstreamModelId: string;
   providerId?: string;
+  authType?: 'api' | 'oauth' | 'none';
+  oauthAccountId?: string;
   supportedParameters?: string[];
   reasoning?: boolean;
   interleavedReasoningField?: string;
@@ -120,6 +122,8 @@ export async function startCodexProxy(
       apiKey: route.apiKey,
       baseURL: route.baseURL,
       providerId: route.modelId,
+      authType: route.authType,
+      oauthAccountId: route.oauthAccountId,
       vertex: route.vertex,
     }));
   }
@@ -136,6 +140,10 @@ export async function startCodexProxy(
 
     const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
       const url = req.url ?? '/';
+
+      if (debug) {
+        log(`-> ${req.method} ${url} content-type=${req.headers['content-type'] ?? '(none)'} content-encoding=${req.headers['content-encoding'] ?? '(none)'} content-length=${req.headers['content-length'] ?? '(none)'}`);
+      }
 
       if (req.method === 'GET' && url === '/health') {
         sendJson(res, 200, { ok: true });
@@ -196,10 +204,25 @@ export async function startCodexProxy(
           }
         }
 
+        let rawBody: string;
+        try {
+          rawBody = await readBody(req);
+        } catch (err) {
+          if (debug) {
+            log(`Error: failed to read/decode request body on POST ${url}: ${formatUpstreamError(err)} content-encoding=${req.headers['content-encoding'] ?? '(none)'}`);
+          }
+          sendJson(res, 400, { error: { message: 'Invalid request body', type: 'invalid_request_error' } });
+          return;
+        }
+
         let body: Record<string, unknown>;
         try {
-          body = JSON.parse(await readBody(req));
-        } catch {
+          body = JSON.parse(rawBody);
+        } catch (err) {
+          if (debug) {
+            const headers = JSON.stringify(req.headers);
+            log(`Error: Invalid JSON body on POST ${url}: ${formatUpstreamError(err)} headers=${headers} rawBody=${JSON.stringify(rawBody.slice(0, 2000))}`);
+          }
           sendJson(res, 400, { error: { message: 'Invalid JSON body', type: 'invalid_request_error' } });
           return;
         }

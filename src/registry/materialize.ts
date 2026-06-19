@@ -73,6 +73,7 @@ function materializeOne(
     id: provider.id,
     name: provider.name,
     apiKey,
+    authType: provider.authType,
     models,
   };
 }

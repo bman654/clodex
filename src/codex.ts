@@ -67,13 +67,21 @@ export function codexHelpText(): string {
 
 ${pc.bold('Usage:')}
   relay-ai codex [options] [codex-flags]
+  relay-ai codex --vertex
   relay-ai codex --restore
   relay-ai codex --config
+  relay-ai codex --help
+  relay-ai codex --version
 
 ${pc.bold('Options:')}
   --trace      Write proxy debug logs to ~/.relay-ai/logs/ and show errors on exit
   --provider   Boot provider id (skip wizard when paired with --model or non-interactive)
   --model      Boot model id (skip wizard when paired with --provider or non-interactive)
+  --vertex     Use Claude models through Google Vertex AI
+  --restore    Remove interrupted-session overlay files
+  --config     Preview/write launch configuration without starting Codex
+  --help       Show this command help
+  --version    Show version
 
 ${pc.bold('Description:')}
   Picks a provider and model from ~/.relay-ai/providers.json, writes a temporary

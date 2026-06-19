@@ -177,6 +177,17 @@ describe('resolveCodexRoute', () => {
     expect(route.tier).toBe('direct');
   });
 
+  it('routes OpenAI OAuth through the proxy', async () => {
+    const { resolveCodexRoute } = await import('../src/codex/routing.js');
+    const route = resolveCodexRoute(
+      { id: 'openai', name: 'OpenAI', apiKey: 'oauth-token', authType: 'oauth', models: [] },
+      { id: 'gpt-5.5', name: 'GPT', family: '', brand: '', modelFormat: 'openai', upstreamModelId: 'gpt-5.5', npm: '@ai-sdk/openai' },
+      'oauth-token',
+    );
+    expect(route.tier).toBe('proxy');
+    expect(route.authType).toBe('oauth');
+  });
+
   it('routes Anthropic to tier 2 proxy', async () => {
     const { resolveCodexRoute } = await import('../src/codex/routing.js');
     const route = resolveCodexRoute(
@@ -314,7 +325,7 @@ describe('buildCatalogFile', () => {
     const sonnet = { id: 'claude-sonnet-4-6', name: 'claude-sonnet-4-6', family: 'claude', brand: 'Claude', modelFormat: 'anthropic' as const, upstreamModelId: 'claude-sonnet-4-6', contextWindow: 200000 };
     expect(formatCodexModelLabel(haiku)).toBe('Claude Haiku 4.5');
     const catalog = buildAppCatalogFile([sonnet, haiku], 'Anthropic', haiku.id);
-    expect(catalog.models[0]!.slug).toBe('relay-ai-launch-codex-app/claude-haiku-4-5-20251001');
+    expect(catalog.models[0]!.slug).toBe('claude-haiku-4-5-20251001');
     expect(catalog.models[0]!.display_name).toBe('Claude Haiku 4.5');
     expect(catalog.models[0]!.priority).toBe(0);
     expect(catalog.models[1]!.priority).toBe(1);

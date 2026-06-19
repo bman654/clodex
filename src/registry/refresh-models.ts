@@ -241,7 +241,7 @@ export async function refreshProviderModels(
       name: provider.name,
       ok: true,
       modelCount: enriched.length,
-      previousModelCount,
+      previousModelCount: provider.refreshedAt ? previousModelCount : undefined,
     };
   } catch (err) {
     return {

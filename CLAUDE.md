@@ -150,9 +150,9 @@ In all cases `process.env['OPENCODE_API_KEY']` is set immediately so the key is 
 - `--restore` globs `models-*.json` (CLI) and `app-models-*.json` (App); the new files are `models-favorites.json` and `app-models-favorites.json`.
 - Zen/Go favorites are skipped in Codex (use Claude or Desktop gateway).
 
-## Release status (v0.2.5)
+## Release status (v0.2.7)
 
-Current version is **v0.2.5** — native provider registry, agent boot flags (`--provider` / `--model`), `relay-ai --ai`, Codex favorites catalog, Codex App restore handling, reasoning capability metadata, and OpenCode cloud provider setup in `relay-ai providers add`.
+Current version is **v0.2.7** — official launch release with the native provider registry, complete Claude/Codex app help, unified OpenCode Zen / Go setup, duplicate-provider migration, stable post-import refreshes, agent boot flags (`--provider` / `--model`), `relay-ai --ai`, favorites catalogs, reasoning capability metadata, and Codex App history preservation via built-in `openai` provider + local Responses proxy (`--trace` fully wired).
 
 **Known limitations (by design):**
 - Cost display in Claude Code is always inaccurate for non-Anthropic models.

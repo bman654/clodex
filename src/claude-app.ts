@@ -16,7 +16,7 @@ import { createGatewayModelCatalog, type ServerModelInfo } from './server/models
 import { BACKENDS } from './constants.js';
 import { loadServerModels } from './server/index.js';
 import { filterServerModelsByFavorites } from './server/catalog-filter.js';
-import { writeRelayAiConfig, injectCoworkEgressHosts, getClaudeDesktopHome } from './claude-desktop/app-config.js';
+import { writeRelayAiConfig, getClaudeDesktopHome } from './claude-desktop/app-config.js';
 import { getProxyDebugLogPath } from './trace-log.js';
 import { readSessionLock, recoverSession, hasStaleSession, writeSessionLock, setupExitCleanup, cleanupSession, backupMetaJson, isConcurrentLiveSession, waitForShutdown } from './claude-desktop/app-session.js';
 import { launchOrRestartClaudeApp, claudeAppSupported, isClaudeAppRunning, quitClaudeAppGracefully } from './claude-desktop/app-launch.js';
@@ -26,9 +26,17 @@ export function claudeAppHelpText(): string {
   return `${pc.bold('relay-ai claude-app')} — launch Claude Desktop app in 3P mode with your registry providers
 
 ${pc.bold('Usage:')}
-  relay-ai claude-app
+  relay-ai claude-app [options]
   relay-ai claude-app --trace
   relay-ai claude-app --restore
+  relay-ai claude-app --help
+  relay-ai claude-app --version
+
+${pc.bold('Options:')}
+  --trace      Write proxy debug logs to ~/.relay-ai/logs/
+  --restore    Restore Claude Desktop config after an interrupted app session
+  --help       Show this command help
+  --version    Show version
 
 ${pc.bold('Description:')}
   Picks a provider and model from ~/.relay-ai/providers.json, patches Claude Desktop config
@@ -169,8 +177,6 @@ export async function runClaudeAppCommand(args: string[]): Promise<number> {
 
   try {
     backupMetaJson();
-    // Inject egress hosts in main config
-    injectCoworkEgressHosts();
 
     proxyHandle = await startServer({
       host: '127.0.0.1',

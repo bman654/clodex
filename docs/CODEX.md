@@ -7,7 +7,7 @@ Use **OpenAI Codex** (terminal CLI or desktop app) with models from your relay-a
 | **`relay-ai codex`** | Codex **terminal** (TUI) | Temporary sidecar profile — never touches your main Codex config |
 | **`relay-ai codex-app`** | Codex **desktop app** (macOS / Windows) | Patches `~/.codex/config.toml` with backup; restored on Ctrl+C |
 
-Both commands use the same registry (`~/.relay-ai/providers.json`), the same provider picker, and the same routing (OpenAI direct vs local Responses proxy for everything else).
+Both commands use the same registry (`~/.relay-ai/providers.json`) and provider picker. The CLI uses OpenAI directly when possible; the desktop app always uses the local Responses proxy so it can keep Codex's built-in provider identity and preserve history visibility.
 
 **Full flag reference:** `relay-ai codex --help` and `relay-ai codex-app --help`. This guide explains *how it works*, *what files are touched*, and *how to recover*.
 
@@ -146,7 +146,7 @@ On macOS, profile TOML alone may not be enough; relay-ai also passes `-s danger-
 relay-ai codex-app
 ```
 
-Pick provider → pick model → Codex **app** opens. **Keep the relay-ai terminal open** until you’re done (Tier 2 needs the foreground proxy). Press **Ctrl+C** to stop the proxy and restore your previous Codex config.
+Pick provider → pick model → Codex **app** opens. **Keep the relay-ai terminal open** until you’re done (the app always uses the foreground proxy). Press **Ctrl+C** to stop the proxy and restore your previous Codex config.
 
 **Platforms:** macOS and Windows. Linux is not supported (no Codex desktop app).
 
@@ -175,22 +175,18 @@ CLI files (`relay-ai-launch.config.toml`, `session.json`, `models-*.json`) are *
 
 ### What gets written to `config.toml`
 
-Example (Tier 2 / proxy):
+Example:
 
 ```toml
 model = "claude-sonnet-4-6"
-model_provider = "relay-ai-launch-codex-app"
+model_provider = "openai"
+openai_base_url = "http://127.0.0.1:<random-port>/v1"
 model_catalog_json = "/Users/you/.relay-ai/codex/app-models-anthropic.json"
-
-[model_providers.relay-ai-launch-codex-app]
-name = "Claude Sonnet 4.6 · Anthropic"
-base_url = "http://127.0.0.1:<random-port>/v1"
-wire_api = "responses"
 ```
 
-The provider `name` and catalog `display_name` use human-readable labels (e.g. `Claude Haiku 4.5`). The Codex app bar may still show **Custom** for registry providers — see troubleshooting below.
+The app deliberately keeps `model_provider = "openai"` and redirects the built-in provider with `openai_base_url`. Codex records the provider on every local thread and filters its history by provider; using a separate custom provider would hide existing OpenAI/ChatGPT threads while a relay-ai session is active. No conversations are deleted.
 
-Tier 1 OpenAI adds `env_key = "OPENAI_API_KEY"` and points `base_url` at OpenAI.
+The catalog `display_name` uses human-readable labels (e.g. `Claude Haiku 4.5`).
 
 ### Cleanup (App)
 
@@ -218,11 +214,11 @@ When you have saved favorites via `relay-ai models`, both `relay-ai codex` and `
 ### Slug policy
 
 - **CLI** (`relay-ai codex`): slugs are `${providerId}__${modelId}` so models from different providers never collide.
-- **App** (`relay-ai codex-app`): slugs are prefixed with `relay-ai-launch-codex-app/` (per `codexAppModelSlug`). The two schemes are distinct on purpose.
+- **App** (`relay-ai codex-app`): single-provider catalogs use bare model ids; favorites use the same `${providerId}__${modelId}` collision-safe form as the CLI.
 
 ### Authentication
 
-The launched Codex child gets `OPENAI_API_KEY=proxy-local`, not your real upstream key. The local Responses proxy at `127.0.0.1:<port>` holds the real credentials. This is the same placeholder as single-provider Codex.
+For CLI favorites, the launched Codex child gets `OPENAI_API_KEY=proxy-local`, not your real upstream key. For the desktop app, Codex keeps its normal OpenAI login while `openai_base_url` points requests at the local proxy. In both cases, the proxy holds the real upstream credentials.
 
 ### Reasoning effort
 
@@ -234,13 +230,13 @@ With 20 favorites spanning many providers, the first request after launch may be
 
 ---
 
-## Provider routing (shared)
+## Provider routing
 
-| Provider | Route | Notes |
-|----------|-------|-------|
-| **OpenAI** | Tier 1 direct | `relay-ai providers auth openai` for ChatGPT OAuth |
-| **Anthropic, xAI, Gemini, Nvidia, DeepSeek, …** | Tier 2 proxy | Anthropic showcase path for Codex |
-| **OpenCode Zen / Go** | Tier 2 proxy | Requires an OpenCode API key |
+| Provider | CLI route | App route | Notes |
+|----------|-----------|-----------|-------|
+| **OpenAI** | Tier 1 direct | Local proxy | `relay-ai providers auth openai` for ChatGPT OAuth |
+| **Anthropic, xAI, Gemini, Nvidia, DeepSeek, …** | Tier 2 proxy | Local proxy | SDK translation path |
+| **OpenCode Zen / Go** | Tier 2 proxy | Local proxy | Requires an OpenCode API key |
 
 Add providers with `relay-ai providers add` or import from OpenCode.
 
@@ -276,8 +272,6 @@ Codex exposes a **reasoning effort** picker when relay-ai's model catalog includ
 
 **Claude Code / Desktop gateway:** `relay-ai claude` and `relay-ai server` map Claude Code's `/effort` (`output_config.effort`) to the same SDK options. Anthropic direct passthrough routes forward effort unchanged.
 
-**App bar "Custom" label:** When using registry providers, Codex desktop may still show "Custom" in the app bar — see [Troubleshooting](#app-relay-ai-codex-app) below.
-
 ---
 
 ## Troubleshooting
@@ -297,7 +291,7 @@ Codex exposes a **reasoning effort** picker when relay-ai's model catalog includ
 
 | Symptom | Fix |
 |---------|-----|
-| App bar shows **"Custom"** not model name | Known [Codex desktop limitation](https://github.com/openai/codex/issues/19694) for third-party providers. relay-ai prints **Active model:** in the terminal and sets catalog `display_name` + provider `name` — trust the terminal line for what's running. |
+| Existing conversations disappear during a relay-ai session | Update relay-ai. Older releases selected a custom `model_provider`, so Codex filtered the sidebar to relay-ai-only threads. Current releases keep the built-in `openai` provider and preserve normal history visibility. |
 | App didn’t open | Open Codex manually once, run `relay-ai codex-app` again |
 | Model errors / disconnected | Keep relay-ai terminal open (proxy must run) |
 | Stuck on relay-ai settings | `relay-ai codex-app --restore` |

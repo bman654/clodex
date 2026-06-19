@@ -135,7 +135,7 @@ export interface ProviderDisplayEntry {
   authLabel: string;
   inRegistry: boolean;
   /** Zen/Go active via OpenCode API key but not saved in providers.json */
-  cloudBuiltin?: 'zen' | 'go';
+  cloudBuiltin?: 'opencode';
 }
 
 function countUsableZenGoModels(models: ModelInfo[]): number {
@@ -148,8 +148,8 @@ function countUsableZenGoModels(models: ModelInfo[]): number {
  */
 export async function resolveProvidersForDisplay(): Promise<ProviderDisplayEntry[]> {
   const reg = loadRegistry();
-  const registryIds = new Set(reg.providers.map(p => p.id));
   const entries: ProviderDisplayEntry[] = [];
+  const cloudProviders = reg.providers.filter(provider => provider.id === 'zen' || provider.id === 'go');
 
   const opencodeKey = await readGlobalOpencodeCredential();
   let zenCount = 0;
@@ -160,46 +160,39 @@ export async function resolveProvidersForDisplay(): Promise<ProviderDisplayEntry
     zenCount = countUsableZenGoModels(zenGo.zenModels);
     goCount = countUsableZenGoModels(zenGo.goModels);
 
-    if (!registryIds.has('zen') && zenCount > 0) {
-      entries.push({
-        id: 'zen',
-        name: 'OpenCode Zen',
-        modelCount: zenCount,
-        enabled: true,
-        authLabel: 'keychain (OpenCode API key)',
-        inRegistry: false,
-        cloudBuiltin: 'zen',
-      });
-    }
-    if (!registryIds.has('go') && goCount > 0) {
-      entries.push({
-        id: 'go',
-        name: 'OpenCode Go',
-        modelCount: goCount,
-        enabled: true,
-        authLabel: 'keychain (OpenCode API key)',
-        inRegistry: false,
-        cloudBuiltin: 'go',
-      });
-    }
+  }
+
+  if (cloudProviders.length > 0 || zenCount + goCount > 0) {
+    entries.push({
+      id: 'opencode-cloud',
+      name: 'OpenCode Zen / Go',
+      modelCount: zenCount + goCount || cloudProviders.reduce(
+        (total, provider) => total + (provider.modelsCache?.models.length ?? 0),
+        0,
+      ),
+      enabled: cloudProviders.length === 0 || cloudProviders.some(provider => provider.enabled),
+      authLabel: cloudProviders[0]
+        ? formatRegistryAuthLabel(cloudProviders[0])
+        : 'keychain (OpenCode API key)',
+      inRegistry: cloudProviders.length > 0,
+      cloudBuiltin: 'opencode',
+    });
   }
 
   for (const provider of reg.providers) {
-    let modelCount = provider.modelsCache?.models.length ?? 0;
-    if (provider.id === 'zen' && zenCount > 0) modelCount = zenCount;
-    if (provider.id === 'go' && goCount > 0) modelCount = goCount;
+    if (provider.id === 'zen' || provider.id === 'go') continue;
 
     entries.push({
       id: provider.id,
       name: provider.name,
-      modelCount,
+      modelCount: provider.modelsCache?.models.length ?? 0,
       enabled: provider.enabled,
       authLabel: formatRegistryAuthLabel(provider),
       inRegistry: true,
     });
   }
 
-  return entries;
+  return entries.sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** True when Zen/Go are already usable (registry entry or live OpenCode API key). */
@@ -238,6 +231,8 @@ export function localProvidersToServerModels(localProviders: LocalProvider[]): S
       npm: model.modelFormat === 'openai' ? (model.npm || '@ai-sdk/openai-compatible') : model.npm,
       apiBaseUrl: model.apiBaseUrl,
       apiKey: provider.apiKey,
+      authType: provider.authType,
+      oauthAccountId: provider.oauthAccountId,
       contextWindow: model.contextWindow,
       supportedParameters: model.supportedParameters,
       reasoning: model.reasoning,

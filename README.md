@@ -8,8 +8,16 @@
 > Relay any model into any coding agent — launch tools, switch providers, and run local API gateways.
 
 [![npm version](https://img.shields.io/npm/v/@jacobbd/relay-ai)](https://www.npmjs.com/package/@jacobbd/relay-ai)
-[![License](https://img.shields.io/npm/l/@jacobbd/relay-ai)](https://github.com/jacob-bd/relay-ai/blob/main/LICENSE)
+[![License](https://img.shields.io/npm/l/@jacobbd/relay-ai)](LICENSE)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?style=flat-square&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/jacobbd)
+
+<p align="center">
+  <a href="https://youtu.be/IvsUPHLhX0o">
+    <img src="assets/demo-part1-thumbnail.png" alt="relay-ai demo — installation, configuration, Claude Code, Claude Cowork & Claude Code Desktop (Part 1)" width="100%">
+  </a>
+</p>
+
+> **Demo (Part 1):** Installation · Configuration · Claude Code · Claude Cowork · Claude Code Desktop — [watch on YouTube](https://youtu.be/IvsUPHLhX0o) *(premieres June 19 at 10:45 AM ET)*
 
 **relay-ai** is an interactive CLI that launches AI coding tools and runs local API gateways on your machine. Currently, it supports **Claude Code**, **Claude Desktop (Cowork + Code)**, the **OpenAI Codex CLI**, and the **Codex desktop app (macOS + Windows)**.
 
@@ -82,13 +90,47 @@ Bare `relay-ai` prints help and migration guidance. Use `relay-ai claude` for th
 
 ## Installation
 
-```bash
-# Install globally
-npm install -g @jacobbd/relay-ai
+To install the CLI globally:
 
-# Upgrade to the latest version
+```bash
+npm install -g @jacobbd/relay-ai
+```
+
+### Upgrading
+
+To upgrade to the latest version:
+
+```bash
 npm update -g @jacobbd/relay-ai
 ```
+
+### Uninstallation
+
+To uninstall the CLI globally:
+
+```bash
+npm uninstall -g @jacobbd/relay-ai
+```
+
+> [!NOTE]
+> If you use a Node version manager like **NVM**, make sure you run the uninstall command using the active Node version that was used to install it (e.g., run `nvm use <version>` first).
+
+To fully remove the tool and all its configuration data, you can delete the configuration directory (`.relay-ai`) on your operating system:
+
+- **macOS / Linux**:
+  ```bash
+  rm -rf ~/.relay-ai
+  ```
+- **Windows**:
+  - In Command Prompt:
+    ```cmd
+    rmdir /s /q "%USERPROFILE%\.relay-ai"
+    ```
+  - In PowerShell:
+    ```powershell
+    Remove-Item -Recurse -Force "$env:USERPROFILE\.relay-ai"
+    ```
+
 
 ## Setup
 
@@ -319,7 +361,7 @@ Launch the **Codex app** (macOS or Windows) with registry providers:
 relay-ai codex-app
 ```
 
-Patches `~/.codex/config.toml` with backup; **Ctrl+C** in the relay-ai terminal restores your config. Tier 2 (Anthropic, etc.) requires keeping that terminal open. Preview config without writing: `relay-ai codex-app --config`. Recovery: `relay-ai codex-app --restore`.
+Patches `~/.codex/config.toml` with backup; **Ctrl+C** in the relay-ai terminal restores your config. The app keeps Codex's built-in `openai` provider active so existing conversation history remains visible, and routes the selected model through a foreground local proxy. Preview config without writing: `relay-ai codex-app --config`. Recovery: `relay-ai codex-app --restore`.
 
 See **[docs/CODEX.md](docs/CODEX.md)** for CLI vs app differences, file ownership, and troubleshooting.
 

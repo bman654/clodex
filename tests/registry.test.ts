@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -107,6 +107,59 @@ describe('registry io', () => {
     expect(loaded.providers).toHaveLength(1);
     expect(loaded.providers[0]?.id).toBe('groq');
   });
+
+  it('removes legacy OpenCode cloud duplicates on load and persists the cleanup', () => {
+    const path = join(home, 'providers.json');
+    const base = {
+      enabled: true,
+      authRef: 'keyring:global:opencode',
+      api: {},
+      addedAt: '2026-06-18T00:00:00.000Z',
+    };
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 1,
+      providers: [
+        { ...base, id: 'zen', templateId: 'zen', name: 'OpenCode Zen' },
+        { ...base, id: 'opencode', templateId: 'opencode', name: 'OpenCode Zen' },
+        { ...base, id: 'go', templateId: 'go', name: 'OpenCode Go' },
+        { ...base, id: 'opencode-go', templateId: 'opencode-go', name: 'OpenCode Go' },
+      ],
+    }));
+
+    const loaded = loadRegistry(path);
+
+    expect(loaded.providers.map(provider => provider.id)).toEqual(['zen', 'go']);
+    expect(JSON.parse(readFileSync(path, 'utf8')).providers.map((provider: { id: string }) => provider.id))
+      .toEqual(['zen', 'go']);
+  });
+
+  it('renames a legacy OpenCode cloud provider when no canonical entry exists', () => {
+    const path = join(home, 'providers.json');
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: 'opencode',
+        templateId: 'opencode',
+        name: 'OpenCode',
+        enabled: true,
+        authRef: 'keyring:provider:opencode',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/v1' },
+        addedAt: '2026-06-18T00:00:00.000Z',
+      }],
+    }));
+
+    const loaded = loadRegistry(path);
+
+    expect(loaded.providers[0]).toMatchObject({
+      id: 'zen',
+      templateId: 'zen',
+      name: 'OpenCode Zen',
+      authRef: 'keyring:provider:opencode',
+      api: {},
+    });
+  });
 });
 
 describe('materializeRegistry', () => {
@@ -118,6 +171,7 @@ describe('materializeRegistry', () => {
       name: 'OpenAI',
       enabled: true,
       authRef: 'keyring:provider:openai',
+      authType: 'oauth',
       api: { npm: '@ai-sdk/openai' },
       addedAt: '2026-06-09T00:00:00.000Z',
       modelsCache: {
@@ -135,6 +189,7 @@ describe('materializeRegistry', () => {
     expect(locals).toHaveLength(1);
     expect(locals[0]?.models[0]?.upstreamModelId).toBe('gpt-5.5');
     expect(locals[0]?.apiKey).toBe('sk-test');
+    expect(locals[0]?.authType).toBe('oauth');
   });
 
   it('returns empty when credential missing', () => {

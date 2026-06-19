@@ -17,15 +17,31 @@ export function oauthAuthRef(providerId: string): string {
   return `keyring:oauth:provider:${providerId}`;
 }
 
+function normalizeImportProviderIdentity(provider: LocalProvider): LocalProvider {
+  if (provider.id === 'opencode') {
+    return { ...provider, id: 'zen', name: 'OpenCode Zen' };
+  }
+  if (provider.id === 'opencode-go') {
+    return { ...provider, id: 'go', name: 'OpenCode Go' };
+  }
+  return provider;
+}
+
 /** Merge API-key providers from serve with OAuth providers backed by auth.json. */
 export function buildImportProviderList(
   raw: RawProvider[],
   authEntries: Record<string, OpencodeAuthEntry>,
 ): { providers: LocalProvider[]; oauth: OAuthImportContext } {
   const oauthByProviderId = new Map<string, OpencodeOAuthCredential>();
-  const apiProviders = normalizeProviders(raw);
-  const covered = new Set(apiProviders.map(p => p.id));
-  const merged = [...apiProviders];
+  const covered = new Set<string>();
+  const merged: LocalProvider[] = [];
+
+  for (const provider of normalizeProviders(raw)) {
+    const normalized = normalizeImportProviderIdentity(provider);
+    if (covered.has(normalized.id)) continue;
+    merged.push(normalized);
+    covered.add(normalized.id);
+  }
 
   for (const provider of raw) {
     if (provider.id === 'opencode' || provider.id === 'opencode-go') continue;

@@ -20,6 +20,8 @@ export function localModelToRoute(lp: LocalProvider, model: LocalProviderModel):
     npm: model.npm,
     baseURL: model.apiBaseUrl,
     providerId: lp.id,
+    authType: lp.authType,
+    oauthAccountId: lp.oauthAccountId,
     supportedParameters: model.supportedParameters,
     reasoning: model.reasoning,
     interleavedReasoningField: model.interleavedReasoningField,

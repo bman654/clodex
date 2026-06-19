@@ -30,6 +30,7 @@ import { loadRegistry, saveRegistry } from '../src/registry/io.js';
 import { saveProviderCredential } from '../src/env.js';
 import { importFromOpencode } from '../src/registry/import-opencode.js';
 import { validateImportKey } from '../src/registry/validate-import-key.js';
+import { goRegistryStub, zenRegistryStub } from '../src/registry/builtins.js';
 
 const groqLocal: LocalProvider = {
   id: 'groq',
@@ -115,5 +116,69 @@ describe('importFromOpencode', () => {
       reason: 'credential-save-failed',
     }]);
     expect(saveRegistry).toHaveBeenCalledWith({ version: 1, providers: [], importedAt: expect.any(String) });
+  });
+
+  it('compares imported OpenCode cloud providers with existing zen and go entries', async () => {
+    vi.mocked(saveProviderCredential).mockClear();
+    vi.mocked(saveRegistry).mockClear();
+    const zen = zenRegistryStub();
+    const go = goRegistryStub();
+    const duplicateZen: RegistryProvider = {
+      ...zen,
+      id: 'opencode',
+      templateId: 'opencode',
+      name: 'OpenCode',
+      authRef: 'keyring:provider:opencode',
+    };
+    const duplicateGo: RegistryProvider = {
+      ...go,
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      authRef: 'keyring:provider:opencode-go',
+    };
+    vi.mocked(loadRegistry).mockReturnValue({
+      version: 1,
+      providers: [zen, duplicateZen, go, duplicateGo],
+    });
+    vi.mocked(fetchRawOpencodeProviders).mockResolvedValue([{
+      id: 'opencode',
+      name: 'OpenCode',
+      key: 'shared-opencode-key',
+      models: {
+        zen: {
+          id: 'zen-model',
+          name: 'Zen model',
+          api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/v1' },
+        },
+      },
+    }, {
+      id: 'opencode-go',
+      name: 'OpenCode Go',
+      key: 'shared-opencode-key',
+      models: {
+        go: {
+          id: 'go-model',
+          name: 'Go model',
+          api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/go/v1' },
+        },
+      },
+    }]);
+    vi.mocked(validateImportKey).mockResolvedValue({ canImport: true });
+    const resolveConflict = vi.fn().mockResolvedValue('keep');
+
+    const result = await importFromOpencode({ resolveConflict });
+
+    expect(resolveConflict).toHaveBeenCalledTimes(2);
+    expect(resolveConflict.mock.calls.map(([ctx]) => [ctx.existing.id, ctx.incoming.id]))
+      .toEqual([['zen', 'zen'], ['go', 'go']]);
+    expect(result.imported).toHaveLength(0);
+    expect(result.skipped).toEqual([
+      { id: 'zen', name: 'OpenCode Zen', reason: 'conflict-kept' },
+      { id: 'go', name: 'OpenCode Go', reason: 'conflict-kept' },
+    ]);
+    expect(saveProviderCredential).not.toHaveBeenCalled();
+    expect(saveRegistry).toHaveBeenLastCalledWith(expect.objectContaining({
+      providers: [zen, go],
+    }));
   });
 });

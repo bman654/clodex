@@ -2,6 +2,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { parseArgs, rootHelpText, claudeHelpText, serverHelpText, modelsHelpText, main } from '../src/cli.js';
 import { VERSION } from '../src/constants.js';
+import { codexHelpText } from '../src/codex.js';
+import { codexAppHelpText } from '../src/codex-app.js';
+import { claudeAppHelpText } from '../src/claude-app.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -219,20 +222,32 @@ describe('parseArgs', () => {
 });
 
 describe('help text', () => {
-  it('root help documents v0.2.0 commands and local providers', () => {
+  it('root help documents every accepted command and alias', () => {
     const help = rootHelpText();
+    const commands = [
+      'claude',
+      'claude-app',
+      'codex',
+      'codex-app',
+      'server',
+      'models',
+      'favorites',
+      'providers',
+    ];
 
     expect(help).toContain(`v${VERSION}`);
-    expect(help).toContain('relay-ai claude');
-    expect(help).toContain('relay-ai models');
-    expect(help).toContain('relay-ai providers');
-    expect(help).toContain('relay-ai server');
+    for (const command of commands) {
+      expect(help).toContain(`relay-ai ${command}`);
+      expect(parseArgs([command]).error).toBeUndefined();
+    }
     expect(help).toContain('relay-ai --version');
+    expect(help).toContain('relay-ai --help');
     expect(help).toContain('relay-ai --ai');
+    for (const option of ['-h', '--help', '-v', '--version', '--ai', '--install', '--force']) {
+      expect(help).toContain(option);
+    }
     expect(help).toContain('local providers');
     expect(help).toContain('Commands:');
-    expect(help).toContain('codex-app');
-    expect(help).toContain('codex');
     expect(help).toContain('Launch OpenAI Codex CLI');
   });
 
@@ -281,6 +296,23 @@ describe('help text', () => {
     expect(help).toContain('/model');
     expect(help).toContain('20');
     expect(help).toContain('~/.relay-ai/config.json');
+  });
+
+  it('app and Codex help document every relay-ai-managed option', () => {
+    const codex = codexHelpText();
+    for (const option of ['--trace', '--provider', '--model', '--vertex', '--restore', '--config', '--help', '--version']) {
+      expect(codex).toContain(option);
+    }
+
+    const codexApp = codexAppHelpText();
+    for (const option of ['--vertex', '--restore', '--config', '--help', '--version']) {
+      expect(codexApp).toContain(option);
+    }
+
+    const claudeApp = claudeAppHelpText();
+    for (const option of ['--trace', '--restore', '--help', '--version']) {
+      expect(claudeApp).toContain(option);
+    }
   });
 });
 

@@ -31,6 +31,8 @@ export interface ServerModelInfo {
   npm?: string;            // OpenCode api.npm — openai-format models route through the SDK adapter
   apiBaseUrl?: string;     // base URL for openai-compatible / openrouter SDK providers
   apiKey?: string;         // model-specific API key; overrides server-level apiKey if set; never returned in API responses
+  authType?: 'api' | 'oauth' | 'none';
+  oauthAccountId?: string;
   supportedParameters?: string[];
   reasoning?: boolean;
   interleavedReasoningField?: string;

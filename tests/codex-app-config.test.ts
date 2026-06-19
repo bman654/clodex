@@ -51,10 +51,11 @@ describe('app-config', () => {
     const text = readFileSync(configPath, 'utf8');
     expect(isAppManagedConfig(text)).toBe(true);
     expect(text).toContain('sandbox = "workspace-write"');
-    expect(text).toContain(CODEX_APP_PROVIDER_ID);
+    expect(text).toContain('model_provider = "openai"');
+    expect(text).toContain('openai_base_url = "http://127.0.0.1:54321/v1"');
     expect(text).toContain('127.0.0.1:54321');
-    expect(text).toContain('relay-ai-launch-codex-app/claude-sonnet-4-6');
-    expect(text).toContain('requires_openai_auth = true');
+    expect(text).toContain('model = "claude-sonnet-4-6"');
+    expect(text).not.toContain(`[model_providers.${CODEX_APP_PROVIDER_ID}]`);
     expect(text).toContain('model_reasoning_effort = "high"');
   });
 
@@ -85,9 +86,51 @@ describe('app-config', () => {
     expect(isAppManagedConfig(after)).toBe(false);
   });
 
+  it('restore state round-trips openai_base_url', () => {
+    const configPath = join(home, '.codex', 'config.toml');
+    const before = 'model = "gpt-5"\nmodel_provider = "openai"\nopenai_base_url = "https://example.test/v1"\n';
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    writeFileSync(configPath, before, 'utf8');
+    const state = captureRestoreState(before);
+    applyAppConfigPatch(proxySpec('/tmp/catalog.json'), configPath);
+    restoreConfigFromState(state, configPath);
+    const after = readFileSync(configPath, 'utf8');
+    expect(after).toContain('openai_base_url = "https://example.test/v1"');
+  });
+
+  it('preserves openai_base_url when restoring a legacy snapshot', () => {
+    const configPath = join(home, '.codex', 'config.toml');
+    const managed = [
+      'model = "relay-ai-launch-codex-app/claude-sonnet-4-6"',
+      'model_provider = "relay-ai-launch-codex-app"',
+      'model_catalog_json = "/tmp/app-models-anthropic.json"',
+      'openai_base_url = "https://example.test/v1"',
+      '',
+      '[model_providers.relay-ai-launch-codex-app]',
+      'name = "relay-ai"',
+      'base_url = "http://127.0.0.1:54321/v1"',
+      'wire_api = "responses"',
+      '',
+    ].join('\n');
+    mkdirSync(join(home, '.codex'), { recursive: true });
+    writeFileSync(configPath, managed, 'utf8');
+    restoreConfigFromState({
+      hadProfile: false,
+      hadModel: true,
+      model: 'gpt-5',
+      hadModelProvider: true,
+      modelProvider: 'openai',
+      hadModelCatalogJson: false,
+      hadModelReasoningEffort: false,
+    }, configPath);
+    const after = readFileSync(configPath, 'utf8');
+    expect(after).toContain('openai_base_url = "https://example.test/v1"');
+  });
+
   it('preview validates without writing', () => {
     const toml = previewAppConfigToml(proxySpec('/tmp/c.json'));
-    expect(toml).toContain('wire_api = "responses"');
+    expect(toml).toContain('model_provider = "openai"');
+    expect(toml).toContain('openai_base_url = "http://127.0.0.1:54321/v1"');
     expect(existsSync(join(home, '.codex', 'config.toml'))).toBe(false);
   });
 });

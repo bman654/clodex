@@ -54,14 +54,14 @@ describe('parseProvidersArgs', () => {
 
   it('routes cloud builtins to the cloud detail branch', () => {
     expect(providerHubChoiceValue({
-      id: 'zen',
-      name: 'OpenCode Zen',
-      modelCount: 3,
+      id: 'opencode-cloud',
+      name: 'OpenCode Zen / Go',
+      modelCount: 6,
       enabled: true,
       authLabel: 'keychain',
       inRegistry: false,
-      cloudBuiltin: 'zen',
-    })).toBe('cloud:zen');
+      cloudBuiltin: 'opencode',
+    })).toBe('cloud:opencode');
     expect(providerHubChoiceValue({
       id: 'groq',
       name: 'Groq',

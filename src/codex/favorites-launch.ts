@@ -23,6 +23,8 @@ export function buildCodexProxyRoutesFromResolved(
         baseURL: route.baseURL,
         upstreamModelId: route.upstreamModelId,
         providerId: route.providerId,
+        authType: route.authType,
+        oauthAccountId: route.oauthAccountId,
       } as CodexProxyRoute;
     })
     .filter((r): r is CodexProxyRoute => r !== undefined);

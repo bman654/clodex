@@ -138,6 +138,37 @@ describe('effortProviderOptions + deepMergeProviderOptions', () => {
 });
 
 describe('createLanguageModel', () => {
+  it('routes OpenAI OAuth through the ChatGPT Codex backend with the account header', async () => {
+    const responses = vi.fn((modelId: string) => ({ modelId, provider: 'openai-responses' }));
+    const chat = vi.fn((modelId: string) => ({ modelId, provider: 'openai-chat' }));
+    const createOpenAI = vi.fn(() => ({ responses, chat }));
+    vi.doMock('@ai-sdk/openai', () => ({ createOpenAI }));
+
+    const header = Buffer.from('{}').toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ chatgpt_account_id: 'acct-123' })).toString('base64url');
+    const accessToken = `${header}.${payload}.sig`;
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai',
+      modelId: 'gpt-5.5',
+      apiKey: accessToken,
+      authType: 'oauth',
+      oauthAccountId: 'stored-acct-456',
+    });
+
+    expect(createOpenAI).toHaveBeenCalledWith({
+      apiKey: accessToken,
+      baseURL: 'https://chatgpt.com/backend-api/codex',
+      headers: {
+        'ChatGPT-Account-Id': 'stored-acct-456',
+        originator: 'relay-ai',
+      },
+    });
+    expect(responses).toHaveBeenCalledWith('gpt-5.5');
+    vi.doUnmock('@ai-sdk/openai');
+  });
+
   it('ignores baseURL for @ai-sdk/google (discovery URL is OpenAI-compatible only)', async () => {
     const createGoogleGenerativeAI = vi.fn(() => {
       const provider = vi.fn((modelId: string) => ({ modelId, provider: 'google' }));

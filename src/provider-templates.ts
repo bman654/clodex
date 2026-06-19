@@ -15,6 +15,7 @@ export interface ProviderTemplate {
   apiKeyOptional?: boolean;
   modelSource: ProviderModelSource;
   supported: boolean;
+  addable?: boolean;
   unsupportedReason?: string;
 }
 
@@ -210,6 +211,15 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     unsupportedReason: 'Uses gcloud Application Default Credentials — not supported via API key import.',
   },
   {
+    id: 'opencode-cloud',
+    name: 'OpenCode Zen / Go',
+    authType: 'api',
+    npm: '@ai-sdk/openai-compatible',
+    signupUrl: 'https://opencode.ai/auth',
+    modelSource: 'zen-go-api',
+    supported: true,
+  },
+  {
     id: 'zen',
     name: 'OpenCode Zen',
     authType: 'api',
@@ -217,6 +227,7 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     signupUrl: 'https://opencode.ai/auth',
     modelSource: 'zen-go-api',
     supported: true,
+    addable: false,
   },
   {
     id: 'go',
@@ -226,6 +237,7 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     signupUrl: 'https://opencode.ai/auth',
     modelSource: 'zen-go-api',
     supported: true,
+    addable: false,
   },
   // OAuth-gated subscription providers — use relay-ai providers auth <id> to sign in
   {
@@ -241,13 +253,20 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
 ];
 
 export function listSupportedTemplates(): ProviderTemplate[] {
-  return PROVIDER_TEMPLATES.filter(t => t.supported && t.authType === 'api');
+  return PROVIDER_TEMPLATES
+    .filter(t => t.supported && t.authType === 'api' && t.addable !== false)
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 /** Supported templates not yet present in the user's registry. */
 export function listAddableTemplates(configuredIds: Iterable<string> = []): ProviderTemplate[] {
   const configured = new Set(configuredIds);
-  return listSupportedTemplates().filter(t => !configured.has(t.id));
+  return listSupportedTemplates().filter(t => {
+    if (t.id === 'opencode-cloud') {
+      return !configured.has('zen') && !configured.has('go');
+    }
+    return !configured.has(t.id);
+  });
 }
 
 export function getTemplateById(id: string): ProviderTemplate | undefined {
@@ -264,4 +283,3 @@ export function filterTemplates(templates: ProviderTemplate[], query: string): P
       t.npm.toLowerCase().includes(q),
   );
 }
-

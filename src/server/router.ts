@@ -196,12 +196,15 @@ async function handleAnthropicMessages(
         apiKey,
         baseURL: model.apiBaseUrl,
         providerId: model.providerId ?? model.sourceBackend,
+        authType: model.authType,
+        oauthAccountId: model.oauthAccountId,
         vertex: options.vertex,
       });
       modelCache.set(cacheKey, languageModel);
     }
     const params = sdkTranslateRequest(body as unknown as AnthropicRequest, model.npm!, {
       defaultEffort: anthropicEffortFromRequest(body as AnthropicRequest) ? undefined : model.defaultEffort,
+      openAiOAuth: model.npm === '@ai-sdk/openai' && model.authType === 'oauth',
       reasoningMetadata: {
         providerId: model.providerId,
         apiBaseUrl: model.apiBaseUrl,

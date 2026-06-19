@@ -64,7 +64,7 @@ export function buildFavoritesAppCatalog(
   let priority = 0;
   for (const r of resolved) {
     const model = enrichFavoriteModel(r);
-    const slug = `relay-ai-launch-codex-app/${model.id}`;
+    const slug = codexCliFavoritesSlug(r.providerId, model.id);
     models.push(catalogEntryFromModel(model, r.providerName, priority++, true, slug));
   }
   return { models };

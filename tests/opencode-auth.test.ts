@@ -78,6 +78,35 @@ describe('buildImportProviderList', () => {
     expect(oauth.oauthByProviderId.has('xai')).toBe(true);
   });
 
+  it('maps OpenCode cloud provider ids to relay-ai zen and go ids', () => {
+    const cloudRaw: RawProvider[] = [{
+      id: 'opencode',
+      name: 'OpenCode',
+      key: 'shared-opencode-key',
+      models: {
+        zen: {
+          id: 'zen-model',
+          api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/v1' },
+        },
+      },
+    }, {
+      id: 'opencode-go',
+      name: 'OpenCode Go',
+      key: 'shared-opencode-key',
+      models: {
+        go: {
+          id: 'go-model',
+          api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/go/v1' },
+        },
+      },
+    }];
+
+    const { providers } = buildImportProviderList(cloudRaw, {});
+
+    expect(providers.map(provider => provider.id)).toEqual(['zen', 'go']);
+    expect(providers.map(provider => provider.name)).toEqual(['OpenCode Zen', 'OpenCode Go']);
+  });
+
   it('classifies credential gaps by provider type', () => {
     expect(classifyOpencodeCredentialGap('xai')).toBe('oauth-no-token');
     expect(classifyOpencodeCredentialGap('anthropic')).toBe('no-api-key');

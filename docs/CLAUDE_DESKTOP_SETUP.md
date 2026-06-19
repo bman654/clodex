@@ -90,9 +90,9 @@ To use Claude in Chrome, [restore 1P mode](#restore-claude-desktop-to-anthropics
 
 ---
 
-## Quick Start: Automated Setup (macOS / Windows)
+## Quick Start: Automated Setup
 
-The easiest way to use Claude Desktop with your local providers is the **automated setup**:
+On macOS or Windows, the easiest way to use Claude Desktop with your local providers is the **automated setup**:
 
 ```bash
 relay-ai claude-app
@@ -114,6 +114,8 @@ relay-ai claude-app --restore
 ## Manual Setup (Network/Advanced)
 
 If you are running the gateway on a different machine (like a remote cloud desktop, a local container, or a home server) or want to keep a permanent background gateway, you can configure it manually.
+
+## Step 1: Start the Relay AI server
 
 In a terminal, start the gateway and **leave it running**:
 

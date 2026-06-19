@@ -14,11 +14,16 @@ describe('provider templates', () => {
     expect(ids).toContain('mistral');
   });
 
+  it('sorts supported templates alphabetically by display name', () => {
+    const names = listSupportedTemplates().map(t => t.name);
+    expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b)));
+  });
+
   it('filters templates by search query', () => {
     const templates = listSupportedTemplates();
     expect(filterTemplates(templates, 'gro').map(t => t.id)).toEqual(['groq']);
     expect(filterTemplates(templates, 'together').map(t => t.id)).toEqual(['togetherai']);
-    expect(filterTemplates(templates, 'opencode').map(t => t.id)).toEqual(['zen', 'go']);
+    expect(filterTemplates(templates, 'opencode').map(t => t.id)).toEqual(['opencode-cloud']);
   });
 
   it('looks up template by id', () => {
@@ -30,6 +35,13 @@ describe('provider templates', () => {
     expect(addable.map(t => t.id)).not.toContain('groq');
     expect(addable.map(t => t.id)).not.toContain('mistral');
     expect(addable.map(t => t.id)).toContain('togetherai');
+  });
+
+  it('offers OpenCode Zen and Go as one setup option', () => {
+    expect(listAddableTemplates([]).filter(t => t.modelSource === 'zen-go-api').map(t => t.id))
+      .toEqual(['opencode-cloud']);
+    expect(listAddableTemplates(['zen']).map(t => t.id)).not.toContain('opencode-cloud');
+    expect(listAddableTemplates(['go']).map(t => t.id)).not.toContain('opencode-cloud');
   });
 });
 

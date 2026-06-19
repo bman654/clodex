@@ -9,6 +9,7 @@ import { oauthAuthRef } from './registry/import-build.js';
 import { loadRegistry } from './registry/io.js';
 import { startCodexProxy } from './codex-proxy.js';
 import type { CodexProxyHandle } from './codex-proxy.js';
+import { getCodexProxyDebugLogPath, printTraceLog } from './trace-log.js';
 import { buildAppCatalogFile, formatCodexModelLabel, serializeCatalog } from './codex/catalog.js';
 import { pickCodexProvider, pickCodexModel, confirmCodexLaunch } from './codex/prompts.js';
 import {
@@ -42,7 +43,7 @@ import {
   printCodexAppSessionPanel,
 } from './codex/ui.js';
 import { resolveFirstAvailableFavorite, type ResolvedFavorite } from './favorites-resolver.js';
-import { buildFavoritesAppCatalog } from './codex/favorites-catalog.js';
+import { buildFavoritesAppCatalog, codexCliFavoritesSlug } from './codex/favorites-catalog.js';
 import {
   buildVertexRuntimeConfig,
   hasApplicationDefaultCredentials,
@@ -57,14 +58,25 @@ export function codexAppHelpText(): string {
   return `${pc.bold('relay-ai codex-app')} — launch Codex desktop app with your registry providers
 
 ${pc.bold('Usage:')}
-  relay-ai codex-app
+  relay-ai codex-app [options]
+  relay-ai codex-app --vertex
   relay-ai codex-app --restore
   relay-ai codex-app --config
+  relay-ai codex-app --help
+  relay-ai codex-app --version
+
+${pc.bold('Options:')}
+  --vertex     Use Claude models through Google Vertex AI
+  --restore    Restore Codex config after an interrupted app session
+  --config     Preview the generated Codex app configuration without launching
+  --trace      Write proxy debug logs to ~/.relay-ai/logs/ and show errors on exit
+  --help       Show this command help
+  --version    Show version
 
 ${pc.bold('Description:')}
   Picks a provider and model from ~/.relay-ai/providers.json, patches ~/.codex/config.toml
-  (with backup + restore on Ctrl+C), starts a local Responses proxy when needed, and opens
-  the Codex desktop app. Keep this terminal open while using Codex (Tier 2 / Anthropic).
+  (with backup + restore on Ctrl+C), starts a local Responses proxy, and opens the
+  Codex desktop app. Keep this terminal open while using Codex.
 
 ${pc.bold('Platforms:')}
   macOS and Windows. Linux is not supported (no Codex desktop app).
@@ -80,6 +92,8 @@ ${pc.bold('Preview (no writes):')}
 
 ${pc.bold('Examples:')}
   relay-ai codex-app
+  relay-ai codex-app --vertex
+  relay-ai codex-app --config
   relay-ai codex-app --restore
   
 ${pc.bold('Favorites:')}
@@ -106,7 +120,7 @@ function vertexEntryToLocalModel(entry: VertexModelEntry): import('./types.js').
   };
 }
 
-async function runCodexAppVertexLaunch(configOnly: boolean): Promise<number> {
+async function runCodexAppVertexLaunch(configOnly: boolean, trace = false): Promise<number> {
   if (!hasApplicationDefaultCredentials()) {
     p.log.error('Google Application Default Credentials not found.');
     p.log.info('Run: gcloud auth application-default login');
@@ -181,7 +195,7 @@ async function runCodexAppVertexLaunch(configOnly: boolean): Promise<number> {
         providerId: 'vertex',
         vertex: vertexConfig,
       })),
-      { requireAuth: false },
+      { requireAuth: false, debug: trace },
     );
     const proxyPort = proxyHandle.port;
 
@@ -192,7 +206,6 @@ async function runCodexAppVertexLaunch(configOnly: boolean): Promise<number> {
       route,
       proxyPort,
       catalogPath,
-      providerDisplayName: `${selectedEntry.display_name} · Vertex AI`,
     };
 
     saveAppRestoreStateBeforePatch();
@@ -271,6 +284,11 @@ export async function runCodexAppCommand(args: string[], opts: { vertex?: boolea
 
   const interrupted = recoverInterruptedCodexAppSession();
   const configOnly = args.includes('--config');
+  const trace = args.includes('--trace');
+  const debugLogPath = getCodexProxyDebugLogPath();
+  if (trace && !configOnly) {
+    p.log.info(`Debug log: ${debugLogPath}`);
+  }
 
   const isTty = Boolean(process.stdin.isTTY);
   if (!configOnly) {
@@ -294,7 +312,7 @@ export async function runCodexAppCommand(args: string[], opts: { vertex?: boolea
   }
 
   if (opts.vertex) {
-    return runCodexAppVertexLaunch(configOnly);
+    return runCodexAppVertexLaunch(configOnly, trace);
   }
 
   const catalogSpinner = p.spinner();
@@ -372,6 +390,7 @@ export async function runCodexAppCommand(args: string[], opts: { vertex?: boolea
   activeProvider.apiKey = apiKey;
 
   const route = resolveCodexRoute(activeProvider, selectedModel, apiKey);
+  const appRoute = { ...route, tier: 'proxy' as const };
   const routable = routableModelsForProvider(activeProvider, 'codex-app');
 
   let resolvedFavorites: ResolvedFavorite[] = [];
@@ -406,7 +425,7 @@ export async function runCodexAppCommand(args: string[], opts: { vertex?: boolea
       activeProvider.name,
       modelLabel,
       selectedModel.id,
-      route,
+      appRoute,
     );
     if (!confirmed) return 0;
   }
@@ -420,12 +439,12 @@ export async function runCodexAppCommand(args: string[], opts: { vertex?: boolea
 
     const activeRoute = favoritesActive && resolvedFavorites.length > 0 ? {
       tier: 'proxy' as const,
-      modelId: selectedModel.id,
+      modelId: codexCliFavoritesSlug(activeProvider.id, selectedModel.id),
       providerId: activeProvider.id,
       npm: '',
       upstreamModelId: '',
       apiKey: '',
-    } : route;
+    } : appRoute;
 
     const specBase = { route: activeRoute, catalogPath };
 
@@ -455,10 +474,7 @@ export async function runCodexAppCommand(args: string[], opts: { vertex?: boolea
       console.log(`  ${pc.bold('config.toml patch preview:')}`);
       const tomlPreview = previewAppConfigToml({
         ...specBase,
-        proxyPort: (favoritesActive || route.tier === 'proxy') ? PREVIEW_PROXY_PORT : undefined,
-        providerDisplayName: favoritesActive
-          ? `Favorites Catalog`
-          : `${formatCodexModelLabel(selectedModel)} · ${activeProvider.name}`,
+        proxyPort: PREVIEW_PROXY_PORT,
       });
       for (const line of tomlPreview.split('\n')) {
         console.log(`    ${pc.dim(line)}`);
@@ -478,14 +494,12 @@ export async function runCodexAppCommand(args: string[], opts: { vertex?: boolea
     const proxyPort = favoritesActive && resolvedFavorites.length > 0
       ? (proxyHandle = await startCodexProxy(
         buildCodexProxyRoutesFromResolved(resolvedFavorites, providersById),
-        { requireAuth: false },
+        { requireAuth: false, debug: trace },
       )).port
-      : (route.tier === 'proxy'
-        ? (proxyHandle = await startCodexProxy(
-          buildCodexProxyRoutesForProvider(activeProvider, apiKey, selectedModel.id, 'codex-app'),
-          { requireAuth: false },
-        )).port
-        : undefined);
+      : (proxyHandle = await startCodexProxy(
+        buildCodexProxyRoutesForProvider(activeProvider, apiKey, selectedModel.id, 'codex-app'),
+        { requireAuth: false, debug: trace },
+      )).port;
 
     const modelLabel = formatCodexModelLabel(selectedModel);
     const catalogFile = favoritesActive && resolvedFavorites.length > 0
@@ -498,9 +512,6 @@ export async function runCodexAppCommand(args: string[], opts: { vertex?: boolea
       route: activeRoute,
       proxyPort,
       catalogPath,
-      providerDisplayName: favoritesActive
-        ? `Favorites Catalog`
-        : `${modelLabel} · ${activeProvider.name}`,
     };
 
     saveAppRestoreStateBeforePatch();
@@ -526,9 +537,7 @@ export async function runCodexAppCommand(args: string[], opts: { vertex?: boolea
       recentModelsByProvider: { ...prefs.recentModelsByProvider, [activeProvider.id]: updatedRecent },
     });
 
-    if (route.tier === 'proxy' && proxyPort) {
-      logCodexProxy(proxyPort);
-    }
+    logCodexProxy(proxyPort);
 
     logCodexActiveModel(modelLabel, selectedModel.id);
 
@@ -548,8 +557,9 @@ export async function runCodexAppCommand(args: string[], opts: { vertex?: boolea
 
     codexAppOutro(modelLabel);
     await waitForShutdown();
+    if (trace) printTraceLog(debugLogPath);
     console.log('');
-    
+
     // Restore config immediately before prompting
     if (sessionActive) {
       restoreCodexAppOverlay();

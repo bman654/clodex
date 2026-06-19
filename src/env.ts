@@ -258,6 +258,17 @@ export async function resolveProviderCredential(
   return readProviderSecret(parsed.account, diag);
 }
 
+/** Read OAuth metadata retained alongside the access token. */
+export async function resolveProviderOAuthAccountId(
+  authRef: string,
+  diag?: (msg: string) => void,
+): Promise<string | undefined> {
+  const parsed = parseAuthRef(authRef);
+  if (!parsed || parsed.kind !== 'keyring' || !oauthProviderIdFromAccount(parsed.account)) return undefined;
+  const raw = await readKeyringAccount(parsed.account, diag);
+  return parseStoredOAuthCredential(raw)?.accountId;
+}
+
 function decodeProviderSecret(raw: string | null): string | null {
   if (!raw) return null;
   const trimmed = raw.trim();
@@ -360,4 +371,3 @@ export async function isSecretServiceAvailable(): Promise<boolean> {
     return false;
   }
 }
-

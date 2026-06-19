@@ -13,6 +13,8 @@ export interface CodexRoute {
   contextWindow?: number;
   modelId: string;
   providerId: string;
+  authType?: 'api' | 'oauth' | 'none';
+  oauthAccountId?: string;
   supportedParameters?: string[];
   reasoning?: boolean;
   interleavedReasoningField?: string;
@@ -53,7 +55,7 @@ function resolveBaseURL(model: LocalProviderModel, provider: LocalProvider): str
     ?? model.baseUrl;
 }
 
-/** Tier 1 = OpenAI only for v1. Everything else (including Anthropic, xAI) → proxy. */
+/** Tier 1 = OpenAI API keys only. OAuth needs the proxy for Codex endpoint headers. */
 export function resolveCodexRoute(
   provider: LocalProvider,
   model: LocalProviderModel,
@@ -72,12 +74,14 @@ export function resolveCodexRoute(
     contextWindow: model.contextWindow,
     modelId: model.id,
     providerId: provider.id,
+    authType: provider.authType,
+    oauthAccountId: provider.oauthAccountId,
     supportedParameters: model.supportedParameters,
     reasoning: model.reasoning,
     interleavedReasoningField: model.interleavedReasoningField,
   };
 
-  if (provider.id === 'openai' && model.modelFormat === 'openai') {
+  if (provider.id === 'openai' && provider.authType !== 'oauth' && model.modelFormat === 'openai') {
     return { tier: 'direct', ...base };
   }
 
@@ -113,6 +117,8 @@ export function buildCodexProxyRoutesForProvider(
       baseURL: route.baseURL,
       upstreamModelId: route.upstreamModelId,
       providerId: route.providerId,
+      authType: route.authType,
+      oauthAccountId: route.oauthAccountId,
       supportedParameters: route.supportedParameters,
       reasoning: route.reasoning,
       interleavedReasoningField: route.interleavedReasoningField,

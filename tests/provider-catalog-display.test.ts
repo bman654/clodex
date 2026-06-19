@@ -103,7 +103,7 @@ describe('resolveProvidersForDisplay', () => {
     vi.restoreAllMocks();
   });
 
-  it('includes cloud Zen when API key exists but registry has no zen stub', async () => {
+  it('shows Zen and Go as one OpenCode provider when the API key exists', async () => {
     const registry = emptyRegistry();
     registry.providers.push({
       id: 'groq',
@@ -120,17 +120,25 @@ describe('resolveProvidersForDisplay', () => {
     vi.spyOn(env, 'readGlobalOpencodeCredential').mockResolvedValue('opencode-key');
     mockZenGoModels([
       { id: 'claude-sonnet', name: 'Sonnet', brand: 'Claude', modelFormat: 'anthropic', sourceBackend: 'zen', isFree: true, contextWindow: 200000 },
+    ], [
+      { id: 'deepseek', name: 'DeepSeek', brand: 'DeepSeek', modelFormat: 'openai', sourceBackend: 'go', isFree: false, contextWindow: 200000 },
     ]);
 
     const entries = await resolveProvidersForDisplay();
-    expect(entries.map(e => e.id)).toEqual(['zen', 'groq']);
-    expect(entries[0]?.cloudBuiltin).toBe('zen');
-    expect(entries[0]?.modelCount).toBe(1);
+    expect(entries.map(e => e.id)).toEqual(['groq', 'opencode-cloud']);
+    expect(entries[1]?.name).toBe('OpenCode Zen / Go');
+    expect(entries[1]?.cloudBuiltin).toBe('opencode');
+    expect(entries[1]?.modelCount).toBe(2);
   });
 
-  it('does not duplicate zen when registry already has zen stub', async () => {
+  it('does not show separate Zen and Go rows when registry stubs exist', async () => {
     const registry = emptyRegistry();
-    registry.providers.push(zenRegistryStub());
+    registry.providers.push(zenRegistryStub(), {
+      ...zenRegistryStub(),
+      id: 'go',
+      templateId: 'go',
+      name: 'OpenCode Go',
+    });
     saveRegistry(registry);
 
     vi.spyOn(env, 'readGlobalOpencodeCredential').mockResolvedValue('opencode-key');
@@ -139,8 +147,8 @@ describe('resolveProvidersForDisplay', () => {
     ]);
 
     const entries = await resolveProvidersForDisplay();
-    expect(entries.filter(e => e.id === 'zen')).toHaveLength(1);
-    expect(entries.find(e => e.id === 'zen')?.inRegistry).toBe(true);
+    expect(entries.map(e => e.id)).toEqual(['opencode-cloud']);
+    expect(entries[0]?.inRegistry).toBe(true);
   });
 });
 
