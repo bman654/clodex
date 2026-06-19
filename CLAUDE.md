@@ -2,6 +2,19 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Release workflow
+
+To release a new version:
+
+```bash
+npm version patch          # bumps package.json, commits, and tags (use minor/major as needed)
+npm run build              # compile — VERSION is derived from package.json automatically
+npm publish                # publish to npm
+git push --follow-tags     # push commit + tag to GitHub
+```
+
+`package.json` is the single source of truth for the version. Never edit `src/constants.ts` manually for version bumps.
+
 ## Commands
 
 ```bash
