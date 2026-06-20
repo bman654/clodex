@@ -13,6 +13,7 @@
 - **Fuzzy multi-token model search** — model search now supports multi-token AND matching and punctuation normalization. Queries like `"QWEN 3.7"` or `"qwen 2.5 32"` now successfully match models like `qwen3-7b` and `qwen2.5-coder-32b`.
 - **Multi-model selection in favorites manager** — allow users to select and add multiple favorite models from a single provider in one step using `p.multiselect` with a dimmed visual cue `(Space to select, Enter to confirm)`.
 - **Back-button navigation in launcher model selectors** — added `← Go back` options and handled cancellations to loop back to the provider selection menu (with the chosen provider pre-selected) in `relay-ai claude`, `relay-ai codex`, `relay-ai codex-app`, and the favorites addition wizard.
+- **Alphabetical sorting of providers and models** — sorted the launcher and wizard selection lists alphabetically using natural collation for cleaner readability and easier scanning.
 
 ### Fixed
 - **OpenAI OAuth model retrieval** — restored live model discovery for ChatGPT accounts by explicitly sending the installed `claude` version (`?client_version=`) and a standard `User-Agent`, which the Codex backend now strictly requires.
