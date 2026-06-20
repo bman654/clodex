@@ -34,8 +34,11 @@ type LargeCatalogMode = 'choose' | 'search' | 'browse';
 
 function sortModelsByBrand<T extends ModelSearchable>(models: T[]): T[] {
   return [...models].sort((a, b) => {
-    const brandCmp = a.brand.localeCompare(b.brand);
-    return brandCmp !== 0 ? brandCmp : a.id.localeCompare(b.id);
+    const brandCmp = a.brand.localeCompare(b.brand, undefined, { sensitivity: 'base' });
+    if (brandCmp !== 0) return brandCmp;
+    const nameA = a.name || a.id;
+    const nameB = b.name || b.id;
+    return nameA.localeCompare(nameB, undefined, { sensitivity: 'base', numeric: true });
   });
 }
 

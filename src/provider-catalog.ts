@@ -82,7 +82,7 @@ export function zenGoAsLocalProvider(backendId: 'zen' | 'go', models: ModelInfo[
 
 export function providersForPicker(catalog: ProviderCatalog): LocalProvider[] {
   const registryIds = new Set(catalog.localProviders.map(p => p.id));
-  return [
+  const providers = [
     ...(catalog.zenModels.length > 0 && !registryIds.has('zen')
       ? [zenGoAsLocalProvider('zen', catalog.zenModels)]
       : []),
@@ -91,6 +91,16 @@ export function providersForPicker(catalog: ProviderCatalog): LocalProvider[] {
       : []),
     ...catalog.localProviders,
   ];
+
+  for (const p of providers) {
+    p.models.sort((a, b) => {
+      const nameA = a.name || a.id;
+      const nameB = b.name || b.id;
+      return nameA.localeCompare(nameB, undefined, { sensitivity: 'base', numeric: true });
+    });
+  }
+
+  return providers.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }));
 }
 
 /** Resolve API key when provider.apiKey is empty (registry authRef or global OpenCode key). */

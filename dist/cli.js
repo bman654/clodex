@@ -6107,11 +6107,19 @@ function zenGoAsLocalProvider(backendId, models) {
 }
 function providersForPicker(catalog) {
   const registryIds = new Set(catalog.localProviders.map((p19) => p19.id));
-  return [
+  const providers = [
     ...catalog.zenModels.length > 0 && !registryIds.has("zen") ? [zenGoAsLocalProvider("zen", catalog.zenModels)] : [],
     ...catalog.goModels.length > 0 && !registryIds.has("go") ? [zenGoAsLocalProvider("go", catalog.goModels)] : [],
     ...catalog.localProviders
   ];
+  for (const p19 of providers) {
+    p19.models.sort((a, b) => {
+      const nameA = a.name || a.id;
+      const nameB = b.name || b.id;
+      return nameA.localeCompare(nameB, void 0, { sensitivity: "base", numeric: true });
+    });
+  }
+  return providers.sort((a, b) => a.name.localeCompare(b.name, void 0, { sensitivity: "base", numeric: true }));
 }
 async function resolveLocalProviderApiKey(provider) {
   const direct = provider.apiKey?.trim();
@@ -7149,8 +7157,11 @@ var MODE_SEARCH = "search";
 var MODE_BROWSE = "browse";
 function sortModelsByBrand(models) {
   return [...models].sort((a, b) => {
-    const brandCmp = a.brand.localeCompare(b.brand);
-    return brandCmp !== 0 ? brandCmp : a.id.localeCompare(b.id);
+    const brandCmp = a.brand.localeCompare(b.brand, void 0, { sensitivity: "base" });
+    if (brandCmp !== 0) return brandCmp;
+    const nameA = a.name || a.id;
+    const nameB = b.name || b.id;
+    return nameA.localeCompare(nameB, void 0, { sensitivity: "base", numeric: true });
   });
 }
 function normalizeForSearch(s) {
