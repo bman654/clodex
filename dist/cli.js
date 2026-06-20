@@ -13560,16 +13560,16 @@ async function runModelsCommand() {
       });
       if (p18.isCancel(addPath)) continue;
       let provider;
-      let browsed;
+      let browsedMultiple = [];
       if (addPath === "global") {
         const globalPick = await pickGlobalFavoriteModel(allProviders, favorites);
         if (globalPick === null) continue;
         if (globalPick !== ADD_BY_PROVIDER) {
           provider = allProviders.find((ap) => ap.id === globalPick.providerId);
-          browsed = globalPick.model;
+          browsedMultiple = [globalPick.model];
         }
       }
-      if (!browsed) {
+      if (browsedMultiple.length === 0) {
         let currentInitialProvider = void 0;
         while (true) {
           const providerOptions = allProviders.map((ap) => providerSelectOption(ap));
@@ -13580,30 +13580,66 @@ async function runModelsCommand() {
           });
           if (p18.isCancel(pickedProviderId)) break;
           provider = allProviders.find((ap) => ap.id === pickedProviderId);
-          const browsedResult = await browseAllModels(provider, prefs);
-          if (browsedResult === "back") {
+          const options2 = provider.models.map((m) => {
+            const favorited = isFavorite(favorites, { providerId: provider.id, modelId: m.id });
+            const label = formatCodexModelLabel(m);
+            return {
+              value: m.id,
+              label: fmtModel(label, m.id),
+              hint: favorited ? pc16.yellow("\u2605 already favorite") : ""
+            };
+          });
+          const pickedModelIds = await p18.multiselect({
+            message: `Select models to add from ${provider.name} ${pc16.dim("(Space to select, Enter to confirm)")}`,
+            options: options2,
+            required: false
+          });
+          if (p18.isCancel(pickedModelIds)) {
             currentInitialProvider = provider.id;
             continue;
           }
-          if (!browsedResult) break;
-          browsed = browsedResult;
+          if (pickedModelIds.length === 0) {
+            currentInitialProvider = provider.id;
+            continue;
+          }
+          browsedMultiple = provider.models.filter((m) => pickedModelIds.includes(m.id));
           break;
         }
-        if (!browsed) continue;
+        if (browsedMultiple.length === 0) continue;
       }
-      const fav = { providerId: provider.id, modelId: browsed.id };
-      const result = addFavorite(favorites, fav);
-      if (!result.ok) {
-        if (result.reason === "duplicate") {
-          p18.log.warn(`${browsed.name || browsed.id} is already in your favorites.`);
+      const addedModels = [];
+      let duplicateCount = 0;
+      let limitReached = false;
+      for (const model of browsedMultiple) {
+        const fav = { providerId: provider.id, modelId: model.id };
+        const result = addFavorite(favorites, fav);
+        if (!result.ok) {
+          if (result.reason === "duplicate") {
+            duplicateCount++;
+          } else {
+            limitReached = true;
+            break;
+          }
         } else {
-          p18.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached \u2014 remove one first.`);
+          favorites = result.list;
+          favoritesDirty = true;
+          addedModels.push(model);
         }
-        continue;
       }
-      favorites = result.list;
-      favoritesDirty = true;
-      p18.log.success(`Added ${browsed.name || browsed.id} (${provider.name}) to favorites.`);
+      if (addedModels.length > 0) {
+        if (addedModels.length === 1) {
+          const modelName = addedModels[0].name || addedModels[0].id;
+          p18.log.success(`Added ${modelName} (${provider.name}) to favorites.`);
+        } else {
+          p18.log.success(`Added ${addedModels.length} models from ${provider.name} to favorites.`);
+        }
+      }
+      if (duplicateCount > 0) {
+        p18.log.warn(`${duplicateCount} selected model(s) were already in your favorites.`);
+      }
+      if (limitReached) {
+        p18.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached \u2014 some selected models could not be added.`);
+      }
     } else if (choice.startsWith("fav-")) {
       const idx = parseInt(choice.slice(4), 10);
       const fav = favorites[idx];

@@ -1,6 +1,6 @@
 // src/cli.ts
 import pc from 'picocolors';
-import { relayIntro, relayOutro, providerSelectOption, fmtModel, fmtEnabledStar } from './ui.js';
+import { relayIntro, relayOutro, providerSelectOption, fmtModel, fmtEnabledStar, formatModelLabel } from './ui.js';
 import * as p from '@clack/prompts';
 import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
@@ -24,7 +24,7 @@ import { pickLocalModel, browseAllModels } from './prompts.js';
 import { fetchProviderCatalog, providersForPicker, resolveLocalProviderApiKey } from './provider-catalog.js';
 import { BACKENDS, VERSION } from './constants.js';
 import type { ParsedArgs, ModelInfo, FavoriteModel, LocalProvider, LocalProviderModel } from './types.js';
-import { addFavorite, removeFavorite } from './favorites.js';
+import { addFavorite, removeFavorite, isFavorite } from './favorites.js';
 import {
   browseByProviderChoice,
   buildGlobalFavoriteIndex,
@@ -588,18 +588,18 @@ export async function runModelsCommand(): Promise<number> {
       if (p.isCancel(addPath)) continue;
 
       let provider: LocalProvider | undefined;
-      let browsed: LocalProviderModel | undefined;
+      let browsedMultiple: LocalProviderModel[] = [];
 
       if (addPath === 'global') {
         const globalPick = await pickGlobalFavoriteModel(allProviders, favorites);
         if (globalPick === null) continue;
         if (globalPick !== browseByProviderChoice) {
           provider = allProviders.find(ap => ap.id === globalPick.providerId);
-          browsed = globalPick.model;
+          browsedMultiple = [globalPick.model];
         }
       }
 
-      if (!browsed) {
+      if (browsedMultiple.length === 0) {
         let currentInitialProvider: string | undefined = undefined;
         while (true) {
           const providerOptions = allProviders.map(ap => providerSelectOption(ap));
@@ -611,32 +611,74 @@ export async function runModelsCommand(): Promise<number> {
           if (p.isCancel(pickedProviderId)) break;
 
           provider = allProviders.find(ap => ap.id === pickedProviderId)!;
-          const browsedResult = await browseAllModels(provider, prefs);
-          if (browsedResult === 'back') {
+          
+          const options = provider.models.map(m => {
+            const favorited = isFavorite(favorites, { providerId: provider!.id, modelId: m.id });
+            const label = formatModelLabel(m);
+            return {
+              value: m.id,
+              label: fmtModel(label, m.id),
+              hint: favorited ? pc.yellow('★ already favorite') : '',
+            };
+          });
+
+          const pickedModelIds = await p.multiselect({
+            message: `Select models to add from ${provider.name} ${pc.dim('(Space to select, Enter to confirm)')}`,
+            options,
+            required: false,
+          });
+
+          if (p.isCancel(pickedModelIds)) {
             currentInitialProvider = provider.id;
             continue;
           }
-          if (!browsedResult) break;
 
-          browsed = browsedResult;
+          if (pickedModelIds.length === 0) {
+            currentInitialProvider = provider.id;
+            continue;
+          }
+
+          browsedMultiple = provider.models.filter(m => (pickedModelIds as string[]).includes(m.id));
           break;
         }
-        if (!browsed) continue;
+        if (browsedMultiple.length === 0) continue;
       }
 
-      const fav: FavoriteModel = { providerId: provider!.id, modelId: browsed.id };
-      const result = addFavorite(favorites, fav);
-      if (!result.ok) {
-        if (result.reason === 'duplicate') {
-          p.log.warn(`${browsed.name || browsed.id} is already in your favorites.`);
+      const addedModels: LocalProviderModel[] = [];
+      let duplicateCount = 0;
+      let limitReached = false;
+
+      for (const model of browsedMultiple) {
+        const fav: FavoriteModel = { providerId: provider!.id, modelId: model.id };
+        const result = addFavorite(favorites, fav);
+        if (!result.ok) {
+          if (result.reason === 'duplicate') {
+            duplicateCount++;
+          } else {
+            limitReached = true;
+            break;
+          }
         } else {
-          p.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached — remove one first.`);
+          favorites = result.list;
+          favoritesDirty = true;
+          addedModels.push(model);
         }
-        continue;
       }
-      favorites = result.list;
-      favoritesDirty = true;
-      p.log.success(`Added ${browsed.name || browsed.id} (${provider!.name}) to favorites.`);
+
+      if (addedModels.length > 0) {
+        if (addedModels.length === 1) {
+          const modelName = addedModels[0].name || addedModels[0].id;
+          p.log.success(`Added ${modelName} (${provider!.name}) to favorites.`);
+        } else {
+          p.log.success(`Added ${addedModels.length} models from ${provider!.name} to favorites.`);
+        }
+      }
+      if (duplicateCount > 0) {
+        p.log.warn(`${duplicateCount} selected model(s) were already in your favorites.`);
+      }
+      if (limitReached) {
+        p.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached — some selected models could not be added.`);
+      }
     } else if ((choice as string).startsWith('fav-')) {
       const idx = parseInt((choice as string).slice(4), 10);
       const fav = favorites[idx]!;
