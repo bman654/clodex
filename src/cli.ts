@@ -600,15 +600,27 @@ export async function runModelsCommand(): Promise<number> {
       }
 
       if (!browsed) {
-        const providerOptions = allProviders.map(ap => providerSelectOption(ap));
-        const pickedProviderId = await p.select<string>({
-          message: 'Which provider?',
-          options: providerOptions,
-        });
-        if (p.isCancel(pickedProviderId)) continue;
+        let currentInitialProvider: string | undefined = undefined;
+        while (true) {
+          const providerOptions = allProviders.map(ap => providerSelectOption(ap));
+          const pickedProviderId: string | symbol = await p.select({
+            message: 'Which provider?',
+            options: providerOptions,
+            initialValue: currentInitialProvider,
+          });
+          if (p.isCancel(pickedProviderId)) break;
 
-        provider = allProviders.find(ap => ap.id === pickedProviderId)!;
-        browsed = await browseAllModels(provider, prefs) ?? undefined;
+          provider = allProviders.find(ap => ap.id === pickedProviderId)!;
+          const browsedResult = await browseAllModels(provider, prefs);
+          if (browsedResult === 'back') {
+            currentInitialProvider = provider.id;
+            continue;
+          }
+          if (!browsedResult) break;
+
+          browsed = browsedResult;
+          break;
+        }
         if (!browsed) continue;
       }
 
@@ -754,35 +766,44 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     }
     if (!dryRun) recordLaunchSelection('claude', activeProvider.id, selectedModel.id, prefs);
   } else {
-    const chosen = await p.select<string>({
-      message: 'Which provider?',
-      options: providerOptions,
-      initialValue: initialProvider,
-    });
+    let currentInitialProvider = initialProvider;
+    while (true) {
+      const chosen = await p.select<string>({
+        message: 'Which provider?',
+        options: providerOptions,
+        initialValue: currentInitialProvider,
+      });
 
-    if (p.isCancel(chosen)) {
-      p.cancel('Cancelled.');
-      return 0;
-    }
-
-    const providerChoice = chosen as string;
-
-    if (providerChoice === '__favorites__') {
-      const favoriteStart = resolveFirstAvailableFavorite(favorites, allProviders);
-      if (!favoriteStart) {
-        p.log.warn('No saved favorites are currently available.');
+      if (p.isCancel(chosen)) {
+        p.cancel('Cancelled.');
         return 0;
       }
-      activeProvider = favoriteStart.provider;
-      selectedModel = favoriteStart.model;
-      p.log.step(`Loaded Favorites Catalog. Starting model: ${selectedModel.name || selectedModel.id} (${activeProvider.name})`);
-    } else {
-      activeProvider = allProviders.find(lp => lp.id === providerChoice)!;
-      const pickedModel = await pickLocalModel(activeProvider, conflicts, prefs);
-      if (!pickedModel) return 0;
-      selectedModel = pickedModel;
 
-      if (!dryRun) recordLaunchSelection('claude', activeProvider.id, selectedModel.id, prefs);
+      const providerChoice = chosen as string;
+
+      if (providerChoice === '__favorites__') {
+        const favoriteStart = resolveFirstAvailableFavorite(favorites, allProviders);
+        if (!favoriteStart) {
+          p.log.warn('No saved favorites are currently available.');
+          return 0;
+        }
+        activeProvider = favoriteStart.provider;
+        selectedModel = favoriteStart.model;
+        p.log.step(`Loaded Favorites Catalog. Starting model: ${selectedModel.name || selectedModel.id} (${activeProvider.name})`);
+        break;
+      } else {
+        activeProvider = allProviders.find(lp => lp.id === providerChoice)!;
+        const pickedModelResult = await pickLocalModel(activeProvider, conflicts, prefs);
+        if (pickedModelResult === 'back') {
+          currentInitialProvider = activeProvider.id;
+          continue;
+        }
+        if (!pickedModelResult) return 0;
+        selectedModel = pickedModelResult;
+
+        if (!dryRun) recordLaunchSelection('claude', activeProvider.id, selectedModel.id, prefs);
+        break;
+      }
     }
   }
 

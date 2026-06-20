@@ -15,6 +15,7 @@ export async function pickCodexProvider(
   providers: LocalProvider[],
   prefs: UserPreferences,
   hasFavorites = false,
+  initialProviderId?: string,
 ): Promise<LocalProvider | '__favorites__' | null> {
   if (providers.length === 0 && !hasFavorites) return null;
 
@@ -29,7 +30,9 @@ export async function pickCodexProvider(
   }
 
   const initial =
-    prefs.lastCodexProvider && options.some(o => o.value === prefs.lastCodexProvider)
+    initialProviderId && options.some(o => o.value === initialProviderId)
+      ? initialProviderId
+      : prefs.lastCodexProvider && options.some(o => o.value === prefs.lastCodexProvider)
       ? prefs.lastCodexProvider
       : options[0]!.value;
 
@@ -51,42 +54,53 @@ export async function pickCodexProvider(
 export async function pickCodexModel(
   provider: LocalProvider,
   prefs: UserPreferences,
-): Promise<LocalProviderModel | null> {
+): Promise<LocalProviderModel | 'back' | null> {
   const recentIds = (prefs.recentModelsByProvider?.[provider.id] ?? []).slice(0, 3);
   const recentModels = recentIds
     .map(id => provider.models.find(m => m.id === id))
     .filter((m): m is LocalProviderModel => m !== undefined);
 
-  let selectedModel: LocalProviderModel;
+  let selectedModel: LocalProviderModel | null = null;
 
-  if (recentModels.length > 0) {
-    const options = [
-      ...recentModels.map(m => modelSelectOption(m, 'recent')),
-      navOption('__browse_all__', 'Browse all models →', `${provider.models.length} available`),
-    ];
+  while (true) {
+    if (recentModels.length > 0) {
+      const options = [
+        ...recentModels.map(m => modelSelectOption(m, 'recent')),
+        navOption('__browse_all__', 'Browse all models →', `${provider.models.length} available`),
+        navOption('__back__', '← Go back', 'Select a different provider'),
+      ];
 
-    const picked = await p.select({
-      message: `Model for ${provider.name}?`,
-      options,
-      initialValue: recentModels[0].id,
-    });
+      const picked = await p.select({
+        message: `Model for ${provider.name}?`,
+        options,
+        initialValue: recentModels[0].id,
+      });
 
-    if (p.isCancel(picked)) {
-      p.cancel('Cancelled.');
-      return null;
-    }
+      if (p.isCancel(picked) || String(picked) === '__back__') {
+        return 'back';
+      }
 
-    if (String(picked) === '__browse_all__') {
+      if (String(picked) === '__browse_all__') {
+        const browsed = await browseAllModels(provider, prefs);
+        if (browsed === 'back') {
+          continue;
+        }
+        if (!browsed) return null;
+        selectedModel = browsed;
+        break;
+      } else {
+        selectedModel = recentModels.find(m => m.id === String(picked))!;
+        break;
+      }
+    } else {
       const browsed = await browseAllModels(provider, prefs);
+      if (browsed === 'back') {
+        return 'back';
+      }
       if (!browsed) return null;
       selectedModel = browsed;
-    } else {
-      selectedModel = recentModels.find(m => m.id === String(picked))!;
+      break;
     }
-  } else {
-    const browsed = await browseAllModels(provider, prefs);
-    if (!browsed) return null;
-    selectedModel = browsed;
   }
 
   return selectedModel;

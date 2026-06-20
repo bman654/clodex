@@ -354,24 +354,35 @@ export async function runCodexAppCommand(args: string[], opts: { vertex?: boolea
     ?? activeProvider.models[0]!;
 
   if (!configOnly) {
-    const pickedProvider = await pickCodexProvider(compatible, prefs, favoritesActive);
-    if (!pickedProvider) return 0;
-    
-    if (pickedProvider === '__favorites__') {
-      const favoriteProviders = compatible.map(providerForCodexPicker);
-      const favoriteStart = resolveFirstAvailableFavorite(favorites, favoriteProviders);
-      if (!favoriteStart) {
-        p.log.warn('No saved Codex App favorites are currently available.');
-        return 0;
+    let currentInitialProvider = prefs.lastCodexProvider && compatible.some(o => o.id === prefs.lastCodexProvider)
+      ? prefs.lastCodexProvider
+      : compatible[0]!.id;
+    while (true) {
+      const pickedProvider = await pickCodexProvider(compatible, prefs, favoritesActive, currentInitialProvider);
+      if (!pickedProvider) return 0;
+      
+      if (pickedProvider === '__favorites__') {
+        const favoriteProviders = compatible.map(providerForCodexPicker);
+        const favoriteStart = resolveFirstAvailableFavorite(favorites, favoriteProviders);
+        if (!favoriteStart) {
+          p.log.warn('No saved Codex App favorites are currently available.');
+          return 0;
+        }
+        activeProvider = favoriteStart.provider;
+        selectedModel = favoriteStart.model;
+        p.log.step(`Loaded Favorites Catalog. Starting model: ${selectedModel.name || selectedModel.id} (${activeProvider.name})`);
+        break;
+      } else {
+        activeProvider = providerForCodexPicker(pickedProvider as LocalProvider);
+        const pickedModelResult = await pickCodexModel(activeProvider, prefs);
+        if (pickedModelResult === 'back') {
+          currentInitialProvider = activeProvider.id;
+          continue;
+        }
+        if (!pickedModelResult) return 0;
+        selectedModel = pickedModelResult;
+        break;
       }
-      activeProvider = favoriteStart.provider;
-      selectedModel = favoriteStart.model;
-      p.log.step(`Loaded Favorites Catalog. Starting model: ${selectedModel.name || selectedModel.id} (${activeProvider.name})`);
-    } else {
-      activeProvider = providerForCodexPicker(pickedProvider as LocalProvider);
-      const pickedModel = await pickCodexModel(activeProvider, prefs);
-      if (!pickedModel) return 0;
-      selectedModel = pickedModel;
     }
   }
 

@@ -153,7 +153,7 @@ async function selectLargeCatalog<T extends ModelSearchable & { id: string }>(
   toOption: (m: T) => ModelSelectOption,
   message: string,
   initialModelId?: string,
-): Promise<T | null> {
+): Promise<T | 'back' | null> {
   let mode: LargeCatalogMode = 'choose';
 
   while (true) {
@@ -167,12 +167,12 @@ async function selectLargeCatalog<T extends ModelSearchable & { id: string }>(
             label: pc.cyan('Browse all models'),
             hint: `${MODEL_PAGE_SIZE} per page · ${Math.ceil(browseList.length / MODEL_PAGE_SIZE)} pages`,
           },
+          navOption('__back__', '← Go back', 'Select a different provider'),
         ],
       });
 
-      if (p.isCancel(method)) {
-        p.cancel('Cancelled.');
-        return null;
+      if (p.isCancel(method) || String(method) === '__back__') {
+        return 'back';
       }
 
       mode = method === MODE_BROWSE ? 'browse' : 'search';
@@ -244,13 +244,16 @@ async function selectModelWithSearch<T extends ModelSearchable & { id: string }>
   message: string,
   initialModelId?: string,
   browseList?: T[],
-): Promise<T | null> {
+): Promise<T | 'back' | null> {
   if (models.length === 0) return null;
 
   const orderedBrowse = browseList ?? sortModelsByBrand(models);
 
   if (models.length <= MODEL_SEARCH_THRESHOLD) {
-    const options = models.map(toOption);
+    const options = [
+      ...models.map(toOption),
+      navOption('__back__', '← Go back', ''),
+    ];
     const initialValue =
       initialModelId && options.some(o => o.value === initialModelId)
         ? initialModelId
@@ -262,9 +265,8 @@ async function selectModelWithSearch<T extends ModelSearchable & { id: string }>
       initialValue,
     });
 
-    if (p.isCancel(picked)) {
-      p.cancel('Cancelled.');
-      return null;
+    if (p.isCancel(picked) || String(picked) === '__back__') {
+      return 'back';
     }
 
     const selected = models.find(m => m.id === String(picked));
@@ -286,7 +288,7 @@ function modelToOption(model: LocalProviderModel, hint?: string) {
 export async function browseAllModels(
   provider: LocalProvider,
   prefs: UserPreferences,
-): Promise<LocalProviderModel | null> {
+): Promise<LocalProviderModel | 'back' | null> {
   return selectModelWithSearch(
     provider.models,
     m => modelToOption(m),
@@ -299,43 +301,54 @@ export async function pickLocalModel(
   provider: LocalProvider,
   conflicts: ConflictInfo[],
   prefs: UserPreferences,
-): Promise<LocalProviderModel | null> {
+): Promise<LocalProviderModel | 'back' | null> {
   // Show recently used models for this provider if we have any.
   const recentIds = (prefs.recentModelsByProvider?.[provider.id] ?? []).slice(0, MAX_RECENT);
   const recentModels = recentIds
     .map(id => provider.models.find(m => m.id === id))
     .filter((m): m is LocalProviderModel => m !== undefined);
 
-  let selectedModel: LocalProviderModel;
+  let selectedModel: LocalProviderModel | null = null;
 
-  if (recentModels.length > 0) {
-    const options = [
-      ...recentModels.map(m => modelToOption(m, 'recent')),
-      navOption(BROWSE_ALL, 'Browse all models →', `${provider.models.length} available`),
-    ];
+  while (true) {
+    if (recentModels.length > 0) {
+      const options = [
+        ...recentModels.map(m => modelToOption(m, 'recent')),
+        navOption(BROWSE_ALL, 'Browse all models →', `${provider.models.length} available`),
+        navOption('__back__', '← Go back', 'Select a different provider'),
+      ];
 
-    const picked = await p.select({
-      message: 'Which model?',
-      options,
-      initialValue: recentModels[0].id,
-    });
+      const picked = await p.select({
+        message: 'Which model?',
+        options,
+        initialValue: recentModels[0].id,
+      });
 
-    if (p.isCancel(picked)) {
-      p.cancel('Cancelled.');
-      return null;
-    }
+      if (p.isCancel(picked) || String(picked) === '__back__') {
+        return 'back';
+      }
 
-    if (String(picked) === BROWSE_ALL) {
+      if (String(picked) === BROWSE_ALL) {
+        const browsed = await browseAllModels(provider, prefs);
+        if (browsed === 'back') {
+          continue;
+        }
+        if (!browsed) return null;
+        selectedModel = browsed;
+        break;
+      } else {
+        selectedModel = recentModels.find(m => m.id === String(picked))!;
+        break;
+      }
+    } else {
       const browsed = await browseAllModels(provider, prefs);
+      if (browsed === 'back') {
+        return 'back';
+      }
       if (!browsed) return null;
       selectedModel = browsed;
-    } else {
-      selectedModel = recentModels.find(m => m.id === String(picked))!;
+      break;
     }
-  } else {
-    const browsed = await browseAllModels(provider, prefs);
-    if (!browsed) return null;
-    selectedModel = browsed;
   }
 
   noteEnvConflicts(conflicts);
