@@ -5,6 +5,7 @@ import { resolveContextWindow } from '../context-window.js';
 import type { ProviderTemplate } from '../provider-templates.js';
 import { normalizeGoogleDisplayName, normalizeGoogleModelId } from './google-model-id.js';
 import type { CachedModel } from './types.js';
+import { makeTraceLogger, getProviderDebugLogPath } from '../trace-log.js';
 
 const TEST_TIMEOUT_MS = 10_000;
 
@@ -108,8 +109,17 @@ export async function fetchTemplateModels(
       };
     }
 
+    let logTrace: ((msg: string) => void) | undefined;
+    if (process.env.RELAY_AI_TRACE === '1') {
+      logTrace = makeTraceLogger(getProviderDebugLogPath());
+    }
+
     if (!response.ok) {
       const body = await response.text().catch(() => '');
+      if (logTrace) {
+        logTrace(`[fetchTemplateModels] HTTP ${response.status} from ${url}`);
+        logTrace(`[fetchTemplateModels] Body: ${body}`);
+      }
       const detail = body.slice(0, 200).trim();
       if (response.status === 401 || response.status === 403) {
         return {
@@ -129,7 +139,21 @@ export async function fetchTemplateModels(
       };
     }
 
-    const json = (await response.json()) as OpenAiModelListResponse;
+    const rawBodyText = await response.text().catch(() => '');
+    if (logTrace) {
+      logTrace(`[fetchTemplateModels] HTTP ${response.status} from ${url}`);
+      logTrace(`[fetchTemplateModels] Body: ${rawBodyText}`);
+    }
+
+    let json: OpenAiModelListResponse = {};
+    try {
+      if (rawBodyText.trim()) {
+        json = JSON.parse(rawBodyText) as OpenAiModelListResponse;
+      }
+    } catch {
+      // Failed to parse, use empty object
+    }
+
     const models = parseModelList(json, template.npm);
     if (models.length === 0) {
       return {

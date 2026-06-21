@@ -19,6 +19,7 @@ export const CLAUDE_DEBUG_LOG = 'claude-debug.log';
 export const PROXY_DEBUG_LOG = 'proxy-debug.log';
 export const CODEX_PROXY_DEBUG_LOG = 'codex-proxy-debug.log';
 export const GEMINI_PROXY_DEBUG_LOG = 'gemini-proxy-debug.log';
+export const PROVIDER_DEBUG_LOG = 'provider-debug.log';
 
 export function ensureLogsDir(): string {
   const dir = getLogsPath();
@@ -51,6 +52,16 @@ export function getCodexProxyDebugLogPath(): string {
 
 export function getGeminiProxyDebugLogPath(): string {
   return join(ensureLogsDir(), GEMINI_PROXY_DEBUG_LOG);
+}
+
+export function getProviderDebugLogPath(): string {
+  return join(ensureLogsDir(), PROVIDER_DEBUG_LOG);
+}
+
+export function prepareProviderTraceLog(): string {
+  const path = getProviderDebugLogPath();
+  resetTraceLog(path);
+  return path;
 }
 
 /** Reset log file and return a writer that redacts secrets. */

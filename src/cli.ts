@@ -147,10 +147,12 @@ export function parseArgs(args: string[]): ParsedArgs {
 
   if (first === 'providers') {
     const parsed = emptyParsed('providers');
-    parsed.claudeArgs = rest;
+    parsed.claudeArgs = [];
     for (const arg of rest) {
-      if (arg === '--help' || arg === '-h') parsed.showHelp = true;
+      if (arg === '--trace') parsed.trace = true;
+      else if (arg === '--help' || arg === '-h') parsed.showHelp = true;
       else if (arg === '--version' || arg === '-v') parsed.showVersion = true;
+      else parsed.claudeArgs.push(arg);
     }
     return parsed;
   }
@@ -1087,6 +1089,9 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
     if (parsed.showHelp) {
       printHelp(providersHelpText());
       return 0;
+    }
+    if (parsed.trace) {
+      process.env.RELAY_AI_TRACE = '1';
     }
     return runProvidersCommand(parsed.claudeArgs);
   }

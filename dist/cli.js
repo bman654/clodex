@@ -3525,6 +3525,113 @@ function listCredentialSkippedProviders(raw, authEntries, importedIds, alreadyRe
   return skipped;
 }
 
+// src/trace-log.ts
+import {
+  chmodSync as chmodSync4,
+  existsSync as existsSync7,
+  mkdirSync as mkdirSync4,
+  readFileSync as readFileSync6,
+  unlinkSync,
+  writeFileSync as writeFileSync3
+} from "fs";
+import { join as join8 } from "path";
+import pc2 from "picocolors";
+var DIR_MODE2 = 448;
+var FILE_MODE4 = 384;
+var CLAUDE_DEBUG_LOG = "claude-debug.log";
+var PROXY_DEBUG_LOG = "proxy-debug.log";
+var CODEX_PROXY_DEBUG_LOG = "codex-proxy-debug.log";
+var GEMINI_PROXY_DEBUG_LOG = "gemini-proxy-debug.log";
+var PROVIDER_DEBUG_LOG = "provider-debug.log";
+function ensureLogsDir() {
+  const dir = getLogsPath();
+  mkdirSync4(dir, { recursive: true, mode: DIR_MODE2 });
+  try {
+    chmodSync4(dir, DIR_MODE2);
+  } catch {
+  }
+  return dir;
+}
+function getClaudeDebugLogPath() {
+  return join8(ensureLogsDir(), CLAUDE_DEBUG_LOG);
+}
+function prepareClaudeTraceLog() {
+  const path = getClaudeDebugLogPath();
+  resetTraceLog(path);
+  return path;
+}
+function getProxyDebugLogPath() {
+  return join8(ensureLogsDir(), PROXY_DEBUG_LOG);
+}
+function getCodexProxyDebugLogPath() {
+  return join8(ensureLogsDir(), CODEX_PROXY_DEBUG_LOG);
+}
+function getGeminiProxyDebugLogPath() {
+  return join8(ensureLogsDir(), GEMINI_PROXY_DEBUG_LOG);
+}
+function getProviderDebugLogPath() {
+  return join8(ensureLogsDir(), PROVIDER_DEBUG_LOG);
+}
+function makeTraceLogger(logPath) {
+  resetTraceLog(logPath);
+  return (message) => writeSecureLogLine(logPath, `${(/* @__PURE__ */ new Date()).toISOString()} ${message}`);
+}
+function resetTraceLog(path) {
+  ensureLogsDir();
+  if (existsSync7(path)) {
+    try {
+      unlinkSync(path);
+    } catch {
+    }
+  }
+}
+var REDACTION_PATTERNS = [
+  // Bearer / Authorization headers
+  (line) => line.replace(/Bearer\s+[A-Za-z0-9._\-+/=]+/gi, "Bearer [REDACTED]"),
+  (line) => line.replace(/("authorization"\s*:\s*")[^"]+/gi, "$1[REDACTED]"),
+  (line) => line.replace(/(x-api-key"\s*:\s*")[^"]+/gi, "$1[REDACTED]"),
+  // Common API key prefixes
+  (line) => line.replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "sk-[REDACTED]"),
+  (line) => line.replace(/\bsk-ant-[A-Za-z0-9_-]{8,}\b/g, "sk-ant-[REDACTED]"),
+  (line) => line.replace(/\bAIza[A-Za-z0-9_-]{20,}\b/g, "AIza[REDACTED]"),
+  (line) => line.replace(/\bgsk_[A-Za-z0-9]{20,}\b/g, "gsk_[REDACTED]")
+];
+function redactTraceLine(line) {
+  let out = line;
+  for (const apply of REDACTION_PATTERNS) {
+    out = apply(out);
+  }
+  return out;
+}
+function redactTraceLog(content) {
+  return content.split("\n").map(redactTraceLine).join("\n");
+}
+function writeSecureLogLine(path, line) {
+  ensureLogsDir();
+  const redacted = redactTraceLine(line);
+  try {
+    writeFileSync3(path, `${redacted}
+`, { flag: "a", mode: FILE_MODE4 });
+    chmodSync4(path, FILE_MODE4);
+  } catch {
+  }
+}
+function printTraceLog(debugLogPath) {
+  if (!existsSync7(debugLogPath)) return;
+  const raw = readFileSync6(debugLogPath, "utf8");
+  const log19 = redactTraceLog(raw);
+  const errorLines = log19.split("\n").filter(
+    (l) => l.includes("error") || l.includes("Error") || l.includes('"type":"error"') || l.includes("status")
+  );
+  console.log("\n" + pc2.bold(pc2.cyan("\u2500\u2500 Debug trace \u2500\u2500")));
+  if (errorLines.length > 0) {
+    errorLines.slice(0, 30).forEach((l) => console.log(pc2.dim(l)));
+  } else {
+    console.log(pc2.dim("(no errors found in debug log)"));
+  }
+  console.log(pc2.dim(`Full log: ${debugLogPath}`));
+}
+
 // src/registry/fetch-template-models.ts
 var TEST_TIMEOUT_MS = 1e4;
 function modelFormatForNpm(npm) {
@@ -3596,8 +3703,16 @@ async function fetchTemplateModels(template, apiKey, baseUrlOverride) {
         hint: "Check the base URL \u2014 redirects are blocked for security."
       };
     }
+    let logTrace;
+    if (process.env.RELAY_AI_TRACE === "1") {
+      logTrace = makeTraceLogger(getProviderDebugLogPath());
+    }
     if (!response.ok) {
       const body = await response.text().catch(() => "");
+      if (logTrace) {
+        logTrace(`[fetchTemplateModels] HTTP ${response.status} from ${url}`);
+        logTrace(`[fetchTemplateModels] Body: ${body}`);
+      }
       const detail = body.slice(0, 200).trim();
       if (response.status === 401 || response.status === 403) {
         return {
@@ -3614,7 +3729,18 @@ async function fetchTemplateModels(template, apiKey, baseUrlOverride) {
         hint: detail || "Check your API key and try again."
       };
     }
-    const json = await response.json();
+    const rawBodyText = await response.text().catch(() => "");
+    if (logTrace) {
+      logTrace(`[fetchTemplateModels] HTTP ${response.status} from ${url}`);
+      logTrace(`[fetchTemplateModels] Body: ${rawBodyText}`);
+    }
+    let json = {};
+    try {
+      if (rawBodyText.trim()) {
+        json = JSON.parse(rawBodyText);
+      }
+    } catch {
+    }
     const models = parseModelList(json, template.npm);
     if (models.length === 0) {
       return {
@@ -3770,8 +3896,23 @@ async function fetchAnthropicModels(baseUrl, apiKey) {
       redirect: "manual",
       signal: controller.signal
     });
+    let logTrace;
+    if (process.env.RELAY_AI_TRACE === "1") {
+      logTrace = makeTraceLogger(getProviderDebugLogPath());
+    }
+    const rawBodyText = await response.text().catch(() => "");
+    if (logTrace) {
+      logTrace(`[fetchAnthropicModels] HTTP ${response.status} from ${modelsUrl2}`);
+      logTrace(`[fetchAnthropicModels] Body: ${rawBodyText}`);
+    }
     if (response.ok) {
-      const json = await response.json();
+      let json = {};
+      try {
+        if (rawBodyText.trim()) {
+          json = JSON.parse(rawBodyText);
+        }
+      } catch {
+      }
       const models = [];
       for (const row of json.data ?? []) {
         const id = row.id?.trim();
@@ -4450,111 +4591,6 @@ import * as p2 from "@clack/prompts";
 import { appendFileSync as appendFileSync2, readFileSync as readFileSync7, existsSync as existsSync8 } from "fs";
 import { homedir as homedir6 } from "os";
 import { spawnSync } from "child_process";
-
-// src/trace-log.ts
-import {
-  chmodSync as chmodSync4,
-  existsSync as existsSync7,
-  mkdirSync as mkdirSync4,
-  readFileSync as readFileSync6,
-  unlinkSync,
-  writeFileSync as writeFileSync3
-} from "fs";
-import { join as join8 } from "path";
-import pc2 from "picocolors";
-var DIR_MODE2 = 448;
-var FILE_MODE4 = 384;
-var CLAUDE_DEBUG_LOG = "claude-debug.log";
-var PROXY_DEBUG_LOG = "proxy-debug.log";
-var CODEX_PROXY_DEBUG_LOG = "codex-proxy-debug.log";
-var GEMINI_PROXY_DEBUG_LOG = "gemini-proxy-debug.log";
-function ensureLogsDir() {
-  const dir = getLogsPath();
-  mkdirSync4(dir, { recursive: true, mode: DIR_MODE2 });
-  try {
-    chmodSync4(dir, DIR_MODE2);
-  } catch {
-  }
-  return dir;
-}
-function getClaudeDebugLogPath() {
-  return join8(ensureLogsDir(), CLAUDE_DEBUG_LOG);
-}
-function prepareClaudeTraceLog() {
-  const path = getClaudeDebugLogPath();
-  resetTraceLog(path);
-  return path;
-}
-function getProxyDebugLogPath() {
-  return join8(ensureLogsDir(), PROXY_DEBUG_LOG);
-}
-function getCodexProxyDebugLogPath() {
-  return join8(ensureLogsDir(), CODEX_PROXY_DEBUG_LOG);
-}
-function getGeminiProxyDebugLogPath() {
-  return join8(ensureLogsDir(), GEMINI_PROXY_DEBUG_LOG);
-}
-function makeTraceLogger(logPath) {
-  resetTraceLog(logPath);
-  return (message) => writeSecureLogLine(logPath, `${(/* @__PURE__ */ new Date()).toISOString()} ${message}`);
-}
-function resetTraceLog(path) {
-  ensureLogsDir();
-  if (existsSync7(path)) {
-    try {
-      unlinkSync(path);
-    } catch {
-    }
-  }
-}
-var REDACTION_PATTERNS = [
-  // Bearer / Authorization headers
-  (line) => line.replace(/Bearer\s+[A-Za-z0-9._\-+/=]+/gi, "Bearer [REDACTED]"),
-  (line) => line.replace(/("authorization"\s*:\s*")[^"]+/gi, "$1[REDACTED]"),
-  (line) => line.replace(/(x-api-key"\s*:\s*")[^"]+/gi, "$1[REDACTED]"),
-  // Common API key prefixes
-  (line) => line.replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "sk-[REDACTED]"),
-  (line) => line.replace(/\bsk-ant-[A-Za-z0-9_-]{8,}\b/g, "sk-ant-[REDACTED]"),
-  (line) => line.replace(/\bAIza[A-Za-z0-9_-]{20,}\b/g, "AIza[REDACTED]"),
-  (line) => line.replace(/\bgsk_[A-Za-z0-9]{20,}\b/g, "gsk_[REDACTED]")
-];
-function redactTraceLine(line) {
-  let out = line;
-  for (const apply of REDACTION_PATTERNS) {
-    out = apply(out);
-  }
-  return out;
-}
-function redactTraceLog(content) {
-  return content.split("\n").map(redactTraceLine).join("\n");
-}
-function writeSecureLogLine(path, line) {
-  ensureLogsDir();
-  const redacted = redactTraceLine(line);
-  try {
-    writeFileSync3(path, `${redacted}
-`, { flag: "a", mode: FILE_MODE4 });
-    chmodSync4(path, FILE_MODE4);
-  } catch {
-  }
-}
-function printTraceLog(debugLogPath) {
-  if (!existsSync7(debugLogPath)) return;
-  const raw = readFileSync6(debugLogPath, "utf8");
-  const log19 = redactTraceLog(raw);
-  const errorLines = log19.split("\n").filter(
-    (l) => l.includes("error") || l.includes("Error") || l.includes('"type":"error"') || l.includes("status")
-  );
-  console.log("\n" + pc2.bold(pc2.cyan("\u2500\u2500 Debug trace \u2500\u2500")));
-  if (errorLines.length > 0) {
-    errorLines.slice(0, 30).forEach((l) => console.log(pc2.dim(l)));
-  } else {
-    console.log(pc2.dim("(no errors found in debug log)"));
-  }
-  console.log(pc2.dim(`Full log: ${debugLogPath}`));
-}
-
-// src/key-setup.ts
 function detectShellProfile() {
   const shell = process.env["SHELL"] ?? "";
   if (process.platform === "darwin") {
@@ -14545,10 +14581,12 @@ function parseArgs(args) {
   }
   if (first === "providers") {
     const parsed2 = emptyParsed("providers");
-    parsed2.claudeArgs = rest;
+    parsed2.claudeArgs = [];
     for (const arg of rest) {
-      if (arg === "--help" || arg === "-h") parsed2.showHelp = true;
+      if (arg === "--trace") parsed2.trace = true;
+      else if (arg === "--help" || arg === "-h") parsed2.showHelp = true;
       else if (arg === "--version" || arg === "-v") parsed2.showVersion = true;
+      else parsed2.claudeArgs.push(arg);
     }
     return parsed2;
   }
@@ -15323,6 +15361,9 @@ Error: ${parsed.error}
     if (parsed.showHelp) {
       printHelp(providersHelpText());
       return 0;
+    }
+    if (parsed.trace) {
+      process.env.RELAY_AI_TRACE = "1";
     }
     return runProvidersCommand(parsed.claudeArgs);
   }

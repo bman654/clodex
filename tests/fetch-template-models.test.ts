@@ -16,7 +16,7 @@ describe('fetchTemplateModels', () => {
     vi.mocked(fetch).mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({
+      text: async () => JSON.stringify({
         data: [{ id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' }],
       }),
     } as Response);
@@ -43,7 +43,7 @@ describe('fetchTemplateModels', () => {
     vi.mocked(fetch).mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ data: [{ id: 'llama', name: 'llama' }] }),
+      text: async () => JSON.stringify({ data: [{ id: 'llama', name: 'llama' }] }),
     } as Response);
 
     await fetchTemplateModels(groq, 'gsk-test-key');
@@ -63,7 +63,7 @@ describe('fetchTemplateModels', () => {
     vi.mocked(fetch).mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({
+      text: async () => JSON.stringify({
         data: [{
           id: 'z-ai/glm-5.2',
           name: 'Z.ai: GLM 5.2',

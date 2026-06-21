@@ -8,6 +8,7 @@ import { loadRegistry, saveRegistry } from './io.js';
 import type { CachedModel, RegistryProvider } from './types.js';
 import { customProviderId, isValidProviderId, slugifyProviderId } from './validate.js';
 import { validateCustomEndpointUrl } from './url-security.js';
+import { makeTraceLogger, getProviderDebugLogPath } from '../trace-log.js';
 
 export type CustomEndpointKind = 'openai' | 'anthropic';
 
@@ -53,8 +54,27 @@ export async function fetchAnthropicModels(baseUrl: string, apiKey: string): Pro
       signal: controller.signal,
     });
 
+    let logTrace: ((msg: string) => void) | undefined;
+    if (process.env.RELAY_AI_TRACE === '1') {
+      logTrace = makeTraceLogger(getProviderDebugLogPath());
+    }
+
+    const rawBodyText = await response.text().catch(() => '');
+    if (logTrace) {
+      logTrace(`[fetchAnthropicModels] HTTP ${response.status} from ${modelsUrl}`);
+      logTrace(`[fetchAnthropicModels] Body: ${rawBodyText}`);
+    }
+
     if (response.ok) {
-      const json = (await response.json()) as { data?: Array<{ id?: string; name?: string }> };
+      let json: { data?: Array<{ id?: string; name?: string }> } = {};
+      try {
+        if (rawBodyText.trim()) {
+          json = JSON.parse(rawBodyText) as { data?: Array<{ id?: string; name?: string }> };
+        }
+      } catch {
+        // Failed to parse
+      }
+
       const models: CachedModel[] = [];
       for (const row of json.data ?? []) {
         const id = row.id?.trim();

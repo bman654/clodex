@@ -54,7 +54,7 @@ describe('fetchTemplateModels', () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({
+      text: async () => JSON.stringify({
         data: [{ id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B' }],
       }),
     }));
