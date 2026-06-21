@@ -19,7 +19,13 @@ function modelFormatForNpm(npm: string): 'anthropic' | 'openai' {
 
 function modelsUrl(baseUrl: string): string {
   const trimmed = baseUrl.replace(/\/$/, '');
-  if (trimmed.endsWith('/v1')) return `${trimmed}/models`;
+  
+  // Note: the 'openai' token matches path segments like /v1/openai (DeepInfra
+  // pattern) and custom proxies like /proxy/openai — both get /models appended
+  // directly, not /v1/models. This is the intended heuristic.
+  if (/\/(v\d+[a-z]*|openai|beta)$/.test(trimmed)) {
+    return `${trimmed}/models`;
+  }
   return `${trimmed}/v1/models`;
 }
 

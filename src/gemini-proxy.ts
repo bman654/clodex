@@ -60,19 +60,22 @@ function mergeConsecutiveMessages(messages: any[]): any[] {
   return merged;
 }
 
+// Strip Gemini CLI self-identification injected by the CLI into system and user content.
+// Paragraphs are erased first (while still matching the original "Gemini CLI" text),
+// then any residual brand mentions are renamed to a neutral label.
+function stripGeminiIdentity(text: string): string {
+  return text
+    .replace(/You are Gemini CLI[\s\S]*?(?=\n\n|$)/gi, '')
+    .replace(/I'm Gemini CLI[\s\S]*?(?=\n\n|$)/gi, '')
+    .replace(/Gemini CLI/gi, 'AI CLI');
+}
+
 export function translateGeminiRequest(body: any): any {
   // 1. System instruction
   let system: string | undefined;
   if (body.systemInstruction?.parts) {
-    system = body.systemInstruction.parts.map((p: any) => p.text || '').join('\n');
-    
-    // The Gemini CLI natively injects a very strict system prompt telling the model that it is 
-    // "Gemini CLI... made by Google... running on Google's Gemini model." 
-    // If we proxy to another model, this system prompt forces it to roleplay as Gemini.
-    // We strip out the identity portions here so third-party models act naturally.
-    system = system.replace(/You are Gemini CLI[\s\S]*?(?=\n\n|$)/gi, '');
-    system = system.replace(/I'm Gemini CLI[\s\S]*?(?=\n\n|$)/gi, '');
-    system = system.trim();
+    const rawSystem = body.systemInstruction.parts.map((p: any) => p.text || '').join('\n');
+    system = stripGeminiIdentity(rawSystem).trim();
   }
 
   // 2. Messages (contents)
@@ -88,15 +91,17 @@ export function translateGeminiRequest(body: any): any {
     const turnParts = turn.parts || [];
     for (const p of turnParts) {
       if (p.text !== undefined) {
-        if (p.text.includes('<thinking>') && p.text.includes('</thinking>')) {
-          const tokens = p.text.split(/<thinking>([\s\S]*?)<\/thinking>/);
+        // Strip <session_context> identity injected into user message parts
+        const text = stripGeminiIdentity(p.text);
+        if (text.includes('<thinking>')) {
+          const tokens = text.split(/<thinking>([\s\S]*?)<\/thinking>/);
           for (let i = 0; i < tokens.length; i++) {
             const token = tokens[i].trim();
             if (!token) continue;
             parts.push({ type: i % 2 === 1 ? 'reasoning' : 'text', text: token });
           }
         } else {
-          parts.push({ type: 'text', text: p.text });
+          parts.push({ type: 'text', text });
         }
       } else if (p.inlineData) {
         parts.push({

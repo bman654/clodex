@@ -1,6 +1,6 @@
-# Gemini CLI with relay-ai
+# Gemini CLI with relay-ai (Experimental)
 
-Use the **Google Gemini CLI** with models from your relay-ai registry — Anthropic, xAI, Google Gemini, Nvidia, DeepSeek, OpenAI, and more.
+Use the **Google Gemini CLI** with models from your relay-ai registry — Anthropic, xAI, Google Gemini, Nvidia, DeepSeek, OpenAI, and more. *Note: Gemini CLI integration is currently experimental.*
 
 | Command | What it launches | Config target |
 |---------|------------------|---------------|
@@ -100,6 +100,10 @@ When you have saved favorites via `relay-ai models`, `relay-ai gemini` will show
 | Provider missing in picker | `relay-ai providers add` |
 | Model errors / disconnected | Run `relay-ai gemini --trace` to view proxy logs in `~/.relay-ai/logs/gemini-proxy-debug.log` |
 | JSON parse error on first stdout lines (agents) | Missing `-o stream-json` or `-o json` when running in agent mode |
+
+### Known Limitations
+
+- **Model name does not switch:** The model name displayed in the top right corner of the Gemini CLI UI does not automatically switch/update after we do the `.model_name` change mid-session. This is a known UI limitation with the Gemini CLI.
 
 ## See also
 

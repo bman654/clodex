@@ -35,7 +35,7 @@ import { join } from "path";
 // package.json
 var package_default = {
   name: "@jacobbd/relay-ai",
-  version: "0.2.8",
+  version: "0.3.0",
   publishConfig: {
     access: "public"
   },
@@ -3532,7 +3532,9 @@ function modelFormatForNpm(npm) {
 }
 function modelsUrl(baseUrl) {
   const trimmed = baseUrl.replace(/\/$/, "");
-  if (trimmed.endsWith("/v1")) return `${trimmed}/models`;
+  if (/\/(v\d+[a-z]*|openai|beta)$/.test(trimmed)) {
+    return `${trimmed}/models`;
+  }
   return `${trimmed}/v1/models`;
 }
 function parseModelList(body, npm) {
@@ -3936,6 +3938,36 @@ var PROVIDER_TEMPLATES = [
     npm: "@ai-sdk/deepinfra",
     defaultBaseUrl: "https://api.deepinfra.com/v1/openai",
     signupUrl: "https://deepinfra.com/dash/api_keys",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "deepseek",
+    name: "DeepSeek",
+    authType: "api",
+    npm: "@ai-sdk/openai-compatible",
+    defaultBaseUrl: "https://api.deepseek.com/v1",
+    signupUrl: "https://platform.deepseek.com",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "zhipu",
+    name: "Zhipu AI (GLM)",
+    authType: "api",
+    npm: "@ai-sdk/openai-compatible",
+    defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    signupUrl: "https://open.bigmodel.cn",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "moonshot",
+    name: "Moonshot (Kimi)",
+    authType: "api",
+    npm: "@ai-sdk/openai-compatible",
+    defaultBaseUrl: "https://api.moonshot.cn/v1",
+    signupUrl: "https://platform.moonshot.cn",
     modelSource: "api-list",
     supported: true
   },
@@ -11508,10 +11540,14 @@ function mergeConsecutiveMessages2(messages) {
   }
   return merged;
 }
+function stripGeminiIdentity(text5) {
+  return text5.replace(/You are Gemini CLI[\s\S]*?(?=\n\n|$)/gi, "").replace(/I'm Gemini CLI[\s\S]*?(?=\n\n|$)/gi, "").replace(/Gemini CLI/gi, "AI CLI");
+}
 function translateGeminiRequest(body) {
   let system;
   if (body.systemInstruction?.parts) {
-    system = body.systemInstruction.parts.map((p21) => p21.text || "").join("\n");
+    const rawSystem = body.systemInstruction.parts.map((p21) => p21.text || "").join("\n");
+    system = stripGeminiIdentity(rawSystem).trim();
   }
   const messages = [];
   const nameToIdList = /* @__PURE__ */ new Map();
@@ -11523,15 +11559,16 @@ function translateGeminiRequest(body) {
     const turnParts = turn.parts || [];
     for (const p21 of turnParts) {
       if (p21.text !== void 0) {
-        if (p21.text.includes("<thinking>") && p21.text.includes("</thinking>")) {
-          const tokens = p21.text.split(/<thinking>([\s\S]*?)<\/thinking>/);
+        const text5 = stripGeminiIdentity(p21.text);
+        if (text5.includes("<thinking>")) {
+          const tokens = text5.split(/<thinking>([\s\S]*?)<\/thinking>/);
           for (let i = 0; i < tokens.length; i++) {
             const token = tokens[i].trim();
             if (!token) continue;
             parts.push({ type: i % 2 === 1 ? "reasoning" : "text", text: token });
           }
         } else {
-          parts.push({ type: "text", text: p21.text });
+          parts.push({ type: "text", text: text5 });
         }
       } else if (p21.inlineData) {
         parts.push({
