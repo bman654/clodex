@@ -116,10 +116,22 @@ describe('server model catalog', () => {
       object: 'list',
       data: [
         {
+          id: 'claude-sonnet-test',
+          object: 'model',
+          created: 1735689600,
+          owned_by: 'zen',
+        },
+        {
           id: 'deepseek-test',
           object: 'model',
           created: 1735689600,
           owned_by: 'go',
+        },
+        {
+          id: 'gpt-5',
+          object: 'model',
+          created: 1735689600,
+          owned_by: 'openai',
         },
       ],
     });

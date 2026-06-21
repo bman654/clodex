@@ -4916,13 +4916,13 @@ function upstreamModelId(model) {
   const id = model.upstreamModelId ?? model.id;
   return id.replace(/\[1m\]$/i, "");
 }
-function isOpenAIChatCompletionsModel(model) {
+function supportsDirectOpenAIChatCompletions(model) {
   return model.modelFormat === "openai" && (!!model.completionsUrl || model.sourceBackend === "zen" || model.sourceBackend === "go");
 }
 function formatOpenAIModels(models) {
   return {
     object: "list",
-    data: models.filter(isOpenAIChatCompletionsModel).map((model) => ({
+    data: models.map((model) => ({
       id: model.id,
       object: "model",
       created: CREATED_AT_UNIX,
@@ -5104,9 +5104,9 @@ function serializeToolResultContent(content) {
 
 // src/tool-search.ts
 var TOOL_SEARCH_TYPE_PREFIX = "tool_search_tool";
-function isToolSearchTool(tool3) {
-  if (typeof tool3.type === "string" && tool3.type.startsWith(TOOL_SEARCH_TYPE_PREFIX)) return true;
-  const name = tool3.name ?? "";
+function isToolSearchTool(tool4) {
+  if (typeof tool4.type === "string" && tool4.type.startsWith(TOOL_SEARCH_TYPE_PREFIX)) return true;
+  const name = tool4.name ?? "";
   return name.includes("tool_search") || name === "ToolSearch";
 }
 function extractReferencedToolNames(messages) {
@@ -5145,16 +5145,16 @@ function resolveUpstreamTools(tools, messages) {
   if (!tools?.length) return [];
   const referenced = extractReferencedToolNames(messages);
   const upstream = [];
-  for (const tool3 of tools) {
-    if (isToolSearchTool(tool3)) {
-      upstream.push(tool3);
+  for (const tool4 of tools) {
+    if (isToolSearchTool(tool4)) {
+      upstream.push(tool4);
       continue;
     }
-    if (tool3.defer_loading === true) {
-      if (referenced.has(tool3.name)) upstream.push(tool3);
+    if (tool4.defer_loading === true) {
+      if (referenced.has(tool4.name)) upstream.push(tool4);
       continue;
     }
-    upstream.push(tool3);
+    upstream.push(tool4);
   }
   return upstream;
 }
@@ -6335,6 +6335,147 @@ async function askSaveServerPassword() {
 
 // src/server/router.ts
 import { createServer as createServer2 } from "http";
+
+// src/openai-adapter.ts
+import { tool as tool2, jsonSchema as jsonSchema2, streamText as streamText2, generateText as generateText2 } from "ai";
+function translateOpenAiRequest(body) {
+  const toolNameById = /* @__PURE__ */ new Map();
+  for (const msg of body.messages) {
+    if (msg.role === "assistant" && msg.tool_calls) {
+      for (const tc of msg.tool_calls) toolNameById.set(tc.id, tc.function.name);
+    }
+  }
+  let system;
+  const messages = [];
+  for (const msg of body.messages) {
+    switch (msg.role) {
+      case "system":
+        system = typeof msg.content === "string" ? msg.content : void 0;
+        break;
+      case "user":
+        messages.push({ role: "user", content: msg.content });
+        break;
+      case "assistant": {
+        const parts = [];
+        if (typeof msg.content === "string" && msg.content) {
+          parts.push({ type: "text", text: msg.content });
+        }
+        for (const tc of msg.tool_calls ?? []) {
+          parts.push({
+            type: "tool-call",
+            toolCallId: tc.id,
+            toolName: tc.function.name,
+            input: parseToolArguments(tc.function.arguments)
+          });
+        }
+        messages.push({ role: "assistant", content: parts.length > 0 ? parts : "" });
+        break;
+      }
+      case "tool": {
+        const resultPart = {
+          type: "tool-result",
+          toolCallId: msg.tool_call_id ?? "",
+          toolName: toolNameById.get(msg.tool_call_id ?? "") ?? "unknown",
+          output: {
+            type: "text",
+            value: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content ?? "")
+          }
+        };
+        const lastMsg = messages[messages.length - 1];
+        if (lastMsg?.role === "tool" && Array.isArray(lastMsg.content)) {
+          lastMsg.content.push(resultPart);
+        } else {
+          messages.push({ role: "tool", content: [resultPart] });
+        }
+        break;
+      }
+    }
+  }
+  let sdkToolChoice;
+  if (body.tool_choice === "auto" || body.tool_choice === "required") {
+    sdkToolChoice = body.tool_choice;
+  } else if (typeof body.tool_choice === "object" && body.tool_choice?.type === "function") {
+    sdkToolChoice = { type: "tool", toolName: body.tool_choice.function.name };
+  }
+  let tools;
+  if (body.tools?.length) {
+    tools = {};
+    for (const t of body.tools) {
+      if (t.type === "function" && t.function.name) {
+        const schema = t.function.parameters ? jsonSchema2(t.function.parameters) : void 0;
+        tools[t.function.name] = tool2({
+          description: t.function.description ?? "",
+          inputSchema: schema ?? jsonSchema2({ type: "object", properties: {} })
+        });
+      }
+    }
+  }
+  return {
+    system,
+    messages,
+    tools,
+    toolChoice: sdkToolChoice,
+    temperature: body.temperature,
+    maxOutputTokens: body.max_completion_tokens ?? body.max_tokens
+  };
+}
+async function generateOpenAiResponse(model, params, responseModelId) {
+  const result = await generateText2({ model, ...params });
+  const message = { role: "assistant", content: result.text || null };
+  if (result.toolCalls?.length) {
+    message.tool_calls = result.toolCalls.map((tc) => ({
+      id: tc.toolCallId,
+      type: "function",
+      function: { name: tc.toolName, arguments: JSON.stringify(tc.args) }
+    }));
+  }
+  return {
+    id: `chatcmpl-${Date.now()}`,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1e3),
+    model: responseModelId,
+    choices: [{ index: 0, message, finish_reason: result.finishReason || "stop" }],
+    usage: {
+      prompt_tokens: result.usage?.promptTokens ?? 0,
+      completion_tokens: result.usage?.completionTokens ?? 0,
+      total_tokens: result.usage?.totalTokens ?? 0
+    }
+  };
+}
+async function streamOpenAiResponse(model, params, responseModelId, onChunk) {
+  const { fullStream } = streamText2({ model, ...params });
+  const baseData = {
+    id: `chatcmpl-${Date.now()}`,
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1e3),
+    model: responseModelId
+  };
+  const send = (delta, finish_reason = null) => onChunk(`data: ${JSON.stringify({ ...baseData, choices: [{ index: 0, delta, finish_reason }] })}
+
+`);
+  for await (const part of fullStream) {
+    const p19 = part;
+    switch (p19.type) {
+      case "text-delta":
+        send({ role: "assistant", content: p19.textDelta ?? p19.text ?? "" });
+        break;
+      case "tool-input-start":
+      case "tool-call-streaming-start":
+        send({ role: "assistant", tool_calls: [{ index: 0, id: p19.id ?? p19.toolCallId, type: "function", function: { name: p19.toolName, arguments: "" } }] });
+        break;
+      case "tool-input-delta":
+      case "tool-call-delta":
+        send({ tool_calls: [{ index: 0, function: { arguments: p19.delta ?? p19.text ?? p19.argsTextDelta ?? "" } }] });
+        break;
+      case "finish":
+        send({}, p19.finishReason || "stop");
+        break;
+    }
+  }
+  onChunk("data: [DONE]\n\n");
+}
+
+// src/server/router.ts
 function makeServerLog(debugLogPath) {
   if (!debugLogPath) return () => {
   };
@@ -6398,7 +6539,7 @@ async function routeRequest(req, res, options, modelCache, plog) {
       return;
     }
     if (req.method === "POST" && pathname === "/openai/v1/chat/completions") {
-      await handleOpenAIChatCompletions(req, res, options);
+      await handleOpenAIChatCompletions(req, res, options, modelCache, plog);
       return;
     }
     sendJson(res, 404, { error: { message: "Not found" } });
@@ -6437,21 +6578,7 @@ async function handleAnthropicMessages(req, res, options, modelCache, plog) {
       return;
     }
     const apiKey = model.apiKey ?? options.apiKey;
-    const cacheKey = sdkModelCacheKey(model);
-    let languageModel = modelCache.get(cacheKey);
-    if (!languageModel) {
-      languageModel = await createLanguageModel({
-        npm: model.npm,
-        modelId: upstreamModelId(model),
-        apiKey,
-        baseURL: model.apiBaseUrl,
-        providerId: model.providerId ?? model.sourceBackend,
-        authType: model.authType,
-        oauthAccountId: model.oauthAccountId,
-        vertex: options.vertex
-      });
-      modelCache.set(cacheKey, languageModel);
-    }
+    const languageModel = await getOrInitLanguageModel(modelCache, model, model.npm, model.apiBaseUrl, apiKey, options.vertex);
     const params = translateRequest(body, model.npm, {
       defaultEffort: anthropicEffortFromRequest(body) ? void 0 : model.defaultEffort,
       openAiOAuth: model.npm === "@ai-sdk/openai" && model.authType === "oauth",
@@ -6464,7 +6591,7 @@ async function handleAnthropicMessages(req, res, options, modelCache, plog) {
       }
     });
     const clientWantsStream = Boolean(body.stream);
-    const responseModelId = options.gateway?.maskGatewayIds ? gatewayDisplayName(model, options.gateway) : typeof body.model === "string" ? body.model : model.id;
+    const responseModelId = getResponseModelId(body.model, model, options);
     plog(() => `sdk npm=${model.npm} upstream=${upstreamModelId(model)} responseModel=${responseModelId} stream=${clientWantsStream}`);
     try {
       if (clientWantsStream) {
@@ -6488,7 +6615,7 @@ async function handleAnthropicMessages(req, res, options, modelCache, plog) {
   }
   sendJson(res, 400, { error: { message: `Unsupported model format: ${model.modelFormat}` } });
 }
-async function handleOpenAIChatCompletions(req, res, options) {
+async function handleOpenAIChatCompletions(req, res, options, modelCache, plog) {
   const body = await readJson(req);
   if (!body) {
     sendJson(res, 400, { error: { message: "Invalid JSON body" } });
@@ -6496,29 +6623,46 @@ async function handleOpenAIChatCompletions(req, res, options) {
   }
   const model = lookupModel(res, options.catalog, body.model);
   if (!model) return;
-  if (model.modelFormat === "openai") {
-    if (!isOpenAIChatCompletionsModel(model)) {
-      sendJson(res, 400, {
-        error: {
-          message: `OpenAI chat completions are not available for model: ${model.id}. Use /anthropic/v1/messages.`
-        }
-      });
-      return;
-    }
+  if (supportsDirectOpenAIChatCompletions(model)) {
     if (model.completionsUrl && !/^https?:\/\//i.test(model.completionsUrl)) {
       sendJson(res, 400, { error: { message: `Invalid provider completionsUrl: must be http:// or https://` } });
       return;
     }
     const completionsUrl = model.completionsUrl ? model.completionsUrl : `${backendFor(options, model).baseUrl}/v1/chat/completions`;
-    const apiKey = model.apiKey ?? options.apiKey;
-    await forwardJson(res, completionsUrl, body, apiKey);
+    const apiKey2 = model.apiKey ?? options.apiKey;
+    await relayAnthropicMessages(res, completionsUrl, body, apiKey2, Boolean(body.stream));
     return;
   }
-  if (model.modelFormat === "anthropic") {
-    sendJson(res, 400, { error: { message: "OpenAI to Anthropic reverse translation is not supported yet" } });
+  const npm = model.npm || (model.modelFormat === "anthropic" ? "@ai-sdk/anthropic" : void 0);
+  if (!npm) {
+    sendJson(res, 400, { error: { message: `No SDK provider for model: ${model.id}` } });
     return;
   }
-  sendJson(res, 400, { error: { message: `Unsupported model format: ${model.modelFormat}` } });
+  const apiKey = model.apiKey ?? options.apiKey;
+  const baseURL = model.modelFormat === "anthropic" ? model.baseUrl : model.apiBaseUrl;
+  const languageModel = await getOrInitLanguageModel(modelCache, model, npm, baseURL, apiKey, options.vertex);
+  const params = translateOpenAiRequest(body);
+  const clientWantsStream = Boolean(body.stream);
+  const responseModelId = getResponseModelId(body.model, model, options);
+  plog(() => `sdk-openai npm=${npm} upstream=${upstreamModelId(model)} responseModel=${responseModelId} stream=${clientWantsStream}`);
+  try {
+    if (clientWantsStream) {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive"
+      });
+      await streamOpenAiResponse(languageModel, params, responseModelId, (chunk) => res.write(chunk));
+      res.end();
+    } else {
+      const response = await generateOpenAiResponse(languageModel, params, responseModelId);
+      sendJson(res, 200, response);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!res.headersSent) sendJson(res, 502, { error: { message } });
+    else res.end();
+  }
 }
 function lookupModel(res, catalog, modelId) {
   if (typeof modelId !== "string") {
@@ -6540,14 +6684,32 @@ function backendFor(options, model) {
   if (model.sourceBackend === "go") return options.backends.go;
   throw new Error(`Provider ${model.sourceBackend} is not a cloud backend \u2014 model must set baseUrl/completionsUrl`);
 }
-function sdkModelCacheKey(model) {
-  return [
+async function getOrInitLanguageModel(modelCache, model, npm, baseURL, apiKey, vertex) {
+  const cacheKey = [
     model.providerId ?? model.sourceBackend,
     model.id,
     upstreamModelId(model),
-    model.npm ?? "",
-    model.apiBaseUrl ?? ""
+    npm,
+    baseURL ?? ""
   ].join("");
+  let languageModel = modelCache.get(cacheKey);
+  if (!languageModel) {
+    languageModel = await createLanguageModel({
+      npm,
+      modelId: upstreamModelId(model),
+      apiKey,
+      baseURL,
+      providerId: model.providerId ?? model.sourceBackend,
+      authType: model.authType,
+      oauthAccountId: model.oauthAccountId,
+      vertex
+    });
+    modelCache.set(cacheKey, languageModel);
+  }
+  return languageModel;
+}
+function getResponseModelId(bodyModel, model, options) {
+  return options.gateway?.maskGatewayIds ? gatewayDisplayName(model, options.gateway) : typeof bodyModel === "string" ? bodyModel : model.id;
 }
 async function forwardJson(res, url, body, apiKey, inboundBeta) {
   const upstream = await postJsonUpstream(url, body, apiKey, inboundBeta);
@@ -6811,16 +6973,17 @@ function createVertexModelCatalog(models) {
 }
 
 // src/server/index.ts
-function getLocalIp() {
+function getLocalIps() {
   const ifaces = networkInterfaces();
-  for (const iface of Object.values(ifaces)) {
+  const result = [];
+  for (const [name, iface] of Object.entries(ifaces)) {
     for (const addr of iface ?? []) {
       if (addr.family === "IPv4" && !addr.internal) {
-        return addr.address;
+        result.push({ name, address: addr.address });
       }
     }
   }
-  return "<this-computer-ip>";
+  return result;
 }
 function printModelCatalog(models, gateway) {
   if (models.length === 0) return;
@@ -6842,12 +7005,9 @@ function printModelCatalog(models, gateway) {
     const sorted = [...groupModels].sort((a, b) => a.name.localeCompare(b.name));
     for (const model of sorted) {
       const anthropicId = exposedGatewayAliasId(model, gateway);
-      const hasOpenAi = isOpenAIChatCompletionsModel(model);
       console.log(`    ${model.name}`);
       console.log(`      ${pc6.dim("anthropic:")} ${pc6.cyan(anthropicId)}`);
-      if (hasOpenAi) {
-        console.log(`      ${pc6.dim("openai:   ")} ${pc6.cyan(model.id)}`);
-      }
+      console.log(`      ${pc6.dim("openai:   ")} ${pc6.cyan(model.id)}`);
     }
     console.log("");
   }
@@ -7035,7 +7195,9 @@ async function runVertexServerCommand() {
   console.log(`  Anthropic:  http://127.0.0.1:${server.port}/anthropic`);
   console.log(`  Models:     ${models.map((model) => model.id).join(", ")}`);
   if (mode === "network") {
-    console.log(`  Network:    http://${getLocalIp()}:${server.port}`);
+    for (const { name, address } of getLocalIps()) {
+      console.log(`  Network (${name}):  http://${address}:${server.port}/anthropic`);
+    }
     if (passwordWasSaved) {
       console.log("  API key:    saved, rotate with `relay-ai server --setup`");
     } else {
@@ -7146,9 +7308,13 @@ async function runServerCommand(options = {}) {
   console.log("");
   console.log(pc6.bold(pc6.green("Relay AI server running")));
   console.log(`  Anthropic:  http://127.0.0.1:${server.port}/anthropic`);
-  console.log(`  OpenAI:     http://127.0.0.1:${server.port}/openai`);
+  console.log(`  OpenAI:     http://127.0.0.1:${server.port}/openai/v1`);
   if (mode === "network") {
-    console.log(`  Network:    http://${getLocalIp()}:${server.port}`);
+    for (const { name, address } of getLocalIps()) {
+      console.log(`  Network (${name}):`);
+      console.log(`    Anthropic:  http://${address}:${server.port}/anthropic`);
+      console.log(`    OpenAI:     http://${address}:${server.port}/openai/v1`);
+    }
     if (passwordWasSaved) {
       console.log("  API key:    saved, rotate with `relay-ai server --setup`");
     } else {
@@ -9005,7 +9171,7 @@ import * as p13 from "@clack/prompts";
 import { createServer as createServer3 } from "http";
 
 // src/codex-responses-adapter.ts
-import { streamText as streamText2, generateText as generateText2, tool as tool2, jsonSchema as jsonSchema2 } from "ai";
+import { streamText as streamText3, generateText as generateText3, tool as tool3, jsonSchema as jsonSchema3 } from "ai";
 function messageText(content) {
   if (typeof content === "string") return content;
   return (content ?? []).map((p19) => p19.type === "output_text" || p19.type === "input_text" || p19.type === "text" ? p19.text ?? "" : "").join("");
@@ -9129,9 +9295,9 @@ function translateResponsesTools(tools) {
   const out = {};
   for (const t of tools) {
     if (t.type !== "function" || !t.name) continue;
-    out[t.name] = tool2({
+    out[t.name] = tool3({
       description: t.description ?? "",
-      inputSchema: jsonSchema2(t.parameters ?? { type: "object", properties: {} })
+      inputSchema: jsonSchema3(t.parameters ?? { type: "object", properties: {} })
     });
   }
   return Object.keys(out).length ? out : void 0;
@@ -9374,24 +9540,24 @@ async function writeResponsesStream(fullStream, modelId, write) {
     });
     outputItems.unshift(reasoningItem);
   }
-  for (const tool3 of toolStates) {
+  for (const tool4 of toolStates) {
     emit("response.function_call_arguments.done", {
       type: "response.function_call_arguments.done",
-      item_id: tool3.itemId,
-      output_index: tool3.outputIndex,
-      arguments: tool3.args
+      item_id: tool4.itemId,
+      output_index: tool4.outputIndex,
+      arguments: tool4.args
     });
     const fcItem = {
       type: "function_call",
-      id: tool3.itemId,
-      call_id: tool3.callId,
-      name: tool3.name,
-      arguments: tool3.args,
+      id: tool4.itemId,
+      call_id: tool4.callId,
+      name: tool4.name,
+      arguments: tool4.args,
       status: "completed"
     };
     emit("response.output_item.done", {
       type: "response.output_item.done",
-      output_index: tool3.outputIndex,
+      output_index: tool4.outputIndex,
       item: fcItem
     });
     outputItems.push(fcItem);
@@ -9410,7 +9576,7 @@ async function writeResponsesStream(fullStream, modelId, write) {
   });
 }
 async function streamResponsesResponse(model, params, modelId, write) {
-  const result = streamText2({ model, ...params });
+  const result = streamText3({ model, ...params });
   Promise.resolve(result.text).catch(() => {
   });
   Promise.resolve(result.toolCalls).catch(() => {
@@ -9424,7 +9590,7 @@ async function streamResponsesResponse(model, params, modelId, write) {
   await writeResponsesStream(result.fullStream, modelId, write);
 }
 async function generateResponsesResponse(model, params, modelId) {
-  const r = await generateText2({ model, ...params });
+  const r = await generateText3({ model, ...params });
   const createdAt = Math.floor(Date.now() / 1e3);
   const responseId = newResponseId();
   const output = [];

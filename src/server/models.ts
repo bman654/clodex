@@ -160,7 +160,7 @@ export function upstreamModelId(model: ServerModelInfo): string {
   return id.replace(/\[1m\]$/i, '');
 }
 
-export function isOpenAIChatCompletionsModel(model: ServerModelInfo): boolean {
+export function supportsDirectOpenAIChatCompletions(model: ServerModelInfo): boolean {
   return model.modelFormat === 'openai'
     && (
       !!model.completionsUrl
@@ -172,7 +172,7 @@ export function isOpenAIChatCompletionsModel(model: ServerModelInfo): boolean {
 export function formatOpenAIModels(models: ServerModelInfo[]) {
   return {
     object: 'list',
-    data: models.filter(isOpenAIChatCompletionsModel).map(model => ({
+    data: models.map(model => ({
       id: model.id,
       object: 'model',
       created: CREATED_AT_UNIX,

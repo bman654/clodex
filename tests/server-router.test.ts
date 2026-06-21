@@ -28,6 +28,20 @@ vi.mock('../src/sdk-adapter.js', async importOriginal => {
   };
 });
 
+vi.mock('../src/openai-adapter.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/openai-adapter.js')>();
+  return {
+    ...actual,
+    generateOpenAiResponse: vi.fn(async (_model: unknown, _params: unknown, modelId: string) => ({
+      id: 'chatcmpl-test',
+      object: 'chat.completion',
+      model: modelId,
+      choices: [{ message: { content: 'openai sdk ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+    })),
+  };
+});
+
 interface UpstreamRequest {
   method: string;
   url: string;
@@ -307,7 +321,7 @@ describe('server router', () => {
     ]);
   });
 
-  it('does not expose SDK-only registry models through OpenAI chat completions', async () => {
+  it('exposes SDK-only registry models through OpenAI chat completions', async () => {
     const sdkOnlyCatalog = createGatewayModelCatalog([{
       id: 'gpt-5',
       name: 'GPT-5',
@@ -325,20 +339,23 @@ describe('server router', () => {
 
     const models = await fetch(`${server.url}/openai/v1/models`);
     expect(models.status).toBe(200);
-    expect(await models.json()).toEqual({ object: 'list', data: [] });
+    expect(await models.json()).toEqual({
+      object: 'list',
+      data: [
+        expect.objectContaining({ id: 'gpt-5', owned_by: 'openai' }),
+      ],
+    });
 
     const response = await fetch(`${server.url}/openai/v1/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'gpt-5', messages: [{ role: 'user', content: 'hi' }] }),
     });
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
-      error: { message: expect.stringContaining('OpenAI chat completions are not available') },
-    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ id: 'chatcmpl-test', choices: [{ message: { content: 'openai sdk ok' } }] });
   });
 
-  it('rejects OpenAI requests for Anthropic-native models', async () => {
+  it('translates OpenAI requests for Anthropic-native models', async () => {
     const server = await startTestServer();
 
     const response = await fetch(`${server.url}/openai/v1/chat/completions`, {
@@ -347,10 +364,8 @@ describe('server router', () => {
       body: JSON.stringify({ model: 'claude-native', messages: [] }),
     });
 
-    expect(response.status).toBe(400);
-    expect(await response.json()).toMatchObject({
-      error: { message: expect.stringContaining('reverse translation is not supported') },
-    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ id: 'chatcmpl-test', choices: [{ message: { content: 'openai sdk ok' } }] });
   });
 
   it('rejects unsupported model formats', async () => {

@@ -4,15 +4,21 @@ import {
   formatGatewayAnthropicModels,
   formatOpenAIModels,
   gatewayDisplayName,
-  isOpenAIChatCompletionsModel,
+  supportsDirectOpenAIChatCompletions,
   type GatewayModelOptions,
   type ModelCatalog,
   type ServerBackendId,
   type ServerModelInfo,
   upstreamModelId,
 } from './models.js';
+import {
+  translateOpenAiRequest,
+  generateOpenAiResponse,
+  streamOpenAiResponse,
+  type OpenAiRequest,
+} from '../openai-adapter.js';
 import { sendJson, readBody } from '../http-utils.js';
-import { postJsonUpstream } from '../upstream-forward.js';
+import { postJsonUpstream, relayAnthropicMessages } from '../upstream-forward.js';
 import { writeSecureLogLine, resetTraceLog } from '../trace-log.js';
 import type { LanguageModel } from 'ai';
 import { createLanguageModel, isSdkMigratedNpm } from '../provider-factory.js';
@@ -134,7 +140,7 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse, options: 
     }
 
     if (req.method === 'POST' && pathname === '/openai/v1/chat/completions') {
-      await handleOpenAIChatCompletions(req, res, options);
+      await handleOpenAIChatCompletions(req, res, options, modelCache, plog);
       return;
     }
 
@@ -187,21 +193,7 @@ async function handleAnthropicMessages(
       return;
     }
     const apiKey = model.apiKey ?? options.apiKey;
-    const cacheKey = sdkModelCacheKey(model);
-    let languageModel = modelCache.get(cacheKey);
-    if (!languageModel) {
-      languageModel = await createLanguageModel({
-        npm: model.npm!,
-        modelId: upstreamModelId(model),
-        apiKey,
-        baseURL: model.apiBaseUrl,
-        providerId: model.providerId ?? model.sourceBackend,
-        authType: model.authType,
-        oauthAccountId: model.oauthAccountId,
-        vertex: options.vertex,
-      });
-      modelCache.set(cacheKey, languageModel);
-    }
+    const languageModel = await getOrInitLanguageModel(modelCache, model, model.npm!, model.apiBaseUrl, apiKey, options.vertex);
     const params = sdkTranslateRequest(body as unknown as AnthropicRequest, model.npm!, {
       defaultEffort: anthropicEffortFromRequest(body as AnthropicRequest) ? undefined : model.defaultEffort,
       openAiOAuth: model.npm === '@ai-sdk/openai' && model.authType === 'oauth',
@@ -214,13 +206,10 @@ async function handleAnthropicMessages(
       },
     });
     const clientWantsStream = Boolean(body.stream);
-
     // Use the display name in the response model field when masking is on — Claude
     // Desktop shows the response model field in its status bar chip, so this surfaces
     // human-readable names ("Grok 4.3 (xAI)") instead of the reversed gateway IDs.
-    const responseModelId = options.gateway?.maskGatewayIds
-      ? gatewayDisplayName(model, options.gateway)
-      : (typeof body.model === 'string' ? body.model : model.id);
+    const responseModelId = getResponseModelId(body.model, model, options);
 
     plog(() => `sdk npm=${model.npm} upstream=${upstreamModelId(model)} responseModel=${responseModelId} stream=${clientWantsStream}`);
 
@@ -252,6 +241,8 @@ async function handleOpenAIChatCompletions(
   req: IncomingMessage,
   res: ServerResponse,
   options: ServerOptions,
+  modelCache: Map<string, LanguageModel>,
+  plog: PLog,
 ): Promise<void> {
   const body = await readJson(req);
   if (!body) {
@@ -262,15 +253,7 @@ async function handleOpenAIChatCompletions(
   const model = lookupModel(res, options.catalog, body.model);
   if (!model) return;
 
-  if (model.modelFormat === 'openai') {
-    if (!isOpenAIChatCompletionsModel(model)) {
-      sendJson(res, 400, {
-        error: {
-          message: `OpenAI chat completions are not available for model: ${model.id}. Use /anthropic/v1/messages.`,
-        },
-      });
-      return;
-    }
+  if (supportsDirectOpenAIChatCompletions(model)) {
     if (model.completionsUrl && !/^https?:\/\//i.test(model.completionsUrl)) {
       sendJson(res, 400, { error: { message: `Invalid provider completionsUrl: must be http:// or https://` } });
       return;
@@ -279,16 +262,44 @@ async function handleOpenAIChatCompletions(
       ? model.completionsUrl
       : `${backendFor(options, model).baseUrl}/v1/chat/completions`;
     const apiKey = model.apiKey ?? options.apiKey;
-    await forwardJson(res, completionsUrl, body, apiKey);
+    await relayAnthropicMessages(res, completionsUrl, body, apiKey, Boolean(body.stream));
     return;
   }
 
-  if (model.modelFormat === 'anthropic') {
-    sendJson(res, 400, { error: { message: 'OpenAI to Anthropic reverse translation is not supported yet' } });
+  // SDK Translation Path
+  const npm = model.npm || (model.modelFormat === 'anthropic' ? '@ai-sdk/anthropic' : undefined);
+  if (!npm) {
+    sendJson(res, 400, { error: { message: `No SDK provider for model: ${model.id}` } });
     return;
   }
 
-  sendJson(res, 400, { error: { message: `Unsupported model format: ${model.modelFormat}` } });
+  const apiKey = model.apiKey ?? options.apiKey;
+  const baseURL = model.modelFormat === 'anthropic' ? model.baseUrl : model.apiBaseUrl;
+  const languageModel = await getOrInitLanguageModel(modelCache, model, npm, baseURL, apiKey, options.vertex);
+  const params = translateOpenAiRequest(body as unknown as OpenAiRequest);
+  const clientWantsStream = Boolean(body.stream);
+  const responseModelId = getResponseModelId(body.model, model, options);
+
+  plog(() => `sdk-openai npm=${npm} upstream=${upstreamModelId(model)} responseModel=${responseModelId} stream=${clientWantsStream}`);
+
+  try {
+    if (clientWantsStream) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      });
+      await streamOpenAiResponse(languageModel, params, responseModelId, chunk => res.write(chunk));
+      res.end();
+    } else {
+      const response = await generateOpenAiResponse(languageModel, params, responseModelId);
+      sendJson(res, 200, response);
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!res.headersSent) sendJson(res, 502, { error: { message } });
+    else res.end();
+  }
 }
 
 function lookupModel(res: ServerResponse, catalog: ModelCatalog, modelId: unknown): ServerModelInfo | null {
@@ -315,14 +326,42 @@ function backendFor(options: ServerOptions, model: ServerModelInfo): ServerBacke
   throw new Error(`Provider ${model.sourceBackend} is not a cloud backend — model must set baseUrl/completionsUrl`);
 }
 
-function sdkModelCacheKey(model: ServerModelInfo): string {
-  return [
+async function getOrInitLanguageModel(
+  modelCache: Map<string, LanguageModel>,
+  model: ServerModelInfo,
+  npm: string,
+  baseURL: string | undefined,
+  apiKey: string,
+  vertex: VertexServerConfig | undefined,
+): Promise<LanguageModel> {
+  const cacheKey = [
     model.providerId ?? model.sourceBackend,
     model.id,
     upstreamModelId(model),
-    model.npm ?? '',
-    model.apiBaseUrl ?? '',
+    npm,
+    baseURL ?? '',
   ].join('\x1f');
+  let languageModel = modelCache.get(cacheKey);
+  if (!languageModel) {
+    languageModel = await createLanguageModel({
+      npm,
+      modelId: upstreamModelId(model),
+      apiKey,
+      baseURL,
+      providerId: model.providerId ?? model.sourceBackend,
+      authType: model.authType,
+      oauthAccountId: model.oauthAccountId,
+      vertex,
+    });
+    modelCache.set(cacheKey, languageModel);
+  }
+  return languageModel;
+}
+
+function getResponseModelId(bodyModel: unknown, model: ServerModelInfo, options: ServerOptions): string {
+  return options.gateway?.maskGatewayIds
+    ? gatewayDisplayName(model, options.gateway)
+    : (typeof bodyModel === 'string' ? bodyModel : model.id);
 }
 
 async function forwardJson(res: ServerResponse, url: string, body: JsonBody, apiKey: string, inboundBeta?: string): Promise<void> {

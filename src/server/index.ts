@@ -28,7 +28,6 @@ import type { ServerModelInfo, GatewayModelOptions } from './models.js';
 import {
   upstreamModelId,
   exposedGatewayAliasId,
-  isOpenAIChatCompletionsModel,
   gatewayProviderLabel,
 } from './models.js';
 import { getReasoningCapabilities } from '../provider-factory.js';
@@ -66,16 +65,17 @@ export interface ServerCommandOptions {
   vertex?: boolean;
 }
 
-function getLocalIp(): string {
+function getLocalIps(): Array<{ name: string; address: string }> {
   const ifaces = networkInterfaces();
-  for (const iface of Object.values(ifaces)) {
+  const result: Array<{ name: string; address: string }> = [];
+  for (const [name, iface] of Object.entries(ifaces)) {
     for (const addr of iface ?? []) {
       if (addr.family === 'IPv4' && !addr.internal) {
-        return addr.address;
+        result.push({ name, address: addr.address });
       }
     }
   }
-  return '<this-computer-ip>';
+  return result;
 }
 
 function printModelCatalog(models: ServerModelInfo[], gateway?: GatewayModelOptions): void {
@@ -102,12 +102,9 @@ function printModelCatalog(models: ServerModelInfo[], gateway?: GatewayModelOpti
     const sorted = [...groupModels].sort((a, b) => a.name.localeCompare(b.name));
     for (const model of sorted) {
       const anthropicId = exposedGatewayAliasId(model, gateway);
-      const hasOpenAi = isOpenAIChatCompletionsModel(model);
       console.log(`    ${model.name}`);
       console.log(`      ${pc.dim('anthropic:')} ${pc.cyan(anthropicId)}`);
-      if (hasOpenAi) {
-        console.log(`      ${pc.dim('openai:   ')} ${pc.cyan(model.id)}`);
-      }
+      console.log(`      ${pc.dim('openai:   ')} ${pc.cyan(model.id)}`);
     }
     console.log('');
   }
@@ -331,7 +328,9 @@ async function runVertexServerCommand(): Promise<number> {
   console.log(`  Anthropic:  http://127.0.0.1:${server.port}/anthropic`);
   console.log(`  Models:     ${models.map(model => model.id).join(', ')}`);
   if (mode === 'network') {
-    console.log(`  Network:    http://${getLocalIp()}:${server.port}`);
+    for (const { name, address } of getLocalIps()) {
+      console.log(`  Network (${name}):  http://${address}:${server.port}/anthropic`);
+    }
     if (passwordWasSaved) {
       console.log('  API key:    saved, rotate with `relay-ai server --setup`');
     } else {
@@ -459,9 +458,13 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   console.log('');
   console.log(pc.bold(pc.green('Relay AI server running')));
   console.log(`  Anthropic:  http://127.0.0.1:${server.port}/anthropic`);
-  console.log(`  OpenAI:     http://127.0.0.1:${server.port}/openai`);
+  console.log(`  OpenAI:     http://127.0.0.1:${server.port}/openai/v1`);
   if (mode === 'network') {
-    console.log(`  Network:    http://${getLocalIp()}:${server.port}`);
+    for (const { name, address } of getLocalIps()) {
+      console.log(`  Network (${name}):`);
+      console.log(`    Anthropic:  http://${address}:${server.port}/anthropic`);
+      console.log(`    OpenAI:     http://${address}:${server.port}/openai/v1`);
+    }
     if (passwordWasSaved) {
       console.log('  API key:    saved, rotate with `relay-ai server --setup`');
     } else {
