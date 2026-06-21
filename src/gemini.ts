@@ -278,6 +278,7 @@ export async function runGeminiCommand(
   
   if (!agentStdout) {
     p.log.info(`Gemini proxy started on port ${proxyHandle.port}`);
+    p.log.info(`💡 Type ${pc.bold('.model <id>')} in the chat to switch models mid-session.`);
   }
 
   const exitCode = await launchGemini(geminiPath, selectedModel.id, childEnv, passthroughArgs);

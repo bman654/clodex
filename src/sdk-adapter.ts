@@ -133,16 +133,16 @@ function thinkingToSdkPart(
   block: AnthropicBlock,
   npm: string,
 ): Record<string, unknown> | null {
-  if (npm !== '@ai-sdk/google' && npm !== '@ai-sdk/openai') return null;
-
   const text = block.thinking ?? '';
   if (npm === '@ai-sdk/openai' && !block.signature && !text.trim()) return null;
 
   const part: Record<string, unknown> = { type: 'reasoning', text };
   if (block.signature) {
-    part.providerOptions = npm === '@ai-sdk/google'
-      ? { google: { thoughtSignature: block.signature } }
-      : { openai: { reasoningEncryptedContent: block.signature } };
+    if (npm === '@ai-sdk/google') {
+      part.providerOptions = { google: { thoughtSignature: block.signature } };
+    } else if (npm === '@ai-sdk/openai' || npm === '@ai-sdk/openai-compatible') {
+      part.providerOptions = { openai: { reasoningEncryptedContent: block.signature } };
+    }
   }
   return part;
 }

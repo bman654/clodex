@@ -1,6 +1,10 @@
 // tests/gemini-proxy.test.ts
 import { describe, it, expect } from 'vitest';
-import { translateGeminiRequest } from '../src/gemini-proxy.js';
+import { 
+  translateGeminiRequest, 
+  sanitizeModelSwitchTurns, 
+  parseModelCommand 
+} from '../src/gemini-proxy.js';
 
 describe('translateGeminiRequest', () => {
   it('maps basic user and assistant turns', () => {
@@ -176,5 +180,67 @@ describe('translateGeminiRequest', () => {
 
     const params = translateGeminiRequest(body);
     expect(params.responseFormat).toEqual({ type: 'json' });
+  });
+});
+
+describe('sanitizeModelSwitchTurns', () => {
+  it('removes .model commands and paired mock responses', () => {
+    const history = [
+      { role: 'user', parts: [{ text: 'Normal prompt' }] },
+      { role: 'model', parts: [{ text: 'Normal response' }] },
+      { role: 'user', parts: [{ text: '.model claude-3-sonnet' }] },
+      { role: 'model', parts: [{ text: '✅ Switched model to...' }] },
+      { role: 'user', parts: [{ text: 'Another prompt' }] }
+    ];
+
+    const cleaned = sanitizeModelSwitchTurns(history);
+    expect(cleaned).toEqual([
+      { role: 'user', parts: [{ text: 'Normal prompt' }] },
+      { role: 'model', parts: [{ text: 'Normal response' }] },
+      { role: 'user', parts: [{ text: 'Another prompt' }] }
+    ]);
+  });
+
+  it('handles consecutive .model commands correctly', () => {
+    const history = [
+      { role: 'user', parts: [{ text: '.model abc' }] },
+      { role: 'model', parts: [{ text: '✅ Switched to abc' }] },
+      { role: 'user', parts: [{ text: '.model xyz' }] },
+      { role: 'model', parts: [{ text: '✅ Switched to xyz' }] },
+      { role: 'user', parts: [{ text: 'Real prompt' }] }
+    ];
+
+    const cleaned = sanitizeModelSwitchTurns(history);
+    expect(cleaned).toEqual([
+      { role: 'user', parts: [{ text: 'Real prompt' }] }
+    ]);
+  });
+
+  it('preserves history without .model commands', () => {
+    const history = [
+      { role: 'user', parts: [{ text: 'Hello' }] },
+      { role: 'model', parts: [{ text: 'Hi' }] }
+    ];
+    const cleaned = sanitizeModelSwitchTurns(history);
+    expect(cleaned).toEqual(history);
+  });
+});
+
+describe('parseModelCommand', () => {
+  it('returns model ID for valid commands', () => {
+    expect(parseModelCommand({ role: 'user', parts: [{ text: '.model deepseek' }] })).toBe('deepseek');
+    expect(parseModelCommand({ role: 'user', parts: [{ text: '  .model    deepseek-v4  ' }] })).toBe('deepseek-v4');
+  });
+
+  it('returns empty string for bare .model', () => {
+    expect(parseModelCommand({ role: 'user', parts: [{ text: '.model' }] })).toBe('');
+    expect(parseModelCommand({ role: 'user', parts: [{ text: ' .model ' }] })).toBe('');
+  });
+
+  it('returns null for non-commands', () => {
+    expect(parseModelCommand({ role: 'user', parts: [{ text: 'hello' }] })).toBeNull();
+    expect(parseModelCommand({ role: 'user', parts: [{ text: 'I want to .model it' }] })).toBeNull();
+    expect(parseModelCommand({ role: 'user', parts: [{ text: '.modelfoo' }] })).toBeNull();
+    expect(parseModelCommand({ role: 'model', parts: [{ text: '.model xyz' }] })).toBeNull();
   });
 });

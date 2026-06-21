@@ -5212,12 +5212,15 @@ function annotateToolNames(messages) {
   }
 }
 function thinkingToSdkPart(block, npm) {
-  if (npm !== "@ai-sdk/google" && npm !== "@ai-sdk/openai") return null;
   const text5 = block.thinking ?? "";
   if (npm === "@ai-sdk/openai" && !block.signature && !text5.trim()) return null;
   const part = { type: "reasoning", text: text5 };
   if (block.signature) {
-    part.providerOptions = npm === "@ai-sdk/google" ? { google: { thoughtSignature: block.signature } } : { openai: { reasoningEncryptedContent: block.signature } };
+    if (npm === "@ai-sdk/google") {
+      part.providerOptions = { google: { thoughtSignature: block.signature } };
+    } else if (npm === "@ai-sdk/openai" || npm === "@ai-sdk/openai-compatible") {
+      part.providerOptions = { openai: { reasoningEncryptedContent: block.signature } };
+    }
   }
   return part;
 }
@@ -11644,6 +11647,7 @@ async function startGeminiProxy(routes, debug = false) {
     outputTokenLimit: 8192,
     supportedGenerationMethods: ["generateContent", "streamGenerateContent"]
   });
+  let sessionRouteOverride = void 0;
   const server = createServer4(async (req, res) => {
     try {
       const url = req.url ?? "";
@@ -11687,8 +11691,39 @@ ${rawBody}`);
         }
         const modelMatch = url.match(/\/models\/([^:]+)/);
         const requestedModel = modelMatch ? decodeURIComponent(modelMatch[1]) : defaultRoute.aliasId;
-        const route = lookupGeminiRoute(routes, requestedModel) ?? defaultRoute;
+        const lastUserTurn = findLastUserTurn(body.contents || []);
+        const modelCommand = parseModelCommand(lastUserTurn);
+        if (modelCommand !== null) {
+          if (modelCommand === "") {
+            const current = sessionRouteOverride ?? (lookupGeminiRoute(routes, requestedModel) ?? defaultRoute);
+            const availableList = routes.map((r) => `  - ${r.aliasId} (${r.displayName})`).join("\n");
+            const exampleId = routes.length > 1 ? routes[1].aliasId : routes[0]?.aliasId ?? "deepseek-v4";
+            const text5 = `Current model: ${current.displayName} (${current.aliasId})
+
+Available models:
+${availableList}
+
+\u{1F4A1} To switch models, type: .model <id>
+Example: .model ${exampleId}`;
+            sendMockGeminiResponse(res, text5, isStream);
+            return;
+          }
+          const targetRoute = lookupGeminiRoute(routes, modelCommand);
+          if (targetRoute) {
+            sessionRouteOverride = targetRoute;
+            plog(`.model switch: ${targetRoute.aliasId} (${targetRoute.realModelId})`);
+            sendMockGeminiResponse(res, `\u2705 Switched model to ${targetRoute.displayName} (${targetRoute.aliasId})`, isStream);
+          } else {
+            const available = routes.map((r) => r.aliasId).join(", ");
+            sendMockGeminiResponse(res, `\u274C Model '${modelCommand}' not found.
+
+Available: ${available}`, isStream);
+          }
+          return;
+        }
+        const route = sessionRouteOverride ?? (lookupGeminiRoute(routes, requestedModel) ?? defaultRoute);
         plog(`Route selected: ${route.aliasId} (upstream model: ${route.realModelId})`);
+        body.contents = sanitizeModelSwitchTurns(body.contents || []);
         const languageModel = await getOrInitModel(route);
         const params = translateGeminiRequest(body);
         plog(`Translated SDK params:
@@ -11852,6 +11887,85 @@ ${JSON.stringify(response, null, 2)}`);
       });
     });
   });
+}
+function sanitizeModelSwitchTurns(contents) {
+  const cleaned = [];
+  let i = 0;
+  while (i < contents.length) {
+    const turn = contents[i];
+    if (isModelSwitchTurn(turn)) {
+      i += 1;
+      if (i < contents.length && contents[i]?.role === "model") {
+        i += 1;
+      }
+      continue;
+    }
+    cleaned.push(turn);
+    i += 1;
+  }
+  return cleaned;
+}
+function isModelSwitchTurn(turn) {
+  if (turn?.role !== "user") return false;
+  const parts = turn.parts || [];
+  if (parts.length === 0) return false;
+  const firstText = parts[0]?.text;
+  if (typeof firstText !== "string") return false;
+  return firstText.trim().startsWith(".model");
+}
+function findLastUserTurn(contents) {
+  for (let i = contents.length - 1; i >= 0; i--) {
+    if (contents[i]?.role === "user") return contents[i];
+  }
+  return void 0;
+}
+function parseModelCommand(turn) {
+  if (!turn || turn.role !== "user") return null;
+  const parts = turn.parts || [];
+  if (parts.length !== 1) return null;
+  const text5 = parts[0]?.text;
+  if (typeof text5 !== "string") return null;
+  const trimmed = text5.trim();
+  if (!trimmed.startsWith(".model")) return null;
+  if (trimmed === ".model") return "";
+  if (trimmed.charAt(6) !== " ") return null;
+  return trimmed.slice(7).trim();
+}
+function sendMockGeminiResponse(res, text5, isStream) {
+  if (isStream) {
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive"
+    });
+    const chunk = {
+      candidates: [{
+        content: { role: "model", parts: [{ text: text5 }] },
+        finishReason: "STOP"
+      }],
+      usageMetadata: { promptTokenCount: 0, candidatesTokenCount: 0 }
+    };
+    res.write(`data: ${JSON.stringify(chunk)}
+
+`);
+    const finishChunk = {
+      candidates: [{ finishReason: "STOP" }],
+      usageMetadata: { promptTokenCount: 0, candidatesTokenCount: 0 }
+    };
+    res.write(`data: ${JSON.stringify(finishChunk)}
+
+`);
+    res.end();
+  } else {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      candidates: [{
+        content: { role: "model", parts: [{ text: text5 }] },
+        finishReason: "STOP"
+      }],
+      usageMetadata: { promptTokenCount: 0, candidatesTokenCount: 0 }
+    }));
+  }
 }
 
 // src/gemini.ts
@@ -12088,6 +12202,7 @@ Error: ${launchPlan.error}
   const childEnv = buildGeminiChildEnv(proxyHandle.port, proxyHandle.token);
   if (!agentStdout) {
     p15.log.info(`Gemini proxy started on port ${proxyHandle.port}`);
+    p15.log.info(`\u{1F4A1} Type ${pc14.bold(".model <id>")} in the chat to switch models mid-session.`);
   }
   const exitCode = await launchGemini(geminiPath, selectedModel.id, childEnv, passthroughArgs);
   proxyHandle.close();

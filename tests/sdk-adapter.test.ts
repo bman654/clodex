@@ -73,10 +73,11 @@ describe('translateMessages', () => {
     const google = translateMessages(msg, '@ai-sdk/google') as any[];
     expect(google[0].content[0].providerOptions).toEqual({ google: { thoughtSignature: 'SIG' } });
     expect(google[0].content[1].providerOptions).toEqual({ google: { thoughtSignature: 'TSIG' } });
-    // xAI: thinking dropped; tool id suffix stripped
+    // xAI: thinking is kept as a reasoning part; tool id suffix stripped
     const xai = translateMessages(msg, '@ai-sdk/xai') as any[];
-    expect(xai[0].content).toHaveLength(1);
-    expect(xai[0].content[0]).toEqual({ type: 'tool-call', toolCallId: 'call_1', toolName: 'Read', input: {} });
+    expect(xai[0].content).toHaveLength(2);
+    expect(xai[0].content[0]).toEqual({ type: 'reasoning', text: 'hmm' });
+    expect(xai[0].content[1]).toEqual({ type: 'tool-call', toolCallId: 'call_1', toolName: 'Read', input: {} });
   });
 
   it('round-trips OpenAI reasoningEncryptedContent via thinking.signature', () => {

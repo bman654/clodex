@@ -227,6 +227,8 @@ export async function startGeminiProxy(
     supportedGenerationMethods: ['generateContent', 'streamGenerateContent'],
   });
 
+  let sessionRouteOverride: ProxyRoute | undefined = undefined;
+
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const url = req.url ?? '';
@@ -276,8 +278,38 @@ export async function startGeminiProxy(
 
         const modelMatch = url.match(/\/models\/([^:]+)/);
         const requestedModel = modelMatch ? decodeURIComponent(modelMatch[1]) : defaultRoute.aliasId;
-        const route = lookupGeminiRoute(routes, requestedModel) ?? defaultRoute;
+
+        // --- Model Switch Intercept ---
+        const lastUserTurn = findLastUserTurn(body.contents || []);
+        const modelCommand = parseModelCommand(lastUserTurn);
+
+        if (modelCommand !== null) {
+          if (modelCommand === '') {
+            // .model with no args — show current model and available list
+            const current = sessionRouteOverride ?? (lookupGeminiRoute(routes, requestedModel) ?? defaultRoute);
+            const availableList = routes.map(r => `  - ${r.aliasId} (${r.displayName})`).join('\n');
+            const exampleId = routes.length > 1 ? routes[1].aliasId : (routes[0]?.aliasId ?? 'deepseek-v4');
+            const text = `Current model: ${current.displayName} (${current.aliasId})\n\nAvailable models:\n${availableList}\n\n💡 To switch models, type: .model <id>\nExample: .model ${exampleId}`;
+            sendMockGeminiResponse(res, text, isStream);
+            return;
+          }
+
+          const targetRoute = lookupGeminiRoute(routes, modelCommand);
+          if (targetRoute) {
+            sessionRouteOverride = targetRoute;
+            plog(`.model switch: ${targetRoute.aliasId} (${targetRoute.realModelId})`);
+            sendMockGeminiResponse(res, `✅ Switched model to ${targetRoute.displayName} (${targetRoute.aliasId})`, isStream);
+          } else {
+            const available = routes.map(r => r.aliasId).join(', ');
+            sendMockGeminiResponse(res, `❌ Model '${modelCommand}' not found.\n\nAvailable: ${available}`, isStream);
+          }
+          return;
+        }
+
+        const route = sessionRouteOverride ?? (lookupGeminiRoute(routes, requestedModel) ?? defaultRoute);
         plog(`Route selected: ${route.aliasId} (upstream model: ${route.realModelId})`);
+
+        body.contents = sanitizeModelSwitchTurns(body.contents || []);
 
         const languageModel = await getOrInitModel(route);
         const params = translateGeminiRequest(body);
@@ -447,4 +479,85 @@ export async function startGeminiProxy(
       });
     });
   });
+}
+
+export function sanitizeModelSwitchTurns(contents: any[]): any[] {
+  const cleaned: any[] = [];
+  let i = 0;
+  while (i < contents.length) {
+    const turn = contents[i];
+    if (isModelSwitchTurn(turn)) {
+      // Skip this user turn and the next model turn (the fake response)
+      i += 1;
+      if (i < contents.length && contents[i]?.role === 'model') {
+        i += 1; // skip the paired model response
+      }
+      continue;
+    }
+    cleaned.push(turn);
+    i += 1;
+  }
+  return cleaned;
+}
+
+export function isModelSwitchTurn(turn: any): boolean {
+  if (turn?.role !== 'user') return false;
+  const parts = turn.parts || [];
+  if (parts.length === 0) return false;
+  const firstText = parts[0]?.text;
+  if (typeof firstText !== 'string') return false;
+  return firstText.trim().startsWith('.model');
+}
+
+export function findLastUserTurn(contents: any[]): any | undefined {
+  for (let i = contents.length - 1; i >= 0; i--) {
+    if (contents[i]?.role === 'user') return contents[i];
+  }
+  return undefined;
+}
+
+export function parseModelCommand(turn: any): string | null {
+  if (!turn || turn.role !== 'user') return null;
+  const parts = turn.parts || [];
+  if (parts.length !== 1) return null; // Must be a single-part message
+  const text = parts[0]?.text;
+  if (typeof text !== 'string') return null;
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('.model')) return null;
+  if (trimmed === '.model') return ''; // no args
+  if (trimmed.charAt(6) !== ' ') return null; // ".modelfoo" is not a command
+  return trimmed.slice(7).trim();
+}
+
+function sendMockGeminiResponse(res: ServerResponse, text: string, isStream: boolean): void {
+  if (isStream) {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    });
+    const chunk = {
+      candidates: [{
+        content: { role: 'model', parts: [{ text }] },
+        finishReason: 'STOP',
+      }],
+      usageMetadata: { promptTokenCount: 0, candidatesTokenCount: 0 },
+    };
+    res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+    const finishChunk = {
+      candidates: [{ finishReason: 'STOP' }],
+      usageMetadata: { promptTokenCount: 0, candidatesTokenCount: 0 }
+    };
+    res.write(`data: ${JSON.stringify(finishChunk)}\n\n`);
+    res.end();
+  } else {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      candidates: [{
+        content: { role: 'model', parts: [{ text }] },
+        finishReason: 'STOP',
+      }],
+      usageMetadata: { promptTokenCount: 0, candidatesTokenCount: 0 },
+    }));
+  }
 }
