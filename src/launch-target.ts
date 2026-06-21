@@ -54,10 +54,25 @@ export function isCodexMachineReadableOutput(args: string[]): boolean {
   return args.includes('--json');
 }
 
-export function wantsCleanAgentStdout(agent: 'claude' | 'codex', childArgs: string[]): boolean {
-  return agent === 'claude'
-    ? isClaudeMachineReadableOutput(childArgs)
-    : isCodexMachineReadableOutput(childArgs);
+export function isGeminiNonInteractive(args: string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === '--') return false;
+    if (arg === '-p' || arg === '--prompt' || arg === '-i' || arg === '--prompt-interactive') return true;
+    if (arg.startsWith('-')) {
+      i = skipAttachedFlagValue(args, i);
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+export function wantsCleanAgentStdout(agent: 'claude' | 'codex' | 'gemini', childArgs: string[]): boolean {
+  if (agent === 'claude') return isClaudeMachineReadableOutput(childArgs);
+  if (agent === 'codex') return isCodexMachineReadableOutput(childArgs);
+  const outFmt = readFlagValue(childArgs, '-o') || readFlagValue(childArgs, '--output-format');
+  return outFmt === 'json' || outFmt === 'stream-json';
 }
 
 /** Claude requires --verbose with stream-json in print mode. */
@@ -95,16 +110,16 @@ export function isCodexNonInteractive(args: string[]): boolean {
 
 export function resolveLaunchTarget(
   explicit: LaunchTarget,
-  prefs: Pick<UserPreferences, 'lastProvider' | 'lastModel' | 'lastCodexProvider' | 'lastCodexModel'>,
-  agent: 'claude' | 'codex',
+  prefs: Pick<UserPreferences, 'lastProvider' | 'lastModel' | 'lastCodexProvider' | 'lastCodexModel' | 'lastGeminiProvider' | 'lastGeminiModel'>,
+  agent: 'claude' | 'codex' | 'gemini',
 ): LaunchTarget | null {
   const slug = explicit.modelId ? parseModelSlug(explicit.modelId) : null;
   const providerId = explicit.providerId
     ?? slug?.providerId
-    ?? (agent === 'claude' ? prefs.lastProvider : prefs.lastCodexProvider);
+    ?? (agent === 'claude' ? prefs.lastProvider : agent === 'codex' ? prefs.lastCodexProvider : prefs.lastGeminiProvider);
   const modelId = slug?.modelId
     ?? explicit.modelId
-    ?? (agent === 'claude' ? prefs.lastModel : prefs.lastCodexModel);
+    ?? (agent === 'claude' ? prefs.lastModel : agent === 'codex' ? prefs.lastCodexModel : prefs.lastGeminiModel);
   if (!providerId || !modelId) return null;
   return { providerId, modelId };
 }
@@ -133,14 +148,16 @@ export function hasCompleteExplicitLaunch(explicit: LaunchTarget): boolean {
 export function planLaunchWizard(opts: {
   explicit: LaunchTarget;
   childArgs: string[];
-  agent: 'claude' | 'codex';
+  agent: 'claude' | 'codex' | 'gemini';
   prefs: UserPreferences;
 }): LaunchWizardPlan {
   const { explicit, childArgs, agent, prefs } = opts;
   const explicitComplete = hasCompleteExplicitLaunch(explicit);
   const nonInteractive = agent === 'claude'
     ? isClaudePrintMode(childArgs)
-    : isCodexNonInteractive(childArgs);
+    : agent === 'codex'
+    ? isCodexNonInteractive(childArgs)
+    : isGeminiNonInteractive(childArgs);
 
   if (explicitComplete) {
     const target = resolveLaunchTarget(explicit, prefs, agent);
@@ -177,8 +194,8 @@ export function planLaunchWizard(opts: {
   return { skip: false, target: null };
 }
 
-function nonInteractiveLaunchError(agent: 'claude' | 'codex'): string {
-  return agent === 'claude'
-    ? 'Print mode requires --provider and --model, or saved preferences from a prior launch.'
-    : 'Non-interactive Codex launch requires --provider and --model, or saved preferences from a prior launch.';
+function nonInteractiveLaunchError(agent: 'claude' | 'codex' | 'gemini'): string {
+  if (agent === 'claude') return 'Print mode requires --provider and --model, or saved preferences from a prior launch.';
+  if (agent === 'codex') return 'Non-interactive Codex launch requires --provider and --model, or saved preferences from a prior launch.';
+  return 'Non-interactive Gemini launch requires --provider and --model, or saved preferences from a prior launch.';
 }

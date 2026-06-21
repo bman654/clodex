@@ -1,6 +1,6 @@
 # AI agents & non-interactive launch
 
-relay-ai is built so **AI agents** (scripts, CI, alef-agent, Cursor subagents, etc.) can launch Claude Code or OpenAI Codex against your provider registry **without interactive wizards**, with **clean machine-readable stdout** when needed.
+relay-ai is built so **AI agents** (scripts, CI, alef-agent, Cursor subagents, etc.) can launch Claude Code, OpenAI Codex, or Google Gemini CLI against your provider registry **without interactive wizards**, with **clean machine-readable stdout** when needed.
 
 For the full machine-readable reference (including your live provider/model list), run:
 
@@ -21,6 +21,8 @@ relay-ai --ai --install    # install SKILL.md to agent skill dirs
 | Claude NDJSON stream | `relay-ai claude --provider <id> --model <id> -p "…" --output-format stream-json` |
 | Codex one-shot (text) | `relay-ai codex --provider <id> --model <id> exec "prompt"` |
 | Codex JSONL events | `relay-ai codex --provider <id> --model <id> exec --json "prompt"` |
+| Gemini one-shot (text) | `relay-ai gemini --provider <id> --model <id> -p "prompt"` |
+| Gemini NDJSON stream | `relay-ai gemini --provider <id> --model <id> -p "…" -o stream-json` |
 | Model slug | `--model zen__deepseek-v4-flash-free` (= `--provider zen --model deepseek-v4-flash-free`) |
 | List providers/models | `relay-ai providers list` or read `~/.relay-ai/providers.json` |
 
@@ -48,6 +50,11 @@ relay-ai consumes these flags **before** spawning Claude or Codex. They are **no
 - Both `--provider` and `--model` are set, **or**
 - Non-interactive args (`exec` subcommand or positional prompt) and saved prefs exist
 
+**Gemini (`relay-ai gemini`):**
+
+- Both `--provider` and `--model` are set, **or**
+- Non-interactive args (`-p` / `--prompt`, `-i` / `--prompt-interactive`, or positional query) and saved prefs exist
+
 In CI / headless loops, **always pass `--provider` and `--model`** — do not rely on saved prefs alone.
 
 ### Examples
@@ -64,6 +71,12 @@ relay-ai codex --provider openai --model gpt-5.4 exec "implement feature X"
 
 # Codex — slug
 relay-ai codex --model zen__deepseek-v4-flash-free exec "fix the test"
+
+# Gemini — explicit boot
+relay-ai gemini --provider google --model gemini-2.5-flash -p "Review this file"
+
+# Gemini — slug
+relay-ai gemini --model zen__deepseek-v4-flash-free -p "Refactor the module"
 ```
 
 ---
@@ -79,6 +92,7 @@ relay-ai detects machine-readable mode and **suppresses all boot UI on stdout**.
 | Claude | `-p` + `--output-format stream-json` or `json` | NDJSON (one JSON object per line) |
 | Claude | `-p` + `--input-format stream-json` | NDJSON |
 | Codex | `exec --json` | JSONL event stream |
+| Gemini | `-p` + `-o stream-json` or `json` | NDJSON |
 
 **Claude `--verbose`:** required by Claude Code for `stream-json` in print mode. relay-ai **auto-adds `--verbose`** when missing.
 
@@ -91,6 +105,10 @@ relay-ai claude --provider zen --model deepseek-v4-flash-free \
 
 relay-ai codex --provider zen --model deepseek-v4-flash-free \
   exec --json "PONG" 2>/dev/null \
+  | node -e "process.stdin.on('data',d=>d.toString().split('\n').filter(Boolean).forEach(l=>JSON.parse(l))); console.log('ok')"
+
+relay-ai gemini --provider zen --model deepseek-v4-flash-free \
+  -p "PONG" -o stream-json 2>/dev/null \
   | node -e "process.stdin.on('data',d=>d.toString().split('\n').filter(Boolean).forEach(l=>JSON.parse(l))); console.log('ok')"
 ```
 
@@ -184,6 +202,10 @@ done
 for model in deepseek-v4-flash-free qwen3.6-plus-free; do
   relay-ai codex --provider zen --model "$model" exec --json "Same task"
 done
+
+for model in gemini-2.5-flash gemini-2.5-pro; do
+  relay-ai gemini --provider google --model "$model" -p "Same task"
+done
 ```
 
 Boot flags use **single-model launch** (favorites catalog is skipped) — better for one-shot agent jobs. Use `relay-ai models` + interactive launch for mid-session `/model` switching.
@@ -233,16 +255,28 @@ relay-ai codex \
   [additional codex flags]
 ```
 
+**Gemini backend (stream-json):**
+
+```bash
+relay-ai gemini \
+  --provider <provider-id> \
+  --model <model-id> \
+  -p "<prompt>" \
+  -o stream-json \
+  [additional gemini flags]
+```
+
 ### alef-agent checklist
 
 1. **Executable:** `relay-ai` (must be on `PATH`; `npm link` after dev builds)
 2. **Always set** `--provider` + `--model` (or slug on `--model`) in backend config
 3. **Claude:** use `--output-format stream-json`; relay-ai adds `--verbose` if needed
 4. **Codex:** use `exec --json` (not `-p` — in Codex, `-p` means profile)
-5. **Parse stdout only** — relay-ai boot/errors on stderr in machine-readable mode
-6. **Codex network:** default sandbox is already full access; no extra `-s` needed
-7. **Discovery:** run `relay-ai --ai` or read `providers.json` to populate alef model lists
-8. **Skill:** `relay-ai --ai --install` drops `relay-ai-cli/SKILL.md` into `~/.agents/skills/` and other agent skill dirs
+5. **Gemini:** use `-o stream-json` or `-o json` with `-p`
+6. **Parse stdout only** — relay-ai boot/errors on stderr in machine-readable mode
+7. **Codex network:** default sandbox is already full access; no extra `-s` needed
+8. **Discovery:** run `relay-ai --ai` or read `providers.json` to populate alef model lists
+9. **Skill:** `relay-ai --ai --install` drops `relay-ai-cli/SKILL.md` into `~/.agents/skills/` and other agent skill dirs
 
 ### Stdout contract (summary)
 
@@ -269,10 +303,10 @@ The full Alef section is also embedded at the bottom of `relay-ai --ai` output.
 **Don't:**
 
 - Rely on interactive wizards in CI or agent loops
-- Pass `--provider` / `--model` to Claude or Codex directly — relay-ai consumes them
+- Pass `--provider` / `--model` to Claude, Codex, or Gemini directly — relay-ai consumes them
 - Use Codex `-p` for print mode (it's `--profile` in Codex)
 - Expect favorites catalog in print/exec mode — use explicit boot flags
-- Edit `~/.claude/settings.json` or `~/.codex/config.toml` from relay-ai — it uses env + temporary overlays
+- Edit `~/.claude/settings.json`, `~/.gemini/config/config.json`, or `~/.codex/config.toml` from relay-ai — it uses env + temporary overlays
 
 ---
 

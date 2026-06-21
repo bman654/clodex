@@ -75,6 +75,9 @@ function buildLiveStateSection(): string {
   if (prefs.lastCodexProvider || prefs.lastCodexModel) {
     prefLines.push(`  Codex last launch:  provider=${prefs.lastCodexProvider ?? '(none)'} model=${prefs.lastCodexModel ?? '(none)'}`);
   }
+  if (prefs.lastGeminiProvider || prefs.lastGeminiModel) {
+    prefLines.push(`  Gemini last launch: provider=${prefs.lastGeminiProvider ?? '(none)'} model=${prefs.lastGeminiModel ?? '(none)'}`);
+  }
   if (prefs.favoriteModels?.length) {
     prefLines.push(`  Favorites (${prefs.favoriteModels.length}/${MAX_MODEL_CATALOG}):`);
     for (const f of prefs.favoriteModels) {
@@ -126,8 +129,8 @@ function staticAiDocBody(): string {
 RELAY-AI — AI AGENT REFERENCE (v${VERSION})
 ================================================================================
 
-relay-ai launches Claude Code, OpenAI Codex, and desktop apps against YOUR
-provider registry (Groq, Mistral, OpenAI, Zen/Go, Ollama, custom endpoints, …).
+relay-ai launches Claude Code, OpenAI Codex, Google Gemini CLI, and desktop apps
+against YOUR provider registry (Groq, Mistral, OpenAI, Zen/Go, Ollama, custom endpoints, …).
 It handles API translation, local proxies, env isolation, and model routing.
 
 SKILL VERSIONING
@@ -179,13 +182,14 @@ PREVIEW LAUNCH WITHOUT STARTING A SESSION:
 INTERACTIVE BROWSE (requires TTY — avoid in agent scripts):
   relay-ai claude          provider + model wizard
   relay-ai codex           provider + model wizard
+  relay-ai gemini          provider + model wizard
   relay-ai providers       provider management hub
 
 ================================================================================
 AGENT PLATFORM PATTERNS — MULTI-MODEL / ONE-SHOT QUERIES
 ================================================================================
 
-relay-ai is designed so agents can use Claude Code or Codex as a PLATFORM:
+relay-ai is designed so agents can use Claude Code, Codex, or Gemini CLI as a PLATFORM:
 run many models sequentially or in parallel shell jobs, each with a focused
 prompt, without interactive wizards.
 
@@ -233,6 +237,24 @@ OPENAI CODEX — NON-INTERACTIVE (exec / positional prompt)
     --provider <id>
     --model <id>        or provider__model-id slug
 
+GOOGLE GEMINI CLI — NON-INTERACTIVE (-p / --prompt)
+  Skips the provider/model wizard when:
+    • Both --provider and --model are set, OR
+    • Non-interactive args (-p / --prompt, -i / --prompt-interactive, or positional query)
+      and saved preferences exist
+
+  Examples:
+    relay-ai gemini --provider google --model gemini-2.5-flash -p "Review this file"
+    relay-ai gemini -p "What is the capital of France?"
+
+  Machine-readable stdout:
+    relay-ai gemini --provider google --model gemini-2.5-flash -p "task" -o json
+    relay-ai gemini --provider google --model gemini-2.5-flash -p "task" -o stream-json
+
+  Boot flags (relay-ai — NOT passed to Gemini):
+    --provider <id>
+    --model <id>        or provider__model-id slug
+
 MULTI-MODEL LOOP (shell pattern):
   for model in llama-3.3-70b-versatile mixtral-8x7b-32768; do
     relay-ai claude --provider groq --model "$model" -p "Same prompt for all models"
@@ -242,10 +264,14 @@ MULTI-MODEL LOOP (shell pattern):
     relay-ai codex --provider zen --model "$model" exec "Same task"
   done
 
+  for model in gemini-2.5-flash gemini-2.5-pro; do
+    relay-ai gemini --provider google --model "$model" -p "Same task"
+  done
+
 FAVORITES / MID-SESSION SWITCHING:
   relay-ai models              interactive favorites manager (max ${MAX_MODEL_CATALOG})
-  When favorites exist, interactive claude/codex launches expose /model switching.
-  Boot flags (--provider + --model) or print/exec mode use SINGLE-MODEL launch
+  When favorites exist, interactive claude/codex/gemini launches expose /model switching.
+  Boot flags (--provider + --model) or print/exec/-p mode use SINGLE-MODEL launch
   (favorites catalog is skipped — better for agent one-shots).
 
 ================================================================================
@@ -280,6 +306,18 @@ CLAUDE CODE
     relay-ai claude --provider anthropic --model claude-sonnet-4-6 -p "review file.ts"
     relay-ai claude --dry-run --provider groq --model llama-3.3-70b-versatile
 
+GOOGLE GEMINI CLI
+  relay-ai gemini [relay-options] [gemini-flags]
+
+  Relay options:
+    --provider <id>    Boot provider (skip wizard with --model)
+    --model <id>       Boot model id or provider__model slug
+    --trace            Debug logs in ~/.relay-ai/logs/
+
+  Examples:
+    relay-ai gemini
+    relay-ai gemini --provider google --model gemini-2.5-flash -p "What is the capital of France?"
+
 OPENAI CODEX CLI
   relay-ai codex [relay-options] [codex-flags]
 
@@ -313,7 +351,7 @@ PROVIDERS REGISTRY
 
 MODELS / FAVORITES
   relay-ai models                 manage favoriteModels in config (alias: favorites)
-  Used for mid-session /model switching in interactive Claude/Codex sessions.
+  Used for mid-session /model switching in interactive Claude/Codex/Gemini sessions.
 
 API GATEWAY (for tools that speak Anthropic/OpenAI HTTP)
   relay-ai server                 foreground gateway on port 17645
@@ -349,10 +387,10 @@ DO:
 
 DO NOT:
   • Rely on interactive wizards in CI, scripts, or headless agent loops
-  • Pass --provider / --model to Claude or Codex directly — relay-ai consumes them
+  • Pass --provider / --model to Claude, Codex, or Gemini directly — relay-ai consumes them
   • Use Codex -p expecting print mode (it means --profile in Codex)
-  • Assume favorites catalog in print/exec mode — use explicit boot flags
-  • Mutate ~/.claude/settings.json or ~/.codex/config.toml — relay-ai uses env +
+  • Assume favorites catalog in print/exec/-p mode — use explicit boot flags
+  • Mutate settings files (e.g. ~/.claude/settings.json, ~/.codex/config.toml, ~/.gemini/config/config.json) — relay-ai uses env +
     temporary overlay profiles only
 
 NON-TTY:
@@ -366,6 +404,7 @@ TROUBLESHOOTING
   relay-ai codex --restore         clean stale overlay after crash
   relay-ai claude --trace          proxy + Claude debug logs
   relay-ai codex --trace           proxy debug log on exit
+  relay-ai gemini --trace          proxy debug log on exit
   relay-ai providers list          verify provider ids
   relay-ai providers refresh-models  repopulate model cache
 
@@ -384,7 +423,7 @@ Human-readable guide: docs/AI-AGENTS.md in the relay-ai repo.
 ALEF AGENT INTEGRATION
 ================================================================================
 
-alef-agent shells out to relay-ai to run Claude Code or Codex against any
+alef-agent shells out to relay-ai to run Claude Code, Codex, or Gemini CLI against any
 provider in ~/.relay-ai/providers.json. relay-ai is a launcher + proxy; the
 child CLI owns NDJSON/JSONL on stdout.
 
@@ -441,7 +480,8 @@ ALEF CHECKLIST
   □ Always pass --provider + --model (or provider__model slug) — never rely on wizard
   □ Claude: --output-format stream-json (or json) with -p
   □ Codex: exec --json (not bare codex exec without --json if parsing stdout)
-  □ Parse stdout only; ignore stderr for JSONL stream
+  □ Gemini: -o json (or stream-json) with -p
+  □ Parse stdout only; ignore stderr for JSONL/NDJSON stream
   □ Zen/Go: --provider zen explicitly + OPENCODE_API_KEY available
   □ Codex network: default danger-full-access — no extra -s needed for nlm/curl/npm
   □ MCP (Claude): --allowed-tools mcp__server__tool on claude args after relay-ai flags

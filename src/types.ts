@@ -2,7 +2,7 @@
 
 export type ModelFormat = 'anthropic' | 'openai' | 'unsupported';
 
-export type StarterCommand = 'root' | 'claude' | 'claude-app' | 'codex' | 'codex-app' | 'server' | 'models' | 'providers';
+export type StarterCommand = 'root' | 'claude' | 'claude-app' | 'codex' | 'codex-app' | 'server' | 'models' | 'providers' | 'gemini';
 
 export interface BackendConfig {
   id: 'zen' | 'go';
@@ -73,6 +73,8 @@ export interface UserPreferences {
   lastProvider?: string;
   lastCodexProvider?: string;
   lastCodexModel?: string;
+  lastGeminiProvider?: string;
+  lastGeminiModel?: string;
   recentModelsByProvider?: Record<string, string[]>;
   favoriteModels?: FavoriteModel[];
   server?: {

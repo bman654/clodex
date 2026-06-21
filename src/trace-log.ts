@@ -18,6 +18,7 @@ const FILE_MODE = 0o600;
 export const CLAUDE_DEBUG_LOG = 'claude-debug.log';
 export const PROXY_DEBUG_LOG = 'proxy-debug.log';
 export const CODEX_PROXY_DEBUG_LOG = 'codex-proxy-debug.log';
+export const GEMINI_PROXY_DEBUG_LOG = 'gemini-proxy-debug.log';
 
 export function ensureLogsDir(): string {
   const dir = getLogsPath();
@@ -46,6 +47,10 @@ export function getProxyDebugLogPath(): string {
 
 export function getCodexProxyDebugLogPath(): string {
   return join(ensureLogsDir(), CODEX_PROXY_DEBUG_LOG);
+}
+
+export function getGeminiProxyDebugLogPath(): string {
+  return join(ensureLogsDir(), GEMINI_PROXY_DEBUG_LOG);
 }
 
 /** Reset log file and return a writer that redacts secrets. */

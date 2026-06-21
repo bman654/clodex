@@ -19,7 +19,7 @@
 
 > **Demo (Part 1):** Installation · Configuration · Claude Code · Claude Cowork · Claude Code Desktop — [watch on YouTube](https://youtu.be/IvsUPHLhX0o)
 
-**relay-ai** is an interactive CLI that launches AI coding tools and runs local API gateways on your machine. Currently, it supports **Claude Code**, **Claude Desktop (Cowork + Code)**, the **OpenAI Codex CLI**, and the **Codex desktop app (macOS + Windows)**.
+**relay-ai** is an interactive CLI that launches AI coding tools and runs local API gateways on your machine. Currently, it supports **Claude Code**, **Claude Desktop (Cowork + Code)**, the **OpenAI Codex CLI**, the **Codex desktop app (macOS + Windows)**, and the **Google Gemini CLI**.
 
 Pick your backend:
 
@@ -41,6 +41,7 @@ Pick your backend:
 | `relay-ai claude-app` | Launch Claude Desktop app with registry providers ([guide](docs/CLAUDE_DESKTOP_SETUP.md)) |
 | `relay-ai codex` | Launch OpenAI Codex CLI with registry providers ([guide](docs/CODEX.md)) |
 | `relay-ai codex-app` | Launch Codex desktop app with registry providers ([guide](docs/CODEX.md)) |
+| `relay-ai gemini` | Launch Google Gemini CLI with registry providers |
 | `relay-ai --ai` | Full agent reference for scripts and alef-agent ([guide](docs/AI-AGENTS.md)) |
 
 Bare `relay-ai` prints help and migration guidance. Use `relay-ai claude` for the wizard.
@@ -77,11 +78,12 @@ Bare `relay-ai` prints help and migration guidance. Use `relay-ai claude` for th
 | Claude Desktop (Cowork + Code) | `relay-ai claude-app` | ✅ Supported macOS + Windows ([guide](docs/CLAUDE_DESKTOP_SETUP.md)) |
 | Codex CLI | `relay-ai codex` | ✅ Supported ([guide](docs/CODEX.md)) |
 | Codex desktop app | `relay-ai codex-app` | ✅ Supported macOS + Windows ([guide](docs/CODEX.md)) |
+| Google Gemini CLI | `relay-ai gemini` | ✅ Supported |
 
 ## Prerequisites
 
 - Node.js 18+
-- A supported AI coding tool installed (e.g. [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code) or [OpenAI Codex](https://www.npmjs.com/package/@openai/codex))
+- A supported AI coding tool installed (e.g. [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code), [OpenAI Codex](https://www.npmjs.com/package/@openai/codex), or [Google Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli))
 - At least one provider configured via `relay-ai providers add` or `import` — **or** an [OpenCode API key](https://opencode.ai/auth) for Zen/Go cloud backends
 - [OpenCode CLI](https://opencode.ai) only if you want **one-time import** from an existing OpenCode setup (optional)
 - For **Vertex gateway:** [Google Cloud SDK](https://cloud.google.com/sdk) with `gcloud auth application-default login`, a GCP project with Vertex AI enabled, and Claude partner models enabled in that project
@@ -366,6 +368,22 @@ Patches `~/.codex/config.toml` with backup; **Ctrl+C** in the relay-ai terminal 
 See **[docs/CODEX.md](docs/CODEX.md)** for CLI vs app differences, file ownership, and troubleshooting.
 
 **Reasoning effort:** Capable models show Codex's native reasoning picker (low/medium/high, etc.). relay-ai maps your choice to each provider's SDK options and preserves existing `model_reasoning_effort` in Codex config. Claude Code `/effort` and the `relay-ai server` gateway use the same mapping — see the [reasoning section in docs/CODEX.md](docs/CODEX.md#reasoning-effort).
+
+### Google Gemini CLI (`relay-ai gemini`)
+
+Launch the [Google Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli) with registry providers.
+
+```bash
+relay-ai gemini
+```
+
+Pick provider → pick model → Gemini prompt loop opens. Non-interactive tasks with streaming NDJSON are also fully supported:
+
+```bash
+relay-ai gemini --provider google --model gemini-2.5-flash -p "Review this file" -o stream-json
+```
+
+For agent / alef-agent integration (boot flags, NDJSON): **[docs/AI-AGENTS.md](docs/AI-AGENTS.md)** and `relay-ai --ai`.
 
 ## How it works
 

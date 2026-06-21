@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // src/cli.ts
-import pc16 from "picocolors";
+import pc17 from "picocolors";
 
 // src/ui.ts
 import pc from "picocolors";
@@ -456,7 +456,7 @@ function isDeepSeekReasoningModel(modelId) {
   return lower === "deepseek-v4-flash" || lower === "deepseek-v4-pro" || lower.startsWith("deepseek-v4-flash-") || lower.startsWith("deepseek-v4-pro-") || lower === "deepseek-reasoner" || lower === "deepseek-chat";
 }
 function hasSupportedParameter(metadata, param) {
-  return (metadata?.supportedParameters ?? []).some((p19) => p19 === param);
+  return (metadata?.supportedParameters ?? []).some((p21) => p21 === param);
 }
 function isOpenRouterRoute(npm, metadata) {
   return npm === "@openrouter/ai-sdk-provider" || metadata?.providerId === "openrouter" || metadata?.apiBaseUrl?.includes("openrouter.ai") === true;
@@ -1104,7 +1104,7 @@ function printFavoritesOnlyPanel() {
 }
 
 // src/cli.ts
-import * as p18 from "@clack/prompts";
+import * as p20 from "@clack/prompts";
 import { realpathSync } from "fs";
 import { fileURLToPath } from "url";
 
@@ -2562,9 +2562,9 @@ function migrateLegacyCloudProviders(registry) {
   return changed;
 }
 function migrateOAuthOpenAiProvider(registry) {
-  if (registry.providers.some((p19) => p19.id === "openai-oauth")) return false;
+  if (registry.providers.some((p21) => p21.id === "openai-oauth")) return false;
   const idx = registry.providers.findIndex(
-    (p19) => p19.id === "openai" && p19.authType === "oauth"
+    (p21) => p21.id === "openai" && p21.authType === "oauth"
   );
   if (idx < 0) return false;
   const existing = registry.providers[idx];
@@ -2577,9 +2577,9 @@ function migrateOAuthOpenAiProvider(registry) {
   return true;
 }
 function migrateOAuthXaiProvider(registry) {
-  if (registry.providers.some((p19) => p19.id === "xai-oauth")) return false;
+  if (registry.providers.some((p21) => p21.id === "xai-oauth")) return false;
   const idx = registry.providers.findIndex(
-    (p19) => p19.id === "xai" && p19.authType === "oauth"
+    (p21) => p21.id === "xai" && p21.authType === "oauth"
   );
   if (idx < 0) return false;
   const existing = registry.providers[idx];
@@ -2636,33 +2636,33 @@ function writeSecureFile(path, content) {
 }
 function parseProvider(raw) {
   if (!raw || typeof raw !== "object") return null;
-  const p19 = raw;
-  if (typeof p19.id !== "string" || !isValidProviderId(p19.id)) return null;
-  if (typeof p19.templateId !== "string" || !p19.templateId) return null;
-  if (typeof p19.name !== "string" || !p19.name) return null;
-  if (typeof p19.enabled !== "boolean") return null;
-  if (typeof p19.authRef !== "string" || !p19.authRef) return null;
-  if (typeof p19.addedAt !== "string" || !p19.addedAt) return null;
-  const api = p19.api;
+  const p21 = raw;
+  if (typeof p21.id !== "string" || !isValidProviderId(p21.id)) return null;
+  if (typeof p21.templateId !== "string" || !p21.templateId) return null;
+  if (typeof p21.name !== "string" || !p21.name) return null;
+  if (typeof p21.enabled !== "boolean") return null;
+  if (typeof p21.authRef !== "string" || !p21.authRef) return null;
+  if (typeof p21.addedAt !== "string" || !p21.addedAt) return null;
+  const api = p21.api;
   if (!api || typeof api !== "object") return null;
   const provider = {
-    id: p19.id,
-    templateId: p19.templateId,
-    name: p19.name,
-    enabled: p19.enabled,
-    authRef: p19.authRef,
+    id: p21.id,
+    templateId: p21.templateId,
+    name: p21.name,
+    enabled: p21.enabled,
+    authRef: p21.authRef,
     api,
-    addedAt: p19.addedAt
+    addedAt: p21.addedAt
   };
-  if (p19.subscriptionFilter === "free" || p19.subscriptionFilter === "zen" || p19.subscriptionFilter === "go") {
-    provider.subscriptionFilter = p19.subscriptionFilter;
+  if (p21.subscriptionFilter === "free" || p21.subscriptionFilter === "zen" || p21.subscriptionFilter === "go") {
+    provider.subscriptionFilter = p21.subscriptionFilter;
   }
-  if (p19.authType === "api" || p19.authType === "oauth" || p19.authType === "none") {
-    provider.authType = p19.authType;
+  if (p21.authType === "api" || p21.authType === "oauth" || p21.authType === "none") {
+    provider.authType = p21.authType;
   }
-  if (typeof p19.refreshedAt === "string") provider.refreshedAt = p19.refreshedAt;
-  if (p19.modelsCache && typeof p19.modelsCache === "object") {
-    const cache = p19.modelsCache;
+  if (typeof p21.refreshedAt === "string") provider.refreshedAt = p21.refreshedAt;
+  if (p21.modelsCache && typeof p21.modelsCache === "object") {
+    const cache = p21.modelsCache;
     if (typeof cache.fetchedAt === "string" && Array.isArray(cache.models)) {
       provider.modelsCache = {
         fetchedAt: cache.fetchedAt,
@@ -3812,10 +3812,10 @@ function uniqueProviderId(displayName, registry) {
   let base = customProviderId(displayName);
   if (!base.startsWith("custom-")) base = `custom-${slugifyProviderId(displayName)}`;
   if (!isValidProviderId(base)) base = "custom-provider";
-  if (!registry.providers.some((p19) => p19.id === base)) return base;
+  if (!registry.providers.some((p21) => p21.id === base)) return base;
   for (let i = 2; i < 100; i++) {
     const candidate = `${base}-${i}`;
-    if (isValidProviderId(candidate) && !registry.providers.some((p19) => p19.id === candidate)) {
+    if (isValidProviderId(candidate) && !registry.providers.some((p21) => p21.id === candidate)) {
       return candidate;
     }
   }
@@ -4353,7 +4353,7 @@ async function importFromOpencode(options = {}) {
       }
       continue;
     }
-    const existingIdx = registry.providers.findIndex((p19) => p19.id === entry.id);
+    const existingIdx = registry.providers.findIndex((p21) => p21.id === entry.id);
     const existing = existingIdx >= 0 ? registry.providers[existingIdx] : void 0;
     if (existing && options.resolveConflict) {
       const choice = await options.resolveConflict({
@@ -4391,7 +4391,7 @@ async function importFromOpencode(options = {}) {
     if (isOAuth) oauthImported += 1;
   }
   const alreadyReportedIds = new Set(skipped.map((s) => s.id));
-  const registryProviderIds = new Set(registry.providers.map((p19) => p19.id));
+  const registryProviderIds = new Set(registry.providers.map((p21) => p21.id));
   for (const provider of listCredentialSkippedProviders(
     raw,
     authEntries,
@@ -4435,6 +4435,7 @@ var FILE_MODE4 = 384;
 var CLAUDE_DEBUG_LOG = "claude-debug.log";
 var PROXY_DEBUG_LOG = "proxy-debug.log";
 var CODEX_PROXY_DEBUG_LOG = "codex-proxy-debug.log";
+var GEMINI_PROXY_DEBUG_LOG = "gemini-proxy-debug.log";
 function ensureLogsDir() {
   const dir = getLogsPath();
   mkdirSync4(dir, { recursive: true, mode: DIR_MODE2 });
@@ -4457,6 +4458,9 @@ function getProxyDebugLogPath() {
 }
 function getCodexProxyDebugLogPath() {
   return join8(ensureLogsDir(), CODEX_PROXY_DEBUG_LOG);
+}
+function getGeminiProxyDebugLogPath() {
+  return join8(ensureLogsDir(), GEMINI_PROXY_DEBUG_LOG);
 }
 function makeTraceLogger(logPath) {
   resetTraceLog(logPath);
@@ -4505,8 +4509,8 @@ function writeSecureLogLine(path, line) {
 function printTraceLog(debugLogPath) {
   if (!existsSync7(debugLogPath)) return;
   const raw = readFileSync6(debugLogPath, "utf8");
-  const log17 = redactTraceLog(raw);
-  const errorLines = log17.split("\n").filter(
+  const log19 = redactTraceLog(raw);
+  const errorLines = log19.split("\n").filter(
     (l) => l.includes("error") || l.includes("Error") || l.includes('"type":"error"') || l.includes("status")
   );
   console.log("\n" + pc2.bold(pc2.cyan("\u2500\u2500 Debug trace \u2500\u2500")));
@@ -4540,7 +4544,7 @@ async function resolveOrCollectApiKey(simulate = false, trace = false) {
     if (existing) return existing;
   }
   const isMac = process.platform === "darwin";
-  const isWindows4 = process.platform === "win32";
+  const isWindows5 = process.platform === "win32";
   const isLinux = process.platform === "linux";
   if (simulate) {
     printDryRunPanel();
@@ -4554,7 +4558,7 @@ async function resolveOrCollectApiKey(simulate = false, trace = false) {
     };
     const storedKey = await readFromCredentialStore(keyDiag);
     if (storedKey) {
-      const storeName = isMac ? "macOS Keychain" : isWindows4 ? "Windows Credential Manager" : "Secret Service";
+      const storeName = isMac ? "macOS Keychain" : isWindows5 ? "Windows Credential Manager" : "Secret Service";
       p2.log.success(`Found key in ${storeName}`);
       process.env["OPENCODE_API_KEY"] = storedKey;
       return storedKey;
@@ -4584,7 +4588,7 @@ async function resolveOrCollectApiKey(simulate = false, trace = false) {
         { value: "session", label: "This session only", hint: "Not saved anywhere \u2014 you'll be asked again next time" }
       ];
     }
-    if (isWindows4) {
+    if (isWindows5) {
       return [
         { value: "credential-manager", label: "Windows Credential Manager", hint: "Key stored securely; relay-ai reads it automatically next time" },
         { value: "setx", label: "Persistent environment variable (plaintext)", hint: "Runs setx \u2014 key visible in System Properties \u2192 Environment Variables" },
@@ -4606,7 +4610,7 @@ async function resolveOrCollectApiKey(simulate = false, trace = false) {
   const saveChoice = await p2.select({
     message: "Where should we save the key?",
     options: saveOptions,
-    initialValue: isMac ? "keychain" : isWindows4 ? "credential-manager" : secretServiceAvailable ? "secret-service" : "profile"
+    initialValue: isMac ? "keychain" : isWindows5 ? "credential-manager" : secretServiceAvailable ? "secret-service" : "profile"
   });
   if (p2.isCancel(saveChoice)) {
     p2.cancel("Cancelled.");
@@ -4753,10 +4757,10 @@ async function runFirstRunWizard(trace = false) {
       if (p3.isCancel(retry) || retry === "cancel") return "cancel";
       return runFirstRunWizard(trace);
     }
-    const spinner9 = p3.spinner();
-    spinner9.start("Importing from OpenCode...");
+    const spinner10 = p3.spinner();
+    spinner10.start("Importing from OpenCode...");
     const result = await importFromOpencode();
-    spinner9.stop("");
+    spinner10.stop("");
     if (result.error) {
       p3.log.error(result.error);
       return runFirstRunWizard(trace);
@@ -5104,9 +5108,9 @@ function serializeToolResultContent(content) {
 
 // src/tool-search.ts
 var TOOL_SEARCH_TYPE_PREFIX = "tool_search_tool";
-function isToolSearchTool(tool4) {
-  if (typeof tool4.type === "string" && tool4.type.startsWith(TOOL_SEARCH_TYPE_PREFIX)) return true;
-  const name = tool4.name ?? "";
+function isToolSearchTool(tool5) {
+  if (typeof tool5.type === "string" && tool5.type.startsWith(TOOL_SEARCH_TYPE_PREFIX)) return true;
+  const name = tool5.name ?? "";
   return name.includes("tool_search") || name === "ToolSearch";
 }
 function extractReferencedToolNames(messages) {
@@ -5145,16 +5149,16 @@ function resolveUpstreamTools(tools, messages) {
   if (!tools?.length) return [];
   const referenced = extractReferencedToolNames(messages);
   const upstream = [];
-  for (const tool4 of tools) {
-    if (isToolSearchTool(tool4)) {
-      upstream.push(tool4);
+  for (const tool5 of tools) {
+    if (isToolSearchTool(tool5)) {
+      upstream.push(tool5);
       continue;
     }
-    if (tool4.defer_loading === true) {
-      if (referenced.has(tool4.name)) upstream.push(tool4);
+    if (tool5.defer_loading === true) {
+      if (referenced.has(tool5.name)) upstream.push(tool5);
       continue;
     }
-    upstream.push(tool4);
+    upstream.push(tool5);
   }
   return upstream;
 }
@@ -5228,8 +5232,8 @@ function translateMessages(messages, npm) {
       for (const b of blocks) {
         if (b.type === "text") parts.push({ type: "text", text: b.text ?? "" });
         else if (b.type === "image") {
-          const p19 = imagePart(b);
-          if (p19) parts.push(p19);
+          const p21 = imagePart(b);
+          if (p21) parts.push(p21);
         }
       }
       if (toolResults.length) {
@@ -5315,7 +5319,7 @@ function translateRequest(body, npm, options) {
     providerOptions
   };
 }
-async function writeAnthropicStream(fullStream, modelId, write, log17) {
+async function writeAnthropicStream(fullStream, modelId, write, log19) {
   const messageId = "msg_" + Date.now();
   let blockIndex = -1;
   let started = false;
@@ -5447,7 +5451,7 @@ async function writeAnthropicStream(fullStream, modelId, write, log17) {
       case "error": {
         const e = part.error;
         const errMsg = e?.message || (typeof part.error === "string" ? part.error : JSON.stringify(e?.data ?? part.error));
-        log17?.(() => `sdk stream error: ${errMsg}`);
+        log19?.(() => `sdk stream error: ${errMsg}`);
         closeOpen();
         emit("error", { type: "error", error: { type: "api_error", message: errMsg } });
         return;
@@ -5461,7 +5465,7 @@ async function writeAnthropicStream(fullStream, modelId, write, log17) {
   emit("message_delta", { type: "message_delta", delta: { stop_reason: finishReason, stop_sequence: null }, usage });
   emit("message_stop", { type: "message_stop" });
 }
-async function streamAnthropicResponse(model, params, modelId, write, log17) {
+async function streamAnthropicResponse(model, params, modelId, write, log19) {
   const result = streamText({ model, ...params });
   Promise.resolve(result.text).catch(() => {
   });
@@ -5473,7 +5477,7 @@ async function streamAnthropicResponse(model, params, modelId, write, log17) {
   });
   Promise.resolve(result.usage).catch(() => {
   });
-  await writeAnthropicStream(result.fullStream, modelId, write, log17);
+  await writeAnthropicStream(result.fullStream, modelId, write, log19);
 }
 async function generateAnthropicResponse(model, params, modelId) {
   const r = await generateText({ model, ...params });
@@ -5862,6 +5866,8 @@ function loadPreferences() {
     lastProvider,
     lastCodexProvider: config.lastCodexProvider,
     lastCodexModel: config.lastCodexModel,
+    lastGeminiProvider: config.lastGeminiProvider,
+    lastGeminiModel: config.lastGeminiModel,
     recentModelsByProvider: config.recentModelsByProvider,
     favoriteModels: config.favoriteModels,
     server: config.server
@@ -5874,6 +5880,8 @@ function savePreferences(prefs) {
   if (prefs.lastProvider !== void 0) config.lastProvider = prefs.lastProvider;
   if (prefs.lastCodexProvider !== void 0) config.lastCodexProvider = prefs.lastCodexProvider;
   if (prefs.lastCodexModel !== void 0) config.lastCodexModel = prefs.lastCodexModel;
+  if (prefs.lastGeminiProvider !== void 0) config.lastGeminiProvider = prefs.lastGeminiProvider;
+  if (prefs.lastGeminiModel !== void 0) config.lastGeminiModel = prefs.lastGeminiModel;
   if (prefs.recentModelsByProvider !== void 0) config.recentModelsByProvider = prefs.recentModelsByProvider;
   if (prefs.favoriteModels !== void 0) config.favoriteModels = prefs.favoriteModels;
   writeConfig(config);
@@ -5883,7 +5891,7 @@ function recordLaunchSelection(agent, providerId, modelId, prefs) {
   const prevRecent = prefs.recentModelsByProvider?.[providerId] ?? [];
   const updatedRecent = [modelId, ...prevRecent.filter((id) => id !== modelId)].slice(0, MAX_RECENT_MODELS);
   savePreferences({
-    ...agent === "claude" ? { lastProvider: providerId, lastModel: modelId } : { lastCodexProvider: providerId, lastCodexModel: modelId },
+    ...agent === "claude" ? { lastProvider: providerId, lastModel: modelId } : agent === "codex" ? { lastCodexProvider: providerId, lastCodexModel: modelId } : { lastGeminiProvider: providerId, lastGeminiModel: modelId },
     recentModelsByProvider: { ...prefs.recentModelsByProvider, [providerId]: updatedRecent }
   });
 }
@@ -6106,14 +6114,14 @@ function zenGoAsLocalProvider(backendId, models) {
   };
 }
 function providersForPicker(catalog) {
-  const registryIds = new Set(catalog.localProviders.map((p19) => p19.id));
+  const registryIds = new Set(catalog.localProviders.map((p21) => p21.id));
   const providers = [
     ...catalog.zenModels.length > 0 && !registryIds.has("zen") ? [zenGoAsLocalProvider("zen", catalog.zenModels)] : [],
     ...catalog.goModels.length > 0 && !registryIds.has("go") ? [zenGoAsLocalProvider("go", catalog.goModels)] : [],
     ...catalog.localProviders
   ];
-  for (const p19 of providers) {
-    p19.models.sort((a, b) => {
+  for (const p21 of providers) {
+    p21.models.sort((a, b) => {
       const nameA = a.name || a.id;
       const nameB = b.name || b.id;
       return nameA.localeCompare(nameB, void 0, { sensitivity: "base", numeric: true });
@@ -6124,7 +6132,7 @@ function providersForPicker(catalog) {
 async function resolveLocalProviderApiKey(provider) {
   const direct = provider.apiKey?.trim();
   if (direct) return direct;
-  const reg = loadRegistry().providers.find((p19) => p19.id === provider.id);
+  const reg = loadRegistry().providers.find((p21) => p21.id === provider.id);
   const authRef = reg?.authRef ?? (provider.id === "zen" || provider.id === "go" ? "keyring:global:opencode" : null);
   if (!authRef) return null;
   return resolveProviderCredential(provider.id, authRef);
@@ -6454,21 +6462,21 @@ async function streamOpenAiResponse(model, params, responseModelId, onChunk) {
 
 `);
   for await (const part of fullStream) {
-    const p19 = part;
-    switch (p19.type) {
+    const p21 = part;
+    switch (p21.type) {
       case "text-delta":
-        send({ role: "assistant", content: p19.textDelta ?? p19.text ?? "" });
+        send({ role: "assistant", content: p21.textDelta ?? p21.text ?? "" });
         break;
       case "tool-input-start":
       case "tool-call-streaming-start":
-        send({ role: "assistant", tool_calls: [{ index: 0, id: p19.id ?? p19.toolCallId, type: "function", function: { name: p19.toolName, arguments: "" } }] });
+        send({ role: "assistant", tool_calls: [{ index: 0, id: p21.id ?? p21.toolCallId, type: "function", function: { name: p21.toolName, arguments: "" } }] });
         break;
       case "tool-input-delta":
       case "tool-call-delta":
-        send({ tool_calls: [{ index: 0, function: { arguments: p19.delta ?? p19.text ?? p19.argsTextDelta ?? "" } }] });
+        send({ tool_calls: [{ index: 0, function: { arguments: p21.delta ?? p21.text ?? p21.argsTextDelta ?? "" } }] });
         break;
       case "finish":
-        send({}, p19.finishReason || "stop");
+        send({}, p21.finishReason || "stop");
         break;
     }
   }
@@ -7121,10 +7129,10 @@ async function getServerPasswordForMode(mode) {
 }
 async function configureExposedProviders() {
   p6.log.info("Add providers to expose. Listed providers are removed when selected \u2014 like favorites.");
-  const spinner9 = p6.spinner();
-  spinner9.start("Loading providers...");
+  const spinner10 = p6.spinner();
+  spinner10.start("Loading providers...");
   const catalog = await fetchProviderCatalog({ agent: "server" });
-  spinner9.stop("");
+  spinner10.stop("");
   const available = providerOptionsFromCatalog(catalog);
   const picked = await selectServerProviders(available, getServerExposedProviders() ?? void 0);
   if (!picked) return void 0;
@@ -7222,8 +7230,8 @@ async function resolveServerUpstreamApiKey() {
   }));
   if (apiKey) {
     const isMac = process.platform === "darwin";
-    const isWindows4 = process.platform === "win32";
-    const storeName = isMac ? "macOS Keychain" : isWindows4 ? "Windows Credential Manager" : "Secret Service";
+    const isWindows5 = process.platform === "win32";
+    const storeName = isMac ? "macOS Keychain" : isWindows5 ? "Windows Credential Manager" : "Secret Service";
     p6.log.success(`Found key in ${storeName}`);
     return apiKey;
   }
@@ -7250,8 +7258,8 @@ async function runServerCommand(options = {}) {
   if (pwResult === void 0) return 0;
   const { password: serverPassword, wasSaved: passwordWasSaved } = pwResult;
   const host = mode === "network" ? "0.0.0.0" : "127.0.0.1";
-  const spinner9 = p6.spinner();
-  spinner9.start("Fetching available models...");
+  const spinner10 = p6.spinner();
+  spinner10.start("Fetching available models...");
   let models;
   try {
     models = await loadServerModels();
@@ -7261,13 +7269,13 @@ async function runServerCommand(options = {}) {
     if (runConfig.favoritesOnly) {
       const favorites = loadPreferences().favoriteModels ?? [];
       if (favorites.length === 0) {
-        spinner9.stop(pc6.red("No favorite models configured"));
+        spinner10.stop(pc6.red("No favorite models configured"));
         p6.log.error("Run `relay-ai models` to add favorites, or turn off favorites-only in the server wizard.");
         return 1;
       }
       models = filterServerModelsByFavorites(models, favorites).slice(0, MAX_MODEL_CATALOG);
       if (models.length === 0) {
-        spinner9.stop(pc6.red("No favorite models matched the current provider filter"));
+        spinner10.stop(pc6.red("No favorite models matched the current provider filter"));
         p6.log.error("Adjust favorites with `relay-ai models` or change exposed providers in the server wizard.");
         return 1;
       }
@@ -7279,7 +7287,7 @@ async function runServerCommand(options = {}) {
       p6.log.info("Desktop/Cowork picker will only show these. Edit with `relay-ai models`.");
     }
     if (models.length === 0) {
-      spinner9.stop(pc6.red("No models to expose"));
+      spinner10.stop(pc6.red("No models to expose"));
       p6.log.error("Add providers with `relay-ai providers add` or configure exposed providers in the server wizard.");
       return 1;
     }
@@ -7288,10 +7296,10 @@ async function runServerCommand(options = {}) {
     const filterNote = runConfig.exposedProviders ? ` \u2014 ${runConfig.exposedProviders.length} provider${runConfig.exposedProviders.length !== 1 ? "s" : ""}` : "";
     const favoritesNote = runConfig.favoritesOnly ? " \u2014 favorites only" : "";
     const maskNote = runConfig.maskGatewayIds ? " \u2014 discovery ids masked" : "";
-    spinner9.stop(`Loaded ${models.length} models (${localCount} from registry providers)${filterNote}${favoritesNote}${maskNote}`);
+    spinner10.stop(`Loaded ${models.length} models (${localCount} from registry providers)${filterNote}${favoritesNote}${maskNote}`);
     if (summary) p6.log.info(summary);
   } catch (err) {
-    spinner9.stop(pc6.red("Failed to load models"));
+    spinner10.stop(pc6.red("Failed to load models"));
     console.error(pc6.red(String(err instanceof Error ? err.message : err)));
     return 1;
   }
@@ -7800,7 +7808,7 @@ async function addProviderFromTemplate(template, apiKey, opts) {
     return { added: false, error: "API key cannot be empty." };
   }
   const registry = loadRegistry();
-  const existing = registry.providers.find((p19) => p19.id === template.id);
+  const existing = registry.providers.find((p21) => p21.id === template.id);
   if (existing && !opts?.replaceExisting) {
     return {
       added: false,
@@ -7850,7 +7858,7 @@ async function addProviderFromTemplate(template, apiKey, opts) {
     }
   };
   if (existing) {
-    const idx = registry.providers.findIndex((p19) => p19.id === template.id);
+    const idx = registry.providers.findIndex((p21) => p21.id === template.id);
     registry.providers[idx] = entry;
   } else {
     registry.providers.push(entry);
@@ -7862,11 +7870,11 @@ async function addProviderFromTemplate(template, apiKey, opts) {
 
 // src/registry/crud.ts
 function credentialStillReferenced(authRef, remaining) {
-  return remaining.some((p19) => p19.authRef === authRef);
+  return remaining.some((p21) => p21.authRef === authRef);
 }
 async function removeProviderFromRegistry(id, opts) {
   const registry = loadRegistry();
-  const index = registry.providers.findIndex((p19) => p19.id === id);
+  const index = registry.providers.findIndex((p21) => p21.id === id);
   if (index < 0) {
     return { removed: false, id, credentialDeleted: false, error: `Provider not found: ${id}` };
   }
@@ -7890,7 +7898,7 @@ async function removeProviderFromRegistry(id, opts) {
 }
 function addZenRegistryStub(opts) {
   const registry = loadRegistry();
-  if (registry.providers.some((p19) => p19.id === "zen")) {
+  if (registry.providers.some((p21) => p21.id === "zen")) {
     return { added: false, reason: "OpenCode Zen is already configured." };
   }
   registry.providers.push(zenRegistryStub(opts?.subscriptionFilter));
@@ -7899,7 +7907,7 @@ function addZenRegistryStub(opts) {
 }
 function addGoRegistryStub() {
   const registry = loadRegistry();
-  if (registry.providers.some((p19) => p19.id === "go")) {
+  if (registry.providers.some((p21) => p21.id === "go")) {
     return { added: false, reason: "OpenCode Go is already configured." };
   }
   registry.providers.push(goRegistryStub());
@@ -7908,7 +7916,7 @@ function addGoRegistryStub() {
 }
 function toggleProviderEnabled(id) {
   const registry = loadRegistry();
-  const provider = registry.providers.find((p19) => p19.id === id);
+  const provider = registry.providers.find((p21) => p21.id === id);
   if (!provider) return { toggled: false, error: `Provider not found: ${id}` };
   provider.enabled = !provider.enabled;
   saveRegistry(registry);
@@ -8142,7 +8150,7 @@ async function refreshApiListProvider(provider, apiKey) {
   };
 }
 function updateProviderCache(registry, providerId, models, baseUrl) {
-  const idx = registry.providers.findIndex((p19) => p19.id === providerId);
+  const idx = registry.providers.findIndex((p21) => p21.id === providerId);
   if (idx < 0) return;
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const existing = registry.providers[idx];
@@ -8157,7 +8165,7 @@ function updateProviderCache(registry, providerId, models, baseUrl) {
   };
 }
 async function refreshProviderModels(providerId, apiKey, registry = loadRegistry()) {
-  const provider = registry.providers.find((p19) => p19.id === providerId);
+  const provider = registry.providers.find((p21) => p21.id === providerId);
   if (!provider) {
     return { id: providerId, name: providerId, ok: false, reason: "Provider not found." };
   }
@@ -8264,7 +8272,7 @@ async function refreshAllProviderModels(resolveKey) {
   const opencodeKey = await readGlobalOpencodeCredential();
   if (opencodeKey) {
     let changed = false;
-    if (!registry.providers.some((p19) => p19.id === "zen")) {
+    if (!registry.providers.some((p21) => p21.id === "zen")) {
       registry.providers.push({
         id: "zen",
         templateId: "zen",
@@ -8278,7 +8286,7 @@ async function refreshAllProviderModels(resolveKey) {
       });
       changed = true;
     }
-    if (!registry.providers.some((p19) => p19.id === "go")) {
+    if (!registry.providers.some((p21) => p21.id === "go")) {
       registry.providers.push({
         id: "go",
         templateId: "go",
@@ -8296,7 +8304,7 @@ async function refreshAllProviderModels(resolveKey) {
       saveRegistry(registry);
     }
   }
-  const enabledProviders = registry.providers.filter((p19) => p19.enabled);
+  const enabledProviders = registry.providers.filter((p21) => p21.enabled);
   for (const provider of enabledProviders) {
     const key = await resolveRefreshCredential(provider, resolveKey);
     refreshed.push(await refreshProviderModels(provider.id, key, registry));
@@ -8350,42 +8358,42 @@ function openBrowser(url) {
 async function runNativeDeviceCode(providerId) {
   const label = PROVIDER_DISPLAY[providerId];
   printOAuthStepsPanel(`${label} \u2014 Sign in`, label);
-  const spinner9 = p9.spinner();
-  spinner9.start("Waiting for authorization...");
+  const spinner10 = p9.spinner();
+  spinner10.start("Waiting for authorization...");
   try {
     if (providerId === "xai" || providerId === "xai-oauth") {
       const tokens2 = await runXaiDeviceCodeFlow(({ url, userCode }) => {
-        spinner9.stop("");
+        spinner10.stop("");
         p9.log.info(`Visit: ${pc9.cyan(url)}`);
         p9.log.info(`Enter code: ${pc9.bold(userCode)}`);
         openBrowser(url);
-        spinner9.start("Waiting for authorization...");
+        spinner10.start("Waiting for authorization...");
       });
-      spinner9.stop(pc9.green("Signed in to xAI"));
+      spinner10.stop(pc9.green("Signed in to xAI"));
       return tokensToStoredCredential(tokens2);
     }
     if (providerId === "github-copilot") {
       const tokens2 = await runGithubDeviceCodeFlow(({ url, userCode }) => {
-        spinner9.stop("");
+        spinner10.stop("");
         p9.log.info(`Visit: ${pc9.cyan(url)}`);
         p9.log.info(`Enter code: ${pc9.bold(userCode)}`);
         openBrowser(url);
-        spinner9.start("Waiting for authorization...");
+        spinner10.start("Waiting for authorization...");
       });
-      spinner9.stop(pc9.green("Signed in to GitHub Copilot"));
+      spinner10.stop(pc9.green("Signed in to GitHub Copilot"));
       return tokensToStoredCredential(tokens2);
     }
     const { tokens, accountId } = await runOpenAiDeviceCodeFlow(({ url, userCode }) => {
-      spinner9.stop("");
+      spinner10.stop("");
       p9.log.info(`Visit: ${pc9.cyan(url)}`);
       p9.log.info(`Enter code: ${pc9.bold(userCode)}`);
       openBrowser(url);
-      spinner9.start("Waiting for authorization...");
+      spinner10.start("Waiting for authorization...");
     });
-    spinner9.stop(pc9.green("Signed in to OpenAI ChatGPT"));
+    spinner10.stop(pc9.green("Signed in to OpenAI ChatGPT"));
     return tokensToStoredCredential(tokens, void 0, accountId);
   } catch (err) {
-    spinner9.stop("");
+    spinner10.stop("");
     throw err;
   }
 }
@@ -8586,10 +8594,10 @@ async function runProvidersImport() {
     if (p10.isCancel(choice)) return "skip";
     return choice;
   } : void 0;
-  const spinner9 = p10.spinner();
-  spinner9.start("Importing from OpenCode...");
+  const spinner10 = p10.spinner();
+  spinner10.start("Importing from OpenCode...");
   const result = await importFromOpencode({ resolveConflict });
-  spinner9.stop("");
+  spinner10.stop("");
   if (result.error) {
     p10.log.error(result.error);
     return 1;
@@ -8654,19 +8662,19 @@ async function runProvidersRefreshModels(providerId) {
   const resolveKey = async (provider) => resolveProviderCredential(provider.id, provider.authRef);
   if (providerId) {
     const registry = loadRegistry();
-    const provider = registry.providers.find((p19) => p19.id === providerId);
+    const provider = registry.providers.find((p21) => p21.id === providerId);
     if (!provider) {
       p10.log.error(`Provider not found: ${providerId}`);
       return 1;
     }
-    const spinner10 = p10.spinner();
-    spinner10.start(`Refreshing ${provider.name}...`);
+    const spinner11 = p10.spinner();
+    spinner11.start(`Refreshing ${provider.name}...`);
     const key = await resolveRefreshCredential(
       provider,
-      async (p19) => resolveProviderCredential(p19.id, p19.authRef)
+      async (p21) => resolveProviderCredential(p21.id, p21.authRef)
     );
     const result = await refreshProviderModels(providerId, key);
-    spinner10.stop("");
+    spinner11.stop("");
     if (result.skipped) {
       const countNote = result.modelCount ? ` (${result.modelCount} cached models kept)` : "";
       p10.log.warn(`${result.name}: ${result.reason}${countNote}`);
@@ -8681,10 +8689,10 @@ async function runProvidersRefreshModels(providerId) {
     p10.log.success(`${result.name}: ${result.modelCount} model${result.modelCount === 1 ? "" : "s"} updated${diffStr}.`);
     return 0;
   }
-  const spinner9 = p10.spinner();
-  spinner9.start("Refreshing model lists...");
+  const spinner10 = p10.spinner();
+  spinner10.start("Refreshing model lists...");
   const { refreshed } = await refreshAllProviderModels(resolveKey);
-  spinner9.stop("");
+  spinner10.stop("");
   const ok = refreshed.filter((r) => r.ok && !r.skipped);
   const skipped = refreshed.filter((r) => r.skipped);
   const failed = refreshed.filter((r) => !r.ok);
@@ -8724,7 +8732,7 @@ async function runProvidersList() {
 async function pickTemplateFromCatalog() {
   while (true) {
     const registry = loadRegistry();
-    const configuredIds = new Set(registry.providers.map((p19) => p19.id));
+    const configuredIds = new Set(registry.providers.map((p21) => p21.id));
     const templates = listAddableTemplates(configuredIds);
     if (templates.length === 0) return null;
     const method = await p10.select({
@@ -8779,7 +8787,7 @@ async function pickTemplateFromCatalog() {
   }
 }
 async function runTemplateAddFlow() {
-  if (listAddableTemplates(loadRegistry().providers.map((p19) => p19.id)).length === 0) {
+  if (listAddableTemplates(loadRegistry().providers.map((p21) => p21.id)).length === 0) {
     p10.log.info("All catalog providers are already configured.");
     return 0;
   }
@@ -8801,12 +8809,12 @@ async function runTemplateAddFlow() {
       apiKey2 = collected;
     }
     await migrateGlobalOpencodeCredential();
-    const spinner10 = p10.spinner();
-    spinner10.start(`Adding ${template.name}...`);
+    const spinner11 = p10.spinner();
+    spinner11.start(`Adding ${template.name}...`);
     const zenStub = addZenRegistryStub();
     const goStub = addGoRegistryStub();
     if (!zenStub.added && !goStub.added) {
-      spinner10.stop("");
+      spinner11.stop("");
       p10.log.warn("OpenCode Zen / Go is already configured.");
       return 0;
     }
@@ -8815,7 +8823,7 @@ async function runTemplateAddFlow() {
       await refreshProviderModels("zen", apiKey2, registry),
       await refreshProviderModels("go", apiKey2, registry)
     ];
-    spinner10.stop("");
+    spinner11.stop("");
     const modelCount = refreshResults.reduce((total, result2) => total + (result2.modelCount ?? 0), 0);
     const failed = refreshResults.filter((result2) => !result2.ok);
     if (failed.length === 0) {
@@ -8858,10 +8866,10 @@ async function runTemplateAddFlow() {
   }
   const rawKey = String(apiKeyInput).trim();
   const apiKey = template.apiKeyOptional && !rawKey ? template.id : rawKey;
-  const spinner9 = p10.spinner();
-  spinner9.start(`Testing connection to ${template.name}...`);
+  const spinner10 = p10.spinner();
+  spinner10.start(`Testing connection to ${template.name}...`);
   const result = await addProviderFromTemplate(template, apiKey, { baseUrl: baseUrlOverride });
-  spinner9.stop("");
+  spinner10.stop("");
   if (!result.added) {
     p10.log.error(result.error ?? "Could not add provider.");
     if (result.hint) p10.log.info(result.hint);
@@ -8909,8 +8917,8 @@ async function runCustomEndpointAddFlow() {
     message: "API key (leave empty for local servers without auth):"
   });
   if (p10.isCancel(apiKey)) return 0;
-  const spinner9 = p10.spinner();
-  spinner9.start("Testing connection...");
+  const spinner10 = p10.spinner();
+  spinner10.start("Testing connection...");
   const result = await addCustomEndpointProvider({
     displayName: String(displayName).trim(),
     baseUrl: String(baseUrl).trim(),
@@ -8918,7 +8926,7 @@ async function runCustomEndpointAddFlow() {
     kind: kindChoice,
     allowInsecureLocal: allowLocal === true
   });
-  spinner9.stop("");
+  spinner10.stop("");
   if (!result.added) {
     p10.log.error(result.error ?? "Could not add custom provider.");
     if (result.hint) p10.log.info(result.hint);
@@ -8937,7 +8945,7 @@ async function runProvidersAdd() {
       hint: hasOpencode ? "Import Groq, OpenAI, etc. from your OpenCode config" : "Requires OpenCode CLI"
     }
   ];
-  const addableTemplates = listAddableTemplates(registry.providers.map((p19) => p19.id));
+  const addableTemplates = listAddableTemplates(registry.providers.map((p21) => p21.id));
   if (addableTemplates.length > 0) {
     options.push({
       value: "templates",
@@ -8974,11 +8982,11 @@ async function runProvidersRemove(id, interactive = false) {
     return 1;
   }
   if (interactive) {
-    const confirm9 = await p10.confirm({
+    const confirm10 = await p10.confirm({
       message: `Remove ${provider.name} (${id})?`,
       initialValue: false
     });
-    if (p10.isCancel(confirm9) || !confirm9) {
+    if (p10.isCancel(confirm10) || !confirm10) {
       p10.cancel("Cancelled.");
       return 0;
     }
@@ -9174,7 +9182,7 @@ import { createServer as createServer3 } from "http";
 import { streamText as streamText3, generateText as generateText3, tool as tool3, jsonSchema as jsonSchema3 } from "ai";
 function messageText(content) {
   if (typeof content === "string") return content;
-  return (content ?? []).map((p19) => p19.type === "output_text" || p19.type === "input_text" || p19.type === "text" ? p19.text ?? "" : "").join("");
+  return (content ?? []).map((p21) => p21.type === "output_text" || p21.type === "input_text" || p21.type === "text" ? p21.text ?? "" : "").join("");
 }
 function extractDeveloperAndInstructions(items, instructions) {
   const developerParts = [];
@@ -9540,24 +9548,24 @@ async function writeResponsesStream(fullStream, modelId, write) {
     });
     outputItems.unshift(reasoningItem);
   }
-  for (const tool4 of toolStates) {
+  for (const tool5 of toolStates) {
     emit("response.function_call_arguments.done", {
       type: "response.function_call_arguments.done",
-      item_id: tool4.itemId,
-      output_index: tool4.outputIndex,
-      arguments: tool4.args
+      item_id: tool5.itemId,
+      output_index: tool5.outputIndex,
+      arguments: tool5.args
     });
     const fcItem = {
       type: "function_call",
-      id: tool4.itemId,
-      call_id: tool4.callId,
-      name: tool4.name,
-      arguments: tool4.args,
+      id: tool5.itemId,
+      call_id: tool5.callId,
+      name: tool5.name,
+      arguments: tool5.args,
       status: "completed"
     };
     emit("response.output_item.done", {
       type: "response.output_item.done",
-      output_index: tool4.outputIndex,
+      output_index: tool5.outputIndex,
       item: fcItem
     });
     outputItems.push(fcItem);
@@ -9766,17 +9774,17 @@ async function startCodexProxy(routes, options = {}) {
     }));
   }
   return new Promise((resolve, reject2) => {
-    const log17 = debug ? makeTraceLogger(getCodexProxyDebugLogPath()) : () => {
+    const log19 = debug ? makeTraceLogger(getCodexProxyDebugLogPath()) : () => {
     };
     const onRejection = (reason) => {
       logUpstreamError(reason);
-      if (debug) log17(formatUpstreamError(reason));
+      if (debug) log19(formatUpstreamError(reason));
     };
     process.on("unhandledRejection", onRejection);
     const server = createServer3(async (req, res) => {
       const url = req.url ?? "/";
       if (debug) {
-        log17(`-> ${req.method} ${url} content-type=${req.headers["content-type"] ?? "(none)"} content-encoding=${req.headers["content-encoding"] ?? "(none)"} content-length=${req.headers["content-length"] ?? "(none)"}`);
+        log19(`-> ${req.method} ${url} content-type=${req.headers["content-type"] ?? "(none)"} content-encoding=${req.headers["content-encoding"] ?? "(none)"} content-length=${req.headers["content-length"] ?? "(none)"}`);
       }
       if (!requireAuth && req.method === "POST") {
         const origin = req.headers.origin;
@@ -9854,7 +9862,7 @@ async function startCodexProxy(routes, options = {}) {
           rawBody = await readBody(req);
         } catch (err) {
           if (debug) {
-            log17(`Error: failed to read/decode request body on POST ${url}: ${formatUpstreamError(err)} content-encoding=${req.headers["content-encoding"] ?? "(none)"}`);
+            log19(`Error: failed to read/decode request body on POST ${url}: ${formatUpstreamError(err)} content-encoding=${req.headers["content-encoding"] ?? "(none)"}`);
           }
           sendJson(res, 400, { error: { message: "Invalid request body", type: "invalid_request_error" } });
           return;
@@ -9865,7 +9873,7 @@ async function startCodexProxy(routes, options = {}) {
         } catch (err) {
           if (debug) {
             const headers = JSON.stringify(req.headers);
-            log17(`Error: Invalid JSON body on POST ${url}: ${formatUpstreamError(err)} headers=${headers} rawBody=${JSON.stringify(rawBody.slice(0, 2e3))}`);
+            log19(`Error: Invalid JSON body on POST ${url}: ${formatUpstreamError(err)} headers=${headers} rawBody=${JSON.stringify(rawBody.slice(0, 2e3))}`);
           }
           sendJson(res, 400, { error: { message: "Invalid JSON body", type: "invalid_request_error" } });
           return;
@@ -9874,7 +9882,7 @@ async function startCodexProxy(routes, options = {}) {
         const resolved = resolveModel(routes, models, modelId);
         if (!resolved) {
           if (debug) {
-            log17(`resolveModel failed: requested="${modelId}" known=[${routes.map((r) => r.modelId).join(", ")}]`);
+            log19(`resolveModel failed: requested="${modelId}" known=[${routes.map((r) => r.modelId).join(", ")}]`);
           }
           sendJson(res, 404, { error: { message: `Unknown model: ${modelId}`, type: "invalid_request_error" } });
           return;
@@ -9894,7 +9902,7 @@ async function startCodexProxy(routes, options = {}) {
           );
           if (debug) {
             const effort = body.reasoning?.effort;
-            log17(`model=${route.modelId} effort=${effort ?? "(none)"} providerOptions=${JSON.stringify(params.providerOptions)}`);
+            log19(`model=${route.modelId} effort=${effort ?? "(none)"} providerOptions=${JSON.stringify(params.providerOptions)}`);
           }
           if (body.stream) {
             res.writeHead(200, {
@@ -9924,7 +9932,7 @@ async function startCodexProxy(routes, options = {}) {
           }
         } catch (err) {
           const msg = formatUpstreamError(err);
-          log17(`handler error: ${msg}`);
+          log19(`handler error: ${msg}`);
           sendJson(res, 500, { error: { message: msg, type: "api_error" } });
         }
         return;
@@ -10150,7 +10158,7 @@ function restoreCodexOverlay(env = process.env) {
   return removed;
 }
 function remainingOverlayPaths(env = process.env) {
-  return ownedOverlayPaths(env).filter((p19) => existsSync11(p19));
+  return ownedOverlayPaths(env).filter((p21) => existsSync11(p21));
 }
 function recoverInterruptedCodexSession(env = process.env) {
   const before = remainingOverlayPaths(env);
@@ -10547,8 +10555,8 @@ function resolveCodexFavorites(activeProvider, selectedModel, compatible, favori
     agent,
     localProviders: compatible,
     zenGoApiKey,
-    zenModels: compatible.find((p19) => p19.id === "zen")?.models,
-    goModels: compatible.find((p19) => p19.id === "go")?.models,
+    zenModels: compatible.find((p21) => p21.id === "zen")?.models,
+    goModels: compatible.find((p21) => p21.id === "go")?.models,
     findLocalModel: (pid, mid) => {
       const provider = compatible.find((lp) => lp.id === pid);
       const model = provider?.models.find((m) => m.id === mid);
@@ -10620,8 +10628,24 @@ function isClaudeMachineReadableOutput(args) {
 function isCodexMachineReadableOutput(args) {
   return args.includes("--json");
 }
+function isGeminiNonInteractive(args) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--") return false;
+    if (arg === "-p" || arg === "--prompt" || arg === "-i" || arg === "--prompt-interactive") return true;
+    if (arg.startsWith("-")) {
+      i = skipAttachedFlagValue(args, i);
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
 function wantsCleanAgentStdout(agent, childArgs) {
-  return agent === "claude" ? isClaudeMachineReadableOutput(childArgs) : isCodexMachineReadableOutput(childArgs);
+  if (agent === "claude") return isClaudeMachineReadableOutput(childArgs);
+  if (agent === "codex") return isCodexMachineReadableOutput(childArgs);
+  const outFmt = readFlagValue(childArgs, "-o") || readFlagValue(childArgs, "--output-format");
+  return outFmt === "json" || outFmt === "stream-json";
 }
 function normalizeClaudeAgentArgs(args) {
   const out = [...args];
@@ -10653,14 +10677,14 @@ function isCodexNonInteractive(args) {
 }
 function resolveLaunchTarget(explicit, prefs, agent) {
   const slug = explicit.modelId ? parseModelSlug(explicit.modelId) : null;
-  const providerId = explicit.providerId ?? slug?.providerId ?? (agent === "claude" ? prefs.lastProvider : prefs.lastCodexProvider);
-  const modelId = slug?.modelId ?? explicit.modelId ?? (agent === "claude" ? prefs.lastModel : prefs.lastCodexModel);
+  const providerId = explicit.providerId ?? slug?.providerId ?? (agent === "claude" ? prefs.lastProvider : agent === "codex" ? prefs.lastCodexProvider : prefs.lastGeminiProvider);
+  const modelId = slug?.modelId ?? explicit.modelId ?? (agent === "claude" ? prefs.lastModel : agent === "codex" ? prefs.lastCodexModel : prefs.lastGeminiModel);
   if (!providerId || !modelId) return null;
   return { providerId, modelId };
 }
 function findProviderAndModel(providers, target) {
   if (!target.providerId || !target.modelId) return null;
-  const provider = providers.find((p19) => p19.id === target.providerId);
+  const provider = providers.find((p21) => p21.id === target.providerId);
   if (!provider) return null;
   const model = provider.models.find((m) => m.id === target.modelId);
   if (!model) return null;
@@ -10677,7 +10701,7 @@ function hasCompleteExplicitLaunch(explicit) {
 function planLaunchWizard(opts) {
   const { explicit, childArgs, agent, prefs } = opts;
   const explicitComplete = hasCompleteExplicitLaunch(explicit);
-  const nonInteractive = agent === "claude" ? isClaudePrintMode(childArgs) : isCodexNonInteractive(childArgs);
+  const nonInteractive = agent === "claude" ? isClaudePrintMode(childArgs) : agent === "codex" ? isCodexNonInteractive(childArgs) : isGeminiNonInteractive(childArgs);
   if (explicitComplete) {
     const target = resolveLaunchTarget(explicit, prefs, agent);
     if (!target) {
@@ -10710,7 +10734,9 @@ function planLaunchWizard(opts) {
   return { skip: false, target: null };
 }
 function nonInteractiveLaunchError(agent) {
-  return agent === "claude" ? "Print mode requires --provider and --model, or saved preferences from a prior launch." : "Non-interactive Codex launch requires --provider and --model, or saved preferences from a prior launch.";
+  if (agent === "claude") return "Print mode requires --provider and --model, or saved preferences from a prior launch.";
+  if (agent === "codex") return "Non-interactive Codex launch requires --provider and --model, or saved preferences from a prior launch.";
+  return "Non-interactive Gemini launch requires --provider and --model, or saved preferences from a prior launch.";
 }
 
 // src/codex.ts
@@ -11121,7 +11147,7 @@ Error: ${launchPlan.error}
     resolvedFavorites = res.resolvedFavorites;
     providersById = res.providersById;
   }
-  const regEntry = loadRegistry().providers.find((p19) => p19.id === activeProvider.id);
+  const regEntry = loadRegistry().providers.find((p21) => p21.id === activeProvider.id);
   const authRef = regEntry?.authRef ?? (activeProvider.apiKey ? `keyring:provider:${activeProvider.id}` : oauthAuthRef(activeProvider.id));
   const apiKey = activeProvider.apiKey?.trim() || await resolveProviderCredential(activeProvider.id, authRef);
   if (!apiKey) {
@@ -11175,7 +11201,7 @@ Error: ${launchPlan.error}
     });
     if (configOnly) {
       const home = process.env["HOME"] ?? "";
-      const shortenPath = (p19) => home ? p19.replace(home, "~") : p19;
+      const shortenPath = (p21) => home ? p21.replace(home, "~") : p21;
       console.log("");
       console.log(pc13.bold(pc13.cyan("  CONFIG PREVIEW \u2014 relay-ai codex")));
       console.log("");
@@ -11239,19 +11265,854 @@ Error: ${launchPlan.error}
   }
 }
 
-// src/codex-app.ts
+// src/gemini.ts
 import pc14 from "picocolors";
 import * as p15 from "@clack/prompts";
 
+// src/gemini/launch.ts
+import { execSync as execSync4, spawn as spawn5 } from "child_process";
+import { existsSync as existsSync13 } from "fs";
+import { homedir as homedir10 } from "os";
+import { join as join14 } from "path";
+var isWindows4 = process.platform === "win32";
+var GEMINI_FALLBACK_PATHS = isWindows4 ? [
+  join14(process.env["APPDATA"] ?? homedir10(), "npm", "gemini.cmd"),
+  join14(process.env["APPDATA"] ?? homedir10(), "npm", "gemini")
+] : [
+  join14(homedir10(), ".local", "bin", "gemini"),
+  join14(homedir10(), ".npm", "bin", "gemini"),
+  "/usr/local/bin/gemini",
+  "/opt/homebrew/bin/gemini"
+];
+function findGeminiBinary() {
+  try {
+    const result = execSync4(isWindows4 ? "where.exe gemini" : "which gemini", {
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    const path = result.trim().split("\n")[0]?.trim();
+    if (path) return path;
+  } catch {
+  }
+  for (const path of GEMINI_FALLBACK_PATHS) {
+    if (existsSync13(path)) return path;
+  }
+  return null;
+}
+function buildGeminiChildEnv(proxyPort, proxyToken) {
+  const env = { ...process.env };
+  delete env["GOOGLE_GEMINI_BASE_URL"];
+  delete env["GEMINI_API_KEY"];
+  delete env["GOOGLE_API_KEY"];
+  delete env["GOOGLE_GENAI_API_KEY"];
+  env["GOOGLE_GEMINI_BASE_URL"] = `http://127.0.0.1:${proxyPort}`;
+  env["GEMINI_API_KEY"] = proxyToken;
+  return env;
+}
+function launchGemini(geminiPath, modelId, env, extraArgs) {
+  return new Promise((resolve) => {
+    const args = ["-m", modelId, ...extraArgs];
+    const child = spawn5(geminiPath, args, {
+      stdio: "inherit",
+      env,
+      shell: isWindows4
+    });
+    const onSigInt = () => child.kill("SIGINT");
+    const onSigTerm = () => child.kill("SIGTERM");
+    process.once("SIGINT", onSigInt);
+    process.once("SIGTERM", onSigTerm);
+    const done = (code) => {
+      process.off("SIGINT", onSigInt);
+      process.off("SIGTERM", onSigTerm);
+      resolve(code);
+    };
+    child.on("error", () => done(1));
+    child.on("exit", (code) => done(code ?? 0));
+  });
+}
+
+// src/gemini/prompts.ts
+import * as p14 from "@clack/prompts";
+async function pickGeminiProvider(providers, prefs, hasFavorites = false, initialProviderId) {
+  if (providers.length === 0 && !hasFavorites) return null;
+  const options = providers.map((lp) => providerSelectOption(lp));
+  if (hasFavorites) {
+    options.unshift({
+      value: "__favorites__",
+      label: "\u2B50 Favorites Catalog",
+      hint: `${prefs.favoriteModels?.length ?? 0} saved favorites`
+    });
+  }
+  const initial = initialProviderId && options.some((o) => o.value === initialProviderId) ? initialProviderId : prefs.lastGeminiProvider && options.some((o) => o.value === prefs.lastGeminiProvider) ? prefs.lastGeminiProvider : options[0].value;
+  const chosen = await p14.select({
+    message: "Which provider for Gemini CLI?",
+    options,
+    initialValue: initial
+  });
+  if (p14.isCancel(chosen)) {
+    p14.cancel("Cancelled.");
+    return null;
+  }
+  if (chosen === "__favorites__") return "__favorites__";
+  return providers.find((lp) => lp.id === chosen) ?? null;
+}
+async function pickGeminiModel(provider, prefs) {
+  const recentIds = (prefs.recentModelsByProvider?.[provider.id] ?? []).slice(0, 3);
+  const recentModels = recentIds.map((id) => provider.models.find((m) => m.id === id)).filter((m) => m !== void 0);
+  let selectedModel = null;
+  while (true) {
+    if (recentModels.length > 0) {
+      const options = [
+        ...recentModels.map((m) => modelSelectOption(m, "recent")),
+        navOption("__browse_all__", "Browse all models \u2192", `${provider.models.length} available`),
+        navOption("__back__", "\u2190 Go back", "Select a different provider")
+      ];
+      const picked = await p14.select({
+        message: `Model for ${provider.name}?`,
+        options,
+        initialValue: recentModels[0].id
+      });
+      if (p14.isCancel(picked) || String(picked) === "__back__") {
+        return "back";
+      }
+      if (String(picked) === "__browse_all__") {
+        const browsed = await browseAllModels(provider, prefs);
+        if (browsed === "back") {
+          continue;
+        }
+        if (!browsed) return null;
+        selectedModel = browsed;
+        break;
+      } else {
+        selectedModel = recentModels.find((m) => m.id === String(picked));
+        break;
+      }
+    } else {
+      const browsed = await browseAllModels(provider, prefs);
+      if (browsed === "back") {
+        return "back";
+      }
+      if (!browsed) return null;
+      selectedModel = browsed;
+      break;
+    }
+  }
+  return selectedModel;
+}
+function confirmGeminiLaunch(providerName, modelLabel, modelId) {
+  return p14.confirm({
+    message: confirmLaunchMessage("Gemini CLI", modelLabel, modelId, providerName),
+    initialValue: true
+  }).then((answer) => {
+    if (p14.isCancel(answer)) {
+      p14.cancel("Cancelled.");
+      return false;
+    }
+    return answer;
+  });
+}
+async function pickGeminiFavoriteModel(providers, favorites) {
+  const favList = [];
+  for (const fav of favorites) {
+    const provider2 = providers.find((lp) => lp.id === fav.providerId);
+    const model2 = provider2?.models.find((m) => m.id === fav.modelId);
+    if (provider2 && model2) favList.push({ provider: provider2, model: model2 });
+  }
+  if (favList.length === 0) {
+    p14.log.warn("None of your saved favorites are available in the current registry.");
+    return null;
+  }
+  const options = [
+    ...favList.map(({ provider: provider2, model: model2 }) => ({
+      value: `${provider2.id}::${model2.id}`,
+      label: model2.name || model2.id,
+      hint: provider2.name
+    })),
+    { value: "__back__", label: "\u2190 Go back", hint: "Select a different provider" }
+  ];
+  const picked = await p14.select({
+    message: "Pick a favorite model for Gemini CLI:",
+    options,
+    initialValue: options[0].value
+  });
+  if (p14.isCancel(picked) || String(picked) === "__back__") return "back";
+  const [pickedProviderId, pickedModelId] = picked.split("::");
+  const provider = providers.find((lp) => lp.id === pickedProviderId);
+  const model = provider?.models.find((m) => m.id === pickedModelId);
+  if (!provider || !model) return null;
+  return { provider, model };
+}
+function rejectGeminiManagedFlags(geminiArgs) {
+  const blocked = /* @__PURE__ */ new Set(["--provider", "--model", "-m", "--trace"]);
+  const takesValue = /* @__PURE__ */ new Set(["--provider", "--model", "-m"]);
+  const out = [];
+  for (let i = 0; i < geminiArgs.length; i++) {
+    const arg = geminiArgs[i];
+    if (blocked.has(arg)) {
+      if (takesValue.has(arg)) i++;
+      continue;
+    }
+    if (arg.startsWith("--model=") || arg.startsWith("--provider=") || arg.startsWith("-m=")) continue;
+    out.push(arg);
+  }
+  return out;
+}
+
+// src/gemini-proxy.ts
+import { createServer as createServer4 } from "http";
+import { randomUUID as randomUUID2 } from "crypto";
+import { streamText as streamText4, generateText as generateText4, tool as tool4, jsonSchema as jsonSchema4 } from "ai";
+function mapFinishReason(reason) {
+  if (reason === "stop" || reason === "tool-calls") return "STOP";
+  if (reason === "length") return "MAX_TOKENS";
+  if (reason === "content-filter") return "SAFETY";
+  return "OTHER";
+}
+function lookupGeminiRoute(routes, requestedModel) {
+  const ids = [requestedModel, ...routeLookupIds(requestedModel)];
+  const slashIdx = requestedModel.indexOf("/");
+  if (slashIdx >= 0) {
+    const after = requestedModel.slice(slashIdx + 1);
+    ids.push(after, ...routeLookupIds(after));
+  }
+  const doubleUnderscore = requestedModel.indexOf("__");
+  if (doubleUnderscore >= 0) {
+    const after = requestedModel.slice(doubleUnderscore + 2);
+    ids.push(after, ...routeLookupIds(after));
+  }
+  const uniqueIds = [...new Set(ids)];
+  for (const id of uniqueIds) {
+    const route = routes.find((r) => r.aliasId === id || r.realModelId === id);
+    if (route) return route;
+  }
+  return void 0;
+}
+function mergeConsecutiveMessages2(messages) {
+  const merged = [];
+  for (const msg of messages) {
+    if (merged.length === 0) {
+      merged.push(msg);
+      continue;
+    }
+    const last = merged[merged.length - 1];
+    if (last.role === msg.role) {
+      const lastContent = Array.isArray(last.content) ? last.content : [{ type: "text", text: last.content }];
+      const nextContent = Array.isArray(msg.content) ? msg.content : [{ type: "text", text: msg.content }];
+      last.content = [...lastContent, ...nextContent];
+    } else {
+      merged.push(msg);
+    }
+  }
+  return merged;
+}
+function translateGeminiRequest(body) {
+  let system;
+  if (body.systemInstruction?.parts) {
+    system = body.systemInstruction.parts.map((p21) => p21.text || "").join("\n");
+  }
+  const messages = [];
+  const nameToIdList = /* @__PURE__ */ new Map();
+  const contents = body.contents || [];
+  for (const turn of contents) {
+    const role = turn.role === "model" ? "assistant" : "user";
+    const parts = [];
+    const toolResults = [];
+    const turnParts = turn.parts || [];
+    for (const p21 of turnParts) {
+      if (p21.text !== void 0) {
+        parts.push({ type: "text", text: p21.text });
+      } else if (p21.inlineData) {
+        parts.push({
+          type: "image",
+          image: Buffer.from(p21.inlineData.data, "base64"),
+          mediaType: p21.inlineData.mimeType
+        });
+      } else if (p21.functionCall) {
+        const id = "call_" + randomUUID2().replace(/-/g, "");
+        const name = p21.functionCall.name;
+        if (!nameToIdList.has(name)) nameToIdList.set(name, []);
+        nameToIdList.get(name).push(id);
+        parts.push({
+          type: "tool-call",
+          toolCallId: id,
+          toolName: name,
+          input: p21.functionCall.args || {}
+        });
+      } else if (p21.functionResponse) {
+        const name = p21.functionResponse.name;
+        const idList = nameToIdList.get(name) || [];
+        const id = idList.shift() || "call_" + randomUUID2().replace(/-/g, "");
+        toolResults.push({
+          type: "tool-result",
+          toolCallId: id,
+          toolName: name,
+          output: {
+            type: "text",
+            value: typeof p21.functionResponse.response === "string" ? p21.functionResponse.response : JSON.stringify(p21.functionResponse.response || {})
+          }
+        });
+      }
+    }
+    if (toolResults.length > 0) {
+      messages.push({
+        role: "tool",
+        content: toolResults
+      });
+    }
+    if (parts.length > 0) {
+      messages.push({
+        role,
+        content: parts
+      });
+    }
+  }
+  const mergedMessages = mergeConsecutiveMessages2(messages);
+  let tools;
+  if (body.tools) {
+    tools = {};
+    for (const t of body.tools) {
+      if (t.functionDeclarations) {
+        for (const fd of t.functionDeclarations) {
+          tools[fd.name] = tool4({
+            description: fd.description || "",
+            inputSchema: jsonSchema4(fd.parameters || { type: "object", properties: {} })
+          });
+        }
+      }
+    }
+  }
+  let toolChoice;
+  const mode = body.toolConfig?.functionCallingConfig?.mode;
+  if (mode === "ANY") {
+    toolChoice = "required";
+  } else if (mode === "AUTO") {
+    toolChoice = "auto";
+  }
+  const generationConfig = body.generationConfig || {};
+  let responseFormat;
+  if (generationConfig.responseMimeType === "application/json") {
+    responseFormat = { type: "json" };
+  }
+  return {
+    system,
+    messages: mergedMessages,
+    tools: tools && Object.keys(tools).length > 0 ? tools : void 0,
+    toolChoice,
+    maxOutputTokens: generationConfig.maxOutputTokens,
+    temperature: generationConfig.temperature,
+    responseFormat
+  };
+}
+async function startGeminiProxy(routes, debug = false) {
+  const proxyToken = randomUUID2();
+  silenceSdkWarnings();
+  if (routes.length === 0) {
+    return Promise.reject(new Error("Gemini proxy requires at least one route"));
+  }
+  const defaultRoute = routes[0];
+  const models = /* @__PURE__ */ new Map();
+  const plog = debug ? makeTraceLogger(getGeminiProxyDebugLogPath()) : () => {
+  };
+  const onRejection = (reason) => {
+    plog(`Unhandled Rejection: ${reason instanceof Error ? reason.stack || reason.message : String(reason)}`);
+  };
+  const onException = (error) => {
+    plog(`Uncaught Exception: ${error.stack || error.message}`);
+  };
+  const getOrInitModel = async (route) => {
+    let m = models.get(route.aliasId);
+    if (!m) {
+      m = await createLanguageModel({
+        npm: route.npm || "@ai-sdk/openai-compatible",
+        modelId: route.realModelId,
+        apiKey: route.apiKey,
+        baseURL: route.baseURL,
+        providerId: route.aliasId,
+        authType: route.authType,
+        oauthAccountId: route.oauthAccountId
+      });
+      models.set(route.aliasId, m);
+    }
+    return m;
+  };
+  const formatGeminiModel = (route) => ({
+    name: `models/${route.aliasId}`,
+    version: "1.0",
+    displayName: route.displayName,
+    description: "Registry model routed through relay-ai proxy",
+    inputTokenLimit: route.contextWindow || 1e6,
+    outputTokenLimit: 8192,
+    supportedGenerationMethods: ["generateContent", "streamGenerateContent"]
+  });
+  const server = createServer4(async (req, res) => {
+    try {
+      const url = req.url ?? "";
+      plog(`${req.method} ${url}`);
+      if (req.method === "GET" && (url.endsWith("/models") || url.includes("/models?"))) {
+        plog("GET models list");
+        res.writeHead(200, { "Content-Type": "application/json" });
+        const payload = JSON.stringify({
+          models: routes.map(formatGeminiModel)
+        });
+        plog(`Response: ${payload}`);
+        res.end(payload);
+        return;
+      }
+      if (req.method === "GET" && url.includes("/models/")) {
+        const modelMatch = url.match(/\/models\/([^?]+)/);
+        if (modelMatch) {
+          const modelId = decodeURIComponent(modelMatch[1]);
+          const route = lookupGeminiRoute(routes, modelId) ?? defaultRoute;
+          plog(`GET model details: ${modelId} -> mapped to route ${route.aliasId}`);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          const payload = JSON.stringify(formatGeminiModel(route));
+          plog(`Response: ${payload}`);
+          res.end(payload);
+          return;
+        }
+      }
+      if (req.method === "POST" && url.includes(":")) {
+        const isStream = url.includes("streamGenerateContent");
+        const rawBody = await readBody(req);
+        plog(`Request body:
+${rawBody}`);
+        let body;
+        try {
+          body = JSON.parse(rawBody);
+        } catch {
+          plog("Error: Invalid JSON body");
+          res.writeHead(400);
+          res.end("Invalid JSON");
+          return;
+        }
+        const modelMatch = url.match(/\/models\/([^:]+)/);
+        const requestedModel = modelMatch ? decodeURIComponent(modelMatch[1]) : defaultRoute.aliasId;
+        const route = lookupGeminiRoute(routes, requestedModel) ?? defaultRoute;
+        plog(`Route selected: ${route.aliasId} (upstream model: ${route.realModelId})`);
+        const languageModel = await getOrInitModel(route);
+        const params = translateGeminiRequest(body);
+        plog(`Translated SDK params:
+${JSON.stringify(params, null, 2)}`);
+        if (isStream) {
+          res.writeHead(200, {
+            "Content-Type": "text/event-stream",
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive"
+          });
+          plog("Starting streamText...");
+          const { fullStream } = streamText4({
+            model: languageModel,
+            ...params
+          });
+          const toolCallBuffers = /* @__PURE__ */ new Map();
+          for await (const part of fullStream) {
+            const p21 = part;
+            plog(`Stream chunk type: ${p21.type}`);
+            if (p21.type === "text-delta") {
+              const chunk = {
+                candidates: [{
+                  content: {
+                    role: "model",
+                    parts: [{ text: p21.textDelta ?? p21.text ?? "" }]
+                  }
+                }]
+              };
+              const data = `data: ${JSON.stringify(chunk)}
+
+`;
+              plog(`Streaming text delta: ${p21.textDelta}`);
+              res.write(data);
+            } else if (p21.type === "tool-input-start") {
+              toolCallBuffers.set(p21.toolCallId, { name: p21.toolName, json: "" });
+            } else if (p21.type === "tool-input-delta") {
+              const buf = toolCallBuffers.get(p21.toolCallId);
+              if (buf) buf.json += p21.delta;
+            } else if (p21.type === "tool-call") {
+              const buf = toolCallBuffers.get(p21.toolCallId);
+              const args = buf ? JSON.parse(buf.json || "{}") : p21.input || {};
+              const name = buf ? buf.name : p21.toolName;
+              plog(`Streaming tool call: ${name} with args: ${JSON.stringify(args)}`);
+              const chunk = {
+                candidates: [{
+                  content: {
+                    role: "model",
+                    parts: [{
+                      functionCall: { name, args }
+                    }]
+                  }
+                }]
+              };
+              res.write(`data: ${JSON.stringify(chunk)}
+
+`);
+            } else if (p21.type === "finish") {
+              const chunk = {
+                candidates: [{
+                  finishReason: mapFinishReason(p21.finishReason ?? "")
+                }],
+                usageMetadata: {
+                  promptTokenCount: p21.totalUsage?.inputTokens || 0,
+                  candidatesTokenCount: p21.totalUsage?.outputTokens || 0
+                }
+              };
+              plog(`Stream finish. Reason: ${p21.finishReason}`);
+              res.write(`data: ${JSON.stringify(chunk)}
+
+`);
+            }
+          }
+          res.end();
+          plog("Stream ended.");
+        } else {
+          plog("Starting generateText...");
+          const result = await generateText4({
+            model: languageModel,
+            ...params
+          });
+          plog("generateText finished.");
+          const parts = [];
+          if (result.text) {
+            parts.push({ text: result.text });
+          }
+          if (result.toolCalls?.length) {
+            for (const tc of result.toolCalls) {
+              parts.push({
+                functionCall: { name: tc.toolName, args: tc.args }
+              });
+            }
+          }
+          const response = {
+            candidates: [{
+              content: {
+                role: "model",
+                parts
+              },
+              finishReason: mapFinishReason(result.finishReason ?? "")
+            }],
+            usageMetadata: {
+              promptTokenCount: result.usage?.inputTokens || 0,
+              candidatesTokenCount: result.usage?.outputTokens || 0
+            }
+          };
+          plog(`Response:
+${JSON.stringify(response, null, 2)}`);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify(response));
+        }
+        return;
+      }
+      plog(`404 Not Found: ${url}`);
+      res.writeHead(404);
+      res.end("Not Found");
+    } catch (err) {
+      plog(`Error handling request: ${err instanceof Error ? err.stack || err.message : String(err)}`);
+      if (debug) {
+        console.error("[Gemini Proxy] Critical error in handler:", err);
+      }
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: errMsg } }));
+      } else {
+        try {
+          res.write(`data: ${JSON.stringify({ error: { message: errMsg } })}
+
+`);
+        } catch {
+        }
+        res.end();
+      }
+    }
+  });
+  process.on("unhandledRejection", onRejection);
+  process.on("uncaughtException", onException);
+  const cleanup = () => {
+    process.off("unhandledRejection", onRejection);
+    process.off("uncaughtException", onException);
+  };
+  return new Promise((resolve, reject2) => {
+    server.on("error", (err) => {
+      cleanup();
+      reject2(err);
+    });
+    server.listen(0, "127.0.0.1", () => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        cleanup();
+        reject2(new Error("Failed to bind gemini proxy"));
+        return;
+      }
+      resolve({
+        port: addr.port,
+        token: proxyToken,
+        close: () => {
+          cleanup();
+          server.close();
+        }
+      });
+    });
+  });
+}
+
+// src/gemini.ts
+function geminiHelpText() {
+  return `${pc14.bold("relay-ai gemini")} v${VERSION}
+Launch Google Gemini CLI with OpenCode Zen / Go or local registry providers.
+
+${pc14.bold("Usage:")}
+  relay-ai gemini [options] [gemini-flags]
+  relay-ai gemini --help
+  relay-ai gemini --version
+
+${pc14.bold("Options:")}
+  --trace      Write proxy debug logs to ~/.relay-ai/logs/ and show errors on exit
+  --provider   Boot provider id (skip wizard when paired with --model or non-interactive)
+  --model      Boot model id (skip wizard when paired with --provider or non-interactive)
+  --help       Show this command help
+  --version    Show version
+
+${pc14.bold("Description:")}
+  Picks a provider and model from ~/.relay-ai/providers.json, starts a local Gemini-to-SDK translation
+  proxy, and launches the Gemini CLI.
+  All registry models (Anthropic, OpenAI, custom endpoints, etc.) route through the local translation proxy.
+
+${pc14.bold("Prerequisites:")}
+  npm install -g @google/gemini-cli
+
+${pc14.bold("Passing flags to Gemini CLI:")}
+  Add Gemini flags directly \u2014 no "--" separator needed.
+  relay-ai manages -m / --model and -p / --prompt; other flags go to Gemini CLI.
+
+${pc14.bold("Examples:")}
+  relay-ai gemini
+  relay-ai gemini --trace
+  relay-ai gemini --provider zen --model gemini-2.5-flash
+  relay-ai gemini -p "review this file"`;
+}
+async function runGeminiCommand(geminiArgs, trace = false, launch = {}) {
+  if (geminiArgs.includes("--help") || geminiArgs.includes("-h")) {
+    console.log(geminiHelpText());
+    return 0;
+  }
+  const geminiPath = findGeminiBinary();
+  if (!geminiPath) {
+    console.error(pc14.red("\nError: gemini binary not found on PATH.\n"));
+    console.error("Install Google Gemini CLI:");
+    console.error("  npm install -g @google/gemini-cli\n");
+    return 1;
+  }
+  const passthroughArgs = rejectGeminiManagedFlags(geminiArgs);
+  const agentStdout = wantsCleanAgentStdout("gemini", passthroughArgs);
+  setAgentStdoutMode(agentStdout);
+  const prefs = loadPreferences();
+  const launchPlan = planLaunchWizard({
+    explicit: { providerId: launch.launchProvider, modelId: launch.launchModel },
+    childArgs: passthroughArgs,
+    agent: "gemini",
+    prefs
+  });
+  if (launchPlan.error) {
+    console.error(pc14.red(`
+Error: ${launchPlan.error}
+`));
+    return 1;
+  }
+  let catalog;
+  if (agentStdout) {
+    try {
+      catalog = await fetchProviderCatalog({ agent: "gemini" });
+    } catch (err) {
+      console.error(pc14.red(String(err instanceof Error ? err.message : err)));
+      return 1;
+    }
+  } else {
+    const catalogSpinner = p15.spinner();
+    catalogSpinner.start("Loading your providers...");
+    try {
+      catalog = await fetchProviderCatalog({ agent: "gemini" });
+    } catch (err) {
+      catalogSpinner.stop("");
+      console.error(pc14.red(String(err instanceof Error ? err.message : err)));
+      return 1;
+    }
+    catalogSpinner.stop("");
+  }
+  const compatible = providersForPicker(catalog);
+  if (compatible.length === 0) {
+    p15.log.warn("No Gemini-compatible providers in your registry.");
+    p15.log.info("Add a provider with relay-ai providers add, or sign in with relay-ai providers auth openai.");
+    return 0;
+  }
+  let activeProvider = compatible.find((lp) => lp.id === prefs.lastGeminiProvider) ?? compatible[0];
+  let selectedModel = activeProvider.models.find((m) => m.id === prefs.lastGeminiModel) ?? activeProvider.models[0];
+  if (!selectedModel) {
+    p15.log.error(`Provider "${activeProvider.name}" has no models available.`);
+    return 1;
+  }
+  ;
+  if (launchPlan.skip && launchPlan.target) {
+    const resolved = findProviderAndModel(compatible, launchPlan.target);
+    if (!resolved) {
+      p15.log.error(
+        `Provider/model not found: ${launchPlan.target.providerId} / ${launchPlan.target.modelId}`
+      );
+      return 1;
+    }
+    activeProvider = resolved.provider;
+    selectedModel = resolved.model;
+    if (!agentStdout) {
+      p15.log.step(`Using ${selectedModel.name || selectedModel.id} (${activeProvider.name})`);
+    }
+  } else {
+    if (!agentStdout) {
+      console.log("");
+      p15.log.info(`Launching ${pc14.bold("Gemini CLI")} with relay-ai`);
+    }
+    const chosenProvider = await pickGeminiProvider(
+      compatible,
+      prefs,
+      (prefs.favoriteModels ?? []).length > 0,
+      launch.launchProvider
+    );
+    if (!chosenProvider) return 0;
+    if (chosenProvider === "__favorites__") {
+      const favPick = await pickGeminiFavoriteModel(compatible, prefs.favoriteModels ?? []);
+      if (!favPick || favPick === "back") return 0;
+      activeProvider = favPick.provider;
+      selectedModel = favPick.model;
+    } else {
+      activeProvider = chosenProvider;
+      const chosenModel = await pickGeminiModel(activeProvider, prefs);
+      if (!chosenModel || chosenModel === "back") return 0;
+      selectedModel = chosenModel;
+    }
+    if (!agentStdout) {
+      const ok = await confirmGeminiLaunch(
+        activeProvider.name,
+        selectedModel.name || selectedModel.id,
+        selectedModel.id
+      );
+      if (!ok) return 0;
+    }
+  }
+  recordLaunchSelection("gemini", activeProvider.id, selectedModel.id, prefs);
+  const launchApiKey = await resolveLocalProviderApiKey(activeProvider);
+  if (!launchApiKey?.trim()) {
+    p15.log.error(
+      `No API key found for ${activeProvider.name}. Set it with relay-ai providers add.`
+    );
+    return 1;
+  }
+  const providerRoutes = activeProvider.models.map((m) => ({
+    aliasId: m.id,
+    realModelId: m.upstreamModelId || m.id,
+    displayName: m.name || m.id,
+    upstreamUrl: m.baseUrl || m.apiBaseUrl || "",
+    apiKey: launchApiKey,
+    modelFormat: m.modelFormat,
+    contextWindow: m.contextWindow,
+    npm: m.npm,
+    baseURL: m.apiBaseUrl,
+    providerId: activeProvider.id,
+    authType: activeProvider.authType,
+    oauthAccountId: activeProvider.oauthAccountId,
+    supportedParameters: m.supportedParameters,
+    reasoning: m.reasoning,
+    interleavedReasoningField: m.interleavedReasoningField
+  }));
+  const resolvedFavs = [];
+  const favorites = prefs.favoriteModels ?? [];
+  for (const fav of favorites) {
+    const provider = compatible.find((lp) => lp.id === fav.providerId);
+    const model = provider?.models.find((m) => m.id === fav.modelId);
+    if (provider && model) {
+      const apiKey = await resolveLocalProviderApiKey(provider);
+      if (apiKey) {
+        resolvedFavs.push({
+          aliasId: model.id,
+          realModelId: model.upstreamModelId || model.id,
+          displayName: model.name || model.id,
+          upstreamUrl: model.baseUrl || model.apiBaseUrl || "",
+          apiKey,
+          modelFormat: model.modelFormat,
+          contextWindow: model.contextWindow,
+          npm: model.npm,
+          baseURL: model.apiBaseUrl,
+          providerId: provider.id,
+          authType: provider.authType,
+          oauthAccountId: provider.oauthAccountId,
+          supportedParameters: model.supportedParameters,
+          reasoning: model.reasoning,
+          interleavedReasoningField: model.interleavedReasoningField
+        });
+      }
+    }
+  }
+  const routesMap = /* @__PURE__ */ new Map();
+  for (const route of providerRoutes) {
+    routesMap.set(route.aliasId, route);
+  }
+  for (const route of resolvedFavs) {
+    if (!routesMap.has(route.aliasId)) {
+      routesMap.set(route.aliasId, route);
+    }
+  }
+  const startingRoute = routesMap.get(selectedModel.id);
+  if (!startingRoute) {
+    routesMap.set(selectedModel.id, {
+      aliasId: selectedModel.id,
+      realModelId: selectedModel.upstreamModelId || selectedModel.id,
+      displayName: selectedModel.name || selectedModel.id,
+      upstreamUrl: selectedModel.baseUrl || selectedModel.apiBaseUrl || "",
+      apiKey: launchApiKey,
+      modelFormat: selectedModel.modelFormat,
+      contextWindow: selectedModel.contextWindow,
+      npm: selectedModel.npm,
+      baseURL: selectedModel.apiBaseUrl,
+      providerId: activeProvider.id,
+      authType: activeProvider.authType,
+      oauthAccountId: activeProvider.oauthAccountId,
+      supportedParameters: selectedModel.supportedParameters,
+      reasoning: selectedModel.reasoning,
+      interleavedReasoningField: selectedModel.interleavedReasoningField
+    });
+  }
+  const finalRoutes = [...routesMap.values()];
+  let proxyHandle = null;
+  try {
+    proxyHandle = await startGeminiProxy(finalRoutes, trace);
+  } catch (err) {
+    p15.log.error(`Failed to start Gemini proxy: ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+  const childEnv = buildGeminiChildEnv(proxyHandle.port, proxyHandle.token);
+  if (!agentStdout) {
+    p15.log.info(`Gemini proxy started on port ${proxyHandle.port}`);
+  }
+  const exitCode = await launchGemini(geminiPath, selectedModel.id, childEnv, passthroughArgs);
+  proxyHandle.close();
+  if (!agentStdout) {
+    p15.log.info("Gemini proxy stopped.");
+  }
+  if (trace) {
+    printTraceLog(getGeminiProxyDebugLogPath());
+  }
+  return exitCode;
+}
+
+// src/codex-app.ts
+import pc15 from "picocolors";
+import * as p17 from "@clack/prompts";
+
 // src/codex/app-config.ts
-import { existsSync as existsSync13, readFileSync as readFileSync11, rmSync as rmSync2, writeFileSync as writeFileSync6, mkdirSync as mkdirSync7 } from "fs";
-import { dirname as dirname6, join as join14 } from "path";
+import { existsSync as existsSync14, readFileSync as readFileSync11, rmSync as rmSync2, writeFileSync as writeFileSync6, mkdirSync as mkdirSync7 } from "fs";
+import { dirname as dirname6, join as join15 } from "path";
 import { parse, stringify } from "smol-toml";
 function getCodexConfigPath() {
-  return join14(getCodexHome(), "config.toml");
+  return join15(getCodexHome(), "config.toml");
 }
 function getCodexAppSidecarProfilePath() {
-  return join14(getCodexHome(), `${CODEX_APP_PROVIDER_ID}.config.toml`);
+  return join15(getCodexHome(), `${CODEX_APP_PROVIDER_ID}.config.toml`);
 }
 function asRecord(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : {};
@@ -11262,7 +12123,7 @@ function rootString(config, key) {
   return { had: true, value: typeof v === "string" ? v : String(v ?? "") };
 }
 function readCodexConfigText(path = getCodexConfigPath()) {
-  if (!existsSync13(path)) return "";
+  if (!existsSync14(path)) return "";
   return readFileSync11(path, "utf8");
 }
 function parseCodexConfig(text5) {
@@ -11409,13 +12270,13 @@ function restoreConfigFromState(state, configPath = getCodexConfigPath()) {
   }
   applyRestoreKey(config, "model_reasoning_effort", state.hadModelReasoningEffort, state.modelReasoningEffort);
   const sidecar = getCodexAppSidecarProfilePath();
-  if (existsSync13(sidecar)) {
+  if (existsSync14(sidecar)) {
     try {
       rmSync2(sidecar, { force: true });
     } catch {
     }
   }
-  const hadFile = existsSync13(configPath);
+  const hadFile = existsSync14(configPath);
   const empty = Object.keys(config).length === 0 || Object.keys(config).length === 1 && "model_providers" in config && Object.keys(asRecord(config.model_providers)).length === 0;
   if (!hadFile && empty) return false;
   if (empty) {
@@ -11436,25 +12297,25 @@ function previewAppConfigToml(spec) {
 // src/codex/app-session.ts
 import {
   copyFileSync as copyFileSync4,
-  existsSync as existsSync14,
+  existsSync as existsSync15,
   mkdirSync as mkdirSync8,
   readdirSync as readdirSync2,
   readFileSync as readFileSync12,
   rmSync as rmSync3
 } from "fs";
-import { basename as basename2, join as join15 } from "path";
+import { basename as basename2, join as join16 } from "path";
 function getAppSessionLockPath(env = process.env) {
-  return join15(getRelayAiCodexDir(env), "session-app.json");
+  return join16(getRelayAiCodexDir(env), "session-app.json");
 }
 function getAppRestoreStatePath(env = process.env) {
-  return join15(getRelayAiCodexDir(env), "app-restore-state.json");
+  return join16(getRelayAiCodexDir(env), "app-restore-state.json");
 }
 function getAppCatalogPath(providerId, env = process.env) {
-  return join15(getRelayAiCodexDir(env), `app-models-${providerId}.json`);
+  return join16(getRelayAiCodexDir(env), `app-models-${providerId}.json`);
 }
 function readAppSessionLock(env = process.env) {
   const path = getAppSessionLockPath(env);
-  if (!existsSync14(path)) return null;
+  if (!existsSync15(path)) return null;
   try {
     const parsed = JSON.parse(readFileSync12(path, "utf8"));
     if (typeof parsed.pid === "number" && typeof parsed.startedAt === "string") return parsed;
@@ -11468,11 +12329,11 @@ function writeAppSessionLock(lock, env = process.env) {
 }
 function clearAppSessionLock(env = process.env) {
   const path = getAppSessionLockPath(env);
-  if (existsSync14(path)) rmSync3(path, { force: true });
+  if (existsSync15(path)) rmSync3(path, { force: true });
 }
 function readAppRestoreState(env = process.env) {
   const path = getAppRestoreStatePath(env);
-  if (!existsSync14(path)) return null;
+  if (!existsSync15(path)) return null;
   try {
     return JSON.parse(readFileSync12(path, "utf8"));
   } catch {
@@ -11486,16 +12347,16 @@ function writeAppRestoreState(state, env = process.env) {
 }
 function clearAppRestoreState(env = process.env) {
   const path = getAppRestoreStatePath(env);
-  if (existsSync14(path)) rmSync3(path, { force: true });
+  if (existsSync15(path)) rmSync3(path, { force: true });
 }
 function backupConfigToml(env = process.env) {
   const configPath = getCodexConfigPath();
-  if (!existsSync14(configPath)) return void 0;
+  if (!existsSync15(configPath)) return void 0;
   rotateBackups(configPath, env);
   const backupsDir = getBackupsDir(env);
   mkdirSync8(backupsDir, { recursive: true });
   const base = basename2(configPath);
-  const backupPath = join15(backupsDir, `${base}.${Date.now()}.bak`);
+  const backupPath = join16(backupsDir, `${base}.${Date.now()}.bak`);
   copyFileSync4(configPath, backupPath);
   return backupPath;
 }
@@ -11511,8 +12372,8 @@ function saveAppRestoreStateBeforePatch(env = process.env) {
 }
 function ownedAppCatalogPaths(env = process.env) {
   const codexDir = getRelayAiCodexDir(env);
-  if (!existsSync14(codexDir)) return [];
-  return readdirSync2(codexDir).filter((n) => n.startsWith("app-models-") && n.endsWith(".json")).map((n) => join15(codexDir, n));
+  if (!existsSync15(codexDir)) return [];
+  return readdirSync2(codexDir).filter((n) => n.startsWith("app-models-") && n.endsWith(".json")).map((n) => join16(codexDir, n));
 }
 function removeAppCatalogs(env = process.env) {
   const removed = [];
@@ -11544,7 +12405,7 @@ function restoreCodexAppOverlay(env = process.env) {
   }
   if (restoreState) {
     restoreConfigFromState(restoreState);
-  } else if (lock?.backupPath && existsSync14(lock.backupPath)) {
+  } else if (lock?.backupPath && existsSync15(lock.backupPath)) {
     copyFileSync4(lock.backupPath, getCodexConfigPath());
   }
   removeAppCatalogs(env);
@@ -11590,11 +12451,11 @@ function waitForShutdown2() {
 }
 
 // src/codex/app-launch.ts
-import { execSync as execSync4 } from "child_process";
-import { existsSync as existsSync15, readdirSync as readdirSync3, statSync as statSync4 } from "fs";
-import { homedir as homedir10 } from "os";
-import { join as join16 } from "path";
-import * as p14 from "@clack/prompts";
+import { execSync as execSync5 } from "child_process";
+import { existsSync as existsSync16, readdirSync as readdirSync3, statSync as statSync4 } from "fs";
+import { homedir as homedir11 } from "os";
+import { join as join17 } from "path";
+import * as p16 from "@clack/prompts";
 var CODEX_BUNDLE_ID = "com.openai.codex";
 function codexAppSupported() {
   if (process.platform !== "darwin" && process.platform !== "win32") {
@@ -11602,7 +12463,7 @@ function codexAppSupported() {
   }
 }
 function run(cmd, encoding = "utf8") {
-  return execSync4(cmd, { encoding, stdio: ["pipe", "pipe", "pipe"] }).trim();
+  return execSync5(cmd, { encoding, stdio: ["pipe", "pipe", "pipe"] }).trim();
 }
 function runPowerShell(script) {
   return run(`powershell.exe -NoProfile -Command ${JSON.stringify(script)}`);
@@ -11610,30 +12471,30 @@ function runPowerShell(script) {
 function darwinAppCandidates() {
   return [
     "/Applications/Codex.app",
-    join16(homedir10(), "Applications", "Codex.app")
+    join17(homedir11(), "Applications", "Codex.app")
   ];
 }
 function winLocalAppData() {
-  return process.env.LOCALAPPDATA ?? join16(homedir10(), "AppData", "Local");
+  return process.env.LOCALAPPDATA ?? join17(homedir11(), "AppData", "Local");
 }
 function winCodexExeCandidates() {
   const local = winLocalAppData();
   const bases = [
-    join16(local, "Programs", "Codex"),
-    join16(local, "Programs", "OpenAI Codex"),
-    join16(local, "Codex"),
-    join16(local, "OpenAI Codex"),
-    join16(local, "OpenAI", "Codex"),
-    join16(local, "openai-codex-electron")
+    join17(local, "Programs", "Codex"),
+    join17(local, "Programs", "OpenAI Codex"),
+    join17(local, "Codex"),
+    join17(local, "OpenAI Codex"),
+    join17(local, "OpenAI", "Codex"),
+    join17(local, "openai-codex-electron")
   ];
   const out = [];
   for (const base of bases) {
-    out.push(join16(base, "Codex.exe"));
+    out.push(join17(base, "Codex.exe"));
     try {
-      if (existsSync15(base)) {
+      if (existsSync16(base)) {
         for (const name of readdirSync3(base)) {
           if (name.startsWith("app-")) {
-            out.push(join16(base, name, "Codex.exe"));
+            out.push(join17(base, name, "Codex.exe"));
           }
         }
       }
@@ -11646,7 +12507,7 @@ function mdfindCodexApp() {
   try {
     const out = run(`mdfind "kMDItemCFBundleIdentifier == '${CODEX_BUNDLE_ID}'"`);
     const first = out.split("\n").map((l) => l.trim()).find(Boolean);
-    return first && existsSync15(first) ? first : null;
+    return first && existsSync16(first) ? first : null;
   } catch {
     return null;
   }
@@ -11654,14 +12515,14 @@ function mdfindCodexApp() {
 function findCodexApp() {
   if (process.platform === "darwin") {
     for (const path of darwinAppCandidates()) {
-      if (existsSync15(path)) return path;
+      if (existsSync16(path)) return path;
     }
     return mdfindCodexApp();
   }
   if (process.platform === "win32") {
     for (const path of winCodexExeCandidates()) {
       try {
-        if (existsSync15(path) && statSync4(path).isFile()) return path;
+        if (existsSync16(path) && statSync4(path).isFile()) return path;
       } catch {
       }
     }
@@ -11725,9 +12586,9 @@ async function waitForQuit(timeoutMs) {
 function openCodexAppAt(path) {
   if (process.platform === "darwin") {
     if (path.endsWith(".app")) {
-      execSync4(`open ${JSON.stringify(path)}`, { stdio: "inherit" });
+      execSync5(`open ${JSON.stringify(path)}`, { stdio: "inherit" });
     } else {
-      execSync4(`open -b ${CODEX_BUNDLE_ID}`, { stdio: "inherit" });
+      execSync5(`open -b ${CODEX_BUNDLE_ID}`, { stdio: "inherit" });
     }
     return;
   }
@@ -11750,9 +12611,9 @@ function openCodexApp() {
 }
 function darwinQuit() {
   try {
-    execSync4(`osascript -e 'tell application "Codex" to quit'`, { stdio: "pipe" });
+    execSync5(`osascript -e 'tell application "Codex" to quit'`, { stdio: "pipe" });
   } catch {
-    execSync4(`osascript -e 'tell application id "${CODEX_BUNDLE_ID}" to quit'`, { stdio: "pipe" });
+    execSync5(`osascript -e 'tell application id "${CODEX_BUNDLE_ID}" to quit'`, { stdio: "pipe" });
   }
 }
 function winQuitGraceful() {
@@ -11780,9 +12641,9 @@ async function launchOrRestartCodexApp(prompt = "Restart Codex to apply relay-ai
     openCodexAppAt(appPath);
     return;
   }
-  const restart = await p14.confirm({ message: prompt, initialValue: true });
-  if (p14.isCancel(restart) || !restart) {
-    p14.log.info("Quit and reopen Codex when you are ready for the new model to take effect.");
+  const restart = await p16.confirm({ message: prompt, initialValue: true });
+  if (p16.isCancel(restart) || !restart) {
+    p16.log.info("Quit and reopen Codex when you are ready for the new model to take effect.");
     return;
   }
   if (process.platform === "darwin") darwinQuit();
@@ -11800,9 +12661,9 @@ function codexAppInstallHint() {
 
 // src/codex-app.ts
 function codexAppHelpText() {
-  return `${pc14.bold("relay-ai codex-app")} \u2014 launch Codex desktop app with your registry providers
+  return `${pc15.bold("relay-ai codex-app")} \u2014 launch Codex desktop app with your registry providers
 
-${pc14.bold("Usage:")}
+${pc15.bold("Usage:")}
   relay-ai codex-app [options]
   relay-ai codex-app --vertex
   relay-ai codex-app --restore
@@ -11810,7 +12671,7 @@ ${pc14.bold("Usage:")}
   relay-ai codex-app --help
   relay-ai codex-app --version
 
-${pc14.bold("Options:")}
+${pc15.bold("Options:")}
   --vertex     Use Claude models through Google Vertex AI
   --restore    Restore Codex config after an interrupted app session
   --config     Preview the generated Codex app configuration without launching
@@ -11818,31 +12679,31 @@ ${pc14.bold("Options:")}
   --help       Show this command help
   --version    Show version
 
-${pc14.bold("Description:")}
+${pc15.bold("Description:")}
   Picks a provider and model from ~/.relay-ai/providers.json, patches ~/.codex/config.toml
   (with backup + restore on Ctrl+C), starts a local Responses proxy, and opens the
   Codex desktop app. Keep this terminal open while using Codex.
 
-${pc14.bold("Platforms:")}
+${pc15.bold("Platforms:")}
   macOS and Windows. Linux is not supported (no Codex desktop app).
 
-${pc14.bold("Cleanup:")}
+${pc15.bold("Cleanup:")}
   Ctrl+C stops the proxy and restores your previous Codex config.
   After crash: relay-ai codex-app --restore
 
-${pc14.bold("Preview (no writes):")}
+${pc15.bold("Preview (no writes):")}
   relay-ai codex-app --config
 
   See docs/CODEX.md for CLI vs app, files touched, and restore.
 
-${pc14.bold("Examples:")}
+${pc15.bold("Examples:")}
   relay-ai codex-app
   relay-ai codex-app --vertex
   relay-ai codex-app --config
   relay-ai codex-app --restore
   
-${pc14.bold("Favorites:")}
-  When you have saved favorites via ${pc14.cyan("relay-ai models")}, the Codex App
+${pc15.bold("Favorites:")}
+  When you have saved favorites via ${pc15.cyan("relay-ai models")}, the Codex App
   picker will show your starting model + favorites for mid-session switching.
   Zen/Go favorites are included when an OpenCode API key is available.`;
 }
@@ -11864,26 +12725,26 @@ function vertexEntryToLocalModel2(entry) {
 }
 async function runCodexAppVertexLaunch(configOnly, trace = false) {
   if (!hasApplicationDefaultCredentials()) {
-    p15.log.error("Google Application Default Credentials not found.");
-    p15.log.info("Run: gcloud auth application-default login");
+    p17.log.error("Google Application Default Credentials not found.");
+    p17.log.info("Run: gcloud auth application-default login");
     return 1;
   }
   const config = buildVertexRuntimeConfig();
   if (!config) {
-    p15.log.error("ANTHROPIC_VERTEX_PROJECT_ID (or GOOGLE_CLOUD_PROJECT) is not set.");
-    p15.log.info("Set your project: export ANTHROPIC_VERTEX_PROJECT_ID=your-project-id");
+    p17.log.error("ANTHROPIC_VERTEX_PROJECT_ID (or GOOGLE_CLOUD_PROJECT) is not set.");
+    p17.log.info("Set your project: export ANTHROPIC_VERTEX_PROJECT_ID=your-project-id");
     return 1;
   }
   let selectedEntry;
   if (config.models.length === 1) {
     selectedEntry = config.models[0];
   } else {
-    const choice = await p15.select({
+    const choice = await p17.select({
       message: "Select a starting Vertex AI model:",
       options: config.models.map((m) => ({ value: m, label: m.display_name, hint: m.id }))
     });
-    if (p15.isCancel(choice)) {
-      p15.cancel("Cancelled.");
+    if (p17.isCancel(choice)) {
+      p17.cancel("Cancelled.");
       return 0;
     }
     selectedEntry = choice;
@@ -11905,19 +12766,19 @@ async function runCodexAppVertexLaunch(configOnly, trace = false) {
     const home = process.env["HOME"] ?? "";
     const shortenPath = (fp) => home ? fp.replace(home, "~") : fp;
     console.log("");
-    console.log(pc14.bold(pc14.cyan("  CONFIG PREVIEW \u2014 relay-ai codex-app --vertex")));
+    console.log(pc15.bold(pc15.cyan("  CONFIG PREVIEW \u2014 relay-ai codex-app --vertex")));
     console.log("");
-    console.log(`  ${pc14.bold("Mode:")}     Vertex AI`);
-    console.log(`  ${pc14.bold("Project:")} ${config.project}`);
-    console.log(`  ${pc14.bold("Location:")} ${config.location}`);
-    console.log(`  ${pc14.bold("Model:")}    ${selectedEntry.display_name}`);
-    console.log(`  ${pc14.bold("Catalog:")} ${vertexModels.length} model${vertexModels.length !== 1 ? "s" : ""} available`);
+    console.log(`  ${pc15.bold("Mode:")}     Vertex AI`);
+    console.log(`  ${pc15.bold("Project:")} ${config.project}`);
+    console.log(`  ${pc15.bold("Location:")} ${config.location}`);
+    console.log(`  ${pc15.bold("Model:")}    ${selectedEntry.display_name}`);
+    console.log(`  ${pc15.bold("Catalog:")} ${vertexModels.length} model${vertexModels.length !== 1 ? "s" : ""} available`);
     console.log("");
-    console.log(`  ${pc14.bold("Catalog file:")}`);
-    console.log(`    ${pc14.dim(shortenPath(catalogPath))}`);
+    console.log(`  ${pc15.bold("Catalog file:")}`);
+    console.log(`    ${pc15.dim(shortenPath(catalogPath))}`);
     console.log("");
-    console.log(pc14.dim("  No app was launched."));
-    console.log(pc14.dim("  Run ") + pc14.cyan("relay-ai codex-app --vertex") + pc14.dim(" to launch."));
+    console.log(pc15.dim("  No app was launched."));
+    console.log(pc15.dim("  Run ") + pc15.cyan("relay-ai codex-app --vertex") + pc15.dim(" to launch."));
     console.log("");
     return 0;
   }
@@ -11956,14 +12817,14 @@ async function runCodexAppVertexLaunch(configOnly, trace = false) {
       proxyPort
     });
     sessionActive = true;
-    p15.log.info(`Vertex AI \xB7 ${selectedEntry.display_name} \u2014 project: ${config.project} / location: ${config.location}`);
+    p17.log.info(`Vertex AI \xB7 ${selectedEntry.display_name} \u2014 project: ${config.project} / location: ${config.location}`);
     logProxy(proxyPort);
     logActiveModel(selectedEntry.display_name, selectedEntry.id);
     try {
       await launchOrRestartCodexApp();
     } catch (err) {
-      p15.log.warn(String(err instanceof Error ? err.message : err));
-      p15.log.info(codexAppInstallHint());
+      p17.log.warn(String(err instanceof Error ? err.message : err));
+      p17.log.info(codexAppInstallHint());
     }
     printCodexAppSessionPanel({
       modelLabel: selectedEntry.display_name,
@@ -11979,8 +12840,8 @@ async function runCodexAppVertexLaunch(configOnly, trace = false) {
       sessionActive = false;
     }
     if (isCodexAppRunning()) {
-      const shouldClose = await p15.confirm({ message: "Codex Desktop is still running. Close it?" });
-      if (shouldClose && !p15.isCancel(shouldClose)) {
+      const shouldClose = await p17.confirm({ message: "Codex Desktop is still running. Close it?" });
+      if (shouldClose && !p17.isCancel(shouldClose)) {
         quitCodexAppGracefully();
       }
     }
@@ -12003,7 +12864,7 @@ async function runCodexAppCommand(args, opts = {}) {
   try {
     codexAppSupported();
   } catch (err) {
-    console.error(pc14.red(String(err instanceof Error ? err.message : err)));
+    console.error(pc15.red(String(err instanceof Error ? err.message : err)));
     return 1;
   }
   const interrupted = recoverInterruptedCodexAppSession();
@@ -12011,17 +12872,17 @@ async function runCodexAppCommand(args, opts = {}) {
   const trace = args.includes("--trace");
   const debugLogPath = getCodexProxyDebugLogPath();
   if (trace && !configOnly) {
-    p15.log.info(`Debug log: ${debugLogPath}`);
+    p17.log.info(`Debug log: ${debugLogPath}`);
   }
   const isTty = Boolean(process.stdin.isTTY);
   if (!configOnly) {
     const sessionCheck = checkAppSessionLock(isTty);
     if (!sessionCheck.ok) {
       if (sessionCheck.reason === "non_tty") {
-        console.error(pc14.red("relay-ai codex-app requires an interactive terminal."));
+        console.error(pc15.red("relay-ai codex-app requires an interactive terminal."));
         return 1;
       }
-      console.error(pc14.yellow(`Another relay-ai codex-app session may be running (pid ${sessionCheck.lock.pid}).`));
+      console.error(pc15.yellow(`Another relay-ai codex-app session may be running (pid ${sessionCheck.lock.pid}).`));
       console.error("Stop it with Ctrl+C in that terminal, or run relay-ai codex-app --restore after it exits.");
       return 1;
     }
@@ -12029,28 +12890,28 @@ async function runCodexAppCommand(args, opts = {}) {
   if (!configOnly) {
     codexAppIntro();
     if (interrupted.recovered) {
-      p15.log.warn("Recovered from an interrupted codex-app session (restored Codex config).");
+      p17.log.warn("Recovered from an interrupted codex-app session (restored Codex config).");
     }
   }
   if (opts.vertex) {
     return runCodexAppVertexLaunch(configOnly, trace);
   }
-  const catalogSpinner = p15.spinner();
+  const catalogSpinner = p17.spinner();
   catalogSpinner.start("Loading your providers...");
   let catalog;
   try {
     catalog = await fetchProviderCatalog({ agent: "codex-app" });
   } catch (err) {
     catalogSpinner.stop("");
-    console.error(pc14.red(String(err instanceof Error ? err.message : err)));
+    console.error(pc15.red(String(err instanceof Error ? err.message : err)));
     return 1;
   }
   catalogSpinner.stop("");
   const compatible = codexCompatibleProviders(providersForPicker(catalog), "codex-app");
   if (compatible.length === 0) {
     if (!configOnly) {
-      p15.log.warn("No Codex-compatible providers in your registry.");
-      p15.log.info("Add a provider with relay-ai providers add.");
+      p17.log.warn("No Codex-compatible providers in your registry.");
+      p17.log.info("Add a provider with relay-ai providers add.");
     }
     return 0;
   }
@@ -12058,10 +12919,10 @@ async function runCodexAppCommand(args, opts = {}) {
   const favorites = prefs.favoriteModels ?? [];
   const favoritesActive = favorites.length > 0;
   if (favoritesActive && !configOnly) {
-    p15.log.info(
+    p17.log.info(
       `Favorites mode active \u2014 Codex App picker will show ${favorites.length + 1} models (1 starting + ${favorites.length} favorites).`
     );
-    p15.log.info("Edit with `relay-ai models`.");
+    p17.log.info("Edit with `relay-ai models`.");
   }
   let activeProvider = providerForCodexPicker(
     compatible.find((lp) => lp.id === prefs.lastCodexProvider) ?? compatible[0]
@@ -12076,12 +12937,12 @@ async function runCodexAppCommand(args, opts = {}) {
         const favoriteProviders = compatible.map(providerForCodexPicker);
         const favoriteStart = resolveFirstAvailableFavorite(favorites, favoriteProviders);
         if (!favoriteStart) {
-          p15.log.warn("No saved Codex App favorites are currently available.");
+          p17.log.warn("No saved Codex App favorites are currently available.");
           return 0;
         }
         activeProvider = favoriteStart.provider;
         selectedModel = favoriteStart.model;
-        p15.log.step(`Loaded Favorites Catalog. Starting model: ${selectedModel.name || selectedModel.id} (${activeProvider.name})`);
+        p17.log.step(`Loaded Favorites Catalog. Starting model: ${selectedModel.name || selectedModel.id} (${activeProvider.name})`);
         break;
       } else {
         activeProvider = providerForCodexPicker(pickedProvider);
@@ -12101,7 +12962,7 @@ async function runCodexAppCommand(args, opts = {}) {
   const apiKey = activeProvider.apiKey?.trim() || await resolveProviderCredential(activeProvider.id, authRef);
   if (!apiKey) {
     if (!configOnly) {
-      p15.log.error(`No credential for ${activeProvider.name}. Run relay-ai providers auth ${activeProvider.id}.`);
+      p17.log.error(`No credential for ${activeProvider.name}. Run relay-ai providers auth ${activeProvider.id}.`);
     }
     return 1;
   }
@@ -12161,36 +13022,36 @@ async function runCodexAppCommand(args, opts = {}) {
       const home = process.env["HOME"] ?? "";
       const shortenPath = (fp) => home ? fp.replace(home, "~") : fp;
       console.log("");
-      console.log(pc14.bold(pc14.cyan("  CONFIG PREVIEW \u2014 relay-ai codex-app")));
+      console.log(pc15.bold(pc15.cyan("  CONFIG PREVIEW \u2014 relay-ai codex-app")));
       console.log("");
       if (favoritesActive) {
-        console.log(`  ${pc14.bold("Mode:")}     Favorites Catalog (${resolvedFavorites.length} model${resolvedFavorites.length !== 1 ? "s" : ""})`);
+        console.log(`  ${pc15.bold("Mode:")}     Favorites Catalog (${resolvedFavorites.length} model${resolvedFavorites.length !== 1 ? "s" : ""})`);
         console.log("");
-        console.log(`  ${pc14.bold("Models:")}`);
+        console.log(`  ${pc15.bold("Models:")}`);
         for (const r of resolvedFavorites) {
-          console.log(`    ${pc14.cyan(r.model.id)}  ${pc14.dim(`(${r.providerName})`)}`);
+          console.log(`    ${pc15.cyan(r.model.id)}  ${pc15.dim(`(${r.providerName})`)}`);
         }
       } else {
-        console.log(`  ${pc14.bold("Mode:")}     Single model`);
-        console.log(`  ${pc14.bold("Provider:")} ${activeProvider.name}`);
-        console.log(`  ${pc14.bold("Model:")}    ${formatCodexModelLabel(selectedModel)}`);
-        console.log(`  ${pc14.bold("Catalog:")}  ${routable.length} model${routable.length !== 1 ? "s" : ""} available`);
+        console.log(`  ${pc15.bold("Mode:")}     Single model`);
+        console.log(`  ${pc15.bold("Provider:")} ${activeProvider.name}`);
+        console.log(`  ${pc15.bold("Model:")}    ${formatCodexModelLabel(selectedModel)}`);
+        console.log(`  ${pc15.bold("Catalog:")}  ${routable.length} model${routable.length !== 1 ? "s" : ""} available`);
       }
       console.log("");
-      console.log(`  ${pc14.bold("config.toml patch preview:")}`);
+      console.log(`  ${pc15.bold("config.toml patch preview:")}`);
       const tomlPreview = previewAppConfigToml({
         ...specBase,
         proxyPort: PREVIEW_PROXY_PORT
       });
       for (const line of tomlPreview.split("\n")) {
-        console.log(`    ${pc14.dim(line)}`);
+        console.log(`    ${pc15.dim(line)}`);
       }
       console.log("");
-      console.log(`  ${pc14.bold("Catalog file:")}`);
-      console.log(`    ${pc14.dim(shortenPath(catalogPath))}`);
+      console.log(`  ${pc15.bold("Catalog file:")}`);
+      console.log(`    ${pc15.dim(shortenPath(catalogPath))}`);
       console.log("");
-      console.log(pc14.dim("  No app was launched."));
-      console.log(pc14.dim("  Run ") + pc14.cyan("relay-ai codex-app") + pc14.dim(" to launch."));
+      console.log(pc15.dim("  No app was launched."));
+      console.log(pc15.dim("  Run ") + pc15.cyan("relay-ai codex-app") + pc15.dim(" to launch."));
       console.log("");
       return 0;
     }
@@ -12234,8 +13095,8 @@ async function runCodexAppCommand(args, opts = {}) {
     try {
       await launchOrRestartCodexApp();
     } catch (err) {
-      p15.log.warn(String(err instanceof Error ? err.message : err));
-      p15.log.info(codexAppInstallHint());
+      p17.log.warn(String(err instanceof Error ? err.message : err));
+      p17.log.info(codexAppInstallHint());
     }
     printCodexAppSessionPanel({
       modelLabel,
@@ -12252,8 +13113,8 @@ async function runCodexAppCommand(args, opts = {}) {
       sessionActive = false;
     }
     if (isCodexAppRunning()) {
-      const shouldClose = await p15.confirm({ message: "Codex Desktop is still running. Close it?" });
-      if (shouldClose && !p15.isCancel(shouldClose)) {
+      const shouldClose = await p17.confirm({ message: "Codex Desktop is still running. Close it?" });
+      if (shouldClose && !p17.isCancel(shouldClose)) {
         quitCodexAppGracefully();
       }
     }
@@ -12265,29 +13126,29 @@ async function runCodexAppCommand(args, opts = {}) {
 }
 
 // src/claude-app.ts
-import pc15 from "picocolors";
-import * as p17 from "@clack/prompts";
+import pc16 from "picocolors";
+import * as p19 from "@clack/prompts";
 
 // src/claude-desktop/app-config.ts
-import { existsSync as existsSync16, readFileSync as readFileSync13, writeFileSync as writeFileSync7, mkdirSync as mkdirSync9 } from "fs";
-import { homedir as homedir11 } from "os";
-import { join as join17, dirname as dirname7 } from "path";
-import { randomUUID as randomUUID2 } from "crypto";
+import { existsSync as existsSync17, readFileSync as readFileSync13, writeFileSync as writeFileSync7, mkdirSync as mkdirSync9 } from "fs";
+import { homedir as homedir12 } from "os";
+import { join as join18, dirname as dirname7 } from "path";
+import { randomUUID as randomUUID3 } from "crypto";
 function getClaudeDesktopHome() {
   if (process.platform === "win32") {
-    return join17(process.env.APPDATA || join17(homedir11(), "AppData", "Roaming"), "Claude-3p");
+    return join18(process.env.APPDATA || join18(homedir12(), "AppData", "Roaming"), "Claude-3p");
   }
-  return join17(homedir11(), "Library", "Application Support", "Claude-3p");
+  return join18(homedir12(), "Library", "Application Support", "Claude-3p");
 }
 function getConfigLibraryPath() {
-  return join17(getClaudeDesktopHome(), "configLibrary");
+  return join18(getClaudeDesktopHome(), "configLibrary");
 }
 function getMetaJsonPath() {
-  return join17(getConfigLibraryPath(), "_meta.json");
+  return join18(getConfigLibraryPath(), "_meta.json");
 }
 function readMetaJson() {
   const metaPath = getMetaJsonPath();
-  if (!existsSync16(metaPath)) return null;
+  if (!existsSync17(metaPath)) return null;
   try {
     return JSON.parse(readFileSync13(metaPath, "utf8"));
   } catch {
@@ -12310,8 +13171,8 @@ function buildRelayAiConfig(proxyPort) {
   };
 }
 function writeRelayAiConfig(proxyPort) {
-  const uuid = randomUUID2();
-  const configPath = join17(getConfigLibraryPath(), `${uuid}.json`);
+  const uuid = randomUUID3();
+  const configPath = join18(getConfigLibraryPath(), `${uuid}.json`);
   const config = buildRelayAiConfig(proxyPort);
   mkdirSync9(dirname7(configPath), { recursive: true });
   writeFileSync7(configPath, `${JSON.stringify(config, null, 2)}
@@ -12326,14 +13187,14 @@ function writeRelayAiConfig(proxyPort) {
 }
 
 // src/claude-desktop/app-session.ts
-import { existsSync as existsSync17, readFileSync as readFileSync14, rmSync as rmSync4, writeFileSync as writeFileSync8, copyFileSync as copyFileSync5, unlinkSync as unlinkSync3 } from "fs";
-import { join as join18 } from "path";
+import { existsSync as existsSync18, readFileSync as readFileSync14, rmSync as rmSync4, writeFileSync as writeFileSync8, copyFileSync as copyFileSync5, unlinkSync as unlinkSync3 } from "fs";
+import { join as join19 } from "path";
 function getSessionLockPath2() {
-  return join18(getClaudeDesktopHome(), ".relay-ai.lock");
+  return join19(getClaudeDesktopHome(), ".relay-ai.lock");
 }
 function readSessionLock2() {
   const path = getSessionLockPath2();
-  if (!existsSync17(path)) return null;
+  if (!existsSync18(path)) return null;
   try {
     const parsed = JSON.parse(readFileSync14(path, "utf8"));
     if (typeof parsed.pid === "number" && typeof parsed.startedAt === "string") return parsed;
@@ -12358,21 +13219,21 @@ function isProcessAlive3(pid) {
 function backupMetaJson() {
   const metaPath = getMetaJsonPath();
   const backupPath = `${metaPath}.bak`;
-  if (existsSync17(metaPath)) {
+  if (existsSync18(metaPath)) {
     copyFileSync5(metaPath, backupPath);
   }
 }
 function restoreMetaJson() {
   const metaPath = getMetaJsonPath();
   const backupPath = `${metaPath}.bak`;
-  if (existsSync17(backupPath)) {
+  if (existsSync18(backupPath)) {
     copyFileSync5(backupPath, metaPath);
     unlinkSync3(backupPath);
   }
 }
 function removeRelayAiConfig(uuid) {
-  const configPath = join18(getConfigLibraryPath(), `${uuid}.json`);
-  if (existsSync17(configPath)) {
+  const configPath = join19(getConfigLibraryPath(), `${uuid}.json`);
+  if (existsSync18(configPath)) {
     try {
       rmSync4(configPath, { force: true });
     } catch {
@@ -12436,11 +13297,11 @@ function setupExitCleanup(uuid) {
 }
 
 // src/claude-desktop/app-launch.ts
-import { execSync as execSync5 } from "child_process";
-import { existsSync as existsSync18, readdirSync as readdirSync4, statSync as statSync5 } from "fs";
-import { homedir as homedir12 } from "os";
-import { join as join19 } from "path";
-import * as p16 from "@clack/prompts";
+import { execSync as execSync6 } from "child_process";
+import { existsSync as existsSync19, readdirSync as readdirSync4, statSync as statSync5 } from "fs";
+import { homedir as homedir13 } from "os";
+import { join as join20 } from "path";
+import * as p18 from "@clack/prompts";
 var CLAUDE_BUNDLE_ID = "com.anthropic.claudefordesktop";
 function claudeAppSupported() {
   if (process.platform !== "darwin" && process.platform !== "win32") {
@@ -12448,7 +13309,7 @@ function claudeAppSupported() {
   }
 }
 function run2(cmd, encoding = "utf8") {
-  return execSync5(cmd, { encoding, stdio: ["pipe", "pipe", "pipe"] }).trim();
+  return execSync6(cmd, { encoding, stdio: ["pipe", "pipe", "pipe"] }).trim();
 }
 function runPowerShell2(script) {
   return run2(`powershell.exe -NoProfile -Command ${JSON.stringify(script)}`);
@@ -12456,26 +13317,26 @@ function runPowerShell2(script) {
 function darwinAppCandidates2() {
   return [
     "/Applications/Claude.app",
-    join19(homedir12(), "Applications", "Claude.app")
+    join20(homedir13(), "Applications", "Claude.app")
   ];
 }
 function winLocalAppData2() {
-  return process.env.LOCALAPPDATA ?? join19(homedir12(), "AppData", "Local");
+  return process.env.LOCALAPPDATA ?? join20(homedir13(), "AppData", "Local");
 }
 function winClaudeExeCandidates() {
   const local = winLocalAppData2();
   const bases = [
-    join19(local, "Programs", "Claude"),
-    join19(local, "Claude")
+    join20(local, "Programs", "Claude"),
+    join20(local, "Claude")
   ];
   const out = [];
   for (const base of bases) {
-    out.push(join19(base, "Claude.exe"));
+    out.push(join20(base, "Claude.exe"));
     try {
-      if (existsSync18(base)) {
+      if (existsSync19(base)) {
         for (const name of readdirSync4(base)) {
           if (name.startsWith("app-")) {
-            out.push(join19(base, name, "Claude.exe"));
+            out.push(join20(base, name, "Claude.exe"));
           }
         }
       }
@@ -12488,7 +13349,7 @@ function mdfindClaudeApp() {
   try {
     const out = run2(`mdfind "kMDItemCFBundleIdentifier == '${CLAUDE_BUNDLE_ID}'"`);
     const first = out.split("\n").map((l) => l.trim()).find(Boolean);
-    return first && existsSync18(first) ? first : null;
+    return first && existsSync19(first) ? first : null;
   } catch {
     return null;
   }
@@ -12496,14 +13357,14 @@ function mdfindClaudeApp() {
 function findClaudeApp() {
   if (process.platform === "darwin") {
     for (const path of darwinAppCandidates2()) {
-      if (existsSync18(path)) return path;
+      if (existsSync19(path)) return path;
     }
     return mdfindClaudeApp();
   }
   if (process.platform === "win32") {
     for (const path of winClaudeExeCandidates()) {
       try {
-        if (existsSync18(path) && statSync5(path).isFile()) return path;
+        if (existsSync19(path) && statSync5(path).isFile()) return path;
       } catch {
       }
     }
@@ -12567,9 +13428,9 @@ async function waitForQuit2(timeoutMs) {
 function openClaudeAppAt(path) {
   if (process.platform === "darwin") {
     if (path.endsWith(".app")) {
-      execSync5(`open ${JSON.stringify(path)}`, { stdio: "inherit" });
+      execSync6(`open ${JSON.stringify(path)}`, { stdio: "inherit" });
     } else {
-      execSync5(`open -b ${CLAUDE_BUNDLE_ID}`, { stdio: "inherit" });
+      execSync6(`open -b ${CLAUDE_BUNDLE_ID}`, { stdio: "inherit" });
     }
     return;
   }
@@ -12592,9 +13453,9 @@ function openClaudeApp() {
 }
 function darwinQuit2() {
   try {
-    execSync5(`osascript -e 'tell application "Claude" to quit'`, { stdio: "pipe" });
+    execSync6(`osascript -e 'tell application "Claude" to quit'`, { stdio: "pipe" });
   } catch {
-    execSync5(`osascript -e 'tell application id "${CLAUDE_BUNDLE_ID}" to quit'`, { stdio: "pipe" });
+    execSync6(`osascript -e 'tell application id "${CLAUDE_BUNDLE_ID}" to quit'`, { stdio: "pipe" });
   }
 }
 function winQuitGraceful2() {
@@ -12620,9 +13481,9 @@ async function launchOrRestartClaudeApp(prompt = "Restart Claude Desktop to appl
     openClaudeAppAt(appPath);
     return;
   }
-  const restart = await p16.confirm({ message: prompt, initialValue: true });
-  if (p16.isCancel(restart) || !restart) {
-    p16.log.info("Quit and reopen Claude Desktop when you are ready for the new model to take effect.");
+  const restart = await p18.confirm({ message: prompt, initialValue: true });
+  if (p18.isCancel(restart) || !restart) {
+    p18.log.info("Quit and reopen Claude Desktop when you are ready for the new model to take effect.");
     return;
   }
   if (process.platform === "darwin") darwinQuit2();
@@ -12637,30 +13498,30 @@ async function launchOrRestartClaudeApp(prompt = "Restart Claude Desktop to appl
 
 // src/claude-app.ts
 function claudeAppHelpText() {
-  return `${pc15.bold("relay-ai claude-app")} \u2014 launch Claude Desktop app in 3P mode with your registry providers
+  return `${pc16.bold("relay-ai claude-app")} \u2014 launch Claude Desktop app in 3P mode with your registry providers
 
-${pc15.bold("Usage:")}
+${pc16.bold("Usage:")}
   relay-ai claude-app [options]
   relay-ai claude-app --trace
   relay-ai claude-app --restore
   relay-ai claude-app --help
   relay-ai claude-app --version
 
-${pc15.bold("Options:")}
+${pc16.bold("Options:")}
   --trace      Write proxy debug logs to ~/.relay-ai/logs/
   --restore    Restore Claude Desktop config after an interrupted app session
   --help       Show this command help
   --version    Show version
 
-${pc15.bold("Description:")}
+${pc16.bold("Description:")}
   Picks a provider and model from ~/.relay-ai/providers.json, patches Claude Desktop config
   (with backup + restore on Ctrl+C), starts a local Responses proxy, and opens
   the Claude Desktop app. Keep this terminal open while using Claude.
 
-${pc15.bold("Platforms:")}
+${pc16.bold("Platforms:")}
   macOS and Windows. Linux is not supported.
 
-${pc15.bold("Cleanup:")}
+${pc16.bold("Cleanup:")}
   Ctrl+C stops the proxy and restores your previous Claude config.
   After a crash: relay-ai claude-app --restore
 `;
@@ -12684,37 +13545,37 @@ async function runClaudeAppCommand(args) {
   try {
     claudeAppSupported();
   } catch (err) {
-    console.error(pc15.red(String(err instanceof Error ? err.message : err)));
+    console.error(pc16.red(String(err instanceof Error ? err.message : err)));
     return 1;
   }
   const isTty = Boolean(process.stdin.isTTY);
   if (!isTty) {
-    console.error(pc15.red("relay-ai claude-app requires an interactive terminal."));
+    console.error(pc16.red("relay-ai claude-app requires an interactive terminal."));
     return 1;
   }
   if (isConcurrentLiveSession()) {
-    console.error(pc15.yellow(`Another relay-ai claude-app session may be running.`));
+    console.error(pc16.yellow(`Another relay-ai claude-app session may be running.`));
     console.error("Stop it with Ctrl+C in that terminal.");
     return 1;
   }
   if (hasStaleSession()) {
-    p17.log.warn("Recovered from an interrupted claude-app session.");
+    p19.log.warn("Recovered from an interrupted claude-app session.");
     recoverSession();
   }
-  const catalogSpinner = p17.spinner();
+  const catalogSpinner = p19.spinner();
   catalogSpinner.start("Loading your providers...");
   let catalog;
   try {
     catalog = await fetchProviderCatalog({ agent: "codex-app" });
   } catch (err) {
     catalogSpinner.stop("");
-    console.error(pc15.red(String(err instanceof Error ? err.message : err)));
+    console.error(pc16.red(String(err instanceof Error ? err.message : err)));
     return 1;
   }
   catalogSpinner.stop("");
   const compatible = codexCompatibleProviders(providersForPicker(catalog), "codex-app");
   if (compatible.length === 0) {
-    p17.log.warn("No compatible providers in your registry.");
+    p19.log.warn("No compatible providers in your registry.");
     return 0;
   }
   const prefs = loadPreferences();
@@ -12736,7 +13597,7 @@ async function runClaudeAppCommand(args) {
     const authRef = regEntry?.authRef ?? (activeProvider.apiKey ? `keyring:provider:${activeProvider.id}` : oauthAuthRef(activeProvider.id));
     const apiKey = activeProvider.apiKey?.trim() || await resolveProviderCredential(activeProvider.id, authRef);
     if (!apiKey) {
-      p17.log.error(`No credential for ${activeProvider.name}. Run relay-ai providers auth ${activeProvider.id}.`);
+      p19.log.error(`No credential for ${activeProvider.name}. Run relay-ai providers auth ${activeProvider.id}.`);
       return 1;
     }
     activeProvider.apiKey = apiKey;
@@ -12799,28 +13660,28 @@ async function runClaudeAppCommand(args) {
       });
     }
     console.log(`
-${pc15.green("\u2714")} Proxy started on port ${proxyHandle.port}`);
+${pc16.green("\u2714")} Proxy started on port ${proxyHandle.port}`);
     try {
       await launchOrRestartClaudeApp();
     } catch (err) {
-      p17.log.warn(String(err instanceof Error ? err.message : err));
+      p19.log.warn(String(err instanceof Error ? err.message : err));
     }
     console.log(`
-${pc15.bold("Claude Desktop 3P Mode Active")}`);
+${pc16.bold("Claude Desktop 3P Mode Active")}`);
     if (useFavorites) {
-      console.log(`${pc15.dim("Catalog:")}  Favorite models only`);
+      console.log(`${pc16.dim("Catalog:")}  Favorite models only`);
     } else {
-      console.log(`${pc15.dim("Model:")}    ${selectedModel.id}`);
-      console.log(`${pc15.dim("Provider:")} ${activeProvider.name}`);
+      console.log(`${pc16.dim("Model:")}    ${selectedModel.id}`);
+      console.log(`${pc16.dim("Provider:")} ${activeProvider.name}`);
     }
-    console.log(`${pc15.cyan("Press Ctrl+C to stop and restore config.")}`);
+    console.log(`${pc16.cyan("Press Ctrl+C to stop and restore config.")}`);
     await waitForShutdown3();
     console.log("");
     cleanupSession(uuid);
     sessionActive = false;
     if (isClaudeAppRunning()) {
-      const shouldClose = await p17.confirm({ message: "Claude Desktop is still running. Close it?" });
-      if (shouldClose && !p17.isCancel(shouldClose)) {
+      const shouldClose = await p19.confirm({ message: "Claude Desktop is still running. Close it?" });
+      if (shouldClose && !p19.isCancel(shouldClose)) {
         quitClaudeAppGracefully();
       }
     }
@@ -12835,17 +13696,17 @@ ${pc15.bold("Claude Desktop 3P Mode Active")}`);
 }
 
 // src/ai-doc.ts
-import { existsSync as existsSync19, mkdirSync as mkdirSync10, readFileSync as readFileSync15, writeFileSync as writeFileSync9 } from "fs";
-import { homedir as homedir13 } from "os";
-import { join as join20 } from "path";
+import { existsSync as existsSync20, mkdirSync as mkdirSync10, readFileSync as readFileSync15, writeFileSync as writeFileSync9 } from "fs";
+import { homedir as homedir14 } from "os";
+import { join as join21 } from "path";
 var SKILL_DIR_NAME = "relay-ai-cli";
 var SKILL_INSTALL_DIRS = [
-  join20(getAppHome(), "skills"),
-  join20(homedir13(), ".claude", "skills"),
-  join20(homedir13(), ".agents", "skills"),
-  join20(homedir13(), ".codex", "skills"),
-  join20(homedir13(), ".cursor", "skills"),
-  join20(homedir13(), ".cursor", "skills-cursor")
+  join21(getAppHome(), "skills"),
+  join21(homedir14(), ".claude", "skills"),
+  join21(homedir14(), ".agents", "skills"),
+  join21(homedir14(), ".codex", "skills"),
+  join21(homedir14(), ".cursor", "skills"),
+  join21(homedir14(), ".cursor", "skills-cursor")
 ];
 function parseSkillVersion(content) {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
@@ -12859,8 +13720,8 @@ function parseSkillVersion(content) {
   return null;
 }
 function readInstalledSkillVersion(skillDir) {
-  const skillPath = join20(skillDir, "SKILL.md");
-  if (!existsSync19(skillPath)) return null;
+  const skillPath = join21(skillDir, "SKILL.md");
+  if (!existsSync20(skillPath)) return null;
   try {
     const head = readFileSync15(skillPath, "utf-8").slice(0, 1024);
     return parseSkillVersion(head.includes("---", 4) ? head : `${head}
@@ -12872,8 +13733,8 @@ function readInstalledSkillVersion(skillDir) {
 }
 function skillInstallTargets() {
   return SKILL_INSTALL_DIRS.map((dir) => {
-    const skillDir = join20(dir, SKILL_DIR_NAME);
-    return { skillDir, skillPath: join20(skillDir, "SKILL.md") };
+    const skillDir = join21(dir, SKILL_DIR_NAME);
+    return { skillDir, skillPath: join21(skillDir, "SKILL.md") };
   });
 }
 function formatProviderModels(provider) {
@@ -12886,7 +13747,7 @@ function formatProviderModels(provider) {
 function buildLiveStateSection() {
   const prefs = loadPreferences();
   const registry = loadRegistry();
-  const enabled = registry.providers.filter((p19) => p19.enabled);
+  const enabled = registry.providers.filter((p21) => p21.enabled);
   const prefLines = [];
   if (prefs.lastProvider || prefs.lastModel) {
     prefLines.push(`  Claude last launch: provider=${prefs.lastProvider ?? "(none)"} model=${prefs.lastModel ?? "(none)"}`);
@@ -12894,15 +13755,18 @@ function buildLiveStateSection() {
   if (prefs.lastCodexProvider || prefs.lastCodexModel) {
     prefLines.push(`  Codex last launch:  provider=${prefs.lastCodexProvider ?? "(none)"} model=${prefs.lastCodexModel ?? "(none)"}`);
   }
+  if (prefs.lastGeminiProvider || prefs.lastGeminiModel) {
+    prefLines.push(`  Gemini last launch: provider=${prefs.lastGeminiProvider ?? "(none)"} model=${prefs.lastGeminiModel ?? "(none)"}`);
+  }
   if (prefs.favoriteModels?.length) {
     prefLines.push(`  Favorites (${prefs.favoriteModels.length}/${MAX_MODEL_CATALOG}):`);
     for (const f of prefs.favoriteModels) {
       prefLines.push(`    ${f.providerId} / ${f.modelId}`);
     }
   }
-  const providerBlocks = enabled.length === 0 ? ["  No registry providers configured. Built-in cloud: zen, go (OpenCode Zen/Go)."] : enabled.map((p19) => [
-    `  ${p19.name} (${p19.id}) \u2014 ${p19.modelsCache?.models.length ?? 0} cached model(s)`,
-    formatProviderModels(p19)
+  const providerBlocks = enabled.length === 0 ? ["  No registry providers configured. Built-in cloud: zen, go (OpenCode Zen/Go)."] : enabled.map((p21) => [
+    `  ${p21.name} (${p21.id}) \u2014 ${p21.modelsCache?.models.length ?? 0} cached model(s)`,
+    formatProviderModels(p21)
   ].join("\n"));
   return `
 ================================================================================
@@ -12938,8 +13802,8 @@ function staticAiDocBody() {
 RELAY-AI \u2014 AI AGENT REFERENCE (v${VERSION})
 ================================================================================
 
-relay-ai launches Claude Code, OpenAI Codex, and desktop apps against YOUR
-provider registry (Groq, Mistral, OpenAI, Zen/Go, Ollama, custom endpoints, \u2026).
+relay-ai launches Claude Code, OpenAI Codex, Google Gemini CLI, and desktop apps
+against YOUR provider registry (Groq, Mistral, OpenAI, Zen/Go, Ollama, custom endpoints, \u2026).
 It handles API translation, local proxies, env isolation, and model routing.
 
 SKILL VERSIONING
@@ -12991,13 +13855,14 @@ PREVIEW LAUNCH WITHOUT STARTING A SESSION:
 INTERACTIVE BROWSE (requires TTY \u2014 avoid in agent scripts):
   relay-ai claude          provider + model wizard
   relay-ai codex           provider + model wizard
+  relay-ai gemini          provider + model wizard
   relay-ai providers       provider management hub
 
 ================================================================================
 AGENT PLATFORM PATTERNS \u2014 MULTI-MODEL / ONE-SHOT QUERIES
 ================================================================================
 
-relay-ai is designed so agents can use Claude Code or Codex as a PLATFORM:
+relay-ai is designed so agents can use Claude Code, Codex, or Gemini CLI as a PLATFORM:
 run many models sequentially or in parallel shell jobs, each with a focused
 prompt, without interactive wizards.
 
@@ -13045,6 +13910,24 @@ OPENAI CODEX \u2014 NON-INTERACTIVE (exec / positional prompt)
     --provider <id>
     --model <id>        or provider__model-id slug
 
+GOOGLE GEMINI CLI \u2014 NON-INTERACTIVE (-p / --prompt)
+  Skips the provider/model wizard when:
+    \u2022 Both --provider and --model are set, OR
+    \u2022 Non-interactive args (-p / --prompt, -i / --prompt-interactive, or positional query)
+      and saved preferences exist
+
+  Examples:
+    relay-ai gemini --provider google --model gemini-2.5-flash -p "Review this file"
+    relay-ai gemini -p "What is the capital of France?"
+
+  Machine-readable stdout:
+    relay-ai gemini --provider google --model gemini-2.5-flash -p "task" -o json
+    relay-ai gemini --provider google --model gemini-2.5-flash -p "task" -o stream-json
+
+  Boot flags (relay-ai \u2014 NOT passed to Gemini):
+    --provider <id>
+    --model <id>        or provider__model-id slug
+
 MULTI-MODEL LOOP (shell pattern):
   for model in llama-3.3-70b-versatile mixtral-8x7b-32768; do
     relay-ai claude --provider groq --model "$model" -p "Same prompt for all models"
@@ -13054,10 +13937,14 @@ MULTI-MODEL LOOP (shell pattern):
     relay-ai codex --provider zen --model "$model" exec "Same task"
   done
 
+  for model in gemini-2.5-flash gemini-2.5-pro; do
+    relay-ai gemini --provider google --model "$model" -p "Same task"
+  done
+
 FAVORITES / MID-SESSION SWITCHING:
   relay-ai models              interactive favorites manager (max ${MAX_MODEL_CATALOG})
-  When favorites exist, interactive claude/codex launches expose /model switching.
-  Boot flags (--provider + --model) or print/exec mode use SINGLE-MODEL launch
+  When favorites exist, interactive claude/codex/gemini launches expose /model switching.
+  Boot flags (--provider + --model) or print/exec/-p mode use SINGLE-MODEL launch
   (favorites catalog is skipped \u2014 better for agent one-shots).
 
 ================================================================================
@@ -13092,6 +13979,18 @@ CLAUDE CODE
     relay-ai claude --provider anthropic --model claude-sonnet-4-6 -p "review file.ts"
     relay-ai claude --dry-run --provider groq --model llama-3.3-70b-versatile
 
+GOOGLE GEMINI CLI
+  relay-ai gemini [relay-options] [gemini-flags]
+
+  Relay options:
+    --provider <id>    Boot provider (skip wizard with --model)
+    --model <id>       Boot model id or provider__model slug
+    --trace            Debug logs in ~/.relay-ai/logs/
+
+  Examples:
+    relay-ai gemini
+    relay-ai gemini --provider google --model gemini-2.5-flash -p "What is the capital of France?"
+
 OPENAI CODEX CLI
   relay-ai codex [relay-options] [codex-flags]
 
@@ -13125,7 +14024,7 @@ PROVIDERS REGISTRY
 
 MODELS / FAVORITES
   relay-ai models                 manage favoriteModels in config (alias: favorites)
-  Used for mid-session /model switching in interactive Claude/Codex sessions.
+  Used for mid-session /model switching in interactive Claude/Codex/Gemini sessions.
 
 API GATEWAY (for tools that speak Anthropic/OpenAI HTTP)
   relay-ai server                 foreground gateway on port 17645
@@ -13161,10 +14060,10 @@ DO:
 
 DO NOT:
   \u2022 Rely on interactive wizards in CI, scripts, or headless agent loops
-  \u2022 Pass --provider / --model to Claude or Codex directly \u2014 relay-ai consumes them
+  \u2022 Pass --provider / --model to Claude, Codex, or Gemini directly \u2014 relay-ai consumes them
   \u2022 Use Codex -p expecting print mode (it means --profile in Codex)
-  \u2022 Assume favorites catalog in print/exec mode \u2014 use explicit boot flags
-  \u2022 Mutate ~/.claude/settings.json or ~/.codex/config.toml \u2014 relay-ai uses env +
+  \u2022 Assume favorites catalog in print/exec/-p mode \u2014 use explicit boot flags
+  \u2022 Mutate settings files (e.g. ~/.claude/settings.json, ~/.codex/config.toml, ~/.gemini/config/config.json) \u2014 relay-ai uses env +
     temporary overlay profiles only
 
 NON-TTY:
@@ -13178,6 +14077,7 @@ TROUBLESHOOTING
   relay-ai codex --restore         clean stale overlay after crash
   relay-ai claude --trace          proxy + Claude debug logs
   relay-ai codex --trace           proxy debug log on exit
+  relay-ai gemini --trace          proxy debug log on exit
   relay-ai providers list          verify provider ids
   relay-ai providers refresh-models  repopulate model cache
 
@@ -13196,7 +14096,7 @@ Human-readable guide: docs/AI-AGENTS.md in the relay-ai repo.
 ALEF AGENT INTEGRATION
 ================================================================================
 
-alef-agent shells out to relay-ai to run Claude Code or Codex against any
+alef-agent shells out to relay-ai to run Claude Code, Codex, or Gemini CLI against any
 provider in ~/.relay-ai/providers.json. relay-ai is a launcher + proxy; the
 child CLI owns NDJSON/JSONL on stdout.
 
@@ -13253,7 +14153,8 @@ ALEF CHECKLIST
   \u25A1 Always pass --provider + --model (or provider__model slug) \u2014 never rely on wizard
   \u25A1 Claude: --output-format stream-json (or json) with -p
   \u25A1 Codex: exec --json (not bare codex exec without --json if parsing stdout)
-  \u25A1 Parse stdout only; ignore stderr for JSONL stream
+  \u25A1 Gemini: -o json (or stream-json) with -p
+  \u25A1 Parse stdout only; ignore stderr for JSONL/NDJSON stream
   \u25A1 Zen/Go: --provider zen explicitly + OPENCODE_API_KEY available
   \u25A1 Codex network: default danger-full-access \u2014 no extra -s needed for nlm/curl/npm
   \u25A1 MCP (Claude): --allowed-tools mcp__server__tool on claude args after relay-ai flags
@@ -13498,6 +14399,32 @@ function parseArgs(args) {
     }
     return parsed2;
   }
+  if (first === "gemini") {
+    const parsed2 = emptyParsed("gemini");
+    for (let i = 0; i < rest.length; i += 1) {
+      const arg = rest[i];
+      if (arg === "--trace") {
+        parsed2.trace = true;
+        continue;
+      }
+      if (arg === "--help" || arg === "-h") {
+        parsed2.showHelp = true;
+        continue;
+      }
+      if (arg === "--version" || arg === "-v") {
+        parsed2.showVersion = true;
+        continue;
+      }
+      const consumed = tryConsumeRelayLaunchFlag(arg, rest, i, parsed2);
+      if (consumed !== null) {
+        if ("error" in consumed) return parsed2;
+        i = consumed.next;
+        continue;
+      }
+      parsed2.claudeArgs.push(arg);
+    }
+    return parsed2;
+  }
   if (first !== "claude") {
     return {
       ...emptyParsed("root"),
@@ -13530,15 +14457,16 @@ function parseArgs(args) {
   return parsed;
 }
 function rootHelpText() {
-  return `${pc16.bold("relay-ai")} v${VERSION}
+  return `${pc17.bold("relay-ai")} v${VERSION}
 Launch AI coding tools with OpenCode Zen / Go or local providers (Groq, Mistral,
 OpenAI, Gemini, Ollama, and more).
 
-${pc16.bold("Usage:")}
+${pc17.bold("Usage:")}
   relay-ai claude [options] [claude-flags]
   relay-ai claude-app [options]
   relay-ai codex [options] [codex-flags]
   relay-ai codex-app [options]
+  relay-ai gemini [options] [gemini-flags]
   relay-ai server [options]
   relay-ai models
   relay-ai favorites
@@ -13549,32 +14477,34 @@ ${pc16.bold("Usage:")}
   relay-ai --ai --install    Install or upgrade agent skill when version changed
   relay-ai --ai --install --force  Reinstall skill even if already current
 
-${pc16.bold("Root options:")}
+${pc17.bold("Root options:")}
   -h, --help       Show this help
   -v, --version    Show version
   --ai             Print the full reference for AI agents
   --ai --install   Install or upgrade the relay-ai agent skill
   --force          Reinstall the agent skill when used with --ai --install
 
-${pc16.bold("Commands:")}
+${pc17.bold("Commands:")}
   claude      Launch Claude Code \u2014 pick a provider from your registry
   models      Manage favorite models for mid-session /model switching (max ${MAX_MODEL_CATALOG})
   favorites   Alias for models
   providers   Add, import, and manage your AI providers
   server      Run a foreground API gateway (OpenCode Zen / Go and local providers)
   codex       Launch OpenAI Codex CLI with registry providers
+  gemini      Launch Google Gemini CLI with registry providers
   codex-app   Launch Codex desktop app with registry providers (macOS + Windows)
   claude-app  Launch Claude Desktop app with registry providers (macOS + Windows)
 
-${pc16.bold("Migration:")}
+${pc17.bold("Migration:")}
   Bare relay-ai prints this help instead of launching Claude Code.
   Use relay-ai claude for the wizard and launcher.
 
-${pc16.bold("Examples:")}
+${pc17.bold("Examples:")}
   relay-ai claude
   relay-ai models
   relay-ai providers
   relay-ai codex
+  relay-ai gemini
   relay-ai codex-app
   relay-ai claude-app
   relay-ai server
@@ -13583,15 +14513,15 @@ ${pc16.bold("Examples:")}
   relay-ai claude -- --print "hello"`;
 }
 function claudeHelpText() {
-  return `${pc16.bold("relay-ai claude")} v${VERSION}
+  return `${pc17.bold("relay-ai claude")} v${VERSION}
 Launch Claude Code with OpenCode Zen, Go, or local providers as the API backend.
 
-${pc16.bold("Usage:")}
+${pc17.bold("Usage:")}
   relay-ai claude [options] [claude-flags]
   relay-ai claude --help
   relay-ai claude --version
 
-${pc16.bold("Options:")}
+${pc17.bold("Options:")}
   --dry-run    Run the wizard but show a preview instead of launching Claude Code
   --setup      Hint: use relay-ai providers to add or manage providers
   --trace      Write debug logs to ~/.relay-ai/logs/ and show errors on exit
@@ -13600,22 +14530,22 @@ ${pc16.bold("Options:")}
   --help       Show this command help
   --version    Show version
 
-${pc16.bold("Providers:")}
+${pc17.bold("Providers:")}
   Cloud (Zen/Go)  Requires OPENCODE_API_KEY \u2014 get one at https://opencode.ai/auth
   Registry        Configure with relay-ai providers add or import (Groq, Mistral,
                   Nvidia, DeepSeek, OpenAI, custom endpoints, etc.).
 
-${pc16.bold("Model switching:")}
+${pc17.bold("Model switching:")}
   Run relay-ai models to save favorites (max ${MAX_MODEL_CATALOG}).
   When favorites exist, launch starts a multi-route proxy and Claude Code /model
   lists your starting model plus favorites for live switching.
   With no favorites, launch uses a single model as before.
 
-${pc16.bold("Note:")}
+${pc17.bold("Note:")}
   Claude Code may save the launched model to ~/.claude/settings.json.
   Bare claude later can still show that model \u2014 reset with claude --model sonnet.
 
-${pc16.bold("Examples:")}
+${pc17.bold("Examples:")}
   relay-ai claude
   relay-ai claude -c
   relay-ai claude --resume abc-123
@@ -13629,54 +14559,54 @@ ${pc16.bold("Examples:")}
   relay-ai claude -- --dangerously-skip-permissions`;
 }
 function serverHelpText() {
-  return `${pc16.bold("relay-ai server")} v${VERSION}
+  return `${pc17.bold("relay-ai server")} v${VERSION}
 Run a foreground API gateway for registry providers, Zen/Go, or Vertex AI.
 
-${pc16.bold("Usage:")}
+${pc17.bold("Usage:")}
   relay-ai server
   relay-ai server --vertex
   relay-ai server --help
   relay-ai server --version
 
-${pc16.bold("Behavior:")}
+${pc17.bold("Behavior:")}
   Default: interactive wizard for exposed providers, discovery id masking (for
   Claude Desktop / Cowork), optional favorites-only catalog, then listen mode.
   --vertex: Anthropic-compatible gateway to Claude on Google Vertex AI using
   local gcloud Application Default Credentials (no OpenCode API key).
   Binds to port 17645. Network mode asks for a server password.
 
-${pc16.bold("Vertex env:")}
+${pc17.bold("Vertex env:")}
   ANTHROPIC_VERTEX_PROJECT_ID or GOOGLE_CLOUD_PROJECT \u2014 your GCP project
   GOOGLE_CLOUD_LOCATION or CLOUD_ML_REGION \u2014 region (default: global)
   Optional catalog: ~/.relay-ai/vertex-models.json (see assets/vertex-models.example.json)
 
-${pc16.bold("Endpoints:")}
+${pc17.bold("Endpoints:")}
   Anthropic-compatible:  ANTHROPIC_BASE_URL=http://127.0.0.1:17645/anthropic
   OpenAI-compatible:     OPENAI_BASE_URL=http://127.0.0.1:17645/openai/v1
   API key: use anything locally; use the server password in network mode.`;
 }
 function modelsHelpText() {
-  return `${pc16.bold("relay-ai models")} v${VERSION}
+  return `${pc17.bold("relay-ai models")} v${VERSION}
 Manage favorite models for mid-session switching in Claude Code.
 
-${pc16.bold("Usage:")}
+${pc17.bold("Usage:")}
   relay-ai models
   relay-ai models --help
   relay-ai models --version
 
-${pc16.bold("Behavior:")}
+${pc17.bold("Behavior:")}
   Opens an interactive manager to add or remove favorites.
   Search all providers at once (paginated results) or browse one provider at a time.
   Pick from Zen, Go, or any provider in your registry.
   Favorites are saved to ~/.relay-ai/config.json (max ${MAX_MODEL_CATALOG}).
 
-${pc16.bold("How it works:")}
+${pc17.bold("How it works:")}
   When favorites exist, relay-ai claude starts a multi-route catalog proxy.
   Claude Code /model lists your starting model plus favorites \u2014 switch live
   without restarting. Mix cloud and local favorites in one session.
   With no favorites, launch uses a single model as before.
 
-${pc16.bold("Examples:")}
+${pc17.bold("Examples:")}
   relay-ai models
   relay-ai claude    # switch menu active when favorites are set`;
 }
@@ -13689,11 +14619,11 @@ async function launchClaudeViaCatalog(catalogRoutes, startingRoute, contextWindo
   let proxyHandle;
   try {
     proxyHandle = await startProxyCatalog(catalogRoutes, startingRoute.aliasId, trace);
-    p18.log.info(
-      `Switch menu active \u2014 proxy on port ${proxyHandle.port} ` + pc16.dim(`(${catalogRoutes.length} model${catalogRoutes.length !== 1 ? "s" : ""} in /model)`)
+    p20.log.info(
+      `Switch menu active \u2014 proxy on port ${proxyHandle.port} ` + pc17.dim(`(${catalogRoutes.length} model${catalogRoutes.length !== 1 ? "s" : ""} in /model)`)
     );
   } catch (err) {
-    p18.log.error(`Failed to start proxy: ${err instanceof Error ? err.message : String(err)}`);
+    p20.log.error(`Failed to start proxy: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
   const childEnv = buildChildEnv(
@@ -13706,7 +14636,7 @@ async function launchClaudeViaCatalog(catalogRoutes, startingRoute, contextWindo
   );
   const debugLogPath = prepareClaudeTraceLog();
   const traceArgs = trace ? ["--debug-file", debugLogPath] : [];
-  if (trace) p18.log.info(`Debug log: ${debugLogPath}`);
+  if (trace) p20.log.info(`Debug log: ${debugLogPath}`);
   const exitCode = await launchClaude(
     childEnv,
     claudeCodeClientModelId(startingRoute.aliasId, contextWindow),
@@ -13718,14 +14648,14 @@ async function launchClaudeViaCatalog(catalogRoutes, startingRoute, contextWindo
 }
 async function runModelsCommand() {
   relayIntro("Favorite Models");
-  const spinner9 = p18.spinner();
-  spinner9.start("Loading providers...");
+  const spinner10 = p20.spinner();
+  spinner10.start("Loading providers...");
   const catalog = await fetchProviderCatalog();
-  spinner9.stop("");
+  spinner10.stop("");
   const allProviders = providersForPicker(catalog);
   if (allProviders.length === 0) {
-    p18.log.warn("No providers found.");
-    p18.log.info(`${pc16.dim("OpenCode Zen/Go is always available. Add providers with ")}${pc16.cyan("relay-ai providers")}${pc16.dim(".")}`);
+    p20.log.warn("No providers found.");
+    p20.log.info(`${pc17.dim("OpenCode Zen/Go is always available. Add providers with ")}${pc17.cyan("relay-ai providers")}${pc17.dim(".")}`);
     relayOutro("Done");
     return 0;
   }
@@ -13743,45 +14673,45 @@ async function runModelsCommand() {
     for (let i = 0; i < favorites.length; i++) {
       const fav = favorites[i];
       const entry = modelLookup.get(`${fav.providerId}:${fav.modelId}`);
-      const label = entry ? `${fmtEnabledStar(true)} ${fmtModel(entry.modelName)} ${pc16.dim(`(${entry.providerName})`)}` : pc16.dim(`\u2605 ${fav.modelId} \u2014 provider gone`);
+      const label = entry ? `${fmtEnabledStar(true)} ${fmtModel(entry.modelName)} ${pc17.dim(`(${entry.providerName})`)}` : pc17.dim(`\u2605 ${fav.modelId} \u2014 provider gone`);
       options.push({ value: `fav-${i}`, label, hint: "select to remove" });
     }
     const atCap = favorites.length >= MAX_MODEL_CATALOG;
     options.push({
       value: "__add__",
-      label: atCap ? pc16.dim(`+ Add a model \u2192 (limit of ${MAX_MODEL_CATALOG} reached)`) : pc16.cyan("+ Add a model \u2192"),
+      label: atCap ? pc17.dim(`+ Add a model \u2192 (limit of ${MAX_MODEL_CATALOG} reached)`) : pc17.cyan("+ Add a model \u2192"),
       hint: atCap ? "Remove a favorite first to make room" : `${allProviders.length} provider${allProviders.length !== 1 ? "s" : ""} available`
     });
     options.push({ value: "__done__", label: "Done", hint: "" });
     const header = favorites.length === 0 ? `Favorites (0/${MAX_MODEL_CATALOG})` : `Favorites (${favorites.length}/${MAX_MODEL_CATALOG}) \u2014 select to remove`;
-    const choice = await p18.select({
+    const choice = await p20.select({
       message: header,
       options,
       initialValue: "__done__"
     });
-    if (p18.isCancel(choice) || choice === "__done__") break;
+    if (p20.isCancel(choice) || choice === "__done__") break;
     if (choice === "__add__") {
       if (atCap) {
-        p18.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached \u2014 remove one first.`);
+        p20.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached \u2014 remove one first.`);
         continue;
       }
       const globalCount = buildGlobalFavoriteIndex(allProviders).length;
-      const addPath = await p18.select({
+      const addPath = await p20.select({
         message: "Add a favorite",
         options: [
           {
             value: "global",
-            label: pc16.cyan("Search all providers"),
+            label: pc17.cyan("Search all providers"),
             hint: `${globalCount} models \xB7 ${allProviders.length} provider${allProviders.length !== 1 ? "s" : ""}`
           },
           {
             value: "provider",
-            label: pc16.cyan("Browse by provider \u2192"),
+            label: pc17.cyan("Browse by provider \u2192"),
             hint: "Pick one provider first"
           }
         ]
       });
-      if (p18.isCancel(addPath)) continue;
+      if (p20.isCancel(addPath)) continue;
       let provider;
       let browsedMultiple = [];
       if (addPath === "global") {
@@ -13796,12 +14726,12 @@ async function runModelsCommand() {
         let currentInitialProvider = void 0;
         while (true) {
           const providerOptions = allProviders.map((ap) => providerSelectOption(ap));
-          const pickedProviderId = await p18.select({
+          const pickedProviderId = await p20.select({
             message: "Which provider?",
             options: providerOptions,
             initialValue: currentInitialProvider
           });
-          if (p18.isCancel(pickedProviderId)) break;
+          if (p20.isCancel(pickedProviderId)) break;
           provider = allProviders.find((ap) => ap.id === pickedProviderId);
           const options2 = provider.models.map((m) => {
             const favorited = isFavorite(favorites, { providerId: provider.id, modelId: m.id });
@@ -13809,15 +14739,15 @@ async function runModelsCommand() {
             return {
               value: m.id,
               label: fmtModel(label, m.id),
-              hint: favorited ? pc16.yellow("\u2605 already favorite") : ""
+              hint: favorited ? pc17.yellow("\u2605 already favorite") : ""
             };
           });
-          const pickedModelIds = await p18.multiselect({
-            message: `Select models to add from ${provider.name} ${pc16.dim("(Space to select, Enter to confirm)")}`,
+          const pickedModelIds = await p20.multiselect({
+            message: `Select models to add from ${provider.name} ${pc17.dim("(Space to select, Enter to confirm)")}`,
             options: options2,
             required: false
           });
-          if (p18.isCancel(pickedModelIds)) {
+          if (p20.isCancel(pickedModelIds)) {
             currentInitialProvider = provider.id;
             continue;
           }
@@ -13852,16 +14782,16 @@ async function runModelsCommand() {
       if (addedModels.length > 0) {
         if (addedModels.length === 1) {
           const modelName = addedModels[0].name || addedModels[0].id;
-          p18.log.success(`Added ${modelName} (${provider.name}) to favorites.`);
+          p20.log.success(`Added ${modelName} (${provider.name}) to favorites.`);
         } else {
-          p18.log.success(`Added ${addedModels.length} models from ${provider.name} to favorites.`);
+          p20.log.success(`Added ${addedModels.length} models from ${provider.name} to favorites.`);
         }
       }
       if (duplicateCount > 0) {
-        p18.log.warn(`${duplicateCount} selected model(s) were already in your favorites.`);
+        p20.log.warn(`${duplicateCount} selected model(s) were already in your favorites.`);
       }
       if (limitReached) {
-        p18.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached \u2014 some selected models could not be added.`);
+        p20.log.warn(`Limit of ${MAX_MODEL_CATALOG} favorites reached \u2014 some selected models could not be added.`);
       }
     } else if (choice.startsWith("fav-")) {
       const idx = parseInt(choice.slice(4), 10);
@@ -13870,7 +14800,7 @@ async function runModelsCommand() {
       const label = entry ? `${entry.modelName} (${entry.providerName})` : fav.modelId;
       favorites = removeFavorite(favorites, fav);
       favoritesDirty = true;
-      p18.log.success(`Removed ${label} from favorites.`);
+      p20.log.success(`Removed ${label} from favorites.`);
     }
   }
   if (favoritesDirty) {
@@ -13878,7 +14808,7 @@ async function runModelsCommand() {
   }
   relayOutro(
     favorites.length === 0 ? "No favorites saved" : `${favorites.length} favorite${favorites.length !== 1 ? "s" : ""} saved`,
-    favorites.length === 0 ? pc16.dim("Launch uses single-model mode") : pc16.cyan("/model menu ready on next launch")
+    favorites.length === 0 ? pc17.dim("Launch uses single-model mode") : pc17.cyan("/model menu ready on next launch")
   );
   return 0;
 }
@@ -13889,7 +14819,7 @@ async function runClaudeCommand(parsed) {
   setAgentStdoutMode(agentStdout);
   const claudePath = findClaudeBinary();
   if (!claudePath) {
-    console.error(pc16.red("\nError: claude binary not found on PATH.\n"));
+    console.error(pc17.red("\nError: claude binary not found on PATH.\n"));
     console.error("Install Claude Code:");
     console.error("  npm install -g @anthropic-ai/claude-code\n");
     return 1;
@@ -13904,7 +14834,7 @@ async function runClaudeCommand(parsed) {
     prefs
   });
   if (launchPlan.error) {
-    console.error(pc16.red(`
+    console.error(pc17.red(`
 Error: ${launchPlan.error}
 `));
     return 1;
@@ -13912,7 +14842,7 @@ Error: ${launchPlan.error}
   const switchMenuActive = favorites.length > 0 && !launchPlan.skip;
   if (!agentStdout) relayIntro("Claude Code");
   if (setup && !dryRun && !agentStdout) {
-    p18.log.info("Provider setup now lives in relay-ai providers \u2014 opening that next is recommended.");
+    p20.log.info("Provider setup now lives in relay-ai providers \u2014 opening that next is recommended.");
   }
   if (!dryRun && await needsFirstRunSetup()) {
     const firstRun = await runFirstRunWizard(trace);
@@ -13923,25 +14853,25 @@ Error: ${launchPlan.error}
     try {
       catalog = await fetchProviderCatalog();
     } catch (err) {
-      console.error(pc16.red(String(err instanceof Error ? err.message : err)));
+      console.error(pc17.red(String(err instanceof Error ? err.message : err)));
       return 1;
     }
   } else {
-    const catalogSpinner = p18.spinner();
+    const catalogSpinner = p20.spinner();
     catalogSpinner.start("Loading your providers...");
     try {
       catalog = await fetchProviderCatalog();
     } catch (err) {
       catalogSpinner.stop("");
-      console.error(pc16.red(String(err instanceof Error ? err.message : err)));
+      console.error(pc17.red(String(err instanceof Error ? err.message : err)));
       return 1;
     }
     catalogSpinner.stop("");
   }
   const allProviders = providersForPicker(catalog);
   if (allProviders.length === 0) {
-    p18.log.warn("No providers available.");
-    p18.log.info(pc16.dim("Run relay-ai providers add or import to get started."));
+    p20.log.warn("No providers available.");
+    p20.log.info(pc17.dim("Run relay-ai providers add or import to get started."));
     return 0;
   }
   const providerOptions = allProviders.map((lp) => providerSelectOption(lp));
@@ -13958,7 +14888,7 @@ Error: ${launchPlan.error}
   if (launchPlan.skip && launchPlan.target) {
     const resolved = findProviderAndModel(allProviders, launchPlan.target);
     if (!resolved) {
-      p18.log.error(
+      p20.log.error(
         `Provider/model not found: ${launchPlan.target.providerId} / ${launchPlan.target.modelId}`
       );
       return 1;
@@ -13966,31 +14896,31 @@ Error: ${launchPlan.error}
     activeProvider = resolved.provider;
     selectedModel = resolved.model;
     if (!agentStdout) {
-      p18.log.step(`Using ${selectedModel.name || selectedModel.id} (${activeProvider.name})`);
+      p20.log.step(`Using ${selectedModel.name || selectedModel.id} (${activeProvider.name})`);
     }
     if (!dryRun) recordLaunchSelection("claude", activeProvider.id, selectedModel.id, prefs);
   } else {
     let currentInitialProvider = initialProvider;
     while (true) {
-      const chosen = await p18.select({
+      const chosen = await p20.select({
         message: "Which provider?",
         options: providerOptions,
         initialValue: currentInitialProvider
       });
-      if (p18.isCancel(chosen)) {
-        p18.cancel("Cancelled.");
+      if (p20.isCancel(chosen)) {
+        p20.cancel("Cancelled.");
         return 0;
       }
       const providerChoice = chosen;
       if (providerChoice === "__favorites__") {
         const favoriteStart = resolveFirstAvailableFavorite(favorites, allProviders);
         if (!favoriteStart) {
-          p18.log.warn("No saved favorites are currently available.");
+          p20.log.warn("No saved favorites are currently available.");
           return 0;
         }
         activeProvider = favoriteStart.provider;
         selectedModel = favoriteStart.model;
-        p18.log.step(`Loaded Favorites Catalog. Starting model: ${selectedModel.name || selectedModel.id} (${activeProvider.name})`);
+        p20.log.step(`Loaded Favorites Catalog. Starting model: ${selectedModel.name || selectedModel.id} (${activeProvider.name})`);
         break;
       } else {
         activeProvider = allProviders.find((lp) => lp.id === providerChoice);
@@ -14017,27 +14947,27 @@ Error: ${launchPlan.error}
     );
     const startingRoute = resolveRoute(activeProvider.id, selectedModel.id) ?? null;
     if (!startingRoute) {
-      p18.log.error("Could not resolve a proxy route for the selected model.");
+      p20.log.error("Could not resolve a proxy route for the selected model.");
       return 1;
     }
     const { routes: catalogRoutes, droppedFavorites } = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
     if (droppedFavorites.length > 0) {
-      p18.log.warn(
+      p20.log.warn(
         `Skipping ${droppedFavorites.length} favorite${droppedFavorites.length === 1 ? "" : "s"} that are no longer available in /model`
       );
     }
     if (dryRun) {
       const endpoint = selectedModel.baseUrl ?? selectedModel.completionsUrl ?? "(unknown)";
       console.log("");
-      console.log(pc16.bold(pc16.cyan("  DRY RUN \u2014 would execute (switch-menu mode):")));
+      console.log(pc17.bold(pc17.cyan("  DRY RUN \u2014 would execute (switch-menu mode):")));
       console.log("");
-      console.log(`  ${pc16.bold("Provider:")}      ${activeProvider.name}`);
-      console.log(`  ${pc16.bold("Starting model:")} ${selectedModel.id}`);
-      console.log(`  ${pc16.bold("Endpoint:")}      ${endpoint}`);
-      console.log(`  ${pc16.bold("/model catalog:")} ${catalogRoutes.length} model(s)`);
-      catalogRoutes.forEach((r) => console.log(`    ${pc16.dim(r.displayName)}`));
+      console.log(`  ${pc17.bold("Provider:")}      ${activeProvider.name}`);
+      console.log(`  ${pc17.bold("Starting model:")} ${selectedModel.id}`);
+      console.log(`  ${pc17.bold("Endpoint:")}      ${endpoint}`);
+      console.log(`  ${pc17.bold("/model catalog:")} ${catalogRoutes.length} model(s)`);
+      catalogRoutes.forEach((r) => console.log(`    ${pc17.dim(r.displayName)}`));
       console.log("");
-      console.log(pc16.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
+      console.log(pc17.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
       console.log("");
       return 0;
     }
@@ -14053,21 +14983,21 @@ Error: ${launchPlan.error}
     const formatDesc = selectedModel.modelFormat === "anthropic" ? "direct passthrough" : "via SDK adapter proxy";
     const endpoint = selectedModel.modelFormat === "anthropic" ? selectedModel.baseUrl ?? "(unknown)" : selectedModel.npm ?? "SDK";
     console.log("");
-    console.log(pc16.bold(pc16.cyan("  DRY RUN \u2014 would execute:")));
+    console.log(pc17.bold(pc17.cyan("  DRY RUN \u2014 would execute:")));
     console.log("");
-    console.log(`  ${pc16.bold("Provider:")}  ${activeProvider.name}`);
-    console.log(`  ${pc16.bold("Model:")}     ${selectedModel.id}`);
-    console.log(`  ${pc16.bold("Format:")}    ${selectedModel.modelFormat} (${formatDesc})`);
-    console.log(`  ${pc16.bold(selectedModel.modelFormat === "anthropic" ? "Endpoint:" : "SDK npm:")} ${endpoint}`);
-    console.log(`  ${pc16.bold("Key:")}       ${activeProvider.name} provider key`);
+    console.log(`  ${pc17.bold("Provider:")}  ${activeProvider.name}`);
+    console.log(`  ${pc17.bold("Model:")}     ${selectedModel.id}`);
+    console.log(`  ${pc17.bold("Format:")}    ${selectedModel.modelFormat} (${formatDesc})`);
+    console.log(`  ${pc17.bold(selectedModel.modelFormat === "anthropic" ? "Endpoint:" : "SDK npm:")} ${endpoint}`);
+    console.log(`  ${pc17.bold("Key:")}       ${activeProvider.name} provider key`);
     console.log("");
-    console.log(pc16.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
+    console.log(pc17.dim("  (dry run complete \u2014 Claude Code was NOT launched)"));
     console.log("");
     return 0;
   }
   const launchApiKey = await resolveLocalProviderApiKey(activeProvider);
   if (!launchApiKey?.trim()) {
-    p18.log.error(
+    p20.log.error(
       `No credential found for ${activeProvider.name}. Add a key with relay-ai providers or set OPENCODE_API_KEY.`
     );
     return 1;
@@ -14103,12 +15033,12 @@ Error: ${launchPlan.error}
         launchApiKey
       );
       if (!isAgentStdoutMode()) {
-        p18.log.info(
-          `SDK adapter proxy started on port ${proxyHandle.port}` + (selectedModel.npm ? pc16.dim(` (${selectedModel.npm})`) : "")
+        p20.log.info(
+          `SDK adapter proxy started on port ${proxyHandle.port}` + (selectedModel.npm ? pc17.dim(` (${selectedModel.npm})`) : "")
         );
       }
     } catch (err) {
-      p18.log.error(`Failed to start SDK adapter proxy: ${err instanceof Error ? err.message : String(err)}`);
+      p20.log.error(`Failed to start SDK adapter proxy: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
     childEnv = buildChildEnv(
@@ -14124,7 +15054,7 @@ Error: ${launchPlan.error}
   }
   const debugLogPath = prepareClaudeTraceLog();
   const traceArgs = trace ? ["--debug-file", debugLogPath] : [];
-  if (trace) p18.log.info(`Debug log: ${debugLogPath}`);
+  if (trace) p20.log.info(`Debug log: ${debugLogPath}`);
   const exitCode = await launchClaude(
     childEnv,
     claudeCodeClientModelId(selectedModel.id, selectedModel.contextWindow),
@@ -14137,7 +15067,7 @@ Error: ${launchPlan.error}
 async function main(args = process.argv.slice(2)) {
   const parsed = parseArgs(args);
   if (parsed.error) {
-    console.error(pc16.red(`
+    console.error(pc17.red(`
 Error: ${parsed.error}
 `));
     printHelp(rootHelpText());
@@ -14223,6 +15153,20 @@ Error: ${parsed.error}
       vertex: parsed.vertex
     });
   }
+  if (parsed.command === "gemini") {
+    if (parsed.showVersion) {
+      console.log(VERSION);
+      return 0;
+    }
+    if (parsed.showHelp) {
+      console.log(geminiHelpText());
+      return 0;
+    }
+    return runGeminiCommand(parsed.claudeArgs, parsed.trace, {
+      launchProvider: parsed.launchProvider,
+      launchModel: parsed.launchModel
+    });
+  }
   if (parsed.showVersion) {
     console.log(VERSION);
     return 0;
@@ -14248,7 +15192,7 @@ if (isCliEntryPoint()) {
     if (err === /* @__PURE__ */ Symbol.for("clack:cancel")) {
       process.exit(0);
     }
-    console.error(pc16.red("\nUnexpected error:"), err);
+    console.error(pc17.red("\nUnexpected error:"), err);
     process.exit(1);
   });
 }

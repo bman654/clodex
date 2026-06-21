@@ -72,19 +72,23 @@ export function loadPreferences(): UserPreferences {
     lastProvider,
     lastCodexProvider: config.lastCodexProvider,
     lastCodexModel: config.lastCodexModel,
+    lastGeminiProvider: config.lastGeminiProvider,
+    lastGeminiModel: config.lastGeminiModel,
     recentModelsByProvider: config.recentModelsByProvider,
     favoriteModels: config.favoriteModels,
     server: config.server,
   };
 }
 
-export function savePreferences(prefs: Partial<Pick<UserPreferences, 'lastBackend' | 'lastModel' | 'lastProvider' | 'lastCodexProvider' | 'lastCodexModel' | 'recentModelsByProvider' | 'favoriteModels'>>): void {
+export function savePreferences(prefs: Partial<Pick<UserPreferences, 'lastBackend' | 'lastModel' | 'lastProvider' | 'lastCodexProvider' | 'lastCodexModel' | 'lastGeminiProvider' | 'lastGeminiModel' | 'recentModelsByProvider' | 'favoriteModels'>>): void {
   const config = readConfig();
   if (prefs.lastBackend !== undefined) config.lastBackend = prefs.lastBackend;
   if (prefs.lastModel !== undefined) config.lastModel = prefs.lastModel;
   if (prefs.lastProvider !== undefined) config.lastProvider = prefs.lastProvider;
   if (prefs.lastCodexProvider !== undefined) config.lastCodexProvider = prefs.lastCodexProvider;
   if (prefs.lastCodexModel !== undefined) config.lastCodexModel = prefs.lastCodexModel;
+  if (prefs.lastGeminiProvider !== undefined) config.lastGeminiProvider = prefs.lastGeminiProvider;
+  if (prefs.lastGeminiModel !== undefined) config.lastGeminiModel = prefs.lastGeminiModel;
   if (prefs.recentModelsByProvider !== undefined) config.recentModelsByProvider = prefs.recentModelsByProvider;
   if (prefs.favoriteModels !== undefined) config.favoriteModels = prefs.favoriteModels;
   writeConfig(config);
@@ -93,7 +97,7 @@ export function savePreferences(prefs: Partial<Pick<UserPreferences, 'lastBacken
 const MAX_RECENT_MODELS = 3;
 
 export function recordLaunchSelection(
-  agent: 'claude' | 'codex',
+  agent: 'claude' | 'codex' | 'gemini',
   providerId: string,
   modelId: string,
   prefs: UserPreferences,
@@ -103,7 +107,9 @@ export function recordLaunchSelection(
   savePreferences({
     ...(agent === 'claude'
       ? { lastProvider: providerId, lastModel: modelId }
-      : { lastCodexProvider: providerId, lastCodexModel: modelId }),
+      : agent === 'codex'
+      ? { lastCodexProvider: providerId, lastCodexModel: modelId }
+      : { lastGeminiProvider: providerId, lastGeminiModel: modelId }),
     recentModelsByProvider: { ...prefs.recentModelsByProvider, [providerId]: updatedRecent },
   });
 }

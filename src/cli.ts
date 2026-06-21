@@ -33,6 +33,7 @@ import {
 import { resolveFirstAvailableFavorite } from './favorites-resolver.js';
 import { runProvidersCommand, providersHelpText } from './providers-command.js';
 import { runCodexCommand, codexHelpText } from './codex.js';
+import { runGeminiCommand, geminiHelpText } from './gemini.js';
 import { runCodexAppCommand } from './codex-app.js';
 import { runClaudeAppCommand } from './claude-app.js';
 import { prepareClaudeTraceLog, printTraceLog } from './trace-log.js';
@@ -206,6 +207,33 @@ export function parseArgs(args: string[]): ParsedArgs {
     return parsed;
   }
 
+  if (first === 'gemini') {
+    const parsed = emptyParsed('gemini');
+    for (let i = 0; i < rest.length; i += 1) {
+      const arg = rest[i]!;
+      if (arg === '--trace') {
+        parsed.trace = true;
+        continue;
+      }
+      if (arg === '--help' || arg === '-h') {
+        parsed.showHelp = true;
+        continue;
+      }
+      if (arg === '--version' || arg === '-v') {
+        parsed.showVersion = true;
+        continue;
+      }
+      const consumed = tryConsumeRelayLaunchFlag(arg, rest, i, parsed);
+      if (consumed !== null) {
+        if ('error' in consumed) return parsed;
+        i = consumed.next;
+        continue;
+      }
+      parsed.claudeArgs.push(arg);
+    }
+    return parsed;
+  }
+
   if (first !== 'claude') {
     return {
       ...emptyParsed('root'),
@@ -253,6 +281,7 @@ ${pc.bold('Usage:')}
   relay-ai claude-app [options]
   relay-ai codex [options] [codex-flags]
   relay-ai codex-app [options]
+  relay-ai gemini [options] [gemini-flags]
   relay-ai server [options]
   relay-ai models
   relay-ai favorites
@@ -277,6 +306,7 @@ ${pc.bold('Commands:')}
   providers   Add, import, and manage your AI providers
   server      Run a foreground API gateway (OpenCode Zen / Go and local providers)
   codex       Launch OpenAI Codex CLI with registry providers
+  gemini      Launch Google Gemini CLI with registry providers
   codex-app   Launch Codex desktop app with registry providers (macOS + Windows)
   claude-app  Launch Claude Desktop app with registry providers (macOS + Windows)
 
@@ -289,6 +319,7 @@ ${pc.bold('Examples:')}
   relay-ai models
   relay-ai providers
   relay-ai codex
+  relay-ai gemini
   relay-ai codex-app
   relay-ai claude-app
   relay-ai server
@@ -1089,6 +1120,21 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       launchProvider: parsed.launchProvider,
       launchModel: parsed.launchModel,
       vertex: parsed.vertex,
+    });
+  }
+
+  if (parsed.command === 'gemini') {
+    if (parsed.showVersion) {
+      console.log(VERSION);
+      return 0;
+    }
+    if (parsed.showHelp) {
+      console.log(geminiHelpText());
+      return 0;
+    }
+    return runGeminiCommand(parsed.claudeArgs, parsed.trace, {
+      launchProvider: parsed.launchProvider,
+      launchModel: parsed.launchModel,
     });
   }
 

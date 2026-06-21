@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository. Note that the codebase supports Claude Code, OpenAI Codex, and Google Gemini CLI.
 
 ## Commands
 
@@ -24,6 +24,7 @@ relay-ai server           # foreground OpenCode/registry API gateway
 relay-ai server --vertex  # foreground Vertex AI gateway (gcloud ADC)
 relay-ai codex            # Codex CLI with registry providers (see docs/CODEX.md)
 relay-ai codex-app        # Codex desktop app (macOS/Windows; see docs/CODEX.md)
+relay-ai gemini           # Gemini CLI with registry providers (see docs/GEMINI.md)
 
 # Rebuild after code changes before testing manually
 npm run build && relay-ai --version
