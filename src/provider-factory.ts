@@ -309,6 +309,11 @@ function isDeepSeekReasoningModel(modelId: string): boolean {
     || lower === 'deepseek-chat';
 }
 
+function isKimiReasoningModel(modelId: string): boolean {
+  const lower = modelId.toLowerCase();
+  return lower.startsWith('kimi-');
+}
+
 function hasSupportedParameter(metadata: ReasoningMetadata | undefined, param: string): boolean {
   return (metadata?.supportedParameters ?? []).some(p => p === param);
 }
@@ -562,6 +567,18 @@ export function getReasoningCapabilities(
     };
   }
 
+  if (isKimiReasoningModel(modelId)) {
+    return {
+      levels: [...OPENAI_EFFORT_LEVELS],
+      defaultLevel: 'high',
+      supportsSummaries: false,
+      mode: 'controllable',
+      source: 'provider-rule',
+      confidence: 'documented',
+      wireFormat: { kind: 'openai-reasoning-effort' },
+    };
+  }
+
   if (hasSupportedParameter(metadata, 'reasoning_effort')) {
     return {
       levels: ['low', 'medium', 'high', 'xhigh'],
@@ -677,6 +694,10 @@ export function effortProviderOptions(
     if (!modelId) return undefined;
     if (isDeepSeekReasoningModel(modelId)) {
       return deepSeekEffortProviderOptions(effort);
+    }
+    if (isKimiReasoningModel(modelId)) {
+      const reasoningEffort = mapCodexEffortToOpenAI(effort);
+      return reasoningEffort ? { openai: { reasoningEffort } } : undefined;
     }
     if (hasSupportedParameter(metadata, 'reasoning_effort')) {
       const reasoningEffort = mapCodexEffortToOpenAI(effort);

@@ -48,7 +48,7 @@ Bare `relay-ai` prints help and migration guidance. Use `relay-ai claude` for th
 
 ## Features
 
-- **Native provider registry:** `relay-ai providers` stores config in `~/.relay-ai/providers.json` and secrets in the OS keychain — no OpenCode binary required at launch
+- **Native provider registry:** `relay-ai providers` stores config in `~/.relay-ai/providers.json` and secrets in the OS keychain — no OpenCode binary required at launch. See **[docs/PROVIDERS.md](docs/PROVIDERS.md)** for a full list of providers and known issues.
 - **Provider templates:** Add Groq, Mistral, Together, OpenRouter, and 15+ SDK-backed providers, plus custom OpenAI/Anthropic-compatible endpoints
 - **OpenCode import:** One-time migration from OpenCode (`providers import`); validates API keys and skips placeholders like `anything`
 - **OpenCode Zen / Go:** Optional cloud backends when you have an OpenCode API key
@@ -70,7 +70,7 @@ Bare `relay-ai` prints help and migration guidance. Use `relay-ai claude` for th
 
 | Tool | Command | Status |
 |------|---------|--------|
-| Provider registry | `relay-ai providers` | ✅ Supported |
+| Provider registry | `relay-ai providers` | ✅ Supported ([guide](docs/PROVIDERS.md)) |
 | Claude Code | `relay-ai claude` | ✅ Supported |
 | Favorite models | `relay-ai models` | ✅ Supported |
 | OpenCode API server | `relay-ai server` | ✅ Supported |

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0] - 2026-06-21
+
+### Added
+- **New Native Providers** — Added native provider templates and registry support for DeepSeek (`deepseek`), Zhipu (`zhipu`), and Moonshot (`moonshot`), facilitating direct integration of Chinese LLM providers.
+- **Experimental Gemini Support** — Introduced experimental support for Google Gemini models via a custom SDK adapter and local proxy, enabling `relay-ai gemini`.
+- **Kimi/Moonshot Reasoning Level Selection** — Enabled support for Codex's native "Select Reasoning Level" UI for Kimi models by exposing `supported_reasoning_levels` in the proxy catalog and translating reasoning effort parameters.
+- **Provider Documentation** — Created a dedicated [PROVIDERS.md](file:///Users/jbendavi/dev_projects/relay-ai/docs/PROVIDERS.md) documentation file explaining the differences between Kimi, Kimi Global, and Moonshot models, and linked it from the main README.
+
 ## [0.2.8] - 2026-06-20
 
 ### Added

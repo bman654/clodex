@@ -14,6 +14,7 @@ export interface ProviderTemplate {
   urlPrompt?: string;
   apiKeyOptional?: boolean;
   modelSource: ProviderModelSource;
+  staticModels?: Array<{ id: string; name: string }>;
   supported: boolean;
   addable?: boolean;
   unsupportedReason?: string;
@@ -99,6 +100,28 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     defaultBaseUrl: 'https://api.moonshot.cn/v1',
     signupUrl: 'https://platform.moonshot.cn',
     modelSource: 'api-list',
+    supported: true,
+  },
+  {
+    id: 'moonshot-global',
+    name: 'Moonshot Global (kimi.ai)',
+    authType: 'api',
+    npm: '@ai-sdk/openai-compatible',
+    defaultBaseUrl: 'https://api.moonshot.ai/v1',
+    signupUrl: 'https://platform.kimi.ai',
+    modelSource: 'api-list',
+    supported: true,
+  },
+  {
+    id: 'kimi-code',
+    name: 'Kimi Code (Subscription Required)',
+    authType: 'api',
+    npm: '@ai-sdk/openai-compatible',
+    defaultBaseUrl: 'https://api.kimi.com/coding/v1',
+    modelSource: 'static-seed',
+    staticModels: [
+      { id: 'kimi-for-coding', name: 'Kimi Code K2.7 (Unified)' }
+    ],
     supported: true,
   },
   {

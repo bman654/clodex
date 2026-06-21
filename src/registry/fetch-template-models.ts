@@ -80,6 +80,23 @@ export async function fetchTemplateModels(
     };
   }
 
+  if (template.modelSource === 'static-seed') {
+    const models: CachedModel[] = (template.staticModels || []).map(sm => {
+      const family = sm.id.split(/[-/:]/)[0] ?? sm.id;
+      return {
+        id: sm.id,
+        name: sm.name,
+        upstreamModelId: sm.id,
+        family,
+        brand: deriveBrand(family),
+        contextWindow: resolveContextWindow(sm.id),
+        modelFormat: modelFormatForNpm(template.npm),
+        npm: template.npm,
+      };
+    });
+    return { models, baseUrl };
+  }
+
   const url = modelsUrl(baseUrl);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS);

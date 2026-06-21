@@ -455,6 +455,10 @@ function isDeepSeekReasoningModel(modelId) {
   const lower = modelId.toLowerCase();
   return lower === "deepseek-v4-flash" || lower === "deepseek-v4-pro" || lower.startsWith("deepseek-v4-flash-") || lower.startsWith("deepseek-v4-pro-") || lower === "deepseek-reasoner" || lower === "deepseek-chat";
 }
+function isKimiReasoningModel(modelId) {
+  const lower = modelId.toLowerCase();
+  return lower.startsWith("kimi-");
+}
 function hasSupportedParameter(metadata, param) {
   return (metadata?.supportedParameters ?? []).some((p21) => p21 === param);
 }
@@ -678,6 +682,17 @@ function getReasoningCapabilities(npm, modelId, metadata) {
       wireFormat: { kind: "deepseek-thinking" }
     };
   }
+  if (isKimiReasoningModel(modelId)) {
+    return {
+      levels: [...OPENAI_EFFORT_LEVELS],
+      defaultLevel: "high",
+      supportsSummaries: false,
+      mode: "controllable",
+      source: "provider-rule",
+      confidence: "documented",
+      wireFormat: { kind: "openai-reasoning-effort" }
+    };
+  }
   if (hasSupportedParameter(metadata, "reasoning_effort")) {
     return {
       levels: ["low", "medium", "high", "xhigh"],
@@ -761,6 +776,10 @@ function effortProviderOptions(npm, effort, modelId, metadata) {
     if (!modelId) return void 0;
     if (isDeepSeekReasoningModel(modelId)) {
       return deepSeekEffortProviderOptions(effort);
+    }
+    if (isKimiReasoningModel(modelId)) {
+      const reasoningEffort = mapCodexEffortToOpenAI(effort);
+      return reasoningEffort ? { openai: { reasoningEffort } } : void 0;
     }
     if (hasSupportedParameter(metadata, "reasoning_effort")) {
       const reasoningEffort = mapCodexEffortToOpenAI(effort);
@@ -3678,6 +3697,22 @@ async function fetchTemplateModels(template, apiKey, baseUrlOverride) {
       hint: "Use relay-ai providers import from OpenCode for advanced setups."
     };
   }
+  if (template.modelSource === "static-seed") {
+    const models = (template.staticModels || []).map((sm) => {
+      const family = sm.id.split(/[-/:]/)[0] ?? sm.id;
+      return {
+        id: sm.id,
+        name: sm.name,
+        upstreamModelId: sm.id,
+        family,
+        brand: deriveBrand(family),
+        contextWindow: resolveContextWindow(sm.id),
+        modelFormat: modelFormatForNpm(template.npm),
+        npm: template.npm
+      };
+    });
+    return { models, baseUrl };
+  }
   const url = modelsUrl(baseUrl);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TEST_TIMEOUT_MS);
@@ -4110,6 +4145,28 @@ var PROVIDER_TEMPLATES = [
     defaultBaseUrl: "https://api.moonshot.cn/v1",
     signupUrl: "https://platform.moonshot.cn",
     modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "moonshot-global",
+    name: "Moonshot Global (kimi.ai)",
+    authType: "api",
+    npm: "@ai-sdk/openai-compatible",
+    defaultBaseUrl: "https://api.moonshot.ai/v1",
+    signupUrl: "https://platform.kimi.ai",
+    modelSource: "api-list",
+    supported: true
+  },
+  {
+    id: "kimi-code",
+    name: "Kimi Code (Subscription Required)",
+    authType: "api",
+    npm: "@ai-sdk/openai-compatible",
+    defaultBaseUrl: "https://api.kimi.com/coding/v1",
+    modelSource: "static-seed",
+    staticModels: [
+      { id: "kimi-for-coding", name: "Kimi Code K2.7 (Unified)" }
+    ],
     supported: true
   },
   {
