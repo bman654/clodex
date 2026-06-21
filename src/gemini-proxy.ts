@@ -81,23 +81,11 @@ export function translateGeminiRequest(body: any): any {
     for (const p of turnParts) {
       if (p.text !== undefined) {
         if (p.text.includes('<thinking>') && p.text.includes('</thinking>')) {
-          const regex = /<thinking>([\s\S]*?)<\/thinking>/g;
-          let lastIndex = 0;
-          let match;
-          while ((match = regex.exec(p.text)) !== null) {
-            if (match.index > lastIndex) {
-              const textBefore = p.text.substring(lastIndex, match.index).trim();
-              if (textBefore) parts.push({ type: 'text', text: textBefore });
-            }
-            const thinkingText = match[1].trim();
-            if (thinkingText) {
-              parts.push({ type: 'reasoning', text: thinkingText });
-            }
-            lastIndex = regex.lastIndex;
-          }
-          if (lastIndex < p.text.length) {
-            const textAfter = p.text.substring(lastIndex).trim();
-            if (textAfter) parts.push({ type: 'text', text: textAfter });
+          const tokens = p.text.split(/<thinking>([\s\S]*?)<\/thinking>/);
+          for (let i = 0; i < tokens.length; i++) {
+            const token = tokens[i].trim();
+            if (!token) continue;
+            parts.push({ type: i % 2 === 1 ? 'reasoning' : 'text', text: token });
           }
         } else {
           parts.push({ type: 'text', text: p.text });
