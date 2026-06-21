@@ -6822,6 +6822,36 @@ function getLocalIp() {
   }
   return "<this-computer-ip>";
 }
+function printModelCatalog(models, gateway) {
+  if (models.length === 0) return;
+  const groups = /* @__PURE__ */ new Map();
+  for (const model of models) {
+    const label = gatewayProviderLabel(model);
+    let list = groups.get(label);
+    if (!list) {
+      list = [];
+      groups.set(label, list);
+    }
+    list.push(model);
+  }
+  const sortedGroups = [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  console.log(pc6.bold("Model catalog:"));
+  console.log("");
+  for (const [label, groupModels] of sortedGroups) {
+    console.log(`  ${pc6.bold(label)}`);
+    const sorted = [...groupModels].sort((a, b) => a.name.localeCompare(b.name));
+    for (const model of sorted) {
+      const anthropicId = exposedGatewayAliasId(model, gateway);
+      const hasOpenAi = isOpenAIChatCompletionsModel(model);
+      console.log(`    ${model.name}`);
+      console.log(`      ${pc6.dim("anthropic:")} ${pc6.cyan(anthropicId)}`);
+      if (hasOpenAi) {
+        console.log(`      ${pc6.dim("openai:   ")} ${pc6.cyan(model.id)}`);
+      }
+    }
+    console.log("");
+  }
+}
 function filterZenModelsForServer(models) {
   const zenProvider = loadRegistry().providers.find((entry) => entry.id === "zen" && entry.enabled);
   if (zenProvider?.subscriptionFilter === "free") {
@@ -7016,6 +7046,7 @@ async function runVertexServerCommand() {
   }
   console.log(pc6.dim("  Auth:       gcloud Application Default Credentials"));
   console.log("");
+  printModelCatalog(models);
   console.log(pc6.dim("Press Ctrl+C to stop."));
   await waitForShutdown();
   await server.close();
@@ -7136,6 +7167,7 @@ async function runServerCommand(options = {}) {
     console.log(pc6.dim("  Discovery:  gateway ids masked for Claude Desktop / Cowork"));
   }
   console.log("");
+  printModelCatalog(models, gateway);
   console.log(pc6.dim("Press Ctrl+C to stop."));
   await waitForShutdown();
   await server.close();

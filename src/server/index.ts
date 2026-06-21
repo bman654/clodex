@@ -24,8 +24,13 @@ import {
 } from '../provider-catalog.js';
 import { loadRegistry } from '../registry/io.js';
 import type { ModelInfo } from '../types.js';
-import type { ServerModelInfo } from './models.js';
-import { upstreamModelId } from './models.js';
+import type { ServerModelInfo, GatewayModelOptions } from './models.js';
+import {
+  upstreamModelId,
+  exposedGatewayAliasId,
+  isOpenAIChatCompletionsModel,
+  gatewayProviderLabel,
+} from './models.js';
 import { getReasoningCapabilities } from '../provider-factory.js';
 import {
   askFavoritesOnly,
@@ -71,6 +76,41 @@ function getLocalIp(): string {
     }
   }
   return '<this-computer-ip>';
+}
+
+function printModelCatalog(models: ServerModelInfo[], gateway?: GatewayModelOptions): void {
+  if (models.length === 0) return;
+
+  // Group by provider label, sorted alphabetically
+  const groups = new Map<string, ServerModelInfo[]>();
+  for (const model of models) {
+    const label = gatewayProviderLabel(model);
+    let list = groups.get(label);
+    if (!list) {
+      list = [];
+      groups.set(label, list);
+    }
+    list.push(model);
+  }
+  const sortedGroups = [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+  console.log(pc.bold('Model catalog:'));
+  console.log('');
+  for (const [label, groupModels] of sortedGroups) {
+    console.log(`  ${pc.bold(label)}`);
+    // Sort models within each group alphabetically by name
+    const sorted = [...groupModels].sort((a, b) => a.name.localeCompare(b.name));
+    for (const model of sorted) {
+      const anthropicId = exposedGatewayAliasId(model, gateway);
+      const hasOpenAi = isOpenAIChatCompletionsModel(model);
+      console.log(`    ${model.name}`);
+      console.log(`      ${pc.dim('anthropic:')} ${pc.cyan(anthropicId)}`);
+      if (hasOpenAi) {
+        console.log(`      ${pc.dim('openai:   ')} ${pc.cyan(model.id)}`);
+      }
+    }
+    console.log('');
+  }
 }
 
 function filterZenModelsForServer(models: ModelInfo[]): ModelInfo[] {
@@ -302,6 +342,7 @@ async function runVertexServerCommand(): Promise<number> {
   }
   console.log(pc.dim('  Auth:       gcloud Application Default Credentials'));
   console.log('');
+  printModelCatalog(models);
   console.log(pc.dim('Press Ctrl+C to stop.'));
 
   await waitForShutdown();
@@ -439,6 +480,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     console.log(pc.dim('  Discovery:  gateway ids masked for Claude Desktop / Cowork'));
   }
   console.log('');
+  printModelCatalog(models, gateway);
   console.log(pc.dim('Press Ctrl+C to stop.'));
 
   await waitForShutdown();
