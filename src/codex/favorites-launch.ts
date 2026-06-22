@@ -34,6 +34,7 @@ export function buildCodexProxyRoutesFromResolved(
         providerId: route.providerId,
         authType: route.authType,
         oauthAccountId: route.oauthAccountId,
+        contextWindow: route.contextWindow,
       } as CodexProxyRoute;
     })
     .filter((r): r is CodexProxyRoute => r !== undefined);

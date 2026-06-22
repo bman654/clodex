@@ -35,7 +35,7 @@ import { join } from "path";
 // package.json
 var package_default = {
   name: "@jacobbd/relay-ai",
-  version: "0.3.1",
+  version: "0.3.2",
   publishConfig: {
     access: "public"
   },
@@ -832,11 +832,16 @@ function parseCodexAppModelSlug(modelKey) {
 }
 function buildCodexAppRootConfig(spec) {
   const slug = codexAppModelSlug(spec.route.modelId);
+  const ctxWindow = spec.route.contextWindow;
   return {
     model: slug,
     model_provider: "openai",
     openai_base_url: `http://127.0.0.1:${spec.proxyPort}/v1`,
-    model_catalog_json: spec.catalogPath
+    model_catalog_json: spec.catalogPath,
+    ...ctxWindow && ctxWindow > 0 ? {
+      model_context_window: ctxWindow,
+      model_auto_compact_token_limit: Math.floor(ctxWindow * 0.7)
+    } : {}
   };
 }
 
@@ -9110,11 +9115,11 @@ async function runProvidersRemove(id, interactive = false) {
     return 1;
   }
   if (interactive) {
-    const confirm10 = await p10.confirm({
+    const confirm9 = await p10.confirm({
       message: `Remove ${provider.name} (${id})?`,
       initialValue: false
     });
-    if (p10.isCancel(confirm10) || !confirm10) {
+    if (p10.isCancel(confirm9) || !confirm9) {
       p10.cancel("Cancelled.");
       return 0;
     }
@@ -9833,6 +9838,33 @@ function sanitizeMessage(message) {
 }
 
 // src/codex-proxy.ts
+function estimateMessageChars(params) {
+  let chars = (params.system ?? "").length;
+  for (const msg of params.messages) {
+    if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part && typeof part === "object" && "text" in part && typeof part.text === "string") {
+          chars += part.text.length;
+        }
+      }
+    } else if (typeof msg.content === "string") {
+      chars += msg.content.length;
+    }
+  }
+  return chars;
+}
+function trimToContextLimit(params, contextWindow) {
+  const charLimit = Math.floor(contextWindow * 0.85) * 4;
+  if (estimateMessageChars(params) <= charLimit) return params;
+  let messages = [...params.messages];
+  while (messages.length > 1 && estimateMessageChars({ ...params, messages }) > charLimit) {
+    messages = messages.slice(1);
+    while (messages.length > 0 && messages[0].role !== "user") {
+      messages = messages.slice(1);
+    }
+  }
+  return { ...params, messages };
+}
 var PROXY_PLACEHOLDER_KEY = "proxy-local";
 function codexRouteLookupIds(requestedModel) {
   const ids = routeLookupIds(requestedModel);
@@ -10006,6 +10038,11 @@ async function startCodexProxy(routes, options = {}) {
           sendJson(res, 400, { error: { message: "Invalid JSON body", type: "invalid_request_error" } });
           return;
         }
+        if (debug) {
+          const prevId = body.previous_response_id ?? null;
+          const inputItems = Array.isArray(body.input) ? body.input.length : typeof body.input === "string" ? 1 : 0;
+          log19(`request: model=${String(body.model ?? "")} previous_response_id=${prevId ?? "(none)"} input_items=${inputItems} body_bytes=${rawBody.length}`);
+        }
         const modelId = String(body.model ?? "");
         let resolved = resolveModel(routes, models, modelId);
         if (!resolved) {
@@ -10026,7 +10063,7 @@ async function startCodexProxy(routes, options = {}) {
         }
         const { route, languageModel } = resolved;
         try {
-          const params = translateResponsesRequest(
+          let params = translateResponsesRequest(
             body,
             route.npm,
             {
@@ -10037,6 +10074,13 @@ async function startCodexProxy(routes, options = {}) {
               interleavedReasoningField: route.interleavedReasoningField
             }
           );
+          if (route.contextWindow && route.contextWindow > 0) {
+            const before = params.messages.length;
+            params = trimToContextLimit(params, route.contextWindow);
+            if (debug && params.messages.length < before) {
+              log19(`context trim: model=${route.modelId} window=${route.contextWindow} kept=${params.messages.length}/${before} messages`);
+            }
+          }
           if (debug) {
             const effort = body.reasoning?.effort;
             log19(`model=${route.modelId} effort=${effort ?? "(none)"} providerOptions=${JSON.stringify(params.providerOptions)}`);
@@ -10169,7 +10213,8 @@ function buildCodexProxyRoutesForProvider(provider, apiKey, selectedModelId, age
       oauthAccountId: route.oauthAccountId,
       supportedParameters: route.supportedParameters,
       reasoning: route.reasoning,
-      interleavedReasoningField: route.interleavedReasoningField
+      interleavedReasoningField: route.interleavedReasoningField,
+      contextWindow: route.contextWindow
     };
   });
 }
@@ -10681,7 +10726,8 @@ function buildCodexProxyRoutesFromResolved(resolved, providersById) {
       upstreamModelId: route.upstreamModelId,
       providerId: route.providerId,
       authType: route.authType,
-      oauthAccountId: route.oauthAccountId
+      oauthAccountId: route.oauthAccountId,
+      contextWindow: route.contextWindow
     };
   }).filter((r) => r !== void 0);
   if (skippedOAuth.length > 0) {
@@ -12430,6 +12476,18 @@ function rootString(config, key) {
   const v = config[key];
   return { had: true, value: typeof v === "string" ? v : String(v ?? "") };
 }
+function rootNumber(config, key) {
+  if (!(key in config)) return { had: false };
+  const v = config[key];
+  return { had: true, value: typeof v === "number" ? v : void 0 };
+}
+function applyRestoreNumber(config, key, had, value) {
+  if (had && value !== void 0) {
+    config[key] = value;
+  } else {
+    delete config[key];
+  }
+}
 function readCodexConfigText(path = getCodexConfigPath()) {
   if (!existsSync14(path)) return "";
   return readFileSync11(path, "utf8");
@@ -12446,6 +12504,8 @@ function captureRestoreState(text5) {
   const modelCatalog = rootString(config, "model_catalog_json");
   const openAIBaseUrl = rootString(config, "openai_base_url");
   const reasoning = rootString(config, "model_reasoning_effort");
+  const contextWindow = rootNumber(config, "model_context_window");
+  const autoCompact = rootNumber(config, "model_auto_compact_token_limit");
   return {
     hadProfile: profile.had,
     profile: profile.value,
@@ -12458,7 +12518,11 @@ function captureRestoreState(text5) {
     hadOpenAIBaseUrl: openAIBaseUrl.had,
     openAIBaseUrl: openAIBaseUrl.value,
     hadModelReasoningEffort: reasoning.had,
-    modelReasoningEffort: reasoning.value
+    modelReasoningEffort: reasoning.value,
+    hadModelContextWindow: contextWindow.had,
+    modelContextWindow: contextWindow.value,
+    hadModelAutoCompactTokenLimit: autoCompact.had,
+    modelAutoCompactTokenLimit: autoCompact.value
   };
 }
 function isAppManagedConfig(text5) {
@@ -12477,6 +12541,16 @@ function mergeAppConfig(existing, spec) {
   out.model_provider = patch.model_provider;
   out.openai_base_url = patch.openai_base_url;
   out.model_catalog_json = patch.model_catalog_json;
+  if (patch.model_context_window !== void 0) {
+    out.model_context_window = patch.model_context_window;
+  } else {
+    delete out.model_context_window;
+  }
+  if (patch.model_auto_compact_token_limit !== void 0) {
+    out.model_auto_compact_token_limit = patch.model_auto_compact_token_limit;
+  } else {
+    delete out.model_auto_compact_token_limit;
+  }
   const providers = asRecord(out.model_providers);
   delete providers[CODEX_APP_PROVIDER_ID];
   const profiles = asRecord(out.profiles);
@@ -12577,6 +12651,8 @@ function restoreConfigFromState(state, configPath = getCodexConfigPath()) {
     applyRestoreKey(config, "openai_base_url", Boolean(state.hadOpenAIBaseUrl), state.openAIBaseUrl);
   }
   applyRestoreKey(config, "model_reasoning_effort", state.hadModelReasoningEffort, state.modelReasoningEffort);
+  applyRestoreNumber(config, "model_context_window", state.hadModelContextWindow ?? false, state.modelContextWindow);
+  applyRestoreNumber(config, "model_auto_compact_token_limit", state.hadModelAutoCompactTokenLimit ?? false, state.modelAutoCompactTokenLimit);
   const sidecar = getCodexAppSidecarProfilePath();
   if (existsSync14(sidecar)) {
     try {
@@ -12744,6 +12820,7 @@ function waitForShutdown2() {
     const cleanup = () => {
       process.removeListener("SIGINT", onSigint);
       process.removeListener("SIGTERM", onSigterm);
+      process.removeListener("SIGHUP", onSighup);
     };
     const onSigint = () => {
       cleanup();
@@ -12753,8 +12830,13 @@ function waitForShutdown2() {
       cleanup();
       resolve("sigterm");
     };
+    const onSighup = () => {
+      cleanup();
+      resolve("sighup");
+    };
     process.once("SIGINT", onSigint);
     process.once("SIGTERM", onSigterm);
+    process.once("SIGHUP", onSighup);
   });
 }
 
@@ -12968,6 +13050,21 @@ function codexAppInstallHint() {
 }
 
 // src/codex-app.ts
+async function waitForShutdownWithConfirm() {
+  while (true) {
+    const signal = await waitForShutdown2();
+    if (signal !== "sigint") break;
+    console.log("");
+    const choice = await p17.select({
+      message: "Close Codex Desktop and restore your Codex config?",
+      options: [
+        { value: "yes", label: "Yes, close Codex and restore config" },
+        { value: "no", label: "No, keep session running" }
+      ]
+    });
+    if (p17.isCancel(choice) || choice === "yes") break;
+  }
+}
 function codexAppHelpText() {
   return `${pc15.bold("relay-ai codex-app")} \u2014 launch Codex desktop app with your registry providers
 
@@ -13068,7 +13165,8 @@ async function runCodexAppVertexLaunch(configOnly, trace = false) {
     upstreamModelId: selectedEntry.upstream_id ?? selectedEntry.id,
     npm: VERTEX_ANTHROPIC_NPM,
     apiKey: "",
-    providerId: "vertex"
+    providerId: "vertex",
+    contextWindow: resolveContextWindow(selectedEntry.id)
   };
   if (configOnly) {
     const home = process.env["HOME"] ?? "";
@@ -13141,17 +13239,15 @@ async function runCodexAppVertexLaunch(configOnly, trace = false) {
       restoreCommand: "relay-ai codex-app --restore"
     });
     codexAppOutro(selectedEntry.display_name);
-    await waitForShutdown2();
+    await waitForShutdownWithConfirm();
     console.log("");
+    if (isCodexAppRunning()) {
+      p17.log.step("Stopping Codex Desktop...");
+      quitCodexAppGracefully();
+    }
     if (sessionActive) {
       restoreCodexAppOverlay();
       sessionActive = false;
-    }
-    if (isCodexAppRunning()) {
-      const shouldClose = await p17.confirm({ message: "Codex Desktop is still running. Close it?" });
-      if (shouldClose && !p17.isCancel(shouldClose)) {
-        quitCodexAppGracefully();
-      }
     }
     return 0;
   } finally {
@@ -13323,7 +13419,8 @@ async function runCodexAppCommand(args, opts = {}) {
       providerId: activeProvider.id,
       npm: "",
       upstreamModelId: "",
-      apiKey: ""
+      apiKey: "",
+      contextWindow: selectedModel.contextWindow
     } : appRoute;
     const specBase = { route: activeRoute, catalogPath };
     if (configOnly) {
@@ -13413,18 +13510,16 @@ async function runCodexAppCommand(args, opts = {}) {
       restoreCommand: "relay-ai codex-app --restore"
     });
     codexAppOutro(modelLabel);
-    await waitForShutdown2();
+    await waitForShutdownWithConfirm();
     if (trace) printTraceLog(debugLogPath);
     console.log("");
+    if (isCodexAppRunning()) {
+      p17.log.step("Stopping Codex Desktop...");
+      quitCodexAppGracefully();
+    }
     if (sessionActive) {
       restoreCodexAppOverlay();
       sessionActive = false;
-    }
-    if (isCodexAppRunning()) {
-      const shouldClose = await p17.confirm({ message: "Codex Desktop is still running. Close it?" });
-      if (shouldClose && !p17.isCancel(shouldClose)) {
-        quitCodexAppGracefully();
-      }
     }
     return 0;
   } finally {

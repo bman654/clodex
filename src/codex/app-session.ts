@@ -198,21 +198,18 @@ export function checkAppSessionLock(isTty: boolean, env: NodeJS.ProcessEnv = pro
   return { ok: true };
 }
 
-export function waitForShutdown(): Promise<'sigint' | 'sigterm'> {
+export function waitForShutdown(): Promise<'sigint' | 'sigterm' | 'sighup'> {
   return new Promise(resolve => {
     const cleanup = (): void => {
       process.removeListener('SIGINT', onSigint);
       process.removeListener('SIGTERM', onSigterm);
+      process.removeListener('SIGHUP', onSighup);
     };
-    const onSigint = (): void => {
-      cleanup();
-      resolve('sigint');
-    };
-    const onSigterm = (): void => {
-      cleanup();
-      resolve('sigterm');
-    };
+    const onSigint = (): void => { cleanup(); resolve('sigint'); };
+    const onSigterm = (): void => { cleanup(); resolve('sigterm'); };
+    const onSighup = (): void => { cleanup(); resolve('sighup'); };
     process.once('SIGINT', onSigint);
     process.once('SIGTERM', onSigterm);
+    process.once('SIGHUP', onSighup);
   });
 }

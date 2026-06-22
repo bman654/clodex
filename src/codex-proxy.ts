@@ -11,10 +11,40 @@ import {
   streamResponsesResponse,
   generateResponsesResponse,
   writeResponsesErrorStream,
+  type CodexSdkCallParams,
 } from './codex-responses-adapter.js';
 import { silenceSdkWarnings } from './sdk-adapter.js';
 import { formatUpstreamError } from './codex/upstream-error.js';
 import { getCodexProxyDebugLogPath, makeTraceLogger } from './trace-log.js';
+
+function estimateMessageChars(params: CodexSdkCallParams): number {
+  let chars = (params.system ?? '').length;
+  for (const msg of params.messages) {
+    if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (part && typeof part === 'object' && 'text' in part && typeof (part as { text?: unknown }).text === 'string') {
+          chars += (part as { text: string }).text.length;
+        }
+      }
+    } else if (typeof msg.content === 'string') {
+      chars += msg.content.length;
+    }
+  }
+  return chars;
+}
+
+function trimToContextLimit(params: CodexSdkCallParams, contextWindow: number): CodexSdkCallParams {
+  const charLimit = Math.floor(contextWindow * 0.85) * 4;
+  if (estimateMessageChars(params) <= charLimit) return params;
+  let messages = [...params.messages];
+  while (messages.length > 1 && estimateMessageChars({ ...params, messages }) > charLimit) {
+    messages = messages.slice(1);
+    while (messages.length > 0 && messages[0]!.role !== 'user') {
+      messages = messages.slice(1);
+    }
+  }
+  return { ...params, messages };
+}
 
 export interface CodexProxyRoute {
   modelId: string;
@@ -29,6 +59,7 @@ export interface CodexProxyRoute {
   reasoning?: boolean;
   interleavedReasoningField?: string;
   vertex?: VertexProviderConfig;
+  contextWindow?: number;
 }
 
 export interface CodexProxyHandle {
@@ -246,6 +277,12 @@ export async function startCodexProxy(
           return;
         }
 
+        if (debug) {
+          const prevId = body.previous_response_id ?? null;
+          const inputItems = Array.isArray(body.input) ? body.input.length : (typeof body.input === 'string' ? 1 : 0);
+          log(`request: model=${String(body.model ?? '')} previous_response_id=${prevId ?? '(none)'} input_items=${inputItems} body_bytes=${rawBody.length}`);
+        }
+
         const modelId = String(body.model ?? '');
         let resolved = resolveModel(routes, models, modelId);
         if (!resolved) {
@@ -268,7 +305,7 @@ export async function startCodexProxy(
         const { route, languageModel } = resolved;
 
         try {
-          const params = translateResponsesRequest(
+          let params = translateResponsesRequest(
             body as unknown as import('./codex-responses-adapter.js').ResponsesRequest,
             route.npm,
             {
@@ -279,6 +316,13 @@ export async function startCodexProxy(
               interleavedReasoningField: route.interleavedReasoningField,
             },
           );
+          if (route.contextWindow && route.contextWindow > 0) {
+            const before = params.messages.length;
+            params = trimToContextLimit(params, route.contextWindow);
+            if (debug && params.messages.length < before) {
+              log(`context trim: model=${route.modelId} window=${route.contextWindow} kept=${params.messages.length}/${before} messages`);
+            }
+          }
           if (debug) {
             const effort = (body as { reasoning?: { effort?: string } }).reasoning?.effort;
             log(`model=${route.modelId} effort=${effort ?? '(none)'} providerOptions=${JSON.stringify(params.providerOptions)}`);

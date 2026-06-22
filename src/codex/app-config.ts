@@ -33,6 +33,10 @@ export interface CodexAppRestoreState {
   openAIBaseUrl?: string;
   hadModelReasoningEffort: boolean;
   modelReasoningEffort?: string;
+  hadModelContextWindow?: boolean;
+  modelContextWindow?: number;
+  hadModelAutoCompactTokenLimit?: boolean;
+  modelAutoCompactTokenLimit?: number;
 }
 
 function asRecord(value: unknown): TomlRecord {
@@ -45,6 +49,20 @@ function rootString(config: TomlRecord, key: string): { had: boolean; value: str
   if (!(key in config)) return { had: false, value: '' };
   const v = config[key];
   return { had: true, value: typeof v === 'string' ? v : String(v ?? '') };
+}
+
+function rootNumber(config: TomlRecord, key: string): { had: boolean; value?: number } {
+  if (!(key in config)) return { had: false };
+  const v = config[key];
+  return { had: true, value: typeof v === 'number' ? v : undefined };
+}
+
+function applyRestoreNumber(config: TomlRecord, key: string, had: boolean, value?: number): void {
+  if (had && value !== undefined) {
+    config[key] = value;
+  } else {
+    delete config[key];
+  }
 }
 
 export function readCodexConfigText(path = getCodexConfigPath()): string {
@@ -65,6 +83,8 @@ export function captureRestoreState(text: string): CodexAppRestoreState {
   const modelCatalog = rootString(config, 'model_catalog_json');
   const openAIBaseUrl = rootString(config, 'openai_base_url');
   const reasoning = rootString(config, 'model_reasoning_effort');
+  const contextWindow = rootNumber(config, 'model_context_window');
+  const autoCompact = rootNumber(config, 'model_auto_compact_token_limit');
   return {
     hadProfile: profile.had,
     profile: profile.value,
@@ -78,6 +98,10 @@ export function captureRestoreState(text: string): CodexAppRestoreState {
     openAIBaseUrl: openAIBaseUrl.value,
     hadModelReasoningEffort: reasoning.had,
     modelReasoningEffort: reasoning.value,
+    hadModelContextWindow: contextWindow.had,
+    modelContextWindow: contextWindow.value,
+    hadModelAutoCompactTokenLimit: autoCompact.had,
+    modelAutoCompactTokenLimit: autoCompact.value,
   };
 }
 
@@ -100,6 +124,16 @@ function mergeAppConfig(existing: TomlRecord, spec: CodexAppConfigSpec): TomlRec
   out.model_provider = patch.model_provider;
   out.openai_base_url = patch.openai_base_url;
   out.model_catalog_json = patch.model_catalog_json;
+  if (patch.model_context_window !== undefined) {
+    out.model_context_window = patch.model_context_window;
+  } else {
+    delete out.model_context_window;
+  }
+  if (patch.model_auto_compact_token_limit !== undefined) {
+    out.model_auto_compact_token_limit = patch.model_auto_compact_token_limit;
+  } else {
+    delete out.model_auto_compact_token_limit;
+  }
   const providers = asRecord(out.model_providers);
   delete providers[CODEX_APP_PROVIDER_ID];
   const profiles = asRecord(out.profiles);
@@ -208,6 +242,8 @@ export function restoreConfigFromState(state: CodexAppRestoreState, configPath =
     applyRestoreKey(config, 'openai_base_url', Boolean(state.hadOpenAIBaseUrl), state.openAIBaseUrl);
   }
   applyRestoreKey(config, 'model_reasoning_effort', state.hadModelReasoningEffort, state.modelReasoningEffort);
+  applyRestoreNumber(config, 'model_context_window', state.hadModelContextWindow ?? false, state.modelContextWindow);
+  applyRestoreNumber(config, 'model_auto_compact_token_limit', state.hadModelAutoCompactTokenLimit ?? false, state.modelAutoCompactTokenLimit);
 
   const sidecar = getCodexAppSidecarProfilePath();
   if (existsSync(sidecar)) {

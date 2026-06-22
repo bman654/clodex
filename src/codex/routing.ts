@@ -122,6 +122,7 @@ export function buildCodexProxyRoutesForProvider(
       supportedParameters: route.supportedParameters,
       reasoning: route.reasoning,
       interleavedReasoningField: route.interleavedReasoningField,
+      contextWindow: route.contextWindow,
     };
   });
 }

@@ -182,7 +182,11 @@ model = "claude-sonnet-4-6"
 model_provider = "openai"
 openai_base_url = "http://127.0.0.1:<random-port>/v1"
 model_catalog_json = "/Users/you/.relay-ai/codex/app-models-anthropic.json"
+model_context_window = 1000000
+model_auto_compact_token_limit = 700000
 ```
+
+`model_context_window` tells Codex the model's actual context limit. `model_auto_compact_token_limit` (set to 70% of the limit) tells Codex when to trigger auto-compaction, leaving enough headroom for the compaction request itself to succeed. Both fields are removed on restore.
 
 The app deliberately keeps `model_provider = "openai"` and redirects the built-in provider with `openai_base_url`. Codex records the provider on every local thread and filters its history by provider; using a separate custom provider would hide existing OpenAI/ChatGPT threads while a relay-ai session is active. No conversations are deleted.
 
@@ -297,6 +301,9 @@ Codex exposes a **reasoning effort** picker when relay-ai's model catalog includ
 | Stuck on relay-ai settings | `relay-ai codex-app --restore` |
 | `--restore` blocked | Ctrl+C the other relay-ai codex-app terminal first |
 | Wrong config after test | `--restore`; backups in `~/.relay-ai/codex/backups/` |
+| "prompt too long" / session crashes after many turns | The conversation history grew past the model’s context limit. Start a fresh conversation in Codex. relay-ai now sets `model_auto_compact_token_limit` in config.toml to prevent this going forward — see [Context management](#context-management-and-session-architecture). |
+| Trying to continue a large GPT-5.5 session on a different model | Codex sends the full conversation history inline; 1 M-token models reject 2 M-token payloads. relay-ai trims the oldest messages automatically, but some early context will be lost. Starting fresh is the cleanest option. |
+| Model shows as "Custom" in the Codex UI | Expected — Codex labels all external catalog models as "Custom". The correct model is in use. |
 
 ### Shared
 
@@ -304,6 +311,47 @@ Codex exposes a **reasoning effort** picker when relay-ai's model catalog includ
 |---------|-----|
 | Anthropic key rejected on `providers add` | Update relay-ai (Bearer vs `x-api-key` fix) |
 | Model says relay-ai forced sandbox | Wrong — check Codex sandbox flags, not `RELAY_AI_CODEX_KEY` |
+
+---
+
+## Context management and session architecture
+
+### How Codex handles conversation history
+
+Codex App is a **stateless client**: it sends the full accumulated conversation history with every single request to the proxy. There is no server-side reference system in use — the `previous_response_id` field in the Responses API spec is not implemented in the Codex App binary. Every turn sends all prior turns.
+
+This means:
+
+- Each request grows larger as the conversation continues (~one new message pair per turn).
+- A session that ran for hundreds of turns with GPT-5.5 (which OpenAI manages server-side on their infrastructure) cannot be resumed transparently on a different model via relay-ai — the full local history is sent inline, and 1 M-token models will reject a 2 M-token payload.
+- relay-ai has no way to make Codex adopt a different history-referencing approach. This is a fixed architectural property of the Codex App.
+
+### How relay-ai protects against context overflow
+
+relay-ai uses two complementary layers:
+
+**1. Early auto-compaction via config.toml**
+
+At session start, relay-ai writes two fields into `~/.codex/config.toml`:
+
+```toml
+model_context_window = 1000000          # the model's actual limit
+model_auto_compact_token_limit = 700000  # 70% of the limit
+```
+
+Codex reads `model_auto_compact_token_limit` and triggers its built-in compaction before the conversation reaches that threshold. Compaction at 70% leaves 30% of headroom for the compaction request itself (which includes the full conversation). Without these fields, Codex either never compacts (for unknown models) or compacts too late, causing the compaction request itself to exceed the model limit.
+
+**2. Proxy-level truncation as a last resort**
+
+If a conversation that already exceeds the safety threshold arrives at the proxy (e.g. after switching from a GPT-5.5 session to a 1 M-limit model mid-way through), relay-ai drops the oldest messages before forwarding — enough to bring the estimated token count below 85% of the model's context window. The session continues in a degraded but functional state rather than crashing.
+
+### "Custom" label in the Codex App model picker
+
+When relay-ai configures Codex to use an external model via `model_catalog_json` and a custom `openai_base_url`, Codex App displays the model with a **"Custom"** label in the UI (e.g. "Custom · Medium"). This is expected Codex App behavior for any model loaded from a catalog that isn't in Codex's built-in provider list. The actual model relay-ai selected is in use — the label is cosmetic.
+
+### Background GPT requests from Codex's internal agent
+
+Codex App has an internal agent subsystem that periodically sends background requests using hardcoded OpenAI model IDs (`gpt-5.4`, `gpt-5.4-mini`, `gpt-5.5`), regardless of what model is configured. relay-ai's proxy silently routes these to the session's starting model. This is intentional — the background agent handles UI state tasks and does not affect your conversation.
 
 ---
 

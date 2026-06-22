@@ -26,12 +26,19 @@ export function buildCodexAppRootConfig(spec: CodexAppConfigSpec): {
   model_provider: string;
   openai_base_url: string;
   model_catalog_json: string;
+  model_context_window?: number;
+  model_auto_compact_token_limit?: number;
 } {
   const slug = codexAppModelSlug(spec.route.modelId);
+  const ctxWindow = spec.route.contextWindow;
   return {
     model: slug,
     model_provider: 'openai',
     openai_base_url: `http://127.0.0.1:${spec.proxyPort}/v1`,
     model_catalog_json: spec.catalogPath,
+    ...(ctxWindow && ctxWindow > 0 ? {
+      model_context_window: ctxWindow,
+      model_auto_compact_token_limit: Math.floor(ctxWindow * 0.7),
+    } : {}),
   };
 }

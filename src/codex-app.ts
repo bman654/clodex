@@ -54,6 +54,23 @@ import { resolveContextWindow } from './context-window.js';
 import { buildCodexProxyRoutesFromResolved, resolveCodexFavorites } from './codex/favorites-launch.js';
 import { getFavoritesAppCatalogPath } from './codex/profile.js';
 
+async function waitForShutdownWithConfirm(): Promise<void> {
+  while (true) {
+    const signal = await waitForShutdown();
+    if (signal !== 'sigint') break; // SIGTERM/SIGHUP: close immediately, no one to ask
+    console.log('');
+    const choice = await p.select({
+      message: 'Close Codex Desktop and restore your Codex config?',
+      options: [
+        { value: 'yes', label: 'Yes, close Codex and restore config' },
+        { value: 'no', label: 'No, keep session running' },
+      ],
+    });
+    if (p.isCancel(choice) || choice === 'yes') break; // Ctrl+C or Yes = close
+    // confirmed === false means user typed 'n' → loop back and keep waiting
+  }
+}
+
 export function codexAppHelpText(): string {
   return `${pc.bold('relay-ai codex-app')} — launch Codex desktop app with your registry providers
 
@@ -160,6 +177,7 @@ async function runCodexAppVertexLaunch(configOnly: boolean, trace = false): Prom
     npm: VERTEX_ANTHROPIC_NPM,
     apiKey: '',
     providerId: 'vertex',
+    contextWindow: resolveContextWindow(selectedEntry.id),
   };
 
   if (configOnly) {
@@ -242,19 +260,17 @@ async function runCodexAppVertexLaunch(configOnly: boolean, trace = false): Prom
     });
 
     codexAppOutro(selectedEntry.display_name);
-    await waitForShutdown();
+    await waitForShutdownWithConfirm();
     console.log('');
+
+    if (isCodexAppRunning()) {
+      p.log.step('Stopping Codex Desktop...');
+      quitCodexAppGracefully();
+    }
 
     if (sessionActive) {
       restoreCodexAppOverlay();
       sessionActive = false;
-    }
-
-    if (isCodexAppRunning()) {
-      const shouldClose = await p.confirm({ message: 'Codex Desktop is still running. Close it?' });
-      if (shouldClose && !p.isCancel(shouldClose)) {
-        quitCodexAppGracefully();
-      }
     }
     return 0;
   } finally {
@@ -455,6 +471,7 @@ export async function runCodexAppCommand(args: string[], opts: { vertex?: boolea
       npm: '',
       upstreamModelId: '',
       apiKey: '',
+      contextWindow: selectedModel.contextWindow,
     } : appRoute;
 
     const specBase = { route: activeRoute, catalogPath };
@@ -567,21 +584,18 @@ export async function runCodexAppCommand(args: string[], opts: { vertex?: boolea
     });
 
     codexAppOutro(modelLabel);
-    await waitForShutdown();
+    await waitForShutdownWithConfirm();
     if (trace) printTraceLog(debugLogPath);
     console.log('');
 
-    // Restore config immediately before prompting
+    if (isCodexAppRunning()) {
+      p.log.step('Stopping Codex Desktop...');
+      quitCodexAppGracefully();
+    }
+
     if (sessionActive) {
       restoreCodexAppOverlay();
       sessionActive = false;
-    }
-    
-    if (isCodexAppRunning()) {
-      const shouldClose = await p.confirm({ message: 'Codex Desktop is still running. Close it?' });
-      if (shouldClose && !p.isCancel(shouldClose)) {
-        quitCodexAppGracefully();
-      }
     }
     return 0;
   } finally {

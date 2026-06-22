@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.2] - 2026-06-22
+
+### Fixed
+
+- **Codex App: context overflow no longer crashes long sessions** — relay-ai now writes `model_context_window` and `model_auto_compact_token_limit` (70% of the model's actual limit) into `~/.codex/config.toml` at session start. Codex uses these values to trigger auto-compaction before the conversation reaches the model's hard limit, preventing the compaction-fails-at-limit crash that previously broke sessions and made them unrecoverable. Applies to single-provider, favorites, and Vertex AI sessions alike.
+
+- **Codex App: proxy-level message truncation as a safety net** — if a conversation history arrives that already exceeds 85% of the selected model's context window (e.g. a long native GPT-5.5 session loaded into a 1 M-token model), relay-ai silently drops the oldest messages before forwarding to the upstream model. The session continues in a degraded but functional state instead of crashing with an unrecoverable error.
+
+- **Codex App: Ctrl+C now shows a confirmation menu instead of immediately closing** — pressing Ctrl+C now presents an arrow-key selection menu: *"Close Codex Desktop and restore your Codex config?"* (Yes / No). Pressing Ctrl+C a second time during the prompt, or pressing Enter on Yes, closes the app and restores config. Choosing No keeps the session running. SIGTERM and SIGHUP still close immediately without a prompt.
+
+- **Codex App: `--trace` request observability** — `--trace` mode now logs `previous_response_id`, `input_items`, and `body_bytes` for every incoming proxy request, making it possible to verify Codex's conversation-history protocol against a specific provider setup.
+
 ## [0.3.1] - 2026-06-22
 
 ### Fixed
