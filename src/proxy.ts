@@ -96,6 +96,10 @@ export interface ProxyRoute {
   supportedParameters?: string[];
   reasoning?: boolean;
   interleavedReasoningField?: string;
+  /** Backend capability: model requires the Responses-Lite request shape (x-openai-internal-codex-responses-lite). */
+  useResponsesLite?: boolean;
+  /** Backend capability: model must use the WebSocket Responses transport instead of HTTP. */
+  preferWebSockets?: boolean;
   /** Static headers sent on every upstream request (e.g. a plan/auth-tracking header a custom endpoint requires). */
   headers?: Record<string, string>;
 }
@@ -294,6 +298,9 @@ export function startProxyCatalog(
             oauthAccountId: route.oauthAccountId,
             providerData: route.providerData,
             headers: route.headers,
+            useResponsesLite: route.useResponsesLite,
+            preferWebSockets: route.preferWebSockets,
+            onDebug: (msg: string) => plog(() => msg),
           });
           if (clientWantsStream) {
             res.writeHead(200, {
@@ -436,6 +443,8 @@ export function startProxy(
     supportedParameters?: string[];
     reasoning?: boolean;
     interleavedReasoningField?: string;
+    useResponsesLite?: boolean;
+    preferWebSockets?: boolean;
   },
   apiKey?: string,
 ): Promise<ProxyHandle> {
@@ -458,5 +467,7 @@ export function startProxy(
     supportedParameters: sdk?.supportedParameters,
     reasoning: sdk?.reasoning,
     interleavedReasoningField: sdk?.interleavedReasoningField,
+    useResponsesLite: sdk?.useResponsesLite,
+    preferWebSockets: sdk?.preferWebSockets,
   }], clientModelId, debug);
 }

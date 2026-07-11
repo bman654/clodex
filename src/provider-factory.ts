@@ -3,8 +3,9 @@
 // endpoint selection, and provider quirks.
 import type { LanguageModel } from 'ai';
 import { wrapLanguageModel, extractReasoningMiddleware } from 'ai';
-import { VERTEX_ANTHROPIC_NPM } from './constants.js';
+import { VERTEX_ANTHROPIC_NPM, CODEX_RESPONSES_LITE_VERSION, CODEX_RESPONSES_LITE_WS_URL } from './constants.js';
 import { extractOpenAiAccountId } from './oauth/openai.js';
+import { createResponsesWebSocketFetch } from './oauth/responses-websocket.js';
 import {
   CLAUDE_CODE_USER_AGENT,
   injectClaudeIdentity,
@@ -85,6 +86,12 @@ export interface ProviderModelSpec {
   vertex?: VertexProviderConfig;
   /** Static headers sent on every upstream request (e.g. a plan/auth-tracking header a custom endpoint requires). */
   headers?: Record<string, string>;
+  /** Backend capability: model requires the Responses-Lite request shape (x-openai-internal-codex-responses-lite). */
+  useResponsesLite?: boolean;
+  /** Backend capability: model must use the WebSocket Responses transport instead of HTTP. */
+  preferWebSockets?: boolean;
+  /** Optional debug logger (wired to the proxy trace log) for transport-level diagnostics. */
+  onDebug?: (msg: string) => void;
 }
 
 /** True when this provider routes through the SDK adapter (local providers + Zen/Go openai-format). */
@@ -146,16 +153,27 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
     const accountId = spec.authType === 'oauth'
       ? spec.oauthAccountId ?? extractOpenAiAccountId({ access_token: apiKey })
       : undefined;
-    const openai = createOpenAI(spec.authType === 'oauth'
+    const oauthOptions = spec.authType === 'oauth'
       ? {
           apiKey,
           baseURL: 'https://chatgpt.com/backend-api/codex',
           headers: {
             ...(accountId ? { 'ChatGPT-Account-Id': accountId } : {}),
             originator: 'relay-ai',
+            // Responses-Lite models (backend prefer_websockets/use_responses_lite,
+            // e.g. gpt-5.6-luna) require these on the request.
+            ...(spec.useResponsesLite
+              ? { version: CODEX_RESPONSES_LITE_VERSION, 'x-openai-internal-codex-responses-lite': 'true' }
+              : {}),
           },
+          // Models the backend flags with prefer_websockets are only served over
+          // the WebSocket Responses transport, not HTTP.
+          ...(spec.preferWebSockets
+            ? { fetch: createResponsesWebSocketFetch(CODEX_RESPONSES_LITE_WS_URL, spec.onDebug) }
+            : {}),
         }
-      : { apiKey });
+      : { apiKey };
+    const openai = createOpenAI(oauthOptions);
     return shouldUseOpenAiResponsesEndpoint(modelId) ? openai.responses(modelId) : openai.chat(modelId);
   }
   if (npm === '@ai-sdk/xai') {

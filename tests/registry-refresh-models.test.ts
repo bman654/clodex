@@ -186,6 +186,70 @@ describe('registry/refresh-models', () => {
       expect(mockRegistry.providers[0]?.modelsCache?.models[0]?.id).toBe('gpt-5.6-sol');
     });
 
+    it('captures use_responses_lite / prefer_websockets flags from the live Codex endpoint', async () => {
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI (ChatGPT)',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistry).mockReturnValue(mockRegistry);
+
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          models: [
+            { slug: 'gpt-5.6-luna', title: 'GPT-5.6 Luna', use_responses_lite: true, prefer_websockets: true },
+            { slug: 'gpt-5.6-sol', title: 'GPT-5.6 Sol' },
+          ],
+        }),
+      } as Response);
+
+      await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
+
+      const savedRegistry = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+      const models = savedRegistry.providers[0]?.modelsCache?.models ?? [];
+      const luna = models.find(m => m.id === 'gpt-5.6-luna');
+      const sol = models.find(m => m.id === 'gpt-5.6-sol');
+      expect(luna?.useResponsesLite).toBe(true);
+      expect(luna?.preferWebSockets).toBe(true);
+      // A model the backend does not flag stays on the HTTP path.
+      expect(sol?.useResponsesLite).toBeUndefined();
+      expect(sol?.preferWebSockets).toBeUndefined();
+    });
+
+    it('Tier 3: static seed carries Luna capability flags so a discovery outage does not regress it', async () => {
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistry).mockReturnValue(mockRegistry);
+
+      // Both live endpoints fail → static seed.
+      vi.mocked(global.fetch).mockResolvedValue({ ok: false, status: 500 } as Response);
+
+      await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
+
+      const savedRegistry = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+      const luna = savedRegistry.providers[0]?.modelsCache?.models.find(m => m.id === 'gpt-5.6-luna');
+      expect(luna?.useResponsesLite).toBe(true);
+      expect(luna?.preferWebSockets).toBe(true);
+    });
+
     it('returns error if OAuth token is missing', async () => {
       const mockRegistry: ProviderRegistry = {
         version: 1,

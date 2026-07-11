@@ -8,6 +8,8 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # required to create the GitHub Release
     steps:
       - uses: actions/checkout@v4
 
@@ -18,6 +20,19 @@ jobs:
 
       - run: npm ci
 
+      # Gate the release on a green test + type-check + build before anything is published.
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
       - run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.RELAYAI }}
+
+      # Create a GitHub Release from the matching CHANGELOG.md section.
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NOTES=$(node -e "const fs=require('fs');const cl=fs.readFileSync('CHANGELOG.md','utf8');const m=cl.match(/## \[[\d.]+\][^\n]*\n([\s\S]*?)(?=\n## \[|$)/);console.log(m?m[1].trim():'')")
+          gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --notes "$NOTES"

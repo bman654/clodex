@@ -55,6 +55,10 @@ export interface LocalProviderModel {
   reasoning?: boolean;
   /** Streaming/interleaved reasoning field name from metadata, e.g. reasoning_content. */
   interleavedReasoningField?: string;
+  /** Backend capability: model requires the Responses-Lite request shape (x-openai-internal-codex-responses-lite). */
+  useResponsesLite?: boolean;
+  /** Backend capability: model must use the WebSocket Responses transport instead of HTTP. */
+  preferWebSockets?: boolean;
   /** OpenCode Zen free-tier models only. */
   isFree?: boolean;
   freeStatus?: FreeStatus;

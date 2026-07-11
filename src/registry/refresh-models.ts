@@ -195,42 +195,83 @@ async function refreshOAuthProvider(
   throw new Error(`refreshOAuthProvider: unsupported template "${tpl}"`);
 }
 
+/** A parsed model entry, including backend-reported transport capability flags. */
+interface OpenAiModelEntry {
+  id: string;
+  name: string;
+  context_window?: number;
+  /** Backend flags: model needs the Responses-Lite shape / WebSocket transport. */
+  useResponsesLite?: boolean;
+  preferWebSockets?: boolean;
+}
+
+/** Read the Responses-Lite / WebSocket capability flags off a raw model entry. */
+function readCapabilityFlags(m: Record<string, unknown>): Pick<OpenAiModelEntry, 'useResponsesLite' | 'preferWebSockets'> {
+  const bool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined);
+  return {
+    useResponsesLite: bool(m['use_responses_lite']),
+    preferWebSockets: bool(m['prefer_websockets']),
+  };
+}
+
 /** Parse model entries from OpenAI-standard or ChatGPT-internal response shapes. */
-function parseOpenAiModelEntries(
-  body: unknown,
-): Array<{ id: string; name: string; context_window?: number }> {
+function parseOpenAiModelEntries(body: unknown): OpenAiModelEntry[] {
   if (!body || typeof body !== 'object') return [];
   const b = body as Record<string, unknown>;
 
   // ChatGPT backend format: { models: [{ slug, title }] }
   if (Array.isArray(b.models)) {
-    return (b.models as Array<{ slug?: string; title?: string; name?: string; context_window?: number }>)
-      .map(m => ({ id: m.slug ?? '', name: m.title ?? m.name ?? m.slug ?? '', context_window: m.context_window }))
+    return (b.models as Array<Record<string, unknown>>)
+      .map(m => ({
+        id: (m.slug as string) ?? '',
+        name: (m.title as string) ?? (m.name as string) ?? (m.slug as string) ?? '',
+        context_window: m.context_window as number | undefined,
+        ...readCapabilityFlags(m),
+      }))
       .filter(m => m.id.length > 0);
   }
   // Standard OpenAI format: { data: [{ id, name }] }
   if (Array.isArray(b.data)) {
-    return (b.data as Array<{ id?: string; name?: string; context_window?: number }>)
-      .map(m => ({ id: m.id ?? '', name: m.name ?? m.id ?? '', context_window: m.context_window }))
+    return (b.data as Array<Record<string, unknown>>)
+      .map(m => ({
+        id: (m.id as string) ?? '',
+        name: (m.name as string) ?? (m.id as string) ?? '',
+        context_window: m.context_window as number | undefined,
+        ...readCapabilityFlags(m),
+      }))
       .filter(m => m.id.length > 0);
   }
   return [];
 }
 
-/** Build a CachedModel for a dynamically discovered OpenAI OAuth model. */
-function buildDynamicOAuthModel(id: string, name: string, contextWindow: number | undefined, seedById: Map<string, CachedModel>): CachedModel {
-  if (seedById.has(id)) return seedById.get(id)!;
+/**
+ * Build a CachedModel for a discovered OpenAI OAuth model. The live backend is
+ * authoritative for capability flags: when the model is also seeded, live flags
+ * are merged over the seed (seed acts as fallback if the backend omits a flag).
+ */
+function buildDynamicOAuthModel(entry: OpenAiModelEntry, seedById: Map<string, CachedModel>): CachedModel {
+  const seed = seedById.get(entry.id);
+  if (seed) {
+    return {
+      ...seed,
+      useResponsesLite: entry.useResponsesLite ?? seed.useResponsesLite,
+      preferWebSockets: entry.preferWebSockets ?? seed.preferWebSockets,
+    };
+  }
+  const { id } = entry;
   const prefix = id.split('-')[0] ?? id;
   return {
     id,
-    name,
+    name: entry.name,
     upstreamModelId: id,
     family: prefix,
     brand: deriveBrand(prefix),
-    contextWindow: contextWindow ?? resolveContextWindow(id),
+    contextWindow: entry.context_window ?? resolveContextWindow(id),
     modelFormat: 'openai' as const,
     npm: '@ai-sdk/openai',
     reasoning: modelPrefersResponsesApi(id),
+    useResponsesLite: entry.useResponsesLite,
+    preferWebSockets: entry.preferWebSockets,
   };
 }
 
@@ -278,8 +319,8 @@ async function refreshOpenAiOAuthModels(
 ): Promise<{ models: CachedModel[]; source: 'live' | 'seed'; failureReason?: string }> {
   const TIMEOUT_MS = 10_000;
   const seedById = new Map(buildOpenAiOAuthModels().map(m => [m.id, m]));
-  const toModels = (entries: Array<{ id: string; name: string; context_window?: number }>) =>
-    entries.map(({ id, name, context_window }) => buildDynamicOAuthModel(id, name, context_window, seedById));
+  const toModels = (entries: OpenAiModelEntry[]) =>
+    entries.map(entry => buildDynamicOAuthModel(entry, seedById));
 
   const claudeVersion = getInstalledClaudeVersion();
 

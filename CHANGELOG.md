@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.1] - 2026-07-11
+
+### Fixed
+
+- **GPT-5.6 Luna (OpenAI OAuth) now works** — `gpt-5.6-luna` was selectable but failed at inference (`404 Model not found` / "No output generated") because it requires OpenAI's Codex **Responses-Lite over WebSocket** transport (`wss://chatgpt.com/backend-api/codex/responses`), while relay-ai only spoke the standard HTTP Responses path. relay-ai now opens an outbound WebSocket per request for models the backend flags this way, forwarding the ChatGPT subscription headers (`ChatGPT-Account-Id`, `originator`, `version`, `x-openai-internal-codex-responses-lite`) and the `OpenAI-Beta: responses_websockets` opt-in, and streams the event frames back as SSE. One socket per request, so concurrent Claude Code requests (e.g. background title generation) can't be crossed. Thanks to @tonyb760 for the detailed report (#18). (`store: false` and the `ChatGPT-Account-Id`/`originator` headers were already shipped in 0.4.0.)
+
+### Added
+
+- **Backend-driven transport selection for ChatGPT Codex models** — relay-ai reads the `use_responses_lite` / `prefer_websockets` capability flags the ChatGPT Codex model endpoint reports and routes each model accordingly, instead of hardcoding model names. Future Responses-Lite models are picked up automatically with no code change. The static seed carries the same flags as a fallback for a discovery-endpoint outage.
+
 ## [0.4.0] - 2026-07-10
 
 ### Added

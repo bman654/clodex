@@ -9,7 +9,11 @@
 
 [![npm version](https://img.shields.io/npm/v/@jacobbd/relay-ai)](https://www.npmjs.com/package/@jacobbd/relay-ai)
 [![License](https://img.shields.io/npm/l/@jacobbd/relay-ai)](LICENSE)
-[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?style=flat-square&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/jacobbd)
+
+> ☕ **If you find relay-ai useful, consider [buying me a coffee](https://buymeacoffee.com/jacobbd).**
+> It's free and built in my spare time — but testing every provider runs up a real AI bill. A coffee helps me cover it and keep shipping. Thank you! 🙏
+>
+> <a href="https://buymeacoffee.com/jacobbd"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="42"></a>
 
 <p align="center">
   <a href="https://youtu.be/IvsUPHLhX0o">
@@ -569,6 +573,12 @@ The deprecated `OPENCODE_STARTER_HOME` env var still works as a fallback for `RE
 ## Contributing
 
 Private beta right now. Issues and PRs welcome on GitHub.
+
+## Support
+
+If relay-ai saves you time or money, you can help cover the AI bills that go into building and testing it against every provider. Any support is hugely appreciated. 🙏
+
+<a href="https://buymeacoffee.com/jacobbd"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="42"></a>
 
 ## Disclaimer
 

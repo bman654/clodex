@@ -11,7 +11,7 @@ import { join } from "path";
 // package.json
 var package_default = {
   name: "@jacobbd/relay-ai",
-  version: "0.4.0",
+  version: "0.4.1",
   publishConfig: {
     access: "public"
   },
@@ -81,10 +81,12 @@ var package_default = {
     picocolors: "^1.1.1",
     "smol-toml": "^1.6.1",
     "venice-ai-sdk-provider": "^2.0.2",
+    ws: "^8.21.0",
     zod: "^3.25.76"
   },
   devDependencies: {
     "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^2.1.9",
     tsup: "^8.0.0",
     typescript: "^5.5.0",
@@ -112,6 +114,9 @@ var BACKENDS = {
     baseUrl: "https://opencode.ai/zen/go"
   }
 };
+var CODEX_RESPONSES_LITE_WS_URL = "wss://chatgpt.com/backend-api/codex/responses";
+var CODEX_RESPONSES_LITE_VERSION = "0.144.1";
+var CODEX_RESPONSES_WEBSOCKETS_BETA = "responses_websockets=2026-02-06";
 var CONFLICTING_ENV_VARS = [
   "CLAUDE_CODE_USE_VERTEX",
   "ANTHROPIC_VERTEX_PROJECT_ID",
@@ -312,6 +317,161 @@ async function runOpenAiDeviceCodeFlow(onDeviceCode, opts) {
   return pollOpenAiDeviceCodeToken(deviceData, opts);
 }
 
+// src/oauth/responses-websocket.ts
+var RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite";
+var TERMINAL_EVENT_TYPES = /* @__PURE__ */ new Set(["response.completed", "response.failed", "response.incomplete"]);
+function toHeaderRecord(headers) {
+  const out = {};
+  if (!headers) return out;
+  if (headers instanceof Headers) {
+    headers.forEach((value, key) => {
+      out[key] = value;
+    });
+  } else if (Array.isArray(headers)) {
+    for (const [key, value] of headers) out[key] = value;
+  } else {
+    for (const [key, value] of Object.entries(headers)) out[key] = String(value);
+  }
+  return out;
+}
+function hasResponsesLiteHeader(headers) {
+  return Object.entries(headers).some(
+    ([k, v]) => k.toLowerCase() === RESPONSES_LITE_HEADER && v.toLowerCase() === "true"
+  );
+}
+function bodyToString(body) {
+  if (body == null) return "";
+  if (typeof body === "string") return body;
+  if (body instanceof Uint8Array) return Buffer.from(body).toString("utf8");
+  if (body instanceof ArrayBuffer) return Buffer.from(new Uint8Array(body)).toString("utf8");
+  return String(body);
+}
+function applyResponsesLiteShape(payload) {
+  const reasoning = payload.reasoning && typeof payload.reasoning === "object" ? { ...payload.reasoning } : {};
+  reasoning.context = "all_turns";
+  return {
+    ...payload,
+    reasoning,
+    parallel_tool_calls: false,
+    store: false
+  };
+}
+function createResponsesWebSocketFetch(wsUrl, log7) {
+  const debug = (msg) => {
+    try {
+      log7?.(`ws: ${msg}`);
+    } catch {
+    }
+  };
+  return async (_input, init) => {
+    const { WebSocket } = await import("ws");
+    const headers = toHeaderRecord(init?.headers);
+    headers["OpenAI-Beta"] = CODEX_RESPONSES_WEBSOCKETS_BETA;
+    debug(`connecting ${wsUrl} headers=[${Object.keys(headers).join(", ")}]`);
+    let payload = {};
+    try {
+      payload = JSON.parse(bodyToString(init?.body));
+    } catch {
+      payload = {};
+    }
+    if (hasResponsesLiteHeader(headers)) {
+      payload = applyResponsesLiteShape(payload);
+    }
+    const outgoing = JSON.stringify({ type: "response.create", ...payload });
+    const encoder = new TextEncoder();
+    let socket;
+    let frameCount = 0;
+    const stream = new ReadableStream({
+      start(controller) {
+        let closed = false;
+        const close = () => {
+          if (closed) return;
+          closed = true;
+          try {
+            controller.close();
+          } catch {
+          }
+          try {
+            socket.close();
+          } catch {
+          }
+        };
+        const fail = (message) => {
+          if (closed) return;
+          debug(`fail: ${message}`);
+          try {
+            controller.enqueue(encoder.encode(
+              `data: ${JSON.stringify({ type: "error", error: { message } })}
+
+`
+            ));
+          } catch {
+          }
+          close();
+        };
+        socket = new WebSocket(wsUrl, { headers });
+        socket.on("open", () => {
+          debug(`open \u2014 sending ${outgoing.length}B payload`);
+          socket.send(outgoing);
+        });
+        socket.on("unexpected-response", (_req, res) => {
+          debug(`unexpected-response status=${res.statusCode}`);
+        });
+        socket.on("message", (data) => {
+          const text4 = Array.isArray(data) ? Buffer.concat(data).toString("utf8") : data.toString("utf8");
+          frameCount += 1;
+          if (frameCount <= 3) debug(`frame#${frameCount}: ${text4.slice(0, 200)}`);
+          let event;
+          try {
+            event = JSON.parse(text4);
+          } catch {
+            controller.enqueue(encoder.encode(`data: ${text4.replace(/\r?\n/g, " ")}
+
+`));
+            return;
+          }
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}
+
+`));
+          const type = event.type;
+          if (typeof type === "string" && TERMINAL_EVENT_TYPES.has(type)) {
+            debug(`terminal event: ${type} (after ${frameCount} frames)`);
+            close();
+          }
+        });
+        socket.on("error", (err) => fail(err.message));
+        socket.on("close", (code, reason) => {
+          debug(`close code=${code} frames=${frameCount}${reason?.length ? ` reason=${reason.toString("utf8").slice(0, 200)}` : ""}`);
+          if (closed) return;
+          if (code === 1e3 || code === 1005) {
+            close();
+            return;
+          }
+          fail(`WebSocket closed (${code})${reason?.length ? `: ${reason.toString("utf8")}` : ""}`);
+        });
+        const signal = init?.signal;
+        if (signal) {
+          if (signal.aborted) {
+            close();
+            return;
+          }
+          signal.addEventListener("abort", close, { once: true });
+        }
+      },
+      cancel() {
+        try {
+          socket?.close();
+        } catch {
+        }
+      }
+    });
+    return new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream; charset=utf-8" }
+    });
+  };
+}
+
 // src/oauth/claude-identity.ts
 import { createHash, randomUUID } from "crypto";
 var CLAUDE_CODE_CLI_VERSION = "2.1.195";
@@ -504,14 +664,21 @@ async function createLanguageModel(spec) {
   if (npm === "@ai-sdk/openai") {
     const { createOpenAI } = await import("@ai-sdk/openai");
     const accountId = spec.authType === "oauth" ? spec.oauthAccountId ?? extractOpenAiAccountId({ access_token: apiKey }) : void 0;
-    const openai = createOpenAI(spec.authType === "oauth" ? {
+    const oauthOptions = spec.authType === "oauth" ? {
       apiKey,
       baseURL: "https://chatgpt.com/backend-api/codex",
       headers: {
         ...accountId ? { "ChatGPT-Account-Id": accountId } : {},
-        originator: "relay-ai"
-      }
-    } : { apiKey });
+        originator: "relay-ai",
+        // Responses-Lite models (backend prefer_websockets/use_responses_lite,
+        // e.g. gpt-5.6-luna) require these on the request.
+        ...spec.useResponsesLite ? { version: CODEX_RESPONSES_LITE_VERSION, "x-openai-internal-codex-responses-lite": "true" } : {}
+      },
+      // Models the backend flags with prefer_websockets are only served over
+      // the WebSocket Responses transport, not HTTP.
+      ...spec.preferWebSockets ? { fetch: createResponsesWebSocketFetch(CODEX_RESPONSES_LITE_WS_URL, spec.onDebug) } : {}
+    } : { apiKey };
+    const openai = createOpenAI(oauthOptions);
     return shouldUseOpenAiResponsesEndpoint(modelId) ? openai.responses(modelId) : openai.chat(modelId);
   }
   if (npm === "@ai-sdk/xai") {
@@ -5490,7 +5657,10 @@ function startProxyCatalog(routes, defaultAliasId, debug = false) {
             authType: route.authType,
             oauthAccountId: route.oauthAccountId,
             providerData: route.providerData,
-            headers: route.headers
+            headers: route.headers,
+            useResponsesLite: route.useResponsesLite,
+            preferWebSockets: route.preferWebSockets,
+            onDebug: (msg) => plog(() => msg)
           });
           if (clientWantsStream) {
             res.writeHead(200, {
@@ -5620,7 +5790,9 @@ function startProxy(completionsUrl, modelId, debug = false, contextWindow, sdk, 
     providerData: sdk?.providerData,
     supportedParameters: sdk?.supportedParameters,
     reasoning: sdk?.reasoning,
-    interleavedReasoningField: sdk?.interleavedReasoningField
+    interleavedReasoningField: sdk?.interleavedReasoningField,
+    useResponsesLite: sdk?.useResponsesLite,
+    preferWebSockets: sdk?.preferWebSockets
   }], clientModelId, debug);
 }
 
@@ -6480,7 +6652,9 @@ function cachedModelToLocal(cached, provider) {
     contextWindow: cached.contextWindow ?? resolveContextWindow(id),
     supportedParameters: cached.supportedParameters,
     reasoning: cached.reasoning ?? modelsDev?.reasoning,
-    interleavedReasoningField: cached.interleavedReasoningField ?? modelsDev?.interleaved?.field
+    interleavedReasoningField: cached.interleavedReasoningField ?? modelsDev?.interleaved?.field,
+    useResponsesLite: cached.useResponsesLite,
+    preferWebSockets: cached.preferWebSockets
   };
 }
 function providerAllowsAnonymousFreeModels(provider) {
@@ -6642,6 +6816,8 @@ function localProvidersToServerModels(localProviders) {
       supportedParameters: model.supportedParameters,
       reasoning: model.reasoning,
       interleavedReasoningField: model.interleavedReasoningField,
+      useResponsesLite: model.useResponsesLite,
+      preferWebSockets: model.preferWebSockets,
       headers: provider.headers,
       providerData: provider.providerData
     }))
@@ -7209,7 +7385,9 @@ async function getOrInitLanguageModel(modelCache, model, npm, baseURL, apiKey, v
       authType: model.authType,
       oauthAccountId: model.oauthAccountId,
       vertex,
-      headers: model.headers
+      headers: model.headers,
+      useResponsesLite: model.useResponsesLite,
+      preferWebSockets: model.preferWebSockets
     });
     modelCache.set(cacheKey, languageModel);
   }
@@ -8211,7 +8389,9 @@ function parseModelList(body, npm) {
       freeStatus,
       modelFormat: format,
       npm,
-      supportedParameters: Array.isArray(row.supported_parameters) ? row.supported_parameters : void 0
+      supportedParameters: Array.isArray(row.supported_parameters) ? row.supported_parameters : void 0,
+      useResponsesLite: typeof row.use_responses_lite === "boolean" ? row.use_responses_lite : void 0,
+      preferWebSockets: typeof row.prefer_websockets === "boolean" ? row.prefer_websockets : void 0
     });
   }
   return models;
@@ -8727,7 +8907,7 @@ var OPENAI_OAUTH_MODEL_SEEDS = [
   // GPT-5.6 family (Sol / Terra / Luna)
   { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", reasoning: true },
   { id: "gpt-5.6-terra", name: "GPT-5.6 Terra", reasoning: true },
-  { id: "gpt-5.6-luna", name: "GPT-5.6 Luna", reasoning: true },
+  { id: "gpt-5.6-luna", name: "GPT-5.6 Luna", reasoning: true, useResponsesLite: true, preferWebSockets: true },
   // GPT-5.5 family (Pro)
   { id: "gpt-5.5", name: "GPT-5.5", reasoning: true },
   // GPT-5.4 family
@@ -8754,7 +8934,9 @@ function buildOpenAiOAuthModels() {
       contextWindow: resolveContextWindow(seed.id),
       modelFormat: "openai",
       npm: "@ai-sdk/openai",
-      reasoning: seed.reasoning
+      reasoning: seed.reasoning,
+      useResponsesLite: seed.useResponsesLite,
+      preferWebSockets: seed.preferWebSockets
     };
   });
 }
@@ -8882,30 +9064,57 @@ async function refreshOAuthProvider(provider, accessToken) {
   if (tpl === "antigravity") return refreshAntigravityOAuthModels(accessToken);
   throw new Error(`refreshOAuthProvider: unsupported template "${tpl}"`);
 }
+function readCapabilityFlags(m) {
+  const bool = (v) => typeof v === "boolean" ? v : void 0;
+  return {
+    useResponsesLite: bool(m["use_responses_lite"]),
+    preferWebSockets: bool(m["prefer_websockets"])
+  };
+}
 function parseOpenAiModelEntries(body) {
   if (!body || typeof body !== "object") return [];
   const b = body;
   if (Array.isArray(b.models)) {
-    return b.models.map((m) => ({ id: m.slug ?? "", name: m.title ?? m.name ?? m.slug ?? "", context_window: m.context_window })).filter((m) => m.id.length > 0);
+    return b.models.map((m) => ({
+      id: m.slug ?? "",
+      name: m.title ?? m.name ?? m.slug ?? "",
+      context_window: m.context_window,
+      ...readCapabilityFlags(m)
+    })).filter((m) => m.id.length > 0);
   }
   if (Array.isArray(b.data)) {
-    return b.data.map((m) => ({ id: m.id ?? "", name: m.name ?? m.id ?? "", context_window: m.context_window })).filter((m) => m.id.length > 0);
+    return b.data.map((m) => ({
+      id: m.id ?? "",
+      name: m.name ?? m.id ?? "",
+      context_window: m.context_window,
+      ...readCapabilityFlags(m)
+    })).filter((m) => m.id.length > 0);
   }
   return [];
 }
-function buildDynamicOAuthModel(id, name, contextWindow, seedById) {
-  if (seedById.has(id)) return seedById.get(id);
+function buildDynamicOAuthModel(entry, seedById) {
+  const seed = seedById.get(entry.id);
+  if (seed) {
+    return {
+      ...seed,
+      useResponsesLite: entry.useResponsesLite ?? seed.useResponsesLite,
+      preferWebSockets: entry.preferWebSockets ?? seed.preferWebSockets
+    };
+  }
+  const { id } = entry;
   const prefix = id.split("-")[0] ?? id;
   return {
     id,
-    name,
+    name: entry.name,
     upstreamModelId: id,
     family: prefix,
     brand: deriveBrand(prefix),
-    contextWindow: contextWindow ?? resolveContextWindow(id),
+    contextWindow: entry.context_window ?? resolveContextWindow(id),
     modelFormat: "openai",
     npm: "@ai-sdk/openai",
-    reasoning: modelPrefersResponsesApi(id)
+    reasoning: modelPrefersResponsesApi(id),
+    useResponsesLite: entry.useResponsesLite,
+    preferWebSockets: entry.preferWebSockets
   };
 }
 async function fetchJsonWithAuth(url, accessToken, timeoutMs) {
@@ -8932,7 +9141,7 @@ async function fetchJsonWithAuth(url, accessToken, timeoutMs) {
 async function refreshOpenAiOAuthModels(accessToken) {
   const TIMEOUT_MS = 1e4;
   const seedById = new Map(buildOpenAiOAuthModels().map((m) => [m.id, m]));
-  const toModels = (entries) => entries.map(({ id, name, context_window }) => buildDynamicOAuthModel(id, name, context_window, seedById));
+  const toModels = (entries) => entries.map((entry) => buildDynamicOAuthModel(entry, seedById));
   const claudeVersion = getInstalledClaudeVersion();
   const codexResult = await fetchJsonWithAuth(
     `https://chatgpt.com/backend-api/codex/models?client_version=${claudeVersion}`,
@@ -9268,7 +9477,9 @@ function modelToCached(model) {
     apiUrl: model.apiBaseUrl,
     supportedParameters: model.supportedParameters,
     reasoning: model.reasoning,
-    interleavedReasoningField: model.interleavedReasoningField
+    interleavedReasoningField: model.interleavedReasoningField,
+    useResponsesLite: model.useResponsesLite,
+    preferWebSockets: model.preferWebSockets
   };
 }
 function localProviderToRegistry(provider, opts) {
@@ -10193,4 +10404,4 @@ export {
   quitClaudeAppGracefully,
   launchOrRestartClaudeApp
 };
-//# sourceMappingURL=chunk-RTZ3X3KZ.js.map
+//# sourceMappingURL=chunk-2GUFTECU.js.map

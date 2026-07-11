@@ -4,18 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Release workflow
 
+Publishing is automated by GitHub Actions (`.github/workflows/publish.yml`): **pushing a `v*` tag** runs typecheck + tests + build, then `npm publish` (auth via the `RELAYAI` repo secret — an npm Automation token) and creates a GitHub Release from the matching `CHANGELOG.md` section. **Do NOT run `npm publish` locally** — that double-publishes and fails.
+
 To release a new version:
 
 ```bash
-npm version patch          # bumps package.json, commits, and tags (use minor/major as needed)
-npm run build              # compile — VERSION is derived from package.json automatically
-npm publish                # publish to npm
-git push --follow-tags     # push commit + tag to GitHub
-gh release create v$(node -p "require('./package.json').version") --title "v$(node -p "require('./package.json').version")" --notes "$(node -e "const fs=require('fs');const cl=fs.readFileSync('CHANGELOG.md','utf8');const m=cl.match(/## \[[\d.]+\].*?\n([\s\S]*?)(?=\n## \[|$)/);console.log(m?m[1].trim():'')")"
-# creates a GitHub Release from the latest CHANGELOG.md section
+# 1. Land all code changes and a CHANGELOG.md "## [x.y.z]" section first (committed).
+npm version patch --no-git-tag-version   # bump package.json + package-lock (use minor/major as needed)
+npm run build                            # rebuild dist — VERSION is derived from package.json automatically
+git add -A && git commit -m "release: vX.Y.Z"
+git tag vX.Y.Z
+git push --follow-tags                   # tag push triggers CI → npm publish + GitHub Release
 ```
 
-`package.json` is the single source of truth for the version. Never edit `src/constants.ts` manually for version bumps.
+`package.json` is the single source of truth for the version. Never edit `src/constants.ts` manually for version bumps. `dist/` is committed, so rebuild it in the release commit.
 
 ## Commands
 

@@ -31,6 +31,8 @@ export function localModelToRoute(lp: LocalProvider, model: LocalProviderModel):
     supportedParameters: model.supportedParameters,
     reasoning: model.reasoning,
     interleavedReasoningField: model.interleavedReasoningField,
+    useResponsesLite: model.useResponsesLite,
+    preferWebSockets: model.preferWebSockets,
   };
 }
 

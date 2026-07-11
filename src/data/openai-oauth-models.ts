@@ -22,6 +22,9 @@ interface OAuthModelSeed {
   id: string;
   name: string;
   reasoning?: boolean;
+  /** Backend capability seed — mirrors the live use_responses_lite/prefer_websockets flags. */
+  useResponsesLite?: boolean;
+  preferWebSockets?: boolean;
 }
 
 // Models that the ChatGPT Codex backend (chatgpt.com/backend-api/codex) explicitly rejects
@@ -39,7 +42,7 @@ const OPENAI_OAUTH_MODEL_SEEDS: OAuthModelSeed[] = [
   // GPT-5.6 family (Sol / Terra / Luna)
   { id: 'gpt-5.6-sol',          name: 'GPT-5.6 Sol',       reasoning: true },
   { id: 'gpt-5.6-terra',        name: 'GPT-5.6 Terra',     reasoning: true },
-  { id: 'gpt-5.6-luna',         name: 'GPT-5.6 Luna',      reasoning: true },
+  { id: 'gpt-5.6-luna',         name: 'GPT-5.6 Luna',      reasoning: true, useResponsesLite: true, preferWebSockets: true },
   // GPT-5.5 family (Pro)
   { id: 'gpt-5.5',              name: 'GPT-5.5',           reasoning: true },
   // GPT-5.4 family
@@ -68,6 +71,8 @@ export function buildOpenAiOAuthModels(): CachedModel[] {
       modelFormat: 'openai' as const,
       npm: '@ai-sdk/openai',
       reasoning: seed.reasoning,
+      useResponsesLite: seed.useResponsesLite,
+      preferWebSockets: seed.preferWebSockets,
     };
   });
 }

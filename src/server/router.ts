@@ -395,6 +395,8 @@ async function getOrInitLanguageModel(
       oauthAccountId: model.oauthAccountId,
       vertex,
       headers: model.headers,
+      useResponsesLite: model.useResponsesLite,
+      preferWebSockets: model.preferWebSockets,
     });
     modelCache.set(cacheKey, languageModel);
   }

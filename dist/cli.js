@@ -162,7 +162,7 @@ import {
   validateCustomEndpointUrl,
   writeSecureLogLine,
   zenRegistryStub
-} from "./chunk-RTZ3X3KZ.js";
+} from "./chunk-2GUFTECU.js";
 import {
   filterTemplates,
   init_provider_templates,
@@ -669,7 +669,9 @@ function localModelToRoute(lp, model) {
     headers: lp.headers,
     supportedParameters: model.supportedParameters,
     reasoning: model.reasoning,
-    interleavedReasoningField: model.interleavedReasoningField
+    interleavedReasoningField: model.interleavedReasoningField,
+    useResponsesLite: model.useResponsesLite,
+    preferWebSockets: model.preferWebSockets
   };
 }
 function makeRouteResolver(localProviders) {
@@ -12253,7 +12255,9 @@ Error: ${launchPlan.error}
           oauthAccountId: activeProvider.oauthAccountId,
           supportedParameters: selectedModel.supportedParameters,
           reasoning: selectedModel.reasoning,
-          interleavedReasoningField: selectedModel.interleavedReasoningField
+          interleavedReasoningField: selectedModel.interleavedReasoningField,
+          useResponsesLite: selectedModel.useResponsesLite,
+          preferWebSockets: selectedModel.preferWebSockets
         },
         launchApiKey
       );
@@ -12345,7 +12349,7 @@ Error: ${parsed.error}
       console.log("Usage: relay-ai ui [--trace]\n\nOpen the settings UI in your browser.");
       return 0;
     }
-    const { runUiCommand } = await import("./ui-command-PJG4Y2QY.js");
+    const { runUiCommand } = await import("./ui-command-64SLLWW4.js");
     return runUiCommand({ trace: parsed.trace });
   }
   if (parsed.command === "models") {

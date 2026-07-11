@@ -18,6 +18,16 @@ export const BACKENDS: Record<'zen' | 'go', BackendConfig> = {
   },
 };
 
+// ChatGPT Codex Responses-Lite WebSocket transport (used by models the backend
+// flags with prefer_websockets, e.g. gpt-5.6-luna).
+export const CODEX_RESPONSES_LITE_WS_URL = 'wss://chatgpt.com/backend-api/codex/responses';
+// `version` header the Codex backend expects on Responses-Lite requests. The
+// official Codex CLI sends its own version here; OpenAI may require this to be
+// bumped over time — confirm via --trace if Luna requests start failing.
+export const CODEX_RESPONSES_LITE_VERSION = '0.144.1';
+// OpenAI-Beta opt-in for the WebSocket Responses transport.
+export const CODEX_RESPONSES_WEBSOCKETS_BETA = 'responses_websockets=2026-02-06';
+
 // These must be removed from the child process environment to avoid conflicts
 // with Vertex AI, Bedrock, AWS, Foundry, and any stale Anthropic config.
 export const CONFLICTING_ENV_VARS = [
