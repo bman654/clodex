@@ -36,7 +36,11 @@ describe('antigravity launch-ide', () => {
     }
   });
 
-  it('spawns standalone Antigravity app with isolated user data dir', async () => {
+  // These four tests exercise the mocked `spawn` call, which is only reached once
+  // findAntigravityAppBinary()/findAntigravityIdeBinary() resolves a real, installed
+  // app path — there's no injection point to fake that from the test. Skip (not
+  // silently pass) on machines/CI runners without a real Antigravity install.
+  it.skipIf(!findAntigravityAppBinary())('spawns standalone Antigravity app with isolated user data dir', async () => {
     const tempProfile = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-ai-antigravity-test-'));
     const env = { ...process.env, CLOUD_CODE_URL: 'http://127.0.0.1:12345' };
 
@@ -96,7 +100,7 @@ describe('antigravity launch-ide', () => {
     }
   });
 
-  it('spawns the IDE with user data and extensions dir', async () => {
+  it.skipIf(!findAntigravityIdeBinary())('spawns the IDE with user data and extensions dir', async () => {
     const tempProfile = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-ai-ide-test-'));
     const env = { ...process.env, CLOUD_CODE_URL: 'http://127.0.0.1:12345' };
 
@@ -117,7 +121,7 @@ describe('antigravity launch-ide', () => {
     fs.rmSync(tempProfile, { recursive: true, force: true });
   });
 
-  it('does not add --wait unless explicitly requested', async () => {
+  it.skipIf(!findAntigravityIdeBinary())('does not add --wait unless explicitly requested', async () => {
     const tempProfile = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-ai-ide-test-'));
     const env = { ...process.env, CLOUD_CODE_URL: 'http://127.0.0.1:12345' };
 
@@ -128,7 +132,7 @@ describe('antigravity launch-ide', () => {
     fs.rmSync(tempProfile, { recursive: true, force: true });
   });
 
-  it('passes an explicit --wait argument through unchanged', async () => {
+  it.skipIf(!findAntigravityIdeBinary())('passes an explicit --wait argument through unchanged', async () => {
     const tempProfile = fs.mkdtempSync(path.join(os.tmpdir(), 'relay-ai-ide-test-'));
     const env = { ...process.env, CLOUD_CODE_URL: 'http://127.0.0.1:12345' };
 

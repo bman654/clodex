@@ -12,6 +12,26 @@ function macCommandScriptPath(cmd: string): string | null {
   return match?.[1] ?? null;
 }
 
+// On Linux, getTerminalLaunchCommand probes terminal emulators and writes the
+// actual invocation to a generated launch.sh rather than embedding it inline —
+// read that script to assert on the real command, mirroring the mac helper above.
+function linuxLaunchScriptContents(cmd: string): string | null {
+  const match = cmd.match(/x-terminal-emulator -e sh (\S+)/);
+  const scriptPath = match?.[1];
+  if (!scriptPath) return null;
+  return readFileSync(scriptPath, 'utf8');
+}
+
+function assertLaunchCommandContains(cmd: string, ...substrings: string[]): void {
+  if (process.platform === 'linux') {
+    const script = linuxLaunchScriptContents(cmd);
+    expect(script).toBeTruthy();
+    for (const s of substrings) expect(script).toContain(s);
+    return;
+  }
+  for (const s of substrings) expect(cmd).toContain(s);
+}
+
 describe('native-launcher', () => {
   it('exposes Antigravity fallback install paths', () => {
     expect(fallbackPathsForApp('antigravity-ide', 'win32')).toEqual(expect.arrayContaining([
@@ -70,11 +90,7 @@ describe('native-launcher', () => {
       expect(script).toContain('deepseek-v4-flash');
       expect(cmd).not.toContain('osascript');
     } else {
-      expect(cmd).toContain('codex');
-      expect(cmd).toContain('--provider');
-      expect(cmd).toContain('deepseek');
-      expect(cmd).toContain('--model');
-      expect(cmd).toContain('deepseek-v4-flash');
+      assertLaunchCommandContains(cmd, 'codex', '--provider', 'deepseek', '--model', 'deepseek-v4-flash');
     }
   });
 
@@ -91,8 +107,7 @@ describe('native-launcher', () => {
       const script = readFileSync(scriptPath!, 'utf8');
       expect(script).toContain('relay-ai codex --trace --provider deepseek --model deepseek-v4-flash');
     } else {
-      expect(cmd).toContain('codex');
-      expect(cmd).toContain('--trace');
+      assertLaunchCommandContains(cmd, 'codex', '--trace');
     }
   });
 
@@ -148,7 +163,7 @@ describe('native-launcher', () => {
       expect(script).toContain("cd /Users/jbendavi/dev_projects/example");
       expect(script).toContain('$ relay-ai claude --provider google --model gemini-3.1-pro-low');
     } else {
-      expect(cmd).toContain('/Users/jbendavi/dev_projects/example');
+      assertLaunchCommandContains(cmd, '/Users/jbendavi/dev_projects/example');
     }
   });
 

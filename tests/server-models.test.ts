@@ -40,6 +40,9 @@ const models: ServerModelInfo[] = [
     modelFormat: 'openai',
     npm: '@ai-sdk/openai',
     apiBaseUrl: 'https://api.openai.com/v1',
+    // Explicit so this test doesn't depend on the models-dev cache / heuristic
+    // fallback in src/context-window.ts, which can differ by machine.
+    contextWindow: 400_000,
   },
 ];
 
