@@ -15,15 +15,11 @@
 >
 > <a href="https://buymeacoffee.com/jacobbd"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="42"></a>
 
-<p align="center">
-  <a href="https://youtu.be/IvsUPHLhX0o">
-    <img src="assets/demo-part1-thumbnail.png" alt="relay-ai demo — installation, configuration, Claude Code, Claude Cowork & Claude Code Desktop (Part 1)" width="100%">
-  </a>
-</p>
+📺 **Watch the Demos**
 
-> 🎥 **Watch the Demos:**
-> - **Demo (Part 1):** Installation · Configuration · Claude Code · Claude Cowork & Claude Code Desktop — [watch on YouTube](https://youtu.be/IvsUPHLhX0o)
-> - **Demo (Part 2):** OpenAI Codex CLI & Codex Desktop App — [watch on YouTube](https://youtu.be/42oiOB8IAu4)
+| **Claude Code / Cowork / Desktop** | **Codex CLI & Desktop App** | **Gemini CLI** |
+|:---:|:---:|:---:|
+| [![Claude Demo](https://img.youtube.com/vi/IvsUPHLhX0o/mqdefault.jpg)](https://youtu.be/IvsUPHLhX0o) | [![Codex Demo](https://img.youtube.com/vi/42oiOB8IAu4/mqdefault.jpg)](https://youtu.be/42oiOB8IAu4) | [![Gemini Demo](https://img.youtube.com/vi/g7JKvqOHJl4/mqdefault.jpg)](https://www.youtube.com/watch?v=g7JKvqOHJl4) |
 
 **relay-ai** is an interactive CLI — and now a **visual launcher** — that connects AI coding tools to any provider and runs local API gateways on your machine. It supports **Claude Code**, **Claude Desktop (Cowork + Code)**, the **OpenAI Codex CLI**, the **ChatGPT desktop app in Codex mode (macOS + Windows)**, **Google Gemini CLI**, and experimental **Antigravity CLI / IDE** support.
 
