@@ -4972,6 +4972,7 @@ async function collectCloudCodeToAnthropic(upstreamRes, model, log7) {
 import { randomUUID as randomUUID5 } from "crypto";
 
 // src/sdk-adapter.ts
+import { createHash as createHash2 } from "crypto";
 import { streamText, generateText, tool as tool2, jsonSchema as jsonSchema2 } from "ai";
 
 // src/tool-search.ts
@@ -5106,6 +5107,11 @@ function anthropicEffortFromRequest(body) {
   const effort = body.output_config?.effort;
   if (typeof effort === "string" && effort.trim()) return effort.trim();
   return void 0;
+}
+function openAiPromptCacheKey(system, tools) {
+  const toolSig = (tools ?? []).map((t) => `${t.name}${t.description ?? ""}${JSON.stringify(t.input_schema ?? {})}`).join("");
+  const material = `${system ?? ""}\0${toolSig}`;
+  return "relay-" + createHash2("sha256").update(material).digest("hex").slice(0, 32);
 }
 function systemToString(system) {
   if (!system) return void 0;
@@ -5260,6 +5266,11 @@ function translateRequest2(body, npm, options) {
       openai: { instructions: systemText }
     });
   }
+  if (npm === "@ai-sdk/openai" && !options?.openAiOAuth) {
+    providerOptions = deepMergeProviderOptions(providerOptions, {
+      openai: { promptCacheKey: openAiPromptCacheKey(baseSystem, upstreamTools) }
+    });
+  }
   return {
     system: options?.openAiOAuth ? void 0 : systemText,
     messages: translateMessages(messages, npm),
@@ -5270,6 +5281,15 @@ function translateRequest2(body, npm, options) {
     providerOptions
   };
 }
+function toAnthropicUsage(u) {
+  const total = u?.inputTokens ?? 0;
+  const cached = u?.cachedInputTokens ?? 0;
+  return {
+    input_tokens: Math.max(0, total - cached),
+    output_tokens: u?.outputTokens ?? 0,
+    cache_read_input_tokens: cached
+  };
+}
 async function writeAnthropicStream(fullStream, modelId, write, log7) {
   const messageId = "msg_" + Date.now();
   let blockIndex = -1;
@@ -5278,7 +5298,7 @@ async function writeAnthropicStream(fullStream, modelId, write, log7) {
   let pendingThinkingSig;
   const idToBlock = /* @__PURE__ */ new Map();
   let finishReason = "end_turn";
-  let usage = { input_tokens: 0, output_tokens: 0 };
+  let usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 };
   const emit = (event, data) => write(sseChunk(event, data));
   const ensureStart = () => {
     if (started) return;
@@ -5390,10 +5410,7 @@ async function writeAnthropicStream(fullStream, modelId, write, log7) {
       }
       case "finish":
         if (part.totalUsage) {
-          usage = {
-            input_tokens: part.totalUsage.inputTokens ?? 0,
-            output_tokens: part.totalUsage.outputTokens ?? 0
-          };
+          usage = toAnthropicUsage(part.totalUsage);
         }
         if (part.finishReason === "tool-calls") finishReason = "tool_use";
         else if (part.finishReason === "length") finishReason = "max_tokens";
@@ -5462,7 +5479,7 @@ async function generateAnthropicResponse(model, params, modelId, options) {
       }))
     ],
     stop_reason: finishReason === "tool-calls" ? "tool_use" : "end_turn",
-    usage: { input_tokens: usage?.inputTokens ?? 0, output_tokens: usage?.outputTokens ?? 0 }
+    usage: toAnthropicUsage(usage)
   };
 }
 
@@ -10408,4 +10425,4 @@ export {
   quitClaudeAppGracefully,
   launchOrRestartClaudeApp
 };
-//# sourceMappingURL=chunk-VSXPAZX4.js.map
+//# sourceMappingURL=chunk-THLOQMY7.js.map

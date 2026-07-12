@@ -131,8 +131,8 @@ describe('translateRequest', () => {
       model: 'gpt-5.5',
       messages: [{ role: 'user', content: 'hi' }],
     }, '@ai-sdk/openai');
-    expect(params.providerOptions).toEqual({
-      openai: { store: false, include: ['reasoning.encrypted_content'] },
+    expect(params.providerOptions?.openai).toMatchObject({
+      store: false, include: ['reasoning.encrypted_content'],
     });
   });
 
@@ -329,7 +329,7 @@ describe('generateAnthropicResponse', () => {
 
     expect(generateText).not.toHaveBeenCalled();
     expect((body.content as any[])[0]).toEqual({ type: 'text', text: 'hello' });
-    expect(body.usage).toEqual({ input_tokens: 3, output_tokens: 4 });
+    expect(body.usage).toEqual({ input_tokens: 3, output_tokens: 4, cache_read_input_tokens: 0 });
 
     vi.doUnmock('ai');
     vi.resetModules();
@@ -365,7 +365,23 @@ describe('writeAnthropicStream', () => {
     ]);
     const delta = events.find(e => e.event === 'message_delta')!;
     expect(delta.data.delta.stop_reason).toBe('end_turn');
-    expect(delta.data.usage).toEqual({ input_tokens: 5, output_tokens: 2 });
+    expect(delta.data.usage).toEqual({ input_tokens: 5, output_tokens: 2, cache_read_input_tokens: 0 });
+  });
+
+  it('reports cache hits: cachedInputTokens → cache_read_input_tokens, subtracted from input_tokens', async () => {
+    // OpenAI reports cached tokens WITHIN the prompt total (inputTokens=100 incl.
+    // 80 cache hits). Anthropic's input_tokens must be the uncached remainder (20)
+    // with the 80 surfaced as cache_read_input_tokens.
+    const { events } = await collect([
+      { type: 'start' },
+      { type: 'text-start', id: 't1' },
+      { type: 'text-delta', id: 't1', text: 'hi' },
+      { type: 'text-end', id: 't1' },
+      { type: 'finish', finishReason: 'stop', totalUsage: { inputTokens: 100, outputTokens: 7, cachedInputTokens: 80 } },
+    ]);
+    expect(events.find(e => e.event === 'message_delta')!.data.usage).toEqual({
+      input_tokens: 20, output_tokens: 7, cache_read_input_tokens: 80,
+    });
   });
 
   it('maps a mid-stream 401 to a non-retryable authentication_error instead of a generic api_error', async () => {
@@ -429,5 +445,54 @@ describe('writeAnthropicStream', () => {
     ]);
     const sigDelta = events.find(e => e.event === 'content_block_delta' && e.data.delta.type === 'signature_delta')!;
     expect(sigDelta.data.delta.signature).toBe('enc_xyz');
+  });
+});
+
+describe('translateRequest openai promptCacheKey', () => {
+  const READ_TOOL = { name: 'Read', description: 'read a file', input_schema: { type: 'object', properties: { path: { type: 'string' } } } };
+  const req = (over: Partial<Parameters<typeof translateRequest>[0]> = {}) => ({
+    model: 'gpt-5.5',
+    system: 'You are a coding assistant.',
+    messages: [{ role: 'user' as const, content: 'hello' }],
+    tools: [READ_TOOL],
+    ...over,
+  });
+  const keyOf = (body: Parameters<typeof translateRequest>[0], npm = '@ai-sdk/openai', opts?: Parameters<typeof translateRequest>[2]) =>
+    translateRequest(body, npm, opts).providerOptions?.openai?.promptCacheKey as string | undefined;
+
+  it('sets a stable key for the API-key OpenAI path; identical prefix → identical key', () => {
+    const a = keyOf(req());
+    const b = keyOf(req());
+    expect(typeof a).toBe('string');
+    expect(a).toBe(b);
+  });
+
+  it('changes the key when the top-level system prompt differs (distinct sessions)', () => {
+    expect(keyOf(req({ system: 'date: 2026-07-12' }))).not.toBe(keyOf(req({ system: 'date: 2026-07-13' })));
+  });
+
+  it('changes the key when the tool set differs', () => {
+    const write = { ...READ_TOOL, name: 'Write' };
+    expect(keyOf(req({ tools: [READ_TOOL] }))).not.toBe(keyOf(req({ tools: [READ_TOOL, write] })));
+  });
+
+  it('keeps the key stable across volatile inline system-reminders (within-session turns)', () => {
+    // Claude Code folds role:'system' messages (fresh timestamps, injected context)
+    // into the system prompt. Those must NOT churn the cache key.
+    const withReminder = (t: string) => req({
+      messages: [
+        { role: 'system' as const, content: `<system-reminder>current time ${t}</system-reminder>` },
+        { role: 'user' as const, content: 'hello' },
+      ],
+    });
+    expect(keyOf(withReminder('10:00:01'))).toBe(keyOf(withReminder('10:05:42')));
+  });
+
+  it('omits the key on the ChatGPT/Codex OAuth path (backend manages caching)', () => {
+    expect(keyOf(req(), '@ai-sdk/openai', { openAiOAuth: true })).toBeUndefined();
+  });
+
+  it('omits the key for non-OpenAI providers', () => {
+    expect(keyOf(req(), '@ai-sdk/xai')).toBeUndefined();
   });
 });
