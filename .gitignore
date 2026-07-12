@@ -1,5 +1,4 @@
 node_modules/
-docs/superpowers/
 docs/plans/
 *.js.map
 .env
@@ -22,4 +21,3 @@ vertex-models.json
 .gemini/
 .planning/
 ANTIGRAVITY-DEBUG-SESSION.md
-
