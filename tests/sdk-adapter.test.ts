@@ -311,23 +311,38 @@ describe('generateAnthropicResponse', () => {
   it('forceStream collects a real stream into one response instead of calling generateText', async () => {
     vi.resetModules();
     const generateText = vi.fn();
+    async function* fullStream() {
+      yield { type: 'start' };
+      yield { type: 'finish' };
+    }
+    const streamText = vi.fn(() => ({
+      text: Promise.resolve('hello'),
+      toolCalls: Promise.resolve([]),
+      toolResults: Promise.resolve([]),
+      finishReason: Promise.resolve('stop'),
+      usage: Promise.resolve({ inputTokens: 3, outputTokens: 4 }),
+      fullStream: fullStream(),
+    }));
     vi.doMock('ai', () => ({
       generateText,
-      streamText: vi.fn(() => ({
-        text: Promise.resolve('hello'),
-        toolCalls: Promise.resolve([]),
-        toolResults: Promise.resolve([]),
-        finishReason: Promise.resolve('stop'),
-        usage: Promise.resolve({ inputTokens: 3, outputTokens: 4 }),
-      })),
+      streamText,
       tool: vi.fn((spec: unknown) => spec),
       jsonSchema: vi.fn((schema: unknown) => schema),
     }));
 
     const { generateAnthropicResponse } = await import('../src/sdk-adapter.js');
-    const body = await generateAnthropicResponse({} as never, { messages: [] }, 'gpt-5.6-sol', { forceStream: true });
+    const abort = new AbortController();
+    const onPart = vi.fn();
+    const body = await generateAnthropicResponse(
+      {} as never,
+      { messages: [] },
+      'gpt-5.6-sol',
+      { forceStream: true, abortSignal: abort.signal, onPart },
+    );
 
     expect(generateText).not.toHaveBeenCalled();
+    expect(streamText).toHaveBeenCalledWith(expect.objectContaining({ abortSignal: abort.signal }));
+    expect(onPart.mock.calls).toEqual([['start'], ['finish']]);
     expect((body.content as any[])[0]).toEqual({ type: 'text', text: 'hello' });
     expect(body.usage).toEqual({ input_tokens: 3, output_tokens: 4 });
 

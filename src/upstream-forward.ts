@@ -65,6 +65,7 @@ export interface RelayAnthropicOptions {
   refreshToken?: () => Promise<string | null>;
   onTokenRefreshed?: (token: string) => void;
   onUpstreamError?: (statusCode: number, body: string) => void;
+  signal?: AbortSignal;
 }
 
 export async function relayAnthropicMessages(
@@ -86,6 +87,7 @@ export async function relayAnthropicMessages(
       options.extraHeaders,
     ),
     body: JSON.stringify(body),
+    signal: options.signal,
   });
 
   let upstreamRes: Response;

@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { aliasModelId, startProxyCatalog, type ProxyRoute } from '../src/proxy.js';
 import { getProxyDebugLogPath } from '../src/trace-log.js';
+import { anthropicMessagesEndpoint, estimateAnthropicInputTokens } from '../src/anthropic-endpoints.js';
 
 /** POST JSON to a local proxy via node:http (avoids vi.stubGlobal('fetch') interception). */
 function postToProxy(
@@ -13,6 +14,7 @@ function postToProxy(
   token: string,
   body: unknown,
   relayRequestId?: string,
+  path = '/v1/messages',
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
@@ -20,7 +22,7 @@ function postToProxy(
       {
         hostname: '127.0.0.1',
         port,
-        path: '/v1/messages',
+        path,
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -41,6 +43,29 @@ function postToProxy(
     req.end();
   });
 }
+
+describe('Anthropic endpoint routing', () => {
+  it('matches messages and count_tokens exactly, including query strings', () => {
+    expect(anthropicMessagesEndpoint('/v1/messages?beta=true')).toBe('messages');
+    expect(anthropicMessagesEndpoint('/v1/messages/count_tokens?beta=true')).toBe('count_tokens');
+    expect(anthropicMessagesEndpoint('/v1/messages/batches')).toBeNull();
+    expect(anthropicMessagesEndpoint('/v1/messages-not-real')).toBeNull();
+  });
+
+  it('estimates only input-context fields', () => {
+    const base = estimateAnthropicInputTokens({
+      model: 'relay:test:model',
+      messages: [{ role: 'user', content: 'hello world' }],
+    });
+    expect(base).toBeGreaterThan(0);
+    expect(estimateAnthropicInputTokens({
+      model: 'a-different-model',
+      stream: true,
+      max_tokens: 128_000,
+      messages: [{ role: 'user', content: 'hello world' }],
+    })).toBe(base);
+  });
+});
 
 describe('aliasModelId', () => {
   it('returns claude-* ids unchanged', () => {
@@ -166,6 +191,151 @@ describe('SDK anonymous route handling', () => {
     expect(res.status).toBe(502);
     expect(res.body).not.toContain('Missing API key');
   });
+});
+
+describe('token counting', () => {
+  it('returns a local estimate for translated routes without loading or invoking the provider', async () => {
+    const route: ProxyRoute = {
+      aliasId: 'relay:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: '',
+      modelFormat: 'openai',
+      npm: 'missing-sdk-provider-that-must-not-load',
+      providerId: 'test-provider',
+    };
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        messages: [{ role: 'user', content: 'count this context locally' }],
+      }, undefined, '/v1/messages/count_tokens?beta=true');
+
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({ input_tokens: expect.any(Number) });
+      expect(JSON.parse(res.body).input_tokens).toBeGreaterThan(0);
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('forwards native Anthropic token counts with the real upstream model id', async () => {
+    const fetchMock = vi.fn(async () => new Response('{"input_tokens":17}', {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const route: ProxyRoute = {
+      aliasId: 'relay:anthropic:sonnet',
+      realModelId: 'claude-sonnet-4-6',
+      displayName: 'Claude Sonnet',
+      upstreamUrl: 'https://api.anthropic.com',
+      apiKey: 'provider-key',
+      modelFormat: 'anthropic',
+      providerId: 'anthropic',
+    };
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        messages: [{ role: 'user', content: 'count upstream' }],
+      }, undefined, '/v1/messages/count_tokens');
+
+      expect(res.status).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({ input_tokens: 17 });
+      expect(fetchMock).toHaveBeenCalledWith(
+        'https://api.anthropic.com/v1/messages/count_tokens',
+        expect.objectContaining({
+          body: expect.stringContaining('"model":"claude-sonnet-4-6"'),
+        }),
+      );
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('translated request cancellation', () => {
+  it('aborts the SDK provider request and records translation cancellation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-sdk-cancel-'));
+    const inferenceLogPath = join(dir, 'inference.jsonl');
+    let upstreamReceivedResolve!: () => void;
+    const upstreamReceived = new Promise<void>(resolve => { upstreamReceivedResolve = resolve; });
+    let upstreamClosedResolve!: () => void;
+    const upstreamClosed = new Promise<void>(resolve => { upstreamClosedResolve = resolve; });
+    const upstream = http.createServer((req, res) => {
+      req.resume();
+      req.once('end', () => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.flushHeaders();
+        upstreamReceivedResolve();
+      });
+      req.socket.once('close', upstreamClosedResolve);
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstream.once('error', reject);
+      upstream.listen(0, '127.0.0.1', () => resolve());
+    });
+    const address = upstream.address();
+    if (!address || typeof address === 'string') throw new Error('test upstream did not bind');
+
+    const route: ProxyRoute = {
+      aliasId: 'relay:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: `http://127.0.0.1:${address.port}/v1`,
+      providerId: 'test-provider',
+    };
+    const handle = await startProxyCatalog([route], route.aliasId, false, inferenceLogPath);
+
+    try {
+      const payload = JSON.stringify({
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'cancel this request' }],
+        stream: true,
+      });
+      const request = http.request({
+        hostname: '127.0.0.1',
+        port: handle.port,
+        path: '/v1/messages',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${handle.token}`,
+          'Content-Length': Buffer.byteLength(payload),
+          'x-relay-request-id': 'req-cancel-1',
+        },
+      });
+      request.on('error', () => {});
+      request.end(payload);
+      await upstreamReceived;
+      request.destroy();
+      await upstreamClosed;
+
+      await vi.waitFor(() => {
+        const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+        expect(entries).toContainEqual(expect.objectContaining({
+          event: 'translation_cancelled',
+          requestId: 'req-cancel-1',
+          phase: 'translating',
+        }));
+      });
+    } finally {
+      handle.close();
+      upstream.closeAllConnections();
+      await new Promise<void>(resolve => upstream.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
 
 describe('SDK translated error logging', () => {
@@ -350,6 +520,67 @@ describe('SDK translated error logging', () => {
       expect(completed.sdkParts).toBeGreaterThan(0);
       expect(completed.translatedBytes).toBeGreaterThan(0);
       expect(completed.translatedChunks).toBeGreaterThan(0);
+    } finally {
+      handle.close();
+      await new Promise<void>(resolve => upstream.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('logs dispatch and completion for a non-streaming translated request', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-sdk-nonstream-'));
+    const inferenceLogPath = join(dir, 'inference.jsonl');
+    const upstream = http.createServer((req, res) => {
+      req.resume();
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Connection': 'close' });
+      res.end(JSON.stringify({
+        id: 'chatcmpl-nonstream',
+        object: 'chat.completion',
+        created: 1,
+        model: 'translated-model',
+        choices: [{ index: 0, message: { role: 'assistant', content: 'hello' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+      }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstream.once('error', reject);
+      upstream.listen(0, '127.0.0.1', () => resolve());
+    });
+    const address = upstream.address();
+    if (!address || typeof address === 'string') throw new Error('test upstream did not bind');
+    const route: ProxyRoute = {
+      aliasId: 'relay:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: `http://127.0.0.1:${address.port}/v1`,
+      providerId: 'test-provider',
+    };
+    const handle = await startProxyCatalog([route], route.aliasId, false, inferenceLogPath);
+
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      }, 'req-nonstream-1');
+
+      expect(res.status).toBe(200);
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'translation_dispatched',
+        requestId: 'req-nonstream-1',
+        phase: 'waiting_for_sdk',
+      }));
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'translation_completed',
+        requestId: 'req-nonstream-1',
+        phase: 'waiting_for_sdk',
+      }));
     } finally {
       handle.close();
       await new Promise<void>(resolve => upstream.close(() => resolve()));

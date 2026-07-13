@@ -178,6 +178,7 @@ export type InferenceResponseLifecycleEvent =
   | 'translation_started'
   | 'translation_progress'
   | 'translation_completed'
+  | 'translation_cancelled'
   | 'translation_failed'
   | 'response_started'
   | 'response_progress'

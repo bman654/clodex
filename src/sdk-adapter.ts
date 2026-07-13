@@ -286,6 +286,7 @@ type LogFn = (msg: () => string) => void;
 export interface AnthropicStreamObserver {
   /** Called for every AI SDK fullStream part before Relay translates it. */
   onPart?: (partType: string) => void;
+  abortSignal?: AbortSignal;
 }
 
 export async function writeAnthropicStream(
@@ -443,7 +444,12 @@ export async function streamAnthropicResponse(
   log?: LogFn,
   observer?: AnthropicStreamObserver,
 ): Promise<void> {
-  const result = streamText({ model, ...params, onError: () => {} } as Parameters<typeof streamText>[0]);
+  const result = streamText({
+    model,
+    ...params,
+    abortSignal: observer?.abortSignal,
+    onError: () => {},
+  } as Parameters<typeof streamText>[0]);
   // Prevent unhandled promise rejections on stream properties:
   Promise.resolve(result.text).catch(() => {});
   Promise.resolve(result.toolCalls).catch(() => {});
@@ -458,7 +464,7 @@ export async function generateAnthropicResponse(
   model: LanguageModel,
   params: SdkCallParams,
   modelId: string,
-  options?: { forceStream?: boolean },
+  options?: { forceStream?: boolean; abortSignal?: AbortSignal; onPart?: (partType: string) => void },
 ): Promise<Record<string, unknown>> {
   let text: string;
   let toolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }>;
@@ -469,11 +475,33 @@ export async function generateAnthropicResponse(
     // Some upstreams (e.g. ChatGPT's Codex backend) reject non-streaming requests
     // outright. Request a real stream from the SDK and collect it into one
     // response instead of forwarding the client's non-streaming request upstream.
-    const r = streamText({ model, ...params, onError: () => {} } as Parameters<typeof streamText>[0]);
+    const r = streamText({
+      model,
+      ...params,
+      abortSignal: options.abortSignal,
+      onError: () => {},
+    } as Parameters<typeof streamText>[0]);
     Promise.resolve(r.toolResults).catch(() => {});
-    [text, toolCalls, finishReason, usage] = await Promise.all([r.text, r.toolCalls, r.finishReason, r.usage]);
+    const observeParts = options.onPart
+      ? (async () => {
+          for await (const part of r.fullStream as AsyncIterable<FullStreamPart>) {
+            options.onPart?.(part.type);
+          }
+        })()
+      : Promise.resolve();
+    [text, toolCalls, finishReason, usage] = await Promise.all([
+      r.text,
+      r.toolCalls,
+      r.finishReason,
+      r.usage,
+      observeParts,
+    ]);
   } else {
-    const r = await generateText({ model, ...params } as Parameters<typeof generateText>[0]);
+    const r = await generateText({
+      model,
+      ...params,
+      abortSignal: options?.abortSignal,
+    } as Parameters<typeof generateText>[0]);
     ({ text, toolCalls, finishReason, usage } = r);
   }
 

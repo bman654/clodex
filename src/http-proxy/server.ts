@@ -9,6 +9,7 @@ import { startProxyCatalog } from '../proxy.js';
 import { ensureHttpProxyCertificates } from './ca.js';
 import { routeLookupIds } from '../context-model-id.js';
 import { anthropicEffortFromRequest, type AnthropicRequest } from '../sdk-adapter.js';
+import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
 import {
   getLatestMessagePreview,
   INFERENCE_PROGRESS_INTERVAL_MS,
@@ -137,6 +138,13 @@ function forwardRawAnthropicRequest(
   onErrorResponse?: (statusCode: number, body: string) => void,
 ): Promise<void> {
   return new Promise(resolve => {
+    let settled = false;
+    let clientDisconnected = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
     const upstream = https.request({
       protocol: 'https:',
       hostname: origin.hostname,
@@ -148,13 +156,23 @@ function forwardRawAnthropicRequest(
       rejectUnauthorized,
     }, upstreamRes => {
       copyResponse(upstreamRes, res, onErrorResponse);
-      upstreamRes.once('end', resolve);
-      upstreamRes.once('error', resolve);
+      upstreamRes.once('end', done);
+      upstreamRes.once('error', done);
+    });
+    res.once('close', () => {
+      if (res.writableFinished) return;
+      clientDisconnected = true;
+      upstream.destroy(new Error('Client disconnected'));
+      done();
     });
     upstream.once('error', err => {
+      if (clientDisconnected) {
+        done();
+        return;
+      }
       if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
       res.end(`Anthropic upstream unreachable: ${err.message}`);
-      resolve();
+      done();
     });
     upstream.end(rawBody);
   });
@@ -184,6 +202,8 @@ function forwardToAdapter(
     let adapterEnded = false;
     let failed = false;
     let clientDisconnected = false;
+    let adapterResponse: http.IncomingMessage | undefined;
+    let upstream: http.ClientRequest | undefined;
 
     const writeLifecycle = (
       event: Parameters<typeof writeInferenceResponseLifecycleLog>[1]['event'],
@@ -249,9 +269,16 @@ function forwardToAdapter(
         bytes,
         chunks,
       });
+      adapterResponse?.destroy(new Error('Client disconnected'));
+      upstream?.destroy(new Error('Client disconnected'));
+      resolve();
     });
 
     const failAdapterRequest = (err: Error) => {
+      if (clientDisconnected) {
+        resolve();
+        return;
+      }
       if (headersReceived || failed) return;
       failed = true;
       stopProgress();
@@ -270,7 +297,7 @@ function forwardToAdapter(
       resolve();
     };
 
-    const upstream = http.request({
+    upstream = http.request({
       hostname: '127.0.0.1',
       port: adapter.port,
       method: 'POST',
@@ -282,6 +309,7 @@ function forwardToAdapter(
         ...(lifecycle ? { 'x-relay-request-id': lifecycle.requestId } : {}),
       },
     }, upstreamRes => {
+      adapterResponse = upstreamRes;
       headersReceived = true;
       statusCode = upstreamRes.statusCode ?? 502;
       lastActivityAt = Date.now();
@@ -301,6 +329,10 @@ function forwardToAdapter(
       });
       copyResponse(upstreamRes, res);
       const failAdapterResponse = (err: Error) => {
+        if (clientDisconnected) {
+          resolve();
+          return;
+        }
         if (adapterEnded || failed) return;
         failed = true;
         stopProgress();
@@ -395,7 +427,8 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       return;
     }
 
-    if (req.method === 'POST' && req.url?.startsWith('/v1/messages')) {
+    const messagesEndpoint = anthropicMessagesEndpoint(req.url);
+    if (req.method === 'POST' && messagesEndpoint) {
       const requestId = randomUUID();
       let parsed: AnthropicRequest | null = null;
       let route: ProxyRoute | undefined;
@@ -406,7 +439,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         // Fail safe: an unreadable body is Anthropic traffic, never a relay route.
       }
 
-      if (options.inferenceLogPath) {
+      if (messagesEndpoint === 'messages' && options.inferenceLogPath) {
         const provider = route
           ? (route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown')
           : 'anthropic';
@@ -422,7 +455,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       }
 
       if (route && adapter) {
-        await forwardToAdapter(req, res, rawBody, adapter, options.inferenceLogPath
+        await forwardToAdapter(req, res, rawBody, adapter, messagesEndpoint === 'messages' && options.inferenceLogPath
           ? {
               logPath: options.inferenceLogPath,
               requestId,
@@ -440,7 +473,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         rawBody,
         anthropicOrigin,
         options.anthropicRejectUnauthorized ?? true,
-        options.inferenceLogPath
+        messagesEndpoint === 'messages' && options.inferenceLogPath
           ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
               requestId,
               modelId: typeof parsed?.model === 'string' ? parsed.model : 'unknown',

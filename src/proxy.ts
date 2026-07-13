@@ -37,6 +37,7 @@ import {
   sdkUpstreamErrorDetails,
   upstreamHttpStatus,
 } from './codex/upstream-error.js';
+import { anthropicMessagesEndpoint, estimateAnthropicInputTokens } from './anthropic-endpoints.js';
 
 type ProxyLog = (message: string | (() => string)) => void;
 
@@ -119,6 +120,12 @@ function createTranslationLifecycle(
       stopped = true;
       clearInterval(timer);
       write('translation_completed', snapshot(Date.now()));
+    },
+    cancel() {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      write('translation_cancelled', snapshot(Date.now()));
     },
     fail(errorType: string) {
       if (stopped) return;
@@ -290,13 +297,24 @@ export function startProxyCatalog(
       return;
     }
 
-    // POST /v1/messages — the main translation path (Claude Code appends ?beta=true or similar)
-    if (req.method === 'POST' && req.url?.startsWith('/v1/messages')) {
+    const messagesEndpoint = anthropicMessagesEndpoint(req.url);
+
+    // Anthropic message creation and token counting are distinct endpoints.
+    if (req.method === 'POST' && messagesEndpoint) {
       const inboundKey = extractApiKey(req);
       if (inboundKey !== proxyToken) {
         anthropicError(res, 401, 'Invalid proxy token');
         return;
       }
+
+      const clientAbort = new AbortController();
+      const abortForClientDisconnect = () => {
+        if (!clientAbort.signal.aborted) clientAbort.abort(new Error('Client disconnected'));
+      };
+      req.once('aborted', abortForClientDisconnect);
+      res.once('close', () => {
+        if (!res.writableFinished) abortForClientDisconnect();
+      });
 
       let anthropicBody: any;
       try {
@@ -322,6 +340,45 @@ export function startProxyCatalog(
       );
 
       const usesSdkAdapter = isSdkMigratedNpm(route.npm);
+
+      if (messagesEndpoint === 'count_tokens') {
+        if (route.modelFormat !== 'anthropic') {
+          const inputTokens = estimateAnthropicInputTokens(anthropicBody);
+          plog(() => `token-count: local estimate model=${originalModel} input_tokens=${inputTokens}`);
+          res.setHeader('x-relay-token-count-source', 'local-estimate');
+          sendJson(res, 200, { input_tokens: inputTokens });
+          return;
+        }
+
+        if (!apiKey) {
+          anthropicError(res, 401, 'Missing API key');
+          return;
+        }
+
+        const betaHeaderRaw = req.headers['anthropic-beta'];
+        const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
+        const forwardBody = { ...anthropicBody, model: route.realModelId };
+        const targetUrl = `${upstreamUrl}/v1/messages/count_tokens`;
+        const isOAuth = route.authType === 'oauth';
+        try {
+          await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, false, {
+            inboundBeta,
+            authType: isOAuth ? 'oauth' : 'api',
+            log: message => plog(message),
+            extraHeaders: route.headers,
+            refreshToken: route.refreshToken,
+            onTokenRefreshed: refreshed => { route.apiKey = refreshed; },
+            signal: clientAbort.signal,
+          });
+        } catch (err) {
+          if (clientAbort.signal.aborted) return;
+          const message = err instanceof UpstreamUnreachableError ? err.message : String(err);
+          plog(() => `anthropic token-count error: ${message}`);
+          anthropicError(res, 502, message);
+        }
+        return;
+      }
+
       if (!apiKey && !usesSdkAdapter) {
         anthropicError(res, 401, 'Missing API key');
         return;
@@ -361,6 +418,7 @@ export function startProxyCatalog(
             extraHeaders: route.headers,
             refreshToken: route.refreshToken,
             onTokenRefreshed: refreshed => { route.apiKey = refreshed; },
+            signal: clientAbort.signal,
             onUpstreamError: inferenceLogPath
               ? (statusCode, errorContent) => writeInferenceResponseErrorLog(inferenceLogPath, {
                   modelId: originalModel,
@@ -372,6 +430,7 @@ export function startProxyCatalog(
               : undefined,
           });
         } catch (err) {
+          if (clientAbort.signal.aborted) return;
           const message = err instanceof UpstreamUnreachableError ? err.message : String(err);
           plog(() => `anthropic-passthrough error: ${message}`);
           anthropicError(res, 502, message);
@@ -384,14 +443,12 @@ export function startProxyCatalog(
       // format, endpoint selection, and provider quirks.
       if (usesSdkAdapter) {
         const openAiOAuth = route.npm === '@ai-sdk/openai' && route.authType === 'oauth';
-        const translationLifecycle = clientWantsStream
-          ? createTranslationLifecycle(
-              inferenceLogPath,
-              relayRequestId,
-              originalModel,
-              route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown',
-            )
-          : undefined;
+        const translationLifecycle = createTranslationLifecycle(
+          inferenceLogPath,
+          relayRequestId,
+          originalModel,
+          route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown',
+        );
         try {
           const params = sdkTranslateRequest(anthropicBody, route.npm!, {
             openAiOAuth,
@@ -423,8 +480,8 @@ export function startProxyCatalog(
             preferWebSockets: route.preferWebSockets,
             onDebug: (msg: string) => plog(() => msg),
           });
+          translationLifecycle?.dispatched();
           if (clientWantsStream) {
-            translationLifecycle?.dispatched();
             const writeStreamChunk = (chunk: string) => {
               translationLifecycle?.onOutput(chunk);
               if (!res.headersSent) {
@@ -442,7 +499,10 @@ export function startProxyCatalog(
               originalModel,
               writeStreamChunk,
               plog,
-              { onPart: partType => translationLifecycle?.onPart(partType) },
+              {
+                onPart: partType => translationLifecycle?.onPart(partType),
+                abortSignal: clientAbort.signal,
+              },
             );
             translationLifecycle?.complete();
             if (!res.headersSent) writeStreamChunk('');
@@ -452,11 +512,24 @@ export function startProxyCatalog(
             // outright ("Stream must be set to true"), so always stream internally
             // for it and collect the result, regardless of what the client asked for.
             const anthropicResponse = await generateAnthropicResponse(
-              model, params, originalModel, { forceStream: openAiOAuth },
+              model,
+              params,
+              originalModel,
+              {
+                forceStream: openAiOAuth,
+                abortSignal: clientAbort.signal,
+                onPart: partType => translationLifecycle?.onPart(partType),
+              },
             );
+            translationLifecycle?.onOutput(JSON.stringify(anthropicResponse));
+            translationLifecycle?.complete();
             sendJson(res, 200, anthropicResponse);
           }
         } catch (err) {
+          if (clientAbort.signal.aborted) {
+            translationLifecycle?.cancel();
+            return;
+          }
           translationLifecycle?.fail(err instanceof Error ? err.name : 'UpstreamError');
           const message = formatUpstreamError(err);
           const details = sdkUpstreamErrorDetails(err);
@@ -514,6 +587,7 @@ export function startProxyCatalog(
               'User-Agent': 'vscode/1.X.X (Antigravity/4.2.0)',
             },
             body: JSON.stringify(envelope),
+            signal: clientAbort.signal,
           });
 
         try {
@@ -534,6 +608,7 @@ export function startProxyCatalog(
             sendJson(res, 200, response);
           }
         } catch (err) {
+          if (clientAbort.signal.aborted) return;
           const message = err instanceof Error ? err.message : String(err);
           plog(() => `cloud-code fetch error: ${message}`);
           if (!res.headersSent) anthropicError(res, 502, message);

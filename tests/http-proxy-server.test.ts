@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as https from 'node:https';
@@ -415,6 +415,156 @@ describe('selective HTTP proxy', () => {
     } finally {
       await proxy.close();
       await new Promise<void>(resolve => origin.close(() => resolve()));
+    }
+  }, 20_000);
+
+  it('routes count_tokens to the adapter without recording it as inference', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    const inferenceLogPath = join(testHome, 'count-tokens-inference.jsonl');
+    let adapterPath: string | undefined;
+    let anthropicRequests = 0;
+
+    const origin = https.createServer({
+      key: certificates.serverKey,
+      cert: certificates.serverCert,
+    }, (req, res) => {
+      anthropicRequests += 1;
+      req.resume();
+      res.end('{"unexpected":true}');
+    });
+    const originPort = await listen(origin);
+    const adapterServer = http.createServer(async (req, res) => {
+      adapterPath = req.url;
+      const ended = once(req, 'end');
+      req.resume();
+      await ended;
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Connection': 'close' });
+      res.end('{"input_tokens":42}');
+    });
+    const adapterPort = await listen(adapterServer);
+    const route = {
+      aliasId: 'relay:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai' as const,
+      npm: '@ai-sdk/openai-compatible',
+      providerId: 'test-provider',
+    };
+    const proxy = await startHttpProxy({
+      routes: [route],
+      adapterHandle: {
+        port: adapterPort,
+        token: 'adapter-local-token',
+        close: () => {
+          adapterServer.closeAllConnections();
+          adapterServer.close();
+        },
+      },
+      anthropicOrigin: `https://127.0.0.1:${originPort}`,
+      anthropicRejectUnauthorized: false,
+      inferenceLogPath,
+    });
+
+    try {
+      const body = JSON.stringify({
+        model: route.aliasId,
+        messages: [{ role: 'user', content: 'count this' }],
+      });
+      const secure = await connectMitm(proxy.port, certificates.caCert);
+      let response = '';
+      secure.on('data', chunk => { response += chunk.toString(); });
+      secure.write([
+        'POST /v1/messages/count_tokens?beta=true HTTP/1.1',
+        'Host: api.anthropic.com',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n') + body);
+      await once(secure, 'close');
+
+      expect(response).toContain('200 OK');
+      expect(response).toContain('{"input_tokens":42}');
+      expect(adapterPath).toBe('/v1/messages/count_tokens?beta=true');
+      expect(anthropicRequests).toBe(0);
+      expect(existsSync(inferenceLogPath)).toBe(false);
+    } finally {
+      await proxy.close();
+      await new Promise<void>(resolve => origin.close(() => resolve()));
+    }
+  }, 20_000);
+
+  it('closes the adapter request and logs a terminal client disconnect', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    const inferenceLogPath = join(testHome, 'client-disconnect-inference.jsonl');
+    let adapterReceivedResolve!: () => void;
+    const adapterReceived = new Promise<void>(resolve => { adapterReceivedResolve = resolve; });
+    let adapterClosedResolve!: () => void;
+    const adapterClosed = new Promise<void>(resolve => { adapterClosedResolve = resolve; });
+    const adapterServer = http.createServer((req) => {
+      req.resume();
+      req.once('end', adapterReceivedResolve);
+      req.socket.once('close', adapterClosedResolve);
+    });
+    const adapterPort = await listen(adapterServer);
+    const route = {
+      aliasId: 'relay:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai' as const,
+      npm: '@ai-sdk/openai-compatible',
+      providerId: 'test-provider',
+    };
+    const proxy = await startHttpProxy({
+      routes: [route],
+      adapterHandle: {
+        port: adapterPort,
+        token: 'adapter-local-token',
+        close: () => {
+          adapterServer.closeAllConnections();
+          adapterServer.close();
+        },
+      },
+      inferenceLogPath,
+    });
+
+    try {
+      const body = JSON.stringify({
+        model: route.aliasId,
+        messages: [{ role: 'user', content: 'wait forever' }],
+        stream: false,
+      });
+      const secure = await connectMitm(proxy.port, certificates.caCert);
+      secure.on('error', () => {});
+      secure.write([
+        'POST /v1/messages HTTP/1.1',
+        'Host: api.anthropic.com',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        '',
+        '',
+      ].join('\r\n') + body);
+      await adapterReceived;
+      secure.destroy();
+      await adapterClosed;
+      await new Promise(resolve => setImmediate(resolve));
+
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const requestEntry = entries.find(entry => !entry.event);
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'response_client_disconnected',
+        requestId: requestEntry.requestId,
+        phase: 'waiting_for_headers',
+      }));
+      expect(entries.some(entry => entry.event === 'response_completed')).toBe(false);
+      expect(entries.some(entry => entry.event === 'response_failed')).toBe(false);
+    } finally {
+      await proxy.close();
     }
   }, 20_000);
 
