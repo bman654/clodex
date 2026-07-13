@@ -97,6 +97,9 @@ describe('selective HTTP proxy', () => {
         'event: content_block_delta',
         'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"private response text"}}',
         '',
+        'event: message_delta',
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":19,"output_tokens":8,"cache_creation_input_tokens":100,"cache_read_input_tokens":220}}',
+        '',
         '',
       ].join('\n');
       res.writeHead(200, {
@@ -154,6 +157,18 @@ describe('selective HTTP proxy', () => {
         outputTokens: 1,
         cacheCreationInputTokens: 12,
         cacheReadInputTokens: 210,
+      });
+      expect(entries[2]).toMatchObject({
+        event: 'response_usage',
+        requestId: entries[0].requestId,
+        modelId: 'claude-sonnet-4-6',
+        provider: 'anthropic',
+        route: 'passthrough',
+        usageStage: 'message_delta',
+        inputTokens: 19,
+        outputTokens: 8,
+        cacheCreationInputTokens: 100,
+        cacheReadInputTokens: 220,
       });
       expect(inferenceLog).not.toContain('private-image-data');
       expect(inferenceLog).not.toContain('private response text');
@@ -307,6 +322,7 @@ describe('selective HTTP proxy', () => {
     const inferenceLogPath = join(testHome, 'relay-inference.jsonl');
     let adapterAuth: string | undefined;
     let adapterApiKey: string | undefined;
+    let adapterClaudeSessionId: string | undefined;
     let adapterBody = '';
     let anthropicRequests = 0;
     let fallbackAuth: string | undefined;
@@ -331,6 +347,7 @@ describe('selective HTTP proxy', () => {
       await once(req, 'end');
       adapterAuth = req.headers.authorization;
       adapterApiKey = req.headers['x-api-key'] as string | undefined;
+      adapterClaudeSessionId = req.headers['x-claude-code-session-id'] as string | undefined;
       adapterBody = Buffer.concat(chunks).toString();
       await new Promise(resolve => setTimeout(resolve, 35));
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Connection': 'close' });
@@ -384,6 +401,7 @@ describe('selective HTTP proxy', () => {
         'POST /v1/messages HTTP/1.1',
         'Host: api.anthropic.com',
         'Authorization: Bearer subscription-oauth-token',
+        'X-Claude-Code-Session-Id: 11111111-1111-4111-8111-111111111111',
         'Content-Type: application/json',
         `Content-Length: ${Buffer.byteLength(body)}`,
         'Connection: close',
@@ -396,6 +414,7 @@ describe('selective HTTP proxy', () => {
       expect(anthropicRequests).toBe(0);
       expect(adapterAuth).toBeUndefined();
       expect(adapterApiKey).toBe('adapter-local-token');
+      expect(adapterClaudeSessionId).toBe('11111111-1111-4111-8111-111111111111');
       expect(adapterBody).toBe(body);
       const relayEntries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       const requestEntry = relayEntries.find(entry => !entry.event);

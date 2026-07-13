@@ -23,10 +23,10 @@ import {
 const ANTHROPIC_HOST = 'api.anthropic.com';
 const MAX_BODY_BYTES = 50 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
-const MAX_MESSAGE_START_SSE_BYTES = 64 * 1024;
+const MAX_USAGE_SSE_BLOCK_BYTES = 64 * 1024;
 
-type MessageStartUsage = {
-  usageStage: 'message_start';
+type ResponseUsage = {
+  usageStage: 'message_start' | 'message_delta';
   inputTokens?: number;
   outputTokens?: number;
   cacheCreationInputTokens?: number;
@@ -37,10 +37,9 @@ function numericUsage(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-function messageStartUsageFromSseBlock(block: string): MessageStartUsage | undefined {
+function responseUsageFromSseBlock(block: string): ResponseUsage | undefined {
   const lines = block.split('\n');
   const event = lines.find(line => line.startsWith('event:'))?.slice('event:'.length).trim();
-  if (event && event !== 'message_start') return undefined;
   const data = lines
     .filter(line => line.startsWith('data:'))
     .map(line => line.slice('data:'.length).trimStart())
@@ -49,12 +48,16 @@ function messageStartUsageFromSseBlock(block: string): MessageStartUsage | undef
 
   try {
     const parsed = JSON.parse(data) as Record<string, unknown>;
-    if (parsed.type !== 'message_start') return undefined;
-    const message = parsed.message as Record<string, unknown> | undefined;
-    const usage = message?.usage as Record<string, unknown> | undefined;
+    const type = parsed.type;
+    if (type !== 'message_start' && type !== 'message_delta') return undefined;
+    if (event && event !== type) return undefined;
+    const message = type === 'message_start'
+      ? parsed.message as Record<string, unknown> | undefined
+      : undefined;
+    const usage = (type === 'message_start' ? message?.usage : parsed.usage) as Record<string, unknown> | undefined;
     if (!usage) return undefined;
     return {
-      usageStage: 'message_start',
+      usageStage: type,
       inputTokens: numericUsage(usage.input_tokens),
       outputTokens: numericUsage(usage.output_tokens),
       cacheCreationInputTokens: numericUsage(usage.cache_creation_input_tokens),
@@ -65,54 +68,41 @@ function messageStartUsageFromSseBlock(block: string): MessageStartUsage | undef
   }
 }
 
-function createMessageStartUsageCapture(
-  onUsage: (usage: MessageStartUsage) => void,
-  onDone?: () => void,
+function createResponseUsageCapture(
+  onUsage: (usage: ResponseUsage) => void,
 ): (chunk: Buffer) => void {
   let buffered = '';
-  let capturedBytes = 0;
-  let done = false;
-  const finish = () => {
-    if (done) return;
-    done = true;
-    onDone?.();
-  };
 
   return chunk => {
-    if (done) return;
-    const available = MAX_MESSAGE_START_SSE_BYTES - capturedBytes;
-    const captured = chunk.length > available ? chunk.subarray(0, available) : chunk;
-    capturedBytes += captured.length;
-    buffered = (buffered + captured.toString('utf8')).replace(/\r\n/g, '\n');
+    buffered = (buffered + chunk.toString('utf8')).replace(/\r\n/g, '\n');
 
     let boundary: number;
     while ((boundary = buffered.indexOf('\n\n')) >= 0) {
       const block = buffered.slice(0, boundary);
       buffered = buffered.slice(boundary + 2);
-      const usage = messageStartUsageFromSseBlock(block);
-      if (usage) {
-        finish();
-        onUsage(usage);
-        return;
-      }
+      if (Buffer.byteLength(block) > MAX_USAGE_SSE_BLOCK_BYTES) continue;
+      const usage = responseUsageFromSseBlock(block);
+      if (usage) onUsage(usage);
     }
 
-    if (capturedBytes >= MAX_MESSAGE_START_SSE_BYTES) finish();
+    // Usage events are tiny. Drop an oversized unterminated event rather than
+    // retaining arbitrary streamed response content in this observer.
+    if (Buffer.byteLength(buffered) > MAX_USAGE_SSE_BLOCK_BYTES) buffered = '';
   };
 }
 
-function observeMessageStartUsage(
+function observeResponseUsage(
   upstream: http.IncomingMessage,
   contentEncoding: string | string[] | undefined,
-  onUsage: (usage: MessageStartUsage) => void,
+  onUsage: (usage: ResponseUsage) => void,
 ): void {
   const encoding = (Array.isArray(contentEncoding) ? contentEncoding[0] : contentEncoding)
     ?.trim()
     .toLowerCase();
   if (!encoding || encoding === 'identity') {
-    let capture!: (chunk: Buffer) => void;
-    capture = createMessageStartUsageCapture(onUsage, () => upstream.off('data', capture));
+    const capture = createResponseUsageCapture(onUsage);
     upstream.on('data', capture);
+    upstream.once('end', () => upstream.off('data', capture));
     return;
   }
 
@@ -136,9 +126,10 @@ function observeMessageStartUsage(
     upstream.off('end', onCompressedEnd);
     decoder.destroy();
   };
-  const capture = createMessageStartUsageCapture(onUsage, cleanup);
+  const capture = createResponseUsageCapture(onUsage);
   decoder.on('data', capture);
   decoder.once('error', cleanup);
+  decoder.once('end', cleanup);
   upstream.on('data', onCompressedData);
   upstream.once('end', onCompressedEnd);
 }
@@ -205,12 +196,12 @@ function copyResponse(
   upstream: http.IncomingMessage,
   res: http.ServerResponse,
   onErrorResponse?: (statusCode: number, body: string) => void,
-  onMessageStartUsage?: (usage: MessageStartUsage) => void,
+  onResponseUsage?: (usage: ResponseUsage) => void,
 ): void {
   const statusCode = upstream.statusCode ?? 502;
   const contentType = upstream.headers['content-type'];
-  if (statusCode < 400 && onMessageStartUsage && typeof contentType === 'string' && contentType.includes('text/event-stream')) {
-    observeMessageStartUsage(upstream, upstream.headers['content-encoding'], onMessageStartUsage);
+  if (statusCode < 400 && onResponseUsage && typeof contentType === 'string' && contentType.includes('text/event-stream')) {
+    observeResponseUsage(upstream, upstream.headers['content-encoding'], onResponseUsage);
   }
   const errorChunks: Buffer[] = [];
   let capturedBytes = 0;
@@ -261,7 +252,7 @@ function forwardRawAnthropicRequest(
   origin: URL,
   rejectUnauthorized: boolean,
   onErrorResponse?: (statusCode: number, body: string) => void,
-  onMessageStartUsage?: (usage: MessageStartUsage) => void,
+  onResponseUsage?: (usage: ResponseUsage) => void,
 ): Promise<void> {
   return new Promise(resolve => {
     let settled = false;
@@ -281,7 +272,7 @@ function forwardRawAnthropicRequest(
       servername: net.isIP(origin.hostname) ? undefined : origin.hostname,
       rejectUnauthorized,
     }, upstreamRes => {
-      copyResponse(upstreamRes, res, onErrorResponse, onMessageStartUsage);
+      copyResponse(upstreamRes, res, onErrorResponse, onResponseUsage);
       upstreamRes.once('end', done);
       upstreamRes.once('error', done);
     });
@@ -432,6 +423,9 @@ function forwardToAdapter(
         'Content-Type': 'application/json',
         'Content-Length': String(rawBody.length),
         'x-api-key': adapter.token,
+        ...(typeof req.headers['x-claude-code-session-id'] === 'string'
+          ? { 'x-claude-code-session-id': req.headers['x-claude-code-session-id'] }
+          : {}),
         ...(lifecycle ? { 'x-relay-request-id': lifecycle.requestId } : {}),
       },
     }, upstreamRes => {

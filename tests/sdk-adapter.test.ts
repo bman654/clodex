@@ -7,7 +7,21 @@ import {
   translateToolChoice,
   translateRequest,
   writeAnthropicStream,
+  streamAnthropicResponse,
+  supportsOpenAiPromptCacheBreakpoints,
+  extractClaudeSessionId,
+  claudeSessionPromptCacheKey,
 } from '../src/sdk-adapter.js';
+
+describe('supportsOpenAiPromptCacheBreakpoints', () => {
+  it('enables GPT-5.6 and later OpenAI generations only', () => {
+    expect(supportsOpenAiPromptCacheBreakpoints('gpt-5.5')).toBe(false);
+    expect(supportsOpenAiPromptCacheBreakpoints('gpt-5.6-sol')).toBe(true);
+    expect(supportsOpenAiPromptCacheBreakpoints('gpt-5.10')).toBe(true);
+    expect(supportsOpenAiPromptCacheBreakpoints('gpt-6')).toBe(true);
+    expect(supportsOpenAiPromptCacheBreakpoints('grok-5.6')).toBe(false);
+  });
+});
 
 describe('translateTools', () => {
   it('builds client-side tools (no execute) keyed by name', () => {
@@ -101,13 +115,14 @@ describe('translateMessages', () => {
     expect(openai[0].content).toEqual([{ type: 'text', text: 'hello' }]);
   });
 
-  it('maps base64 image blocks to SDK image parts', () => {
+  it('maps base64 image blocks to AI SDK 7 file parts', () => {
     const out = translateMessages([
       { role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGk=' } }] },
     ], '@ai-sdk/google') as any[];
-    expect(out[0].content[0].type).toBe('image');
+    expect(out[0].content[0].type).toBe('file');
     expect(out[0].content[0].mediaType).toBe('image/png');
-    expect(Buffer.isBuffer(out[0].content[0].image)).toBe(true);
+    expect(out[0].content[0].data.type).toBe('data');
+    expect(Buffer.isBuffer(out[0].content[0].data.data)).toBe(true);
   });
 });
 
@@ -120,7 +135,7 @@ describe('translateRequest', () => {
       max_tokens: 256,
       temperature: 0.5,
     }, '@ai-sdk/google');
-    expect(params.system).toBe('be brief');
+    expect(params.instructions).toBe('be brief');
     expect(params.maxOutputTokens).toBe(256);
     expect(params.temperature).toBe(0.5);
     expect(params.providerOptions).toEqual({ google: { thinkingConfig: { includeThoughts: true } } });
@@ -143,9 +158,41 @@ describe('translateRequest', () => {
       max_tokens: 32000,
     }, '@ai-sdk/openai', { openAiOAuth: true });
 
-    expect(params.system).toBeUndefined();
+    expect(params.instructions).toBeUndefined();
     expect(params.providerOptions?.openai?.instructions).toBe('You are a coding assistant.');
     expect(params.maxOutputTokens).toBeUndefined();
+  });
+
+  it('strips Claude Code Anthropic billing attribution from OpenAI OAuth instructions only', () => {
+    const body = {
+      model: 'gpt-5.6-terra',
+      system: [
+        {
+          text: 'x-anthropic-billing-header: cc_version=2.1.207.9bb; cc_entrypoint=cli; cch=24e85;',
+        },
+        { text: 'You are Claude Code.\nFollow the user instructions.' },
+      ],
+      messages: [{ role: 'user' as const, content: 'hello' }],
+    };
+
+    const oauth = translateRequest(body, '@ai-sdk/openai', { openAiOAuth: true });
+    expect(oauth.providerOptions?.openai?.instructions)
+      .toBe('You are Claude Code.\nFollow the user instructions.');
+
+    const changedAttribution = translateRequest({
+      ...body,
+      system: [
+        { text: 'x-anthropic-billing-header: cc_version=2.1.207.9bb; cc_entrypoint=cli; cch=cb57d;' },
+        body.system[1]!,
+      ],
+    }, '@ai-sdk/openai', { openAiOAuth: true });
+    expect(changedAttribution.providerOptions?.openai?.instructions)
+      .toBe(oauth.providerOptions?.openai?.instructions);
+    expect(changedAttribution.providerOptions?.openai?.promptCacheKey)
+      .toBe(oauth.providerOptions?.openai?.promptCacheKey);
+
+    const publicApi = translateRequest({ ...body, model: 'gpt-5.5' }, '@ai-sdk/openai');
+    expect(publicApi.instructions).toContain('x-anthropic-billing-header:');
   });
 
   it('maps output_config.effort to Google thinking budget without dropping includeThoughts', () => {
@@ -238,32 +285,85 @@ describe('translateRequest', () => {
     const params = translateRequest({
       model: 'grok-4.3', system: [{ text: 'a' }, { text: 'b' }], messages: [],
     }, '@ai-sdk/xai');
-    expect(params.system).toBe('a\nb');
+    expect(params.instructions).toBe('a\nb');
   });
 
-  it('folds inline role:system messages into the system prompt (skills list)', () => {
+  it('preserves inline role:system messages in their original position', () => {
     const params = translateRequest({
       model: 'grok-4.3',
       system: 'base prompt',
       messages: [
         { role: 'user', content: 'hi' },
-        // Claude Code injects the skills list / system-reminders as a system message
         { role: 'system', content: '<system-reminder>available skills: nlm-skill</system-reminder>' } as any,
+        { role: 'user', content: 'continue' },
       ],
     }, '@ai-sdk/xai');
-    expect(params.system).toContain('base prompt');
-    expect(params.system).toContain('nlm-skill');
-    // the system message must NOT survive as a regular message
-    expect(params.messages).toHaveLength(1);
-    expect((params.messages[0] as any).role).toBe('user');
+    expect(params.instructions).toBe('base prompt');
+    expect(params.allowSystemInMessages).toBe(true);
+    expect((params.messages as any[]).map(message => message.role)).toEqual(['user', 'system', 'user']);
+    expect((params.messages[1] as any).content).toContain('nlm-skill');
   });
 
-  it('still produces system text when there is no top-level system, only inline', () => {
+  it('keeps an inline-only system message in the message sequence', () => {
     const params = translateRequest({
       model: 'grok-4.3',
       messages: [{ role: 'system', content: 'only inline context' } as any],
     }, '@ai-sdk/xai');
-    expect(params.system).toBe('only inline context');
+    expect(params.instructions).toBeUndefined();
+    expect(params.allowSystemInMessages).toBe(true);
+    expect(params.messages).toEqual([{ role: 'system', content: 'only inline context' }]);
+  });
+
+  it('maps Claude cache_control blocks to GPT-5.6 explicit cache breakpoints', () => {
+    const params = translateRequest({
+      model: 'gpt-5.6',
+      system: [{ text: 'stable base', cache_control: { type: 'ephemeral' } }],
+      messages: [
+        { role: 'user', content: 'before' },
+        {
+          role: 'system',
+          content: [{
+            type: 'text',
+            text: 'stable injected context',
+            cache_control: { type: 'ephemeral' },
+          }],
+        } as any,
+        {
+          role: 'user',
+          content: [{
+            type: 'text',
+            text: 'stable history',
+            cache_control: { type: 'ephemeral' },
+          }],
+        },
+      ],
+    }, '@ai-sdk/openai');
+
+    expect(params.instructions).toBeUndefined();
+    expect((params.messages as any[]).map(message => message.role)).toEqual(['system', 'user', 'system', 'user']);
+    expect((params.messages[0] as any).providerOptions).toEqual({
+      openai: { promptCacheBreakpoint: { mode: 'explicit' } },
+    });
+    expect((params.messages[2] as any).providerOptions).toEqual({
+      openai: { promptCacheBreakpoint: { mode: 'explicit' } },
+    });
+    expect((params.messages[3] as any).content[0].providerOptions).toEqual({
+      openai: { promptCacheBreakpoint: { mode: 'explicit' } },
+    });
+    expect(params.providerOptions?.openai?.promptCacheOptions).toEqual({ mode: 'implicit', ttl: '30m' });
+  });
+
+  it('does not emit unsupported explicit cache options before GPT-5.6', () => {
+    const params = translateRequest({
+      model: 'gpt-5.5',
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: 'stable', cache_control: { type: 'ephemeral' } }],
+      }],
+    }, '@ai-sdk/openai');
+
+    expect(params.providerOptions?.openai?.promptCacheOptions).toBeUndefined();
+    expect((params.messages[0] as any).content[0].providerOptions).toBeUndefined();
   });
 
   it('omits defer_loading tools until referenced in messages', () => {
@@ -311,7 +411,7 @@ describe('generateAnthropicResponse', () => {
   it('forceStream collects a real stream into one response instead of calling generateText', async () => {
     vi.resetModules();
     const generateText = vi.fn();
-    async function* fullStream() {
+    async function* stream() {
       yield { type: 'start' };
       yield { type: 'finish' };
     }
@@ -321,7 +421,7 @@ describe('generateAnthropicResponse', () => {
       toolResults: Promise.resolve([]),
       finishReason: Promise.resolve('stop'),
       usage: Promise.resolve({ inputTokens: 3, outputTokens: 4 }),
-      fullStream: fullStream(),
+      stream: stream(),
     }));
     vi.doMock('ai', () => ({
       generateText,
@@ -344,7 +444,12 @@ describe('generateAnthropicResponse', () => {
     expect(streamText).toHaveBeenCalledWith(expect.objectContaining({ abortSignal: abort.signal }));
     expect(onPart.mock.calls).toEqual([['start'], ['finish']]);
     expect((body.content as any[])[0]).toEqual({ type: 'text', text: 'hello' });
-    expect(body.usage).toEqual({ input_tokens: 3, output_tokens: 4, cache_read_input_tokens: 0 });
+    expect(body.usage).toEqual({
+      input_tokens: 3,
+      output_tokens: 4,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    });
 
     vi.doUnmock('ai');
     vi.resetModules();
@@ -354,7 +459,7 @@ describe('generateAnthropicResponse', () => {
     vi.resetModules();
     const abort = new AbortController();
     const reason = new Error('Client disconnected');
-    async function* fullStream() {
+    async function* stream() {
       yield { type: 'start' };
       abort.abort(reason);
       yield { type: 'abort' };
@@ -365,7 +470,7 @@ describe('generateAnthropicResponse', () => {
       toolResults: Promise.resolve([]),
       finishReason: Promise.resolve('stop'),
       usage: Promise.resolve({ inputTokens: 0, outputTokens: 0 }),
-      fullStream: fullStream(),
+      stream: stream(),
     }));
     vi.doMock('ai', () => ({
       generateText: vi.fn(),
@@ -385,6 +490,36 @@ describe('generateAnthropicResponse', () => {
     vi.doUnmock('ai');
     vi.resetModules();
   });
+});
+
+describe('streamAnthropicResponse idle timeout', () => {
+  it('aborts an upstream that never produces its first stream event', async () => {
+    const hangingModel = {
+      specificationVersion: 'v3' as const,
+      provider: 'test',
+      modelId: 'test-model',
+      supportedUrls: {},
+      async doStream(options: { abortSignal?: AbortSignal }) {
+        return new Promise((_resolve, reject) => {
+          options.abortSignal?.addEventListener('abort', () => {
+            reject(options.abortSignal?.reason ?? new DOMException('Aborted', 'AbortError'));
+          });
+        });
+      },
+      async doGenerate(): Promise<never> {
+        throw new Error('not used');
+      },
+    };
+
+    await expect(streamAnthropicResponse(
+      hangingModel as never,
+      { messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] as never },
+      'test-model',
+      () => {},
+      undefined,
+      { idleTimeoutMs: 50 },
+    )).rejects.toThrow('no data received from provider');
+  }, 10_000);
 });
 
 // ── streaming translation ────────────────────────────────────────────────────
@@ -427,10 +562,15 @@ describe('writeAnthropicStream', () => {
     });
     const delta = events.find(e => e.event === 'message_delta')!;
     expect(delta.data.delta.stop_reason).toBe('end_turn');
-    expect(delta.data.usage).toEqual({ input_tokens: 5, output_tokens: 2, cache_read_input_tokens: 0 });
+    expect(delta.data.usage).toEqual({
+      input_tokens: 5,
+      output_tokens: 2,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    });
   });
 
-  it('reports cache hits: cachedInputTokens → cache_read_input_tokens, subtracted from input_tokens', async () => {
+  it('reports cache hits: inputTokenDetails.cacheReadTokens → cache_read_input_tokens', async () => {
     // OpenAI reports cached tokens WITHIN the prompt total (inputTokens=100 incl.
     // 80 cache hits). Anthropic's input_tokens must be the uncached remainder (20)
     // with the 80 surfaced as cache_read_input_tokens.
@@ -439,10 +579,38 @@ describe('writeAnthropicStream', () => {
       { type: 'text-start', id: 't1' },
       { type: 'text-delta', id: 't1', text: 'hi' },
       { type: 'text-end', id: 't1' },
-      { type: 'finish', finishReason: 'stop', totalUsage: { inputTokens: 100, outputTokens: 7, cachedInputTokens: 80 } },
+      {
+        type: 'finish',
+        finishReason: 'stop',
+        totalUsage: { inputTokens: 100, outputTokens: 7, inputTokenDetails: { cacheReadTokens: 80 } },
+      },
     ]);
     expect(events.find(e => e.event === 'message_delta')!.data.usage).toEqual({
-      input_tokens: 20, output_tokens: 7, cache_read_input_tokens: 80,
+      input_tokens: 20,
+      output_tokens: 7,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 80,
+    });
+  });
+
+  it('reports GPT-5.6 cache writes as Anthropic cache creation tokens', async () => {
+    const { events } = await collect([
+      { type: 'start' },
+      {
+        type: 'finish',
+        finishReason: 'stop',
+        totalUsage: {
+          inputTokens: 120,
+          outputTokens: 3,
+          inputTokenDetails: { cacheReadTokens: 20, cacheWriteTokens: 80 },
+        },
+      },
+    ]);
+    expect(events.find(e => e.event === 'message_delta')!.data.usage).toEqual({
+      input_tokens: 20,
+      output_tokens: 3,
+      cache_creation_input_tokens: 80,
+      cache_read_input_tokens: 20,
     });
   });
 
@@ -581,8 +749,8 @@ describe('translateRequest openai promptCacheKey', () => {
   });
 
   it('keeps the key stable across volatile inline system-reminders (within-session turns)', () => {
-    // Claude Code folds role:'system' messages (fresh timestamps, injected context)
-    // into the system prompt. Those must NOT churn the cache key.
+    // Inline reminders remain in message order and must not churn the stable
+    // system+tools cache partition key.
     const withReminder = (t: string) => req({
       messages: [
         { role: 'system' as const, content: `<system-reminder>current time ${t}</system-reminder>` },
@@ -592,8 +760,35 @@ describe('translateRequest openai promptCacheKey', () => {
     expect(keyOf(withReminder('10:00:01'))).toBe(keyOf(withReminder('10:05:42')));
   });
 
-  it('omits the key on the ChatGPT/Codex OAuth path (backend manages caching)', () => {
-    expect(keyOf(req(), '@ai-sdk/openai', { openAiOAuth: true })).toBeUndefined();
+  it('sends a session-derived key but omits risky cache options on ChatGPT/Codex OAuth', () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const params = translateRequest({
+      ...req(),
+      model: 'gpt-5.6-sol',
+      metadata: { user_id: JSON.stringify({ session_id: sessionId, device_id: 'private' }) },
+    }, '@ai-sdk/openai', {
+      openAiOAuth: true,
+      reasoningMetadata: { upstreamModelId: 'gpt-5.6-sol' },
+    });
+    expect(params.providerOptions?.openai?.promptCacheKey).toBe(claudeSessionPromptCacheKey(sessionId));
+    expect(params.providerOptions?.openai?.promptCacheOptions).toBeUndefined();
+  });
+
+  it('uses the body session before the header and falls back safely on malformed metadata', () => {
+    const bodySession = '11111111-1111-4111-8111-111111111111';
+    const headerSession = '22222222-2222-4222-8222-222222222222';
+    expect(extractClaudeSessionId({
+      metadata: { user_id: JSON.stringify({ session_id: bodySession }) },
+    }, headerSession)).toBe(bodySession);
+    expect(extractClaudeSessionId({ metadata: { user_id: '{bad json' } }, headerSession)).toBe(headerSession);
+    expect(extractClaudeSessionId({ metadata: { user_id: JSON.stringify({ session_id: 'not-a-uuid' }) } })).toBeUndefined();
+  });
+
+  it('keeps a Claude session key stable across system/tool changes', () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const options = { openAiOAuth: true, claudeSessionId: sessionId };
+    expect(keyOf(req({ system: 'first' }), '@ai-sdk/openai', options))
+      .toBe(keyOf(req({ system: 'second', tools: [] }), '@ai-sdk/openai', options));
   });
 
   it('omits the key for non-OpenAI providers', () => {

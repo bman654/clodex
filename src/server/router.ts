@@ -319,6 +319,9 @@ async function handleAnthropicMessages(
     const params = sdkTranslateRequest(body as unknown as AnthropicRequest, model.npm!, {
       defaultEffort: anthropicEffortFromRequest(body as AnthropicRequest) ? undefined : model.defaultEffort,
       openAiOAuth: model.npm === '@ai-sdk/openai' && model.authType === 'oauth',
+      claudeSessionId: Array.isArray(req.headers['x-claude-code-session-id'])
+        ? req.headers['x-claude-code-session-id'][0]
+        : req.headers['x-claude-code-session-id'],
       reasoningMetadata: {
         providerId: model.providerId,
         apiBaseUrl: model.apiBaseUrl,

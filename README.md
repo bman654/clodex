@@ -97,7 +97,7 @@ Pick your backend:
 
 ## Prerequisites
 
-- Node.js 18+
+- Node.js 22+ (Node.js 24 LTS or newer recommended)
 - A supported AI coding tool installed (e.g. [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code), [OpenAI Codex](https://www.npmjs.com/package/@openai/codex), or [Google Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli))
 - At least one provider configured via `relay-ai providers add` or `import` — **or** an [OpenCode API key](https://opencode.ai/auth) for Zen/Go cloud backends
 - [OpenCode CLI](https://opencode.ai) only if you want **one-time import** from an existing OpenCode setup (optional)
@@ -559,6 +559,8 @@ OpenCode exposes models through different API formats. relay-ai handles them whe
 | Not in cloud wizard | GPT, Gemini on OpenCode Zen/Go | Use an OpenCode-configured provider instead (OpenAI/Google in OpenCode config) | `not yet supported` |
 
 The SDK adapter proxy starts on a random local port for proxy-routed models and stops when Claude Code exits. Each `relay-ai claude` session gets its own port, so multiple terminals are fine. (`relay-ai server` uses fixed port `17645`. One server instance per machine.)
+
+For public-API OpenAI GPT-5.6+ routes, relay preserves Claude Code's inline system-message order and translates Anthropic `cache_control` blocks into OpenAI prompt-cache breakpoints with a 30-minute minimum lifetime. Cache reads and writes are returned through Anthropic-compatible usage fields. ChatGPT/Codex OAuth routes use a hashed Claude session cache key plus persistent WebSocket `previous_response_id` continuation, sending only newly appended tool/user input after exact history validation. Multiple divergent heads can coexist inside a session partition for rewinds and branches. Current instructions, tools, and other request options are forwarded on every create, while Claude Code's volatile Anthropic-only `x-anthropic-billing-header` attribution is omitted from OpenAI instructions so it cannot invalidate the stable prompt prefix. The OAuth backend requires `store:false` and does not accept the public API's `prompt_cache_options` or explicit breakpoints. Reconnects, changed model/effort, and continuation failures safely fall back to full context.
 
 ### Provider notes
 

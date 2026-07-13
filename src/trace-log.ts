@@ -214,7 +214,7 @@ export interface InferenceResponseLifecycleLogEntry {
   translatedBytes?: number;
   translatedChunks?: number;
   outputIdleMs?: number;
-  usageStage?: 'message_start';
+  usageStage?: 'message_start' | 'message_delta';
   inputTokens?: number;
   outputTokens?: number;
   cacheCreationInputTokens?: number;

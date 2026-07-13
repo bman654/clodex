@@ -150,6 +150,7 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
 
   if (npm === '@ai-sdk/openai') {
     const { createOpenAI } = await import('@ai-sdk/openai');
+    const useResponsesEndpoint = shouldUseOpenAiResponsesEndpoint(modelId);
     const accountId = spec.authType === 'oauth'
       ? spec.oauthAccountId ?? extractOpenAiAccountId({ access_token: apiKey })
       : undefined;
@@ -166,27 +167,34 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
               ? { version: CODEX_RESPONSES_LITE_VERSION, 'x-openai-internal-codex-responses-lite': 'true' }
               : {}),
           },
-          // Models the backend flags with prefer_websockets are only served over
-          // the WebSocket Responses transport, not HTTP.
-          ...(spec.preferWebSockets
-            ? { fetch: createResponsesWebSocketFetch(CODEX_RESPONSES_LITE_WS_URL, spec.onDebug) }
+          // Keep every ChatGPT/Codex OAuth Responses conversation on the
+          // persistent WebSocket transport. Models flagged prefer_websockets
+          // require it; the remaining OAuth Responses models benefit from the
+          // same connection-local previous_response_id continuation cache.
+          ...(useResponsesEndpoint
+            ? {
+                fetch: createResponsesWebSocketFetch(CODEX_RESPONSES_LITE_WS_URL, spec.onDebug, {
+                  providerId: spec.providerId ?? 'openai',
+                  accountId,
+                }),
+              }
             : {}),
         }
       : { apiKey };
     const openai = createOpenAI(oauthOptions);
-    return shouldUseOpenAiResponsesEndpoint(modelId) ? openai.responses(modelId) : openai.chat(modelId);
+    return useResponsesEndpoint ? openai.responses(modelId) : openai.chat(modelId);
   }
   if (npm === '@ai-sdk/xai') {
     const { createXai } = await import('@ai-sdk/xai');
     const xai = createXai({ apiKey });
-    return modelPrefersResponsesApi(modelId) ? xai.responses(modelId) : xai(modelId);
+    return modelPrefersResponsesApi(modelId) ? xai.responses(modelId) : xai.chat(modelId);
   }
   // @ai-sdk/google owns its native v1beta endpoint. Registry templates store the
   // OpenAI-compatible URL only for GET /v1/models discovery — passing it here
   // produces .../v1beta/openai/models/...:streamGenerateContent → 404.
   if (npm === '@ai-sdk/google') {
-    const { createGoogleGenerativeAI } = await import('@ai-sdk/google');
-    const google = createGoogleGenerativeAI({ apiKey });
+    const { createGoogle } = await import('@ai-sdk/google');
+    const google = createGoogle({ apiKey });
     return google(modelId);
   }
   // Registry stores root URL (no /v1) for GET /v1/models discovery — passing it here

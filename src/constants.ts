@@ -18,8 +18,9 @@ export const BACKENDS: Record<'zen' | 'go', BackendConfig> = {
   },
 };
 
-// ChatGPT Codex Responses-Lite WebSocket transport (used by models the backend
-// flags with prefer_websockets, e.g. gpt-5.6-luna).
+// ChatGPT Codex WebSocket Responses transport. Models flagged prefer_websockets
+// require it; relay-ai also uses it for other OAuth Responses models so
+// connection-local previous_response_id continuation remains available.
 export const CODEX_RESPONSES_LITE_WS_URL = 'wss://chatgpt.com/backend-api/codex/responses';
 // `version` header the Codex backend expects on Responses-Lite requests. The
 // official Codex CLI sends its own version here; OpenAI may require this to be

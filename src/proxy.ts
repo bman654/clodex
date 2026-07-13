@@ -452,6 +452,9 @@ export function startProxyCatalog(
         try {
           const params = sdkTranslateRequest(anthropicBody, route.npm!, {
             openAiOAuth,
+            claudeSessionId: Array.isArray(req.headers['x-claude-code-session-id'])
+              ? req.headers['x-claude-code-session-id'][0]
+              : req.headers['x-claude-code-session-id'],
             maxTools: maxToolsForNpm(route.npm),
             reasoningMetadata: {
               providerId: route.providerId,
