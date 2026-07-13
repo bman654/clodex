@@ -393,6 +393,26 @@ describe('writeAnthropicStream', () => {
     await expect(writeAnthropicStream(parts() as any, 'm', () => {})).rejects.toBe(upstreamError);
   });
 
+  it('reports every SDK stream part to the lifecycle observer', async () => {
+    const observed: string[] = [];
+    async function* parts() {
+      yield { type: 'start' };
+      yield { type: 'text-start', id: 't1' };
+      yield { type: 'text-delta', id: 't1', text: 'hi' };
+      yield { type: 'finish', finishReason: 'stop' };
+    }
+
+    await writeAnthropicStream(
+      parts() as any,
+      'm',
+      () => {},
+      undefined,
+      { onPart: type => observed.push(type) },
+    );
+
+    expect(observed).toEqual(['start', 'text-start', 'text-delta', 'finish']);
+  });
+
   it('wraps a string stream failure for the HTTP layer', async () => {
     async function* parts() {
       yield { type: 'error', error: 'Something went wrong' };

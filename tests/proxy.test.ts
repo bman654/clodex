@@ -8,7 +8,12 @@ import { aliasModelId, startProxyCatalog, type ProxyRoute } from '../src/proxy.j
 import { getProxyDebugLogPath } from '../src/trace-log.js';
 
 /** POST JSON to a local proxy via node:http (avoids vi.stubGlobal('fetch') interception). */
-function postToProxy(port: number, token: string, body: unknown): Promise<{ status: number; body: string }> {
+function postToProxy(
+  port: number,
+  token: string,
+  body: unknown,
+  relayRequestId?: string,
+): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
     const req = http.request(
@@ -22,6 +27,7 @@ function postToProxy(port: number, token: string, body: unknown): Promise<{ stat
           'Authorization': `Bearer ${token}`,
           'anthropic-version': '2023-06-01',
           'Content-Length': Buffer.byteLength(payload),
+          ...(relayRequestId ? { 'x-relay-request-id': relayRequestId } : {}),
         },
       },
       (res) => {
@@ -163,6 +169,46 @@ describe('SDK anonymous route handling', () => {
 });
 
 describe('SDK translated error logging', () => {
+  it('returns an HTTP error when request translation throws instead of leaving the client pending', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-sdk-translation-error-'));
+    const inferenceLogPath = join(dir, 'inference.jsonl');
+    const route: ProxyRoute = {
+      aliasId: 'relay:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: 'http://127.0.0.1:1/v1',
+      providerId: 'test-provider',
+    };
+    const handle = await startProxyCatalog([route], route.aliasId, false, inferenceLogPath);
+
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: {},
+        stream: true,
+      }, 'req-translate-error');
+
+      expect(res.status).toBe(502);
+      expect(res.body).toContain('error');
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'translation_failed',
+        requestId: 'req-translate-error',
+        phase: 'preparing_translation',
+        sdkParts: 0,
+        translatedBytes: 0,
+      }));
+    } finally {
+      handle.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('preserves a pre-stream HTTP failure and logs the AI SDK response body', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'relay-ai-sdk-error-'));
     const inferenceLogPath = join(dir, 'inference.jsonl');
@@ -199,13 +245,15 @@ describe('SDK translated error logging', () => {
         max_tokens: 100,
         messages: [{ role: 'user', content: 'hi' }],
         stream: true,
-      });
+      }, 'req-error-1');
 
       expect(res.status).toBe(400);
       expect(res.body).toContain('translated request rejected');
-      const errorEntry = JSON.parse(readFileSync(inferenceLogPath, 'utf8').trim());
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const errorEntry = entries.find(entry => entry.event === 'upstream_error');
       expect(errorEntry).toMatchObject({
         event: 'upstream_error',
+        requestId: 'req-error-1',
         modelId: route.aliasId,
         provider: 'test-provider',
         route: 'translated',
@@ -214,9 +262,95 @@ describe('SDK translated error logging', () => {
         attemptCount: 1,
       });
       expect(errorEntry.errorContent).toContain('translated request rejected');
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'translation_dispatched',
+        requestId: 'req-error-1',
+        phase: 'waiting_for_sdk',
+      }));
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'translation_started',
+        requestId: 'req-error-1',
+        lastPartType: 'start',
+      }));
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'translation_failed',
+        requestId: 'req-error-1',
+        lastPartType: 'error',
+      }));
     } finally {
       if (previousRequestPreview === undefined) delete process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
       else process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = previousRequestPreview;
+      handle.close();
+      await new Promise<void>(resolve => upstream.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('logs SDK input and translated output through successful stream completion', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-sdk-success-'));
+    const inferenceLogPath = join(dir, 'inference.jsonl');
+    const upstream = http.createServer((req, res) => {
+      req.resume();
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Connection': 'close' });
+      res.end([
+        'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"translated-model","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":null}]}',
+        '',
+        'data: {"id":"chatcmpl-1","object":"chat.completion.chunk","created":1,"model":"translated-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+        '',
+        'data: [DONE]',
+        '',
+      ].join('\n'));
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstream.once('error', reject);
+      upstream.listen(0, '127.0.0.1', () => resolve());
+    });
+    const address = upstream.address();
+    if (!address || typeof address === 'string') throw new Error('test upstream did not bind');
+
+    const route: ProxyRoute = {
+      aliasId: 'relay:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: `http://127.0.0.1:${address.port}/v1`,
+      providerId: 'test-provider',
+    };
+    const handle = await startProxyCatalog([route], route.aliasId, false, inferenceLogPath);
+
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      }, 'req-success-1');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toContain('event: message_stop');
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'translation_dispatched',
+        requestId: 'req-success-1',
+        phase: 'waiting_for_sdk',
+      }));
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'translation_started',
+        requestId: 'req-success-1',
+      }));
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'translation_completed',
+        requestId: 'req-success-1',
+        lastPartType: 'finish',
+      }));
+      const completed = entries.find(entry => entry.event === 'translation_completed');
+      expect(completed.sdkParts).toBeGreaterThan(0);
+      expect(completed.translatedBytes).toBeGreaterThan(0);
+      expect(completed.translatedChunks).toBeGreaterThan(0);
+    } finally {
       handle.close();
       await new Promise<void>(resolve => upstream.close(() => resolve()));
       rmSync(dir, { recursive: true, force: true });

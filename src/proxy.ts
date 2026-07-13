@@ -8,8 +8,10 @@ import { formatAnthropicModelEntry, formatAnthropicModelList } from './server/mo
 import { claudeCodeClientModelId, routeLookupIds, stripOneMContextSuffix } from './context-model-id.js';
 import {
   getProxyDebugLogPath,
+  INFERENCE_PROGRESS_INTERVAL_MS,
   redactTraceLine,
   resetTraceLog,
+  writeInferenceResponseLifecycleLog,
   writeInferenceResponseErrorLog,
 } from './trace-log.js';
 import { fetchWithOAuthRetry, relayAnthropicMessages, UpstreamUnreachableError } from './upstream-forward.js';
@@ -37,6 +39,95 @@ import {
 } from './codex/upstream-error.js';
 
 type ProxyLog = (message: string | (() => string)) => void;
+
+function createTranslationLifecycle(
+  logPath: string | undefined,
+  requestId: string | undefined,
+  modelId: string,
+  provider: string,
+) {
+  if (!logPath || !requestId) return undefined;
+
+  const startedAt = Date.now();
+  let firstPartAt: number | undefined;
+  let lastPartAt: number | undefined;
+  let lastPartType: string | undefined;
+  let lastOutputAt: number | undefined;
+  let sdkParts = 0;
+  let translatedBytes = 0;
+  let translatedChunks = 0;
+  let stopped = false;
+  let dispatched = false;
+
+  const write = (
+    event: Parameters<typeof writeInferenceResponseLifecycleLog>[1]['event'],
+    extra: Partial<Parameters<typeof writeInferenceResponseLifecycleLog>[1]> = {},
+  ) => writeInferenceResponseLifecycleLog(logPath, {
+    event,
+    requestId,
+    modelId,
+    provider,
+    route: 'translated',
+    ...extra,
+  });
+  const snapshot = (now: number) => ({
+    phase: !dispatched
+      ? 'preparing_translation' as const
+      : sdkParts === 0
+        ? 'waiting_for_sdk' as const
+        : 'translating' as const,
+    durationMs: now - startedAt,
+    sdkParts,
+    ...(lastPartAt !== undefined ? { sdkIdleMs: now - lastPartAt } : {}),
+    translatedBytes,
+    translatedChunks,
+    ...(lastOutputAt !== undefined ? { outputIdleMs: now - lastOutputAt } : {}),
+    ...(lastPartType ? { lastPartType } : {}),
+  });
+  const timer = setInterval(() => {
+    if (!stopped) write('translation_progress', snapshot(Date.now()));
+  }, INFERENCE_PROGRESS_INTERVAL_MS);
+  timer.unref();
+
+  return {
+    dispatched() {
+      if (stopped || dispatched) return;
+      dispatched = true;
+      write('translation_dispatched', snapshot(Date.now()));
+    },
+    onPart(partType: string) {
+      const now = Date.now();
+      sdkParts += 1;
+      lastPartAt = now;
+      lastPartType = partType;
+      if (firstPartAt === undefined) {
+        firstPartAt = now;
+        write('translation_started', {
+          durationMs: now - startedAt,
+          sdkParts,
+          lastPartType,
+        });
+      }
+    },
+    onOutput(chunk: string) {
+      translatedBytes += Buffer.byteLength(chunk);
+      translatedChunks += 1;
+      lastOutputAt = Date.now();
+    },
+    complete() {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      write('translation_completed', snapshot(Date.now()));
+    },
+    fail(errorType: string) {
+      if (stopped) return;
+      stopped = true;
+      clearInterval(timer);
+      write('translation_failed', { ...snapshot(Date.now()), errorType });
+    },
+  };
+}
 
 function appendSecureLog(logPath: string, line: string): void {
   const redacted = redactTraceLine(line);
@@ -218,6 +309,8 @@ export function startProxyCatalog(
 
       const originalModel = anthropicBody.model;
       const clientWantsStream = Boolean(anthropicBody.stream);
+      const relayRequestIdRaw = req.headers['x-relay-request-id'];
+      const relayRequestId = Array.isArray(relayRequestIdRaw) ? relayRequestIdRaw[0] : relayRequestIdRaw;
 
       // Per-request route resolution: look up the alias, fall back to default
       const route = lookupRoute(byAlias, originalModel) ?? defaultRoute;
@@ -291,23 +384,31 @@ export function startProxyCatalog(
       // format, endpoint selection, and provider quirks.
       if (usesSdkAdapter) {
         const openAiOAuth = route.npm === '@ai-sdk/openai' && route.authType === 'oauth';
-        const params = sdkTranslateRequest(anthropicBody, route.npm!, {
-          openAiOAuth,
-          maxTools: maxToolsForNpm(route.npm),
-          reasoningMetadata: {
-            providerId: route.providerId,
-            apiBaseUrl: route.baseURL,
-            supportedParameters: route.supportedParameters,
-            reasoning: route.reasoning,
-            interleavedReasoningField: route.interleavedReasoningField,
-            upstreamModelId: route.realModelId,
-          },
-        });
-        plog(() =>
-          `sdk: npm=${route.npm} model=${route.realModelId}, stream=${clientWantsStream}, ` +
-          `tools=${anthropicBody.tools?.length ?? 0}, msgs=${params.messages.length}`,
-        );
+        const translationLifecycle = clientWantsStream
+          ? createTranslationLifecycle(
+              inferenceLogPath,
+              relayRequestId,
+              originalModel,
+              route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown',
+            )
+          : undefined;
         try {
+          const params = sdkTranslateRequest(anthropicBody, route.npm!, {
+            openAiOAuth,
+            maxTools: maxToolsForNpm(route.npm),
+            reasoningMetadata: {
+              providerId: route.providerId,
+              apiBaseUrl: route.baseURL,
+              supportedParameters: route.supportedParameters,
+              reasoning: route.reasoning,
+              interleavedReasoningField: route.interleavedReasoningField,
+              upstreamModelId: route.realModelId,
+            },
+          });
+          plog(() =>
+            `sdk: npm=${route.npm} model=${route.realModelId}, stream=${clientWantsStream}, ` +
+            `tools=${anthropicBody.tools?.length ?? 0}, msgs=${params.messages.length}`,
+          );
           const model = await createLanguageModel({
             npm: route.npm!,
             modelId: route.realModelId,
@@ -323,7 +424,9 @@ export function startProxyCatalog(
             onDebug: (msg: string) => plog(() => msg),
           });
           if (clientWantsStream) {
+            translationLifecycle?.dispatched();
             const writeStreamChunk = (chunk: string) => {
+              translationLifecycle?.onOutput(chunk);
               if (!res.headersSent) {
                 res.writeHead(200, {
                   'Content-Type': 'text/event-stream',
@@ -333,7 +436,15 @@ export function startProxyCatalog(
               }
               res.write(chunk);
             };
-            await streamAnthropicResponse(model, params, originalModel, writeStreamChunk, plog);
+            await streamAnthropicResponse(
+              model,
+              params,
+              originalModel,
+              writeStreamChunk,
+              plog,
+              { onPart: partType => translationLifecycle?.onPart(partType) },
+            );
+            translationLifecycle?.complete();
             if (!res.headersSent) writeStreamChunk('');
             res.end();
           } else {
@@ -346,12 +457,14 @@ export function startProxyCatalog(
             sendJson(res, 200, anthropicResponse);
           }
         } catch (err) {
+          translationLifecycle?.fail(err instanceof Error ? err.name : 'UpstreamError');
           const message = formatUpstreamError(err);
           const details = sdkUpstreamErrorDetails(err);
           const upstreamStatus = details?.statusCode ?? upstreamHttpStatus(err, message);
           plog(() => `sdk error: ${message}${details?.errorContent ? ` — body: ${details.errorContent}` : ''}`);
           if (inferenceLogPath && upstreamStatus >= 400) {
             writeInferenceResponseErrorLog(inferenceLogPath, {
+              ...(relayRequestId ? { requestId: relayRequestId } : {}),
               modelId: originalModel,
               provider: route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown',
               route: 'translated',

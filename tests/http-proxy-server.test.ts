@@ -305,6 +305,7 @@ describe('selective HTTP proxy', () => {
       adapterAuth = req.headers.authorization;
       adapterApiKey = req.headers['x-api-key'] as string | undefined;
       adapterBody = Buffer.concat(chunks).toString();
+      await new Promise(resolve => setTimeout(resolve, 35));
       res.writeHead(200, { 'Content-Type': 'application/json', 'Connection': 'close' });
       res.end('{"type":"message","content":[]}');
     });
@@ -331,6 +332,7 @@ describe('selective HTTP proxy', () => {
       anthropicOrigin: `https://127.0.0.1:${originPort}`,
       anthropicRejectUnauthorized: false,
       inferenceLogPath,
+      responseProgressIntervalMs: 10,
     });
 
     try {
@@ -338,6 +340,7 @@ describe('selective HTTP proxy', () => {
         model: 'relay:groq:llama-3.3-70b',
         output_config: { effort: 'medium' },
         messages: [],
+        stream: true,
       });
       const secure = await connectMitm(proxy.port, certificates.caCert);
       let response = '';
@@ -359,12 +362,33 @@ describe('selective HTTP proxy', () => {
       expect(adapterAuth).toBeUndefined();
       expect(adapterApiKey).toBe('adapter-local-token');
       expect(adapterBody).toBe(body);
-      expect(JSON.parse(readFileSync(inferenceLogPath, 'utf8').trim())).toMatchObject({
+      const relayEntries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const requestEntry = relayEntries.find(entry => !entry.event);
+      expect(requestEntry).toMatchObject({
         modelId: 'relay:groq:llama-3.3-70b',
         effort: 'medium',
         provider: 'groq',
         route: 'translated',
+        stream: true,
       });
+      expect(requestEntry.requestId).toEqual(expect.any(String));
+      expect(relayEntries).toContainEqual(expect.objectContaining({
+        event: 'response_progress',
+        requestId: requestEntry.requestId,
+        phase: 'waiting_for_headers',
+        bytes: 0,
+        chunks: 0,
+      }));
+      expect(relayEntries).toContainEqual(expect.objectContaining({
+        event: 'response_started',
+        requestId: requestEntry.requestId,
+        statusCode: 200,
+      }));
+      expect(relayEntries).toContainEqual(expect.objectContaining({
+        event: 'response_completed',
+        requestId: requestEntry.requestId,
+        statusCode: 200,
+      }));
 
       const typoBody = JSON.stringify({ model: 'relay:groq:typo', messages: [] });
       const typoSocket = await connectMitm(proxy.port, certificates.caCert);
@@ -383,7 +407,7 @@ describe('selective HTTP proxy', () => {
       expect(anthropicRequests).toBe(1);
       expect(fallbackAuth).toBe('Bearer subscription-oauth-token');
       const inferenceEntries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-      expect(inferenceEntries[1]).toMatchObject({
+      expect(inferenceEntries.find(entry => !entry.event && entry.modelId === 'relay:groq:typo')).toMatchObject({
         modelId: 'relay:groq:typo',
         provider: 'anthropic',
         route: 'passthrough',
@@ -391,6 +415,82 @@ describe('selective HTTP proxy', () => {
     } finally {
       await proxy.close();
       await new Promise<void>(resolve => origin.close(() => resolve()));
+    }
+  }, 20_000);
+
+  it('terminates and logs a translated response when the adapter closes before end', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    const inferenceLogPath = join(testHome, 'adapter-abort-inference.jsonl');
+    const adapterServer = http.createServer(async (req, res) => {
+      const ended = once(req, 'end');
+      req.resume();
+      await ended;
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('event: message_start\ndata: {"type":"message_start"}\n\n');
+      setImmediate(() => res.destroy(new Error('adapter reset')));
+    });
+    const adapterPort = await listen(adapterServer);
+    const route = {
+      aliasId: 'relay:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai' as const,
+      npm: '@ai-sdk/openai-compatible',
+      providerId: 'test-provider',
+    };
+    const proxy = await startHttpProxy({
+      routes: [route],
+      adapterHandle: {
+        port: adapterPort,
+        token: 'adapter-local-token',
+        close: () => {
+          adapterServer.closeAllConnections();
+          adapterServer.close();
+        },
+      },
+      inferenceLogPath,
+    });
+
+    try {
+      const body = JSON.stringify({
+        model: route.aliasId,
+        messages: [{ role: 'user', content: 'test adapter reset' }],
+        stream: true,
+      });
+      const secure = await connectMitm(proxy.port, certificates.caCert);
+      secure.resume();
+      secure.write([
+        'POST /v1/messages HTTP/1.1',
+        'Host: api.anthropic.com',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n') + body);
+      await new Promise<void>(resolve => {
+        secure.once('close', () => resolve());
+        secure.once('error', () => resolve());
+      });
+
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const requestEntry = entries.find(entry => !entry.event);
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'response_started',
+        requestId: requestEntry.requestId,
+        statusCode: 200,
+      }));
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'response_failed',
+        requestId: requestEntry.requestId,
+        statusCode: 200,
+        phase: 'streaming',
+      }));
+      expect(entries.some(entry => entry.event === 'response_completed')).toBe(false);
+    } finally {
+      await proxy.close();
     }
   }, 20_000);
 });

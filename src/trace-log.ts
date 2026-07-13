@@ -22,6 +22,7 @@ export const GEMINI_PROXY_DEBUG_LOG = 'gemini-proxy-debug.log';
 export const PROVIDER_DEBUG_LOG = 'provider-debug.log';
 export const UI_DEBUG_LOG = 'ui-debug.log';
 export const INFERENCE_REQUEST_LOG = 'inference-requests.jsonl';
+export const INFERENCE_PROGRESS_INTERVAL_MS = 30_000;
 
 export function ensureLogsDir(): string {
   const dir = getLogsPath();
@@ -152,14 +153,17 @@ export function getLatestMessagePreview(messages: unknown, system?: unknown): st
 }
 
 export interface InferenceRequestLogEntry {
+  requestId?: string;
   modelId: string;
   provider: string;
   effort?: string;
   route: 'passthrough' | 'translated';
+  stream?: boolean;
   requestPreview?: string;
 }
 
 export interface InferenceResponseErrorLogEntry {
+  requestId?: string;
   modelId: string;
   provider: string;
   route: 'passthrough' | 'translated';
@@ -167,6 +171,49 @@ export interface InferenceResponseErrorLogEntry {
   errorContent?: string;
   isRetryable?: boolean;
   attemptCount?: number;
+}
+
+export type InferenceResponseLifecycleEvent =
+  | 'translation_dispatched'
+  | 'translation_started'
+  | 'translation_progress'
+  | 'translation_completed'
+  | 'translation_failed'
+  | 'response_started'
+  | 'response_progress'
+  | 'response_completed'
+  | 'response_failed'
+  | 'response_client_disconnected';
+
+export type InferenceResponsePhase =
+  | 'preparing_translation'
+  | 'waiting_for_sdk'
+  | 'translating'
+  | 'waiting_for_headers'
+  | 'waiting_for_first_byte'
+  | 'streaming'
+  | 'delivering';
+
+export interface InferenceResponseLifecycleLogEntry {
+  event: InferenceResponseLifecycleEvent;
+  requestId: string;
+  modelId: string;
+  provider: string;
+  route: 'passthrough' | 'translated';
+  statusCode?: number;
+  phase?: InferenceResponsePhase;
+  durationMs?: number;
+  timeToFirstByteMs?: number;
+  idleMs?: number;
+  bytes?: number;
+  chunks?: number;
+  sdkParts?: number;
+  sdkIdleMs?: number;
+  translatedBytes?: number;
+  translatedChunks?: number;
+  outputIdleMs?: number;
+  lastPartType?: string;
+  errorType?: string;
 }
 
 /** Append privacy-minimal routing metadata, plus an explicitly enabled request preview. */
@@ -177,11 +224,59 @@ export function writeInferenceRequestLog(
   const includePreview = process.env[REQUEST_PREVIEW_ENV] === '1' && entry.requestPreview;
   writeSecureLogLine(path, JSON.stringify({
     timestamp: new Date().toISOString(),
+    ...(entry.requestId ? { requestId: compactLogValue(entry.requestId, 100) } : {}),
     modelId: compactLogValue(entry.modelId),
     ...(entry.effort ? { effort: compactLogValue(entry.effort, 100) } : {}),
     provider: compactLogValue(entry.provider, 200),
     route: entry.route,
+    ...(entry.stream !== undefined ? { stream: entry.stream } : {}),
     ...(includePreview ? { requestPreview: compactLogValue(entry.requestPreview!, REQUEST_PREVIEW_MAX + 20) } : {}),
+  }));
+}
+
+function nonNegativeInteger(value: number | undefined): number | undefined {
+  return value !== undefined && Number.isFinite(value)
+    ? Math.max(0, Math.round(value))
+    : undefined;
+}
+
+/** Append privacy-minimal response timing and delivery metadata. */
+export function writeInferenceResponseLifecycleLog(
+  path: string,
+  entry: InferenceResponseLifecycleLogEntry,
+): void {
+  const statusCode = nonNegativeInteger(entry.statusCode);
+  const durationMs = nonNegativeInteger(entry.durationMs);
+  const timeToFirstByteMs = nonNegativeInteger(entry.timeToFirstByteMs);
+  const idleMs = nonNegativeInteger(entry.idleMs);
+  const bytes = nonNegativeInteger(entry.bytes);
+  const chunks = nonNegativeInteger(entry.chunks);
+  const sdkParts = nonNegativeInteger(entry.sdkParts);
+  const sdkIdleMs = nonNegativeInteger(entry.sdkIdleMs);
+  const translatedBytes = nonNegativeInteger(entry.translatedBytes);
+  const translatedChunks = nonNegativeInteger(entry.translatedChunks);
+  const outputIdleMs = nonNegativeInteger(entry.outputIdleMs);
+  writeSecureLogLine(path, JSON.stringify({
+    timestamp: new Date().toISOString(),
+    event: entry.event,
+    requestId: compactLogValue(entry.requestId, 100),
+    modelId: compactLogValue(entry.modelId),
+    provider: compactLogValue(entry.provider, 200),
+    route: entry.route,
+    ...(statusCode !== undefined ? { statusCode } : {}),
+    ...(entry.phase ? { phase: entry.phase } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+    ...(timeToFirstByteMs !== undefined ? { timeToFirstByteMs } : {}),
+    ...(idleMs !== undefined ? { idleMs } : {}),
+    ...(bytes !== undefined ? { bytes } : {}),
+    ...(chunks !== undefined ? { chunks } : {}),
+    ...(sdkParts !== undefined ? { sdkParts } : {}),
+    ...(sdkIdleMs !== undefined ? { sdkIdleMs } : {}),
+    ...(translatedBytes !== undefined ? { translatedBytes } : {}),
+    ...(translatedChunks !== undefined ? { translatedChunks } : {}),
+    ...(outputIdleMs !== undefined ? { outputIdleMs } : {}),
+    ...(entry.lastPartType ? { lastPartType: compactLogValue(entry.lastPartType, 100) } : {}),
+    ...(entry.errorType ? { errorType: compactLogValue(entry.errorType, 200) } : {}),
   }));
 }
 
@@ -194,6 +289,7 @@ export function writeInferenceResponseErrorLog(
   writeSecureLogLine(path, JSON.stringify({
     timestamp: new Date().toISOString(),
     event: 'upstream_error',
+    ...(entry.requestId ? { requestId: compactLogValue(entry.requestId, 100) } : {}),
     modelId: compactLogValue(entry.modelId),
     provider: compactLogValue(entry.provider, 200),
     route: entry.route,

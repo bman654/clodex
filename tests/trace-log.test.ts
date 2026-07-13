@@ -7,6 +7,7 @@ import {
   redactTraceLine,
   redactTraceLog,
   writeInferenceRequestLog,
+  writeInferenceResponseLifecycleLog,
   writeInferenceResponseErrorLog,
 } from '../src/trace-log.js';
 
@@ -159,6 +160,48 @@ describe('inference request log', () => {
     } finally {
       if (previous === undefined) delete process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
       else process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = previous;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('writes correlated response lifecycle metadata without response content', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-inference-lifecycle-'));
+    const path = join(dir, 'requests.jsonl');
+    try {
+      writeInferenceResponseLifecycleLog(path, {
+        event: 'translation_progress',
+        requestId: 'req-123',
+        modelId: 'relay:openai:gpt-test',
+        provider: 'openai',
+        route: 'translated',
+        phase: 'translating',
+        durationMs: 30_000.4,
+        sdkParts: 42,
+        sdkIdleMs: 125.7,
+        translatedBytes: 4096,
+        translatedChunks: 18,
+        outputIdleMs: 100.2,
+        lastPartType: 'text-delta',
+      });
+
+      const entry = JSON.parse(readFileSync(path, 'utf8').trim());
+      expect(entry).toMatchObject({
+        event: 'translation_progress',
+        requestId: 'req-123',
+        modelId: 'relay:openai:gpt-test',
+        provider: 'openai',
+        route: 'translated',
+        phase: 'translating',
+        durationMs: 30_000,
+        sdkParts: 42,
+        sdkIdleMs: 126,
+        translatedBytes: 4096,
+        translatedChunks: 18,
+        outputIdleMs: 100,
+        lastPartType: 'text-delta',
+      });
+      expect(entry).not.toHaveProperty('responseContent');
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
