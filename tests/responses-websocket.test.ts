@@ -277,6 +277,139 @@ describe('createResponsesWebSocketFetch', () => {
     expect(JSON.stringify(diagnostics)).not.toContain('sensitive backend explanation');
   });
 
+  it('logs a content-free anomaly when reasoning delta has no matching start', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await withResponsesWebSocketDiagnosticContext(
+      { requestId: 'req-reasoning-anomaly' },
+      () => wsFetch('https://x', { method: 'POST', headers: {}, body: JSON.stringify({ store: false }) }),
+    );
+    const socket = lastSocket();
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.reasoning_summary_text.delta',
+      item_id: 'sensitive-reasoning-item-id',
+      summary_index: 0,
+      delta: 'sensitive reasoning text',
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.completed',
+      response: { id: 'resp_anomaly' },
+    })));
+    await readAll(res);
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_protocol_anomaly',
+      requestId: 'req-reasoning-anomaly',
+      connectionId: 1,
+      source: 'response_event_sequence',
+      anomaly: 'reasoning_start_missing_before_delta',
+      upstreamEventType: 'response.reasoning_summary_text.delta',
+      itemIdHash: expect.stringMatching(/^[a-f0-9]{16}$/),
+      summaryIndex: 0,
+      knownSummaryParts: [],
+      recentUpstreamEventTypes: ['response.reasoning_summary_text.delta'],
+      emittedModelData: false,
+    }));
+    expect(JSON.stringify(diagnostics)).not.toContain('sensitive-reasoning-item-id');
+    expect(JSON.stringify(diagnostics)).not.toContain('sensitive reasoning text');
+  });
+
+  it('accepts a correctly sequenced multi-part reasoning response', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify({ store: false }),
+    });
+    const socket = lastSocket();
+    const events = [
+      {
+        type: 'response.output_item.added', output_index: 0,
+        item: { type: 'reasoning', id: 'reasoning-1' },
+      },
+      {
+        type: 'response.reasoning_summary_text.delta', item_id: 'reasoning-1',
+        summary_index: 0, delta: 'first',
+      },
+      {
+        type: 'response.reasoning_summary_part.done', item_id: 'reasoning-1', summary_index: 0,
+      },
+      {
+        type: 'response.reasoning_summary_part.added', item_id: 'reasoning-1', summary_index: 1,
+      },
+      {
+        type: 'response.reasoning_summary_text.delta', item_id: 'reasoning-1',
+        summary_index: 1, delta: 'second',
+      },
+      {
+        type: 'response.reasoning_summary_part.done', item_id: 'reasoning-1', summary_index: 1,
+      },
+      {
+        type: 'response.output_item.done', output_index: 0,
+        item: { type: 'reasoning', id: 'reasoning-1' },
+      },
+      { type: 'response.completed', response: { id: 'resp_reasoning' } },
+    ];
+    for (const event of events) socket.emit('message', Buffer.from(JSON.stringify(event)));
+    await readAll(res);
+
+    expect(diagnostics.some(event => event.event === 'ws_response_protocol_anomaly')).toBe(false);
+  });
+
+  it('detects a late delta for a reasoning part the SDK has already concluded', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify({ store: false }),
+    });
+    const socket = lastSocket();
+    const events = [
+      {
+        type: 'response.output_item.added', output_index: 0,
+        item: { type: 'reasoning', id: 'reasoning-late' },
+      },
+      {
+        type: 'response.reasoning_summary_text.delta', item_id: 'reasoning-late',
+        summary_index: 0, delta: 'first',
+      },
+      {
+        type: 'response.reasoning_summary_part.done', item_id: 'reasoning-late', summary_index: 0,
+      },
+      {
+        type: 'response.reasoning_summary_part.added', item_id: 'reasoning-late', summary_index: 1,
+      },
+      {
+        type: 'response.reasoning_summary_text.delta', item_id: 'reasoning-late',
+        summary_index: 0, delta: 'late',
+      },
+      { type: 'response.failed', response: { id: 'resp_late', status: 'failed' } },
+    ];
+    for (const event of events) socket.emit('message', Buffer.from(JSON.stringify(event)));
+    await readAll(res);
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_protocol_anomaly',
+      anomaly: 'reasoning_start_missing_before_delta',
+      summaryIndex: 0,
+      knownSummaryParts: [
+        { summaryIndex: 0, state: 'concluded' },
+        { summaryIndex: 1, state: 'active' },
+      ],
+      recentUpstreamEventTypes: [
+        'response.output_item.added',
+        'response.reasoning_summary_text.delta',
+        'response.reasoning_summary_part.done',
+        'response.reasoning_summary_part.added',
+        'response.reasoning_summary_text.delta',
+      ],
+    }));
+  });
+
   it('closes the socket when the request is aborted', async () => {
     const controller = new AbortController();
     const wsFetch = createResponsesWebSocketFetch(WS_URL);

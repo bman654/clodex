@@ -30,6 +30,7 @@ import {
   translateRequest as sdkTranslateRequest,
   streamAnthropicResponse,
   generateAnthropicResponse,
+  sdkTranslationErrorSignature,
   silenceSdkWarnings,
 } from './sdk-adapter.js';
 import {
@@ -129,11 +130,11 @@ function createTranslationLifecycle(
       clearInterval(timer);
       write('translation_cancelled', snapshot(Date.now()));
     },
-    fail(errorType: string) {
+    fail(errorType: string, errorSignature?: string) {
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
-      write('translation_failed', { ...snapshot(Date.now()), errorType });
+      write('translation_failed', { ...snapshot(Date.now()), errorType, errorSignature });
     },
   };
 }
@@ -547,7 +548,10 @@ export function startProxyCatalog(
             translationLifecycle?.cancel();
             return;
           }
-          translationLifecycle?.fail(err instanceof Error ? err.name : 'UpstreamError');
+          translationLifecycle?.fail(
+            err instanceof Error ? err.name : 'UpstreamError',
+            sdkTranslationErrorSignature(err),
+          );
           const message = formatUpstreamError(err);
           const details = sdkUpstreamErrorDetails(err);
           const upstreamStatus = details?.statusCode ?? upstreamHttpStatus(err, message);

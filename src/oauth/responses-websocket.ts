@@ -81,11 +81,16 @@ interface RequestContext {
   emittedModelData: boolean;
   outputByIndex: Map<number, OutputAccumulator>;
   outputIndexByItemId: Map<string, number>;
+  reasoningPartsByItemId: Map<string, Map<number, ReasoningPartState>>;
+  recentUpstreamEventTypes: string[];
+  emittedProtocolAnomalies: Set<string>;
   emitDiagnostic?: (event: { event: string } & Record<string, unknown>) => void;
   entry?: ConnectionEntry;
   createReplacement: () => ConnectionEntry;
   abortCleanup?: () => void;
 }
+
+type ReasoningPartState = 'active' | 'can_conclude' | 'concluded';
 
 interface ConnectionEntry {
   debugId: number;
@@ -469,13 +474,12 @@ function responseFailureDetails(event: unknown): Record<string, unknown> {
   };
 }
 
-function emitResponseErrorDiagnostic(
+function emitContextDiagnostic(
   entry: ConnectionEntry,
   ctx: RequestContext,
-  details: Record<string, unknown>,
+  details: { event: string } & Record<string, unknown>,
 ): void {
   ctx.emitDiagnostic?.({
-    event: 'ws_response_error',
     connectionId: entry.debugId,
     generation: entry.generation,
     continued: ctx.continued,
@@ -488,6 +492,133 @@ function emitResponseErrorDiagnostic(
       : Math.max(0, entry.options.now() - entry.inFlightStartedAt),
     ...details,
   });
+}
+
+function emitResponseErrorDiagnostic(
+  entry: ConnectionEntry,
+  ctx: RequestContext,
+  details: Record<string, unknown>,
+): void {
+  emitContextDiagnostic(entry, ctx, { event: 'ws_response_error', ...details });
+}
+
+function diagnosticItemIdHash(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0
+    ? createHash('sha256').update(value).digest('hex').slice(0, 16)
+    : undefined;
+}
+
+function reasoningPartIndex(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function emitProtocolAnomaly(
+  entry: ConnectionEntry,
+  ctx: RequestContext,
+  anomaly: string,
+  itemId: unknown,
+  summaryIndex: number | undefined,
+  upstreamEventType: string,
+): void {
+  const itemIdHash = diagnosticItemIdHash(itemId);
+  const key = `${anomaly}:${itemIdHash ?? 'none'}:${summaryIndex ?? 'none'}`;
+  if (ctx.emittedProtocolAnomalies.has(key)) return;
+  ctx.emittedProtocolAnomalies.add(key);
+  const parts = typeof itemId === 'string' ? ctx.reasoningPartsByItemId.get(itemId) : undefined;
+  emitContextDiagnostic(entry, ctx, {
+    event: 'ws_response_protocol_anomaly',
+    source: 'response_event_sequence',
+    anomaly,
+    upstreamEventType,
+    itemIdHash,
+    summaryIndex,
+    knownSummaryParts: parts
+      ? [...parts.entries()].sort(([left], [right]) => left - right)
+        .map(([index, state]) => ({ summaryIndex: index, state }))
+      : [],
+    recentUpstreamEventTypes: [...ctx.recentUpstreamEventTypes],
+  });
+}
+
+function trackReasoningProtocol(
+  entry: ConnectionEntry,
+  ctx: RequestContext,
+  event: unknown,
+  type: string | undefined,
+): void {
+  if (!type || !event || typeof event !== 'object') return;
+  ctx.recentUpstreamEventTypes.push(boundedDiagnosticIdentifier(type) ?? 'unknown');
+  if (ctx.recentUpstreamEventTypes.length > 20) ctx.recentUpstreamEventTypes.shift();
+
+  const record = event as JsonObject;
+  if (type === 'response.output_item.added' || type === 'response.output_item.done') {
+    const item = record.item && typeof record.item === 'object' ? record.item as JsonObject : undefined;
+    if (item?.type !== 'reasoning') return;
+    const itemId = item.id;
+    if (typeof itemId !== 'string' || itemId.length === 0) return;
+    const current = ctx.reasoningPartsByItemId.get(itemId);
+    if (type === 'response.output_item.added') {
+      if (current) {
+        emitProtocolAnomaly(entry, ctx, 'duplicate_reasoning_item_added', itemId, 0, type);
+      }
+      ctx.reasoningPartsByItemId.set(itemId, new Map([[0, 'active']]));
+    } else {
+      if (!current) {
+        emitProtocolAnomaly(entry, ctx, 'reasoning_start_missing_before_item_done', itemId, undefined, type);
+      }
+      ctx.reasoningPartsByItemId.delete(itemId);
+    }
+    return;
+  }
+
+  if (!type.startsWith('response.reasoning_summary_')) {
+    if (type === 'response.completed' && ctx.reasoningPartsByItemId.size > 0) {
+      for (const itemId of ctx.reasoningPartsByItemId.keys()) {
+        emitProtocolAnomaly(entry, ctx, 'reasoning_item_done_missing_before_completion', itemId, undefined, type);
+      }
+    }
+    return;
+  }
+
+  const itemId = record.item_id;
+  const summaryIndex = reasoningPartIndex(record.summary_index);
+  if (typeof itemId !== 'string' || summaryIndex === undefined) return;
+  const parts = ctx.reasoningPartsByItemId.get(itemId);
+  const state = parts?.get(summaryIndex);
+
+  if (type === 'response.reasoning_summary_part.added') {
+    if (!parts) {
+      emitProtocolAnomaly(entry, ctx, 'reasoning_item_missing_before_summary_part', itemId, summaryIndex, type);
+      return;
+    }
+    if (summaryIndex > 0) {
+      for (const [index, partState] of parts) {
+        if (partState === 'can_conclude') parts.set(index, 'concluded');
+      }
+      if (state === 'active' || state === 'can_conclude') {
+        emitProtocolAnomaly(entry, ctx, 'duplicate_reasoning_summary_part_added', itemId, summaryIndex, type);
+      }
+      parts.set(summaryIndex, 'active');
+    }
+    return;
+  }
+
+  if (type === 'response.reasoning_summary_text.delta') {
+    if (state === undefined || state === 'concluded') {
+      emitProtocolAnomaly(entry, ctx, 'reasoning_start_missing_before_delta', itemId, summaryIndex, type);
+    }
+    return;
+  }
+
+  if (type === 'response.reasoning_summary_part.done') {
+    if (state === undefined || state === 'concluded') {
+      emitProtocolAnomaly(entry, ctx, 'reasoning_start_missing_before_part_done', itemId, summaryIndex, type);
+      return;
+    }
+    parts!.set(summaryIndex, ctx.originalPayload.store === true ? 'concluded' : 'can_conclude');
+  }
 }
 
 function responseIdFromEvent(event: unknown): string | undefined {
@@ -775,6 +906,9 @@ function resetContextForRetry(ctx: RequestContext): void {
   ctx.responseId = undefined;
   ctx.outputByIndex.clear();
   ctx.outputIndexByItemId.clear();
+  ctx.reasoningPartsByItemId.clear();
+  ctx.recentUpstreamEventTypes = [];
+  ctx.emittedProtocolAnomalies.clear();
 }
 
 function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
@@ -792,6 +926,7 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   }
 
   const type = eventType(event);
+  trackReasoningProtocol(entry, ctx, event, type);
   captureOutput(ctx, event);
   if (type === 'response.completed') {
     const usage = responseUsage(event);
@@ -1122,6 +1257,9 @@ export function createResponsesWebSocketFetch(
           emittedModelData: false,
           outputByIndex: new Map(),
           outputIndexByItemId: new Map(),
+          reasoningPartsByItemId: new Map(),
+          recentUpstreamEventTypes: [],
+          emittedProtocolAnomalies: new Set(),
           emitDiagnostic: options.onDiagnostic
             ? event => emitDiagnostic(options, event, diagnosticRequestId)
             : undefined,

@@ -11,7 +11,18 @@ import {
   supportsOpenAiPromptCacheBreakpoints,
   extractClaudeSessionId,
   claudeSessionPromptCacheKey,
+  sdkTranslationErrorSignature,
 } from '../src/sdk-adapter.js';
+
+describe('sdkTranslationErrorSignature', () => {
+  it('classifies missing stream parts without exposing their dynamic ids', () => {
+    expect(sdkTranslationErrorSignature(new Error('reasoning part reasoning-42 not found')))
+      .toBe('reasoning_part_not_found');
+    expect(sdkTranslationErrorSignature('text part msg-sensitive not found'))
+      .toBe('text_part_not_found');
+    expect(sdkTranslationErrorSignature(new Error('rate limited'))).toBeUndefined();
+  });
+});
 
 describe('supportsOpenAiPromptCacheBreakpoints', () => {
   it('enables GPT-5.6 and later OpenAI generations only', () => {

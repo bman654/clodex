@@ -279,8 +279,17 @@ describe('inference request log', () => {
         outputIdleMs: 100.2,
         lastPartType: 'text-delta',
       });
+      writeInferenceResponseLifecycleLog(path, {
+        event: 'translation_failed',
+        requestId: 'req-123',
+        modelId: 'relay:openai:gpt-test',
+        provider: 'openai',
+        route: 'translated',
+        errorType: 'Error',
+        errorSignature: 'reasoning_part_not_found',
+      });
 
-      const entry = JSON.parse(readFileSync(path, 'utf8').trim());
+      const [entry, failure] = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       expect(entry).toMatchObject({
         event: 'translation_progress',
         requestId: 'req-123',
@@ -297,6 +306,11 @@ describe('inference request log', () => {
         lastPartType: 'text-delta',
       });
       expect(entry).not.toHaveProperty('responseContent');
+      expect(failure).toMatchObject({
+        event: 'translation_failed',
+        errorType: 'Error',
+        errorSignature: 'reasoning_part_not_found',
+      });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

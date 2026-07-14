@@ -244,6 +244,7 @@ export interface InferenceResponseLifecycleLogEntry {
   cacheReadInputTokens?: number;
   lastPartType?: string;
   errorType?: string;
+  errorSignature?: string;
 }
 
 export type ProxyLifecycleEvent =
@@ -438,6 +439,7 @@ export function writeInferenceResponseLifecycleLog(
     ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
     ...(entry.lastPartType ? { lastPartType: compactLogValue(entry.lastPartType, 100) } : {}),
     ...(entry.errorType ? { errorType: compactLogValue(entry.errorType, 200) } : {}),
+    ...(entry.errorSignature ? { errorSignature: compactLogValue(entry.errorSignature, 100) } : {}),
   }));
 }
 

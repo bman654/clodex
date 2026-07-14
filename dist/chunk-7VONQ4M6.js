@@ -580,9 +580,8 @@ function responseFailureDetails(event) {
     ...diagnosticTextFingerprint("errorMessage", message)
   };
 }
-function emitResponseErrorDiagnostic(entry, ctx, details) {
+function emitContextDiagnostic(entry, ctx, details) {
   ctx.emitDiagnostic?.({
-    event: "ws_response_error",
     connectionId: entry.debugId,
     generation: entry.generation,
     continued: ctx.continued,
@@ -593,6 +592,99 @@ function emitResponseErrorDiagnostic(entry, ctx, details) {
     inFlightMs: entry.inFlightStartedAt === void 0 ? void 0 : Math.max(0, entry.options.now() - entry.inFlightStartedAt),
     ...details
   });
+}
+function emitResponseErrorDiagnostic(entry, ctx, details) {
+  emitContextDiagnostic(entry, ctx, { event: "ws_response_error", ...details });
+}
+function diagnosticItemIdHash(value) {
+  return typeof value === "string" && value.length > 0 ? createHash("sha256").update(value).digest("hex").slice(0, 16) : void 0;
+}
+function reasoningPartIndex(value) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : void 0;
+}
+function emitProtocolAnomaly(entry, ctx, anomaly, itemId, summaryIndex, upstreamEventType) {
+  const itemIdHash = diagnosticItemIdHash(itemId);
+  const key = `${anomaly}:${itemIdHash ?? "none"}:${summaryIndex ?? "none"}`;
+  if (ctx.emittedProtocolAnomalies.has(key)) return;
+  ctx.emittedProtocolAnomalies.add(key);
+  const parts = typeof itemId === "string" ? ctx.reasoningPartsByItemId.get(itemId) : void 0;
+  emitContextDiagnostic(entry, ctx, {
+    event: "ws_response_protocol_anomaly",
+    source: "response_event_sequence",
+    anomaly,
+    upstreamEventType,
+    itemIdHash,
+    summaryIndex,
+    knownSummaryParts: parts ? [...parts.entries()].sort(([left], [right]) => left - right).map(([index, state]) => ({ summaryIndex: index, state })) : [],
+    recentUpstreamEventTypes: [...ctx.recentUpstreamEventTypes]
+  });
+}
+function trackReasoningProtocol(entry, ctx, event, type) {
+  if (!type || !event || typeof event !== "object") return;
+  ctx.recentUpstreamEventTypes.push(boundedDiagnosticIdentifier(type) ?? "unknown");
+  if (ctx.recentUpstreamEventTypes.length > 20) ctx.recentUpstreamEventTypes.shift();
+  const record = event;
+  if (type === "response.output_item.added" || type === "response.output_item.done") {
+    const item = record.item && typeof record.item === "object" ? record.item : void 0;
+    if (item?.type !== "reasoning") return;
+    const itemId2 = item.id;
+    if (typeof itemId2 !== "string" || itemId2.length === 0) return;
+    const current = ctx.reasoningPartsByItemId.get(itemId2);
+    if (type === "response.output_item.added") {
+      if (current) {
+        emitProtocolAnomaly(entry, ctx, "duplicate_reasoning_item_added", itemId2, 0, type);
+      }
+      ctx.reasoningPartsByItemId.set(itemId2, /* @__PURE__ */ new Map([[0, "active"]]));
+    } else {
+      if (!current) {
+        emitProtocolAnomaly(entry, ctx, "reasoning_start_missing_before_item_done", itemId2, void 0, type);
+      }
+      ctx.reasoningPartsByItemId.delete(itemId2);
+    }
+    return;
+  }
+  if (!type.startsWith("response.reasoning_summary_")) {
+    if (type === "response.completed" && ctx.reasoningPartsByItemId.size > 0) {
+      for (const itemId2 of ctx.reasoningPartsByItemId.keys()) {
+        emitProtocolAnomaly(entry, ctx, "reasoning_item_done_missing_before_completion", itemId2, void 0, type);
+      }
+    }
+    return;
+  }
+  const itemId = record.item_id;
+  const summaryIndex = reasoningPartIndex(record.summary_index);
+  if (typeof itemId !== "string" || summaryIndex === void 0) return;
+  const parts = ctx.reasoningPartsByItemId.get(itemId);
+  const state = parts?.get(summaryIndex);
+  if (type === "response.reasoning_summary_part.added") {
+    if (!parts) {
+      emitProtocolAnomaly(entry, ctx, "reasoning_item_missing_before_summary_part", itemId, summaryIndex, type);
+      return;
+    }
+    if (summaryIndex > 0) {
+      for (const [index, partState] of parts) {
+        if (partState === "can_conclude") parts.set(index, "concluded");
+      }
+      if (state === "active" || state === "can_conclude") {
+        emitProtocolAnomaly(entry, ctx, "duplicate_reasoning_summary_part_added", itemId, summaryIndex, type);
+      }
+      parts.set(summaryIndex, "active");
+    }
+    return;
+  }
+  if (type === "response.reasoning_summary_text.delta") {
+    if (state === void 0 || state === "concluded") {
+      emitProtocolAnomaly(entry, ctx, "reasoning_start_missing_before_delta", itemId, summaryIndex, type);
+    }
+    return;
+  }
+  if (type === "response.reasoning_summary_part.done") {
+    if (state === void 0 || state === "concluded") {
+      emitProtocolAnomaly(entry, ctx, "reasoning_start_missing_before_part_done", itemId, summaryIndex, type);
+      return;
+    }
+    parts.set(summaryIndex, ctx.originalPayload.store === true ? "concluded" : "can_conclude");
+  }
 }
 function responseIdFromEvent(event) {
   if (!event || typeof event !== "object") return void 0;
@@ -823,6 +915,9 @@ function resetContextForRetry(ctx) {
   ctx.responseId = void 0;
   ctx.outputByIndex.clear();
   ctx.outputIndexByItemId.clear();
+  ctx.reasoningPartsByItemId.clear();
+  ctx.recentUpstreamEventTypes = [];
+  ctx.emittedProtocolAnomalies.clear();
 }
 function handleSocketMessage(entry, data) {
   const ctx = entry.current;
@@ -838,6 +933,7 @@ function handleSocketMessage(entry, data) {
     return;
   }
   const type = eventType(event);
+  trackReasoningProtocol(entry, ctx, event, type);
   captureOutput(ctx, event);
   if (type === "response.completed") {
     const usage = responseUsage(event);
@@ -1127,6 +1223,9 @@ function createResponsesWebSocketFetch(wsUrl, log8, options = {}) {
           emittedModelData: false,
           outputByIndex: /* @__PURE__ */ new Map(),
           outputIndexByItemId: /* @__PURE__ */ new Map(),
+          reasoningPartsByItemId: /* @__PURE__ */ new Map(),
+          recentUpstreamEventTypes: [],
+          emittedProtocolAnomalies: /* @__PURE__ */ new Set(),
           emitDiagnostic: options.onDiagnostic ? (event) => emitDiagnostic(options, event, diagnosticRequestId) : void 0,
           createReplacement: () => createConnection(
             WebSocket,
@@ -4829,7 +4928,8 @@ function writeInferenceResponseLifecycleLog(path, entry) {
     ...cacheCreationInputTokens !== void 0 ? { cacheCreationInputTokens } : {},
     ...cacheReadInputTokens !== void 0 ? { cacheReadInputTokens } : {},
     ...entry.lastPartType ? { lastPartType: compactLogValue(entry.lastPartType, 100) } : {},
-    ...entry.errorType ? { errorType: compactLogValue(entry.errorType, 200) } : {}
+    ...entry.errorType ? { errorType: compactLogValue(entry.errorType, 200) } : {},
+    ...entry.errorSignature ? { errorSignature: compactLogValue(entry.errorSignature, 100) } : {}
   }));
 }
 function writeProxyLifecycleLog(path, entry) {
@@ -6144,6 +6244,13 @@ function sanitizeMessage(message) {
 }
 
 // src/sdk-adapter.ts
+function sdkTranslationErrorSignature(error) {
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : void 0;
+  if (!message) return void 0;
+  if (/\breasoning part \S+ not found\b/i.test(message)) return "reasoning_part_not_found";
+  if (/\btext part \S+ not found\b/i.test(message)) return "text_part_not_found";
+  return void 0;
+}
 var CLAUDE_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 function validClaudeSessionId(value) {
   if (typeof value !== "string") return void 0;
@@ -6806,11 +6913,11 @@ function createTranslationLifecycle(logPath, requestId, modelId, provider) {
       clearInterval(timer);
       write("translation_cancelled", snapshot(Date.now()));
     },
-    fail(errorType) {
+    fail(errorType, errorSignature) {
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
-      write("translation_failed", { ...snapshot(Date.now()), errorType });
+      write("translation_failed", { ...snapshot(Date.now()), errorType, errorSignature });
     }
   };
 }
@@ -7123,7 +7230,10 @@ function startProxyCatalog(routes, defaultAliasId, debug = false, inferenceLogPa
             translationLifecycle?.cancel();
             return;
           }
-          translationLifecycle?.fail(err instanceof Error ? err.name : "UpstreamError");
+          translationLifecycle?.fail(
+            err instanceof Error ? err.name : "UpstreamError",
+            sdkTranslationErrorSignature(err)
+          );
           const message = formatUpstreamError(err);
           const details = sdkUpstreamErrorDetails(err);
           const upstreamStatus = details?.statusCode ?? upstreamHttpStatus(err, message);
@@ -13099,4 +13209,4 @@ export {
   quitClaudeAppGracefully,
   launchOrRestartClaudeApp
 };
-//# sourceMappingURL=chunk-JJHCW7J7.js.map
+//# sourceMappingURL=chunk-7VONQ4M6.js.map

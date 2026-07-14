@@ -24,6 +24,21 @@ import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
 
 export { silenceSdkWarnings };
 
+export type SdkTranslationErrorSignature =
+  | 'reasoning_part_not_found'
+  | 'text_part_not_found';
+
+/** Classify privacy-safe AI SDK stream-state errors without logging dynamic part ids. */
+export function sdkTranslationErrorSignature(error: unknown): SdkTranslationErrorSignature | undefined {
+  const message = error instanceof Error
+    ? error.message
+    : typeof error === 'string' ? error : undefined;
+  if (!message) return undefined;
+  if (/\breasoning part \S+ not found\b/i.test(message)) return 'reasoning_part_not_found';
+  if (/\btext part \S+ not found\b/i.test(message)) return 'text_part_not_found';
+  return undefined;
+}
+
 // ── Anthropic request shapes (only the fields we read) ───────────────────────
 interface AnthropicBlock {
   type: string;
