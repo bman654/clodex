@@ -60,7 +60,7 @@ import {
   vertexModelsToServerModels,
 } from './vertex-config.js';
 import { runHttpProxyServerCommand } from '../http-proxy/index.js';
-import { getInferenceRequestLogPath } from '../trace-log.js';
+import { getInferenceRequestLogPath, getSessionLogPath } from '../trace-log.js';
 
 export interface ServerRunConfig {
   exposedProviders: string[] | null;
@@ -80,6 +80,7 @@ export interface ServerCommandOptions {
   freeOnly?: boolean;
   maskGatewayIds?: boolean;
   password?: string;
+  wsDiagnostics?: boolean;
 }
 
 export function getLocalIps(): Array<{ name: string; address: string }> {
@@ -458,7 +459,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
       p.log.error('--http-proxy is a local-only server mode and cannot be combined with gateway server options.');
       return 1;
     }
-    return runHttpProxyServerCommand();
+    return runHttpProxyServerCommand(false, options.wsDiagnostics);
   }
   if (options.vertex) {
     return runVertexServerCommand();
@@ -549,6 +550,9 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
 
   const gateway = runConfig.maskGatewayIds ? { maskGatewayIds: true as const } : undefined;
   const inferenceLogPath = getInferenceRequestLogPath();
+  const webSocketDiagnosticsLogPath = options.wsDiagnostics
+    ? getSessionLogPath('server-websocket-diagnostics', 'jsonl')
+    : undefined;
   const server = await startServer({
     host,
     port: 17645,
@@ -558,6 +562,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     backends: BACKENDS,
     gateway,
     inferenceLogPath,
+    webSocketDiagnosticsLogPath,
   });
 
   console.log('');
@@ -565,6 +570,10 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   console.log(`  Anthropic:  http://127.0.0.1:${server.port}/anthropic`);
   console.log(`  OpenAI:     http://127.0.0.1:${server.port}/openai/v1`);
   console.log(`  Request log: ${inferenceLogPath}`);
+  if (webSocketDiagnosticsLogPath) {
+    console.log(`  WebSocket diagnostics: ${webSocketDiagnosticsLogPath}`);
+    console.log(pc.yellow('  Diagnostic mode records request headers and metadata; credential headers are redacted.'));
+  }
   if (mode === 'network') {
     for (const { name, address } of getLocalIps()) {
       console.log(`  Network (${name}):`);

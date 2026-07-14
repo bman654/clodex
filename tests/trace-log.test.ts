@@ -3,12 +3,15 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  getInferenceSessionLogPath,
   getLatestMessagePreview,
   redactTraceLine,
   redactTraceLog,
   writeInferenceRequestLog,
   writeInferenceResponseLifecycleLog,
   writeInferenceResponseErrorLog,
+  writeProxyLifecycleLog,
+  writeWebSocketDiagnosticRequestLog,
 } from '../src/trace-log.js';
 
 describe('trace log redaction', () => {
@@ -28,6 +31,99 @@ describe('trace log redaction', () => {
 });
 
 describe('inference request log', () => {
+  it('logs diagnostic request envelopes while redacting credentials and hashing conversation content', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-ws-diagnostic-'));
+    const path = join(dir, 'diagnostics.jsonl');
+    try {
+      writeWebSocketDiagnosticRequestLog(path, {
+        requestId: 'req-1',
+        provider: 'openai-oauth',
+        route: 'translated',
+        headers: {
+          authorization: 'Bearer private-token',
+          'x-api-key': 'private-api-key',
+          cookie: 'private-cookie',
+          'x-claude-code-session-id': '927b8642-15d2-4535-ab27-1430ae54c4aa',
+          'user-agent': 'claude-cli/1.2.3',
+        },
+        body: {
+          model: 'sol',
+          stream: true,
+          metadata: { user_id: '{"session_id":"927b8642-15d2-4535-ab27-1430ae54c4aa"}' },
+          system: [{ type: 'text', text: 'private system prompt' }],
+          messages: [{ role: 'user', content: [{ type: 'text', text: 'private conversation' }] }],
+          tools: [{ name: 'Read', description: 'private tool description', input_schema: { secret: 'private schema' } }],
+        },
+      });
+
+      const raw = readFileSync(path, 'utf8');
+      const entry = JSON.parse(raw.trim());
+      expect(entry).toMatchObject({
+        event: 'request_diagnostic',
+        requestId: 'req-1',
+        headers: {
+          authorization: '[REDACTED]',
+          'x-api-key': '[REDACTED]',
+          cookie: '[REDACTED]',
+          'x-claude-code-session-id': '927b8642-15d2-4535-ab27-1430ae54c4aa',
+          'user-agent': 'claude-cli/1.2.3',
+        },
+        body: {
+          parameters: {
+            model: 'sol',
+            stream: true,
+            metadata: { user_id: expect.any(String) },
+          },
+          messages: { count: 1, items: [{ role: 'user', contentKinds: ['text'], hash: expect.any(String) }] },
+          tools: { count: 1, items: [{ name: 'Read', hash: expect.any(String) }] },
+        },
+      });
+      expect(raw).not.toContain('private-token');
+      expect(raw).not.toContain('private-api-key');
+      expect(raw).not.toContain('private-cookie');
+      expect(raw).not.toContain('private system prompt');
+      expect(raw).not.toContain('private conversation');
+      expect(raw).not.toContain('private tool description');
+      expect(raw).not.toContain('private schema');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('creates a separate private log path for each proxy session', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-session-log-'));
+    const previousHome = process.env['RELAY_AI_HOME'];
+    process.env['RELAY_AI_HOME'] = dir;
+    try {
+      const first = getInferenceSessionLogPath('claude-http-proxy');
+      const second = getInferenceSessionLogPath('claude-http-proxy');
+      expect(first).not.toBe(second);
+      expect(first).toContain(join('logs', 'sessions'));
+      expect(first).toContain(`claude-http-proxy-pid${process.pid}`);
+
+      writeProxyLifecycleLog(first, {
+        event: 'proxy_started',
+        pid: process.pid,
+        parentPid: process.ppid,
+        host: '127.0.0.1',
+        port: 58985,
+        inheritedProxyPort: 58972,
+      });
+      expect(JSON.parse(readFileSync(first, 'utf8').trim())).toMatchObject({
+        event: 'proxy_started',
+        pid: process.pid,
+        parentPid: process.ppid,
+        host: '127.0.0.1',
+        port: 58985,
+        inheritedProxyPort: 58972,
+      });
+    } finally {
+      if (previousHome === undefined) delete process.env['RELAY_AI_HOME'];
+      else process.env['RELAY_AI_HOME'] = previousHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('writes only structured routing metadata', () => {
     const dir = mkdtempSync(join(tmpdir(), 'relay-ai-inference-log-'));
     const path = join(dir, 'requests.jsonl');

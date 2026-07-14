@@ -18,6 +18,7 @@ import {
   writeInferenceRequestLog,
   writeInferenceResponseLifecycleLog,
   writeInferenceResponseErrorLog,
+  writeWebSocketDiagnosticRequestLog,
   type InferenceResponsePhase,
 } from '../trace-log.js';
 
@@ -142,8 +143,12 @@ export interface HttpProxyOptions {
   /** Short incoming model names mapped to canonical adapter route ids. */
   modelAliases?: ResolvedHttpProxyAlias[];
   debug?: boolean;
+  /** Per-process translated-adapter debug log used when debug is enabled. */
+  debugLogPath?: string;
   /** Append privacy-minimal inference routing records as JSONL. */
   inferenceLogPath?: string;
+  /** Opt-in request-envelope and WebSocket head-decision diagnostics. */
+  webSocketDiagnosticsLogPath?: string;
   /** Test hook; production always uses https://api.anthropic.com. */
   anthropicOrigin?: string;
   /** Test hook for a local self-signed Anthropic origin. */
@@ -160,6 +165,7 @@ export interface HttpProxyHandle {
   caCertPath: string;
   modelIds: string[];
   inferenceLogPath?: string;
+  webSocketDiagnosticsLogPath?: string;
   close: () => Promise<void>;
 }
 
@@ -256,15 +262,69 @@ function forwardRawAnthropicRequest(
   rejectUnauthorized: boolean,
   onErrorResponse?: (statusCode: number, body: string) => void,
   onResponseUsage?: (usage: ResponseUsage) => void,
+  lifecycle?: {
+    logPath: string;
+    requestId: string;
+    modelId: string;
+    provider: string;
+    progressIntervalMs: number;
+  },
 ): Promise<void> {
   return new Promise(resolve => {
+    const startedAt = Date.now();
+    let lastActivityAt = startedAt;
+    let headersReceived = false;
+    let firstByteAt: number | undefined;
+    let statusCode: number | undefined;
+    let bytes = 0;
+    let chunks = 0;
     let settled = false;
+    let responseEnded = false;
+    let failed = false;
     let clientDisconnected = false;
+    const writeLifecycle = (
+      event: Parameters<typeof writeInferenceResponseLifecycleLog>[1]['event'],
+      extra: Partial<Parameters<typeof writeInferenceResponseLifecycleLog>[1]> = {},
+    ) => {
+      if (!lifecycle) return;
+      writeInferenceResponseLifecycleLog(lifecycle.logPath, {
+        event,
+        requestId: lifecycle.requestId,
+        modelId: lifecycle.modelId,
+        provider: lifecycle.provider,
+        route: 'passthrough',
+        ...extra,
+      });
+    };
+    const responsePhase = (): InferenceResponsePhase => {
+      if (!headersReceived) return 'waiting_for_headers';
+      if (firstByteAt === undefined) return 'waiting_for_first_byte';
+      return responseEnded ? 'delivering' : 'streaming';
+    };
+    const progressTimer = lifecycle
+      ? setInterval(() => {
+          const now = Date.now();
+          writeLifecycle('response_progress', {
+            statusCode,
+            phase: responsePhase(),
+            durationMs: now - startedAt,
+            ...(firstByteAt !== undefined ? { timeToFirstByteMs: firstByteAt - startedAt } : {}),
+            idleMs: now - lastActivityAt,
+            bytes,
+            chunks,
+          });
+        }, lifecycle.progressIntervalMs)
+      : undefined;
+    progressTimer?.unref();
+    const stopProgress = () => {
+      if (progressTimer) clearInterval(progressTimer);
+    };
     const done = () => {
       if (settled) return;
       settled = true;
       resolve();
     };
+    const errorType = (err: Error): string => (err as NodeJS.ErrnoException).code ?? err.name;
     const upstream = https.request({
       protocol: 'https:',
       hostname: origin.hostname,
@@ -275,13 +335,76 @@ function forwardRawAnthropicRequest(
       servername: net.isIP(origin.hostname) ? undefined : origin.hostname,
       rejectUnauthorized,
     }, upstreamRes => {
+      headersReceived = true;
+      statusCode = upstreamRes.statusCode ?? 502;
+      lastActivityAt = Date.now();
+      upstreamRes.on('data', (chunk: Buffer) => {
+        const now = Date.now();
+        if (firstByteAt === undefined) {
+          firstByteAt = now;
+          writeLifecycle('response_started', {
+            statusCode,
+            durationMs: now - startedAt,
+            timeToFirstByteMs: now - startedAt,
+          });
+        }
+        lastActivityAt = now;
+        bytes += chunk.length;
+        chunks += 1;
+      });
       copyResponse(upstreamRes, res, onErrorResponse, onResponseUsage);
-      upstreamRes.once('end', done);
-      upstreamRes.once('error', done);
+      upstreamRes.once('end', () => {
+        responseEnded = true;
+        lastActivityAt = Date.now();
+        done();
+      });
+      upstreamRes.once('error', err => {
+        if (clientDisconnected || failed) {
+          done();
+          return;
+        }
+        failed = true;
+        stopProgress();
+        const now = Date.now();
+        writeLifecycle('response_failed', {
+          statusCode,
+          phase: responsePhase(),
+          durationMs: now - startedAt,
+          ...(firstByteAt !== undefined ? { timeToFirstByteMs: firstByteAt - startedAt } : {}),
+          idleMs: now - lastActivityAt,
+          bytes,
+          chunks,
+          errorType: errorType(err),
+        });
+        done();
+      });
+    });
+    res.once('finish', () => {
+      stopProgress();
+      if (failed || clientDisconnected) return;
+      const now = Date.now();
+      writeLifecycle('response_completed', {
+        statusCode,
+        durationMs: now - startedAt,
+        ...(firstByteAt !== undefined ? { timeToFirstByteMs: firstByteAt - startedAt } : {}),
+        bytes,
+        chunks,
+      });
     });
     res.once('close', () => {
-      if (res.writableFinished) return;
+      stopProgress();
+      if (res.writableFinished || failed) return;
       clientDisconnected = true;
+      const now = Date.now();
+      writeLifecycle('response_client_disconnected', {
+        statusCode,
+        phase: responsePhase(),
+        durationMs: now - startedAt,
+        ...(firstByteAt !== undefined ? { timeToFirstByteMs: firstByteAt - startedAt } : {}),
+        idleMs: now - lastActivityAt,
+        bytes,
+        chunks,
+      });
       upstream.destroy(new Error('Client disconnected'));
       done();
     });
@@ -290,6 +413,19 @@ function forwardRawAnthropicRequest(
         done();
         return;
       }
+      failed = true;
+      stopProgress();
+      const now = Date.now();
+      writeLifecycle('response_failed', {
+        statusCode: 502,
+        phase: responsePhase(),
+        durationMs: now - startedAt,
+        idleMs: now - lastActivityAt,
+        bytes,
+        chunks,
+        errorType: errorType(err),
+      });
+      onErrorResponse?.(502, `Anthropic upstream unreachable: ${err.message}`);
       if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
       res.end(`Anthropic upstream unreachable: ${err.message}`);
       done();
@@ -540,6 +676,8 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       options.routes[0]!.aliasId,
       options.debug,
       options.inferenceLogPath,
+      options.debugLogPath,
+      options.webSocketDiagnosticsLogPath,
     );
   }
 
@@ -584,6 +722,19 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         });
       }
 
+      if (messagesEndpoint === 'messages' && options.webSocketDiagnosticsLogPath) {
+        const provider = route
+          ? (route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown')
+          : 'anthropic';
+        writeWebSocketDiagnosticRequestLog(options.webSocketDiagnosticsLogPath, {
+          requestId,
+          provider,
+          route: route ? 'translated' : 'passthrough',
+          headers: req.headers,
+          body: parsed ? parsed as unknown as Record<string, unknown> : {},
+        });
+      }
+
       if (route && adapter) {
         const adapterBody = parsed?.model === route.aliasId
           ? rawBody
@@ -625,6 +776,15 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
               route: 'passthrough',
               ...usage,
             })
+          : undefined,
+        messagesEndpoint === 'messages' && options.inferenceLogPath
+          ? {
+              logPath: options.inferenceLogPath,
+              requestId,
+              modelId: typeof parsed?.model === 'string' ? parsed.model : 'unknown',
+              provider: 'anthropic',
+              progressIntervalMs: options.responseProgressIntervalMs ?? INFERENCE_PROGRESS_INTERVAL_MS,
+            }
           : undefined,
       );
       return;
@@ -700,6 +860,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       ...options.routes.map(route => route.aliasId),
     ],
     inferenceLogPath: options.inferenceLogPath,
+    webSocketDiagnosticsLogPath: options.webSocketDiagnosticsLogPath,
     close: async () => {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>(resolve => proxyServer.close(() => resolve()));

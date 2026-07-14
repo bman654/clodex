@@ -75,6 +75,7 @@ describe('selective HTTP proxy', () => {
   it('forwards first-party request bytes and auth unchanged', async () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'anthropic-inference.jsonl');
+    const webSocketDiagnosticsLogPath = join(testHome, 'websocket-diagnostics.jsonl');
     const previousRequestPreview = process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
     process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = '1';
     let receivedBody = Buffer.alloc(0);
@@ -112,6 +113,7 @@ describe('selective HTTP proxy', () => {
     const proxy = await startHttpProxy({
       routes: [],
       inferenceLogPath,
+      webSocketDiagnosticsLogPath,
       anthropicOrigin: `https://127.0.0.1:${originPort}`,
       anthropicRejectUnauthorized: false,
     });
@@ -146,7 +148,16 @@ describe('selective HTTP proxy', () => {
         route: 'passthrough',
         requestPreview: 'user: identify this Sonnet request',
       });
-      expect(entries[1]).toMatchObject({
+      const responseStarted = entries.find(entry => entry.event === 'response_started');
+      const messageStartUsage = entries.find(entry => entry.event === 'response_usage' && entry.usageStage === 'message_start');
+      const messageDeltaUsage = entries.find(entry => entry.event === 'response_usage' && entry.usageStage === 'message_delta');
+      const responseCompleted = entries.find(entry => entry.event === 'response_completed');
+      expect(responseStarted).toMatchObject({
+        requestId: entries[0].requestId,
+        statusCode: 200,
+        route: 'passthrough',
+      });
+      expect(messageStartUsage).toMatchObject({
         event: 'response_usage',
         requestId: entries[0].requestId,
         modelId: 'claude-sonnet-4-6',
@@ -158,7 +169,7 @@ describe('selective HTTP proxy', () => {
         cacheCreationInputTokens: 12,
         cacheReadInputTokens: 210,
       });
-      expect(entries[2]).toMatchObject({
+      expect(messageDeltaUsage).toMatchObject({
         event: 'response_usage',
         requestId: entries[0].requestId,
         modelId: 'claude-sonnet-4-6',
@@ -170,8 +181,27 @@ describe('selective HTTP proxy', () => {
         cacheCreationInputTokens: 100,
         cacheReadInputTokens: 220,
       });
+      expect(responseCompleted).toMatchObject({
+        requestId: entries[0].requestId,
+        statusCode: 200,
+        route: 'passthrough',
+      });
       expect(inferenceLog).not.toContain('private-image-data');
       expect(inferenceLog).not.toContain('private response text');
+      const diagnosticRaw = readFileSync(webSocketDiagnosticsLogPath, 'utf8');
+      const diagnostic = JSON.parse(diagnosticRaw.trim());
+      expect(diagnostic).toMatchObject({
+        event: 'request_diagnostic',
+        requestId: entries[0].requestId,
+        headers: { authorization: '[REDACTED]' },
+        body: {
+          parameters: { model: 'claude-sonnet-4-6', stream: true },
+          messages: { count: 1 },
+        },
+      });
+      expect(diagnosticRaw).not.toContain('subscription-oauth-token');
+      expect(diagnosticRaw).not.toContain('private-image-data');
+      expect(diagnosticRaw).not.toContain('identify this Sonnet request');
     } finally {
       if (previousRequestPreview === undefined) delete process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
       else process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = previousRequestPreview;
@@ -236,15 +266,21 @@ describe('selective HTTP proxy', () => {
         route: 'passthrough',
         requestPreview: 'user: [tool_result] | system: Generate a concise title for this Claude Code session.',
       });
-      expect(entries[1]).toMatchObject({
+      const upstreamError = entries.find(entry => entry.event === 'upstream_error');
+      expect(upstreamError).toMatchObject({
         event: 'upstream_error',
         modelId: 'claude-haiku-4-5',
         provider: 'anthropic',
         route: 'passthrough',
         statusCode: 529,
       });
-      expect(entries[1].errorContent).toContain('Haiku overloaded');
-      expect(entries[1].errorContent).toContain('[REDACTED]');
+      expect(upstreamError.errorContent).toContain('Haiku overloaded');
+      expect(upstreamError.errorContent).toContain('[REDACTED]');
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'response_completed',
+        requestId: entries[0].requestId,
+        statusCode: 529,
+      }));
       expect(readFileSync(inferenceLogPath, 'utf8')).not.toContain('private tool output');
     } finally {
       if (previousRequestPreview === undefined) delete process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
@@ -302,18 +338,81 @@ describe('selective HTTP proxy', () => {
       });
 
       const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-      expect(entries[1]).toMatchObject({
+      const upstreamError = entries.find(entry => entry.event === 'upstream_error');
+      expect(upstreamError).toMatchObject({
         event: 'upstream_error',
         modelId: 'claude-haiku-4-5',
         statusCode: 503,
       });
-      expect(entries[1].errorContent).toContain('partial outage');
-      expect(entries[1].errorContent).toContain('stream error');
+      expect(upstreamError.errorContent).toContain('partial outage');
+      expect(upstreamError.errorContent).toContain('stream error');
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'response_failed',
+        requestId: entries[0].requestId,
+        statusCode: 503,
+      }));
     } finally {
       if (previousRequestPreview === undefined) delete process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
       else process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = previousRequestPreview;
       await proxy.close();
       await new Promise<void>(resolve => origin.close(() => resolve()));
+    }
+  }, 20_000);
+
+  it('logs an Anthropic connection refusal as an upstream response failure', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    const inferenceLogPath = join(testHome, 'connection-refused-inference.jsonl');
+    const unavailableOrigin = https.createServer({
+      key: certificates.serverKey,
+      cert: certificates.serverCert,
+    });
+    const unavailablePort = await listen(unavailableOrigin);
+    await new Promise<void>(resolve => unavailableOrigin.close(() => resolve()));
+    const proxy = await startHttpProxy({
+      routes: [],
+      inferenceLogPath,
+      anthropicOrigin: `https://127.0.0.1:${unavailablePort}`,
+      anthropicRejectUnauthorized: false,
+    });
+
+    try {
+      const body = JSON.stringify({
+        model: 'claude-opus-4-8',
+        messages: [{ role: 'user', content: 'test refused origin' }],
+        stream: true,
+      });
+      const secure = await connectMitm(proxy.port, certificates.caCert);
+      let response = '';
+      secure.on('data', chunk => { response += chunk.toString(); });
+      secure.write([
+        'POST /v1/messages HTTP/1.1',
+        'Host: api.anthropic.com',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n') + body);
+      await once(secure, 'close');
+
+      expect(response).toContain('502');
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const requestEntry = entries.find(entry => !entry.event);
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'response_failed',
+        requestId: requestEntry.requestId,
+        route: 'passthrough',
+        statusCode: 502,
+        phase: 'waiting_for_headers',
+        errorType: 'ECONNREFUSED',
+      }));
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'upstream_error',
+        requestId: requestEntry.requestId,
+        statusCode: 502,
+      }));
+    } finally {
+      await proxy.close();
     }
   }, 20_000);
 

@@ -13,6 +13,7 @@ import {
   resetTraceLog,
   writeInferenceResponseLifecycleLog,
   writeInferenceResponseErrorLog,
+  writeWebSocketDiagnosticLog,
 } from './trace-log.js';
 import { fetchWithOAuthRetry, relayAnthropicMessages, UpstreamUnreachableError } from './upstream-forward.js';
 import {
@@ -38,6 +39,7 @@ import {
   upstreamHttpStatus,
 } from './codex/upstream-error.js';
 import { anthropicMessagesEndpoint, estimateAnthropicInputTokens } from './anthropic-endpoints.js';
+import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-websocket.js';
 
 type ProxyLog = (message: string | (() => string)) => void;
 
@@ -239,6 +241,8 @@ export function startProxyCatalog(
   defaultAliasId: string,
   debug = false,
   inferenceLogPath?: string,
+  debugLogPath?: string,
+  webSocketDiagnosticsLogPath?: string,
 ): Promise<ProxyHandle> {
   const proxyToken = randomUUID();
   silenceSdkWarnings();
@@ -250,7 +254,7 @@ export function startProxyCatalog(
   const byAlias = new Map(routes.map(r => [r.aliasId, r]));
   const defaultRoute = byAlias.get(defaultAliasId) ?? routes[0]!;
 
-  const plog = makeProxyLog(debug);
+  const plog = makeProxyLog(debug, debugLogPath);
 
   const onRejection = (reason: unknown) => {
     plog(() => `Unhandled Rejection: ${reason instanceof Error ? reason.stack || reason.message : String(reason)}`);
@@ -482,6 +486,9 @@ export function startProxyCatalog(
             useResponsesLite: route.useResponsesLite,
             preferWebSockets: route.preferWebSockets,
             onDebug: (msg: string) => plog(() => msg),
+            onWebSocketDiagnostic: webSocketDiagnosticsLogPath
+              ? event => writeWebSocketDiagnosticLog(webSocketDiagnosticsLogPath, event)
+              : undefined,
           });
           translationLifecycle?.dispatched();
           if (clientWantsStream) {
@@ -496,17 +503,20 @@ export function startProxyCatalog(
               }
               res.write(chunk);
             };
-            await streamAnthropicResponse(
-              model,
-              params,
-              originalModel,
-              writeStreamChunk,
-              plog,
-              {
-                onPart: partType => translationLifecycle?.onPart(partType),
-                initialInputTokens: estimateAnthropicInputTokens(anthropicBody),
-                abortSignal: clientAbort.signal,
-              },
+            await withResponsesWebSocketDiagnosticContext(
+              { requestId: relayRequestId },
+              () => streamAnthropicResponse(
+                model,
+                params,
+                originalModel,
+                writeStreamChunk,
+                plog,
+                {
+                  onPart: partType => translationLifecycle?.onPart(partType),
+                  initialInputTokens: estimateAnthropicInputTokens(anthropicBody),
+                  abortSignal: clientAbort.signal,
+                },
+              ),
             );
             translationLifecycle?.complete();
             if (!res.headersSent) writeStreamChunk('');
@@ -515,15 +525,18 @@ export function startProxyCatalog(
             // ChatGPT's Codex backend (OpenAI OAuth) rejects non-streaming requests
             // outright ("Stream must be set to true"), so always stream internally
             // for it and collect the result, regardless of what the client asked for.
-            const anthropicResponse = await generateAnthropicResponse(
-              model,
-              params,
-              originalModel,
-              {
-                forceStream: openAiOAuth,
-                abortSignal: clientAbort.signal,
-                onPart: partType => translationLifecycle?.onPart(partType),
-              },
+            const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
+              { requestId: relayRequestId },
+              () => generateAnthropicResponse(
+                model,
+                params,
+                originalModel,
+                {
+                  forceStream: openAiOAuth,
+                  abortSignal: clientAbort.signal,
+                  onPart: partType => translationLifecycle?.onPart(partType),
+                },
+              ),
             );
             translationLifecycle?.onOutput(JSON.stringify(anthropicResponse));
             translationLifecycle?.complete();

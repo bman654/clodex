@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { isAuthorized } from './auth.js';
 import {
   formatGatewayAnthropicModels,
@@ -33,6 +34,8 @@ import {
   writeInferenceResponseErrorLog,
   writeSecureLogLine,
   resetTraceLog,
+  writeWebSocketDiagnosticLog,
+  writeWebSocketDiagnosticRequestLog,
   type InferenceRequestLogEntry,
 } from '../trace-log.js';
 import type { LanguageModel } from 'ai';
@@ -51,6 +54,7 @@ import {
   anthropicEffortFromRequest,
   type AnthropicRequest,
 } from '../sdk-adapter.js';
+import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
 
 export interface ServerBackend {
   baseUrl: string;
@@ -74,6 +78,8 @@ export interface ServerOptions {
   debugLogPath?: string;
   /** When set, append privacy-minimal inference routing records as JSONL. */
   inferenceLogPath?: string;
+  /** Opt-in request-envelope and WebSocket head-decision diagnostics. */
+  webSocketDiagnosticsLogPath?: string;
 }
 
 export interface ServerHandle {
@@ -235,6 +241,16 @@ async function handleAnthropicMessages(
     plog(`model not found: ${body.model}`);
     return;
   }
+  const requestId = randomUUID();
+  if (options.webSocketDiagnosticsLogPath) {
+    writeWebSocketDiagnosticRequestLog(options.webSocketDiagnosticsLogPath, {
+      requestId,
+      provider: inferenceProvider(model),
+      route: model.modelFormat === 'anthropic' ? 'passthrough' : 'translated',
+      headers: req.headers,
+      body,
+    });
+  }
 
   plog(() => `anthropic-messages model=${body.model} format=${model.modelFormat} npm=${model.npm ?? 'none'} stream=${body.stream}`);
 
@@ -254,6 +270,7 @@ async function handleAnthropicMessages(
     const isOAuth = model.authType === 'oauth';
 
     auditInference(options, {
+      requestId,
       modelId: body.model,
       effort: anthropicEffortFromRequest(body as AnthropicRequest) ?? model.defaultEffort,
       provider: inferenceProvider(model),
@@ -286,6 +303,7 @@ async function handleAnthropicMessages(
       onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
       onUpstreamError: options.inferenceLogPath
         ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
+            requestId,
             modelId: body.model,
             provider: inferenceProvider(model),
             route: 'passthrough',
@@ -304,13 +322,22 @@ async function handleAnthropicMessages(
     }
     const apiKey = model.apiKey ?? options.apiKey;
     auditInference(options, {
+      requestId,
       modelId: body.model,
       effort: anthropicEffortFromRequest(body as AnthropicRequest) ?? model.defaultEffort,
       provider: inferenceProvider(model),
       route: 'translated',
       requestPreview: getLatestMessagePreview(body.messages, body.system),
     });
-    const languageModel = await getOrInitLanguageModel(modelCache, model, model.npm!, model.apiBaseUrl, apiKey, options.vertex);
+    const languageModel = await getOrInitLanguageModel(
+      modelCache,
+      model,
+      model.npm!,
+      model.apiBaseUrl,
+      apiKey,
+      options.vertex,
+      options.webSocketDiagnosticsLogPath,
+    );
     const npmMaxTools = maxToolsForNpm(model.npm);
     const toolCount = Array.isArray((body as Record<string, unknown>).tools) ? ((body as Record<string, unknown>).tools as unknown[]).length : 0;
     if (npmMaxTools !== undefined && toolCount > npmMaxTools) {
@@ -352,13 +379,19 @@ async function handleAnthropicMessages(
           }
           res.write(chunk);
         };
-        await streamAnthropicResponse(languageModel, params, responseModelId, writeStreamChunk, undefined, {
-          initialInputTokens: estimateAnthropicInputTokens(body),
-        });
+        await withResponsesWebSocketDiagnosticContext(
+          { requestId },
+          () => streamAnthropicResponse(languageModel, params, responseModelId, writeStreamChunk, undefined, {
+            initialInputTokens: estimateAnthropicInputTokens(body),
+          }),
+        );
         if (!res.headersSent) writeStreamChunk('');
         res.end();
       } else {
-        const anthropicResponse = await generateAnthropicResponse(languageModel, params, responseModelId);
+        const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
+          { requestId },
+          () => generateAnthropicResponse(languageModel, params, responseModelId),
+        );
         sendJson(res, 200, anthropicResponse);
       }
     } catch (err) {
@@ -511,6 +544,7 @@ async function getOrInitLanguageModel(
   baseURL: string | undefined,
   apiKey: string,
   vertex: VertexServerConfig | undefined,
+  webSocketDiagnosticsLogPath?: string,
 ): Promise<LanguageModel> {
   const cacheKey = [
     model.providerId ?? model.sourceBackend,
@@ -533,6 +567,9 @@ async function getOrInitLanguageModel(
       headers: model.headers,
       useResponsesLite: model.useResponsesLite,
       preferWebSockets: model.preferWebSockets,
+      onWebSocketDiagnostic: webSocketDiagnosticsLogPath
+        ? event => writeWebSocketDiagnosticLog(webSocketDiagnosticsLogPath, event)
+        : undefined,
     });
     modelCache.set(cacheKey, languageModel);
   }

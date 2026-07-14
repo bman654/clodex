@@ -277,15 +277,26 @@ Run relay-ai as a foreground API gateway on port **17645**:
 | **HTTP proxy** | `relay-ai server --http-proxy` | Claude Code's own Anthropic login + provider keys for favorites | Anthropic models plus favorite `relay:` models |
 | **Vertex gateway** | `relay-ai server --vertex` | gcloud Application Default Credentials | Claude on Vertex AI |
 
-All server modes append one privacy-minimal JSON record per inference request to `~/.relay-ai/logs/inference-requests.jsonl` (or the equivalent under `RELAY_AI_HOME`). Each request record contains the timestamp, requested model id, known effort, provider, and whether the request was passed through or translated. HTTP-proxy records also contain a `requestId` for correlation and whether streaming was requested. An upstream HTTP failure adds an `event: "upstream_error"` record with the real upstream `statusCode` and—when the AI SDK retried—the final error's `isRetryable` value and `attemptCount`. By default, prompts, headers, credentials, and response bodies are never logged. The terminal and UI Server tab both show the exact path; watch it live with:
+Server modes append privacy-minimal JSON records to `~/.relay-ai/logs/inference-requests.jsonl` (or the equivalent under `RELAY_AI_HOME`). Each `relay-ai claude --http-proxy` process instead gets its own file under `~/.relay-ai/logs/sessions/`, so concurrent and nested Claude sessions do not interleave. The launcher prints the exact path. Each request record contains the timestamp, requested model id, known effort, provider, and whether the request was passed through or translated. HTTP-proxy records also contain a `requestId` for correlation and whether streaming was requested. An upstream HTTP failure adds an `event: "upstream_error"` record with the real upstream `statusCode` and—when the AI SDK retried—the final error's `isRetryable` value and `attemptCount`. By default, prompts, headers, credentials, and response bodies are never logged. Watch a standalone server live with:
 
 ```bash
 tail -f ~/.relay-ai/logs/inference-requests.jsonl
 ```
 
-Translated HTTP-proxy requests also log their successful response lifecycle. `translation_started` means the AI SDK stream produced its first part; `response_started` means translated bytes reached the outer HTTP proxy; `translation_completed` means the SDK stream ended cleanly; and `response_completed` means the outer response finished writing to Claude Code. While a request remains open, `translation_progress` and `response_progress` records appear every 30 seconds with part, chunk, byte, and idle counters. `translation_failed`, `response_failed`, or `response_client_disconnected` identify the boundary that terminated early. These records make a stall distinguishable without imposing a response timeout or logging generated content.
+HTTP-proxy requests log their complete response lifecycle for both Anthropic passthrough and translated routes. `response_started` includes the upstream status when response bytes begin; `response_completed` means the response finished writing to Claude Code. Translated routes additionally emit `translation_started` and `translation_completed` around the AI SDK stream. While a request remains open, progress records appear every 30 seconds with chunk, byte, and idle counters. `translation_failed`, `response_failed`, or `response_client_disconnected` identify the boundary that terminated early. A passthrough socket failure records errors such as `ECONNREFUSED` in `errorType`.
+
+Session files also contain `proxy_started`, `proxy_stopping`, and `proxy_stopped` records with the relay PID and listening port. `proxy_started` without a terminal record means the process was killed or crashed before cleanup; a refusal of that local port cannot be written by the dead process itself. `proxy_process_exit` is written when Node receives a normal process exit before cleanup, but `SIGKILL` and machine termination cannot be observed.
 
 For temporary local debugging, set `RELAY_AI_LOG_REQUEST_PREVIEW=1` before starting the server. Request records then include `requestPreview`, containing the role and up to 240 characters of text from the most recent message; when that turn contains only non-text blocks, the preview includes both their types and system text so Claude Code's Haiku/background requests remain identifiable. Upstream error records include up to 2,000 characters of the redacted response body or SDK error data as `errorContent`. Image data, tool inputs/results, headers, and credentials remain excluded. Request and error text may contain sensitive information, so unset the variable and restart the server when debugging is complete.
+
+To investigate OpenAI OAuth WebSocket head accumulation, start either server mode with `--ws-diagnostics`:
+
+```bash
+relay-ai server --http-proxy --ws-diagnostics
+# or: relay-ai server --quick --ws-diagnostics
+```
+
+This non-default mode creates a private per-process `server-websocket-diagnostics` JSONL file under `~/.relay-ai/logs/sessions/` and prints its exact path. `request_diagnostic` records contain the complete non-conversation request envelope, all inbound header names and safe values, raw metadata, and content-free hashes/shapes for system prompts, messages, and tools. Authorization, API-key, cookie, token, secret, and credential header values are always replaced with `[REDACTED]`. `ws_head_decision` records correlate by `requestId` and include the full partition tuple (with the OAuth account id hashed), candidate-head counts, prompt-field hashes, per-item conversation hashes/types, the first mismatch for every candidate, the selected lifecycle decision, and LRU/TTL evictions. No conversation, system-prompt, tool-description/schema, or tool-result text is written. Treat the file as sensitive operational metadata and disable the flag after collecting the needed sessions.
 
 > **Claude Desktop (Cowork + Code):** For the automated macOS/Windows setup, use `relay-ai claude-app`. For manual or network setups, see [docs/CLAUDE_DESKTOP_SETUP.md](docs/CLAUDE_DESKTOP_SETUP.md).
 
@@ -557,6 +568,15 @@ claude_path=$1
 shift
 
 exec env RELAY_AI_CLAUDE_PATH="$claude_path" \
+  relay-ai claude --http-proxy -- "$@"
+```
+
+If the wrapper itself is launched by an already proxied Claude process, clear the outer relay variables before starting the nested relay. The new Claude child receives the new proxy values automatically:
+
+```bash
+exec env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
+  -u NODE_EXTRA_CA_CERTS \
+  RELAY_AI_CLAUDE_PATH="$claude_path" \
   relay-ai claude --http-proxy -- "$@"
 ```
 

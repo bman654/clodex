@@ -7,6 +7,7 @@
 // only after proving the next translated conversation appends to the chain head.
 
 import { createHash } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { FetchFunction } from '@ai-sdk/provider-utils';
 import type { RawData, WebSocket as WsWebSocket } from 'ws';
 import { CODEX_RESPONSES_WEBSOCKETS_BETA } from '../constants.js';
@@ -27,6 +28,27 @@ export interface ResponsesWebSocketFetchOptions {
   idleTtlMs?: number;
   maxConnections?: number;
   now?: () => number;
+  /** Opt-in structured transport diagnostics; never receives conversation content. */
+  onDiagnostic?: (event: ResponsesWebSocketDiagnosticEvent) => void;
+}
+
+export interface ResponsesWebSocketDiagnosticEvent extends Record<string, unknown> {
+  event: string;
+  requestId?: string;
+}
+
+export interface ResponsesWebSocketDiagnosticContext {
+  requestId?: string;
+}
+
+const diagnosticContext = new AsyncLocalStorage<ResponsesWebSocketDiagnosticContext>();
+
+/** Correlate a gateway/proxy request with the lower-level SDK WebSocket fetch. */
+export function withResponsesWebSocketDiagnosticContext<T>(
+  context: ResponsesWebSocketDiagnosticContext,
+  fn: () => T,
+): T {
+  return diagnosticContext.run(context, fn);
 }
 
 type JsonObject = Record<string, unknown>;
@@ -116,6 +138,19 @@ function unregisterEntry(entry: ConnectionEntry): void {
 
 function debugKey(key: string | undefined): string {
   return key ? key.slice(0, 12) : 'none';
+}
+
+function emitDiagnostic(
+  options: ResponsesWebSocketFetchOptions,
+  event: { event: string } & Record<string, unknown>,
+): void {
+  if (!options.onDiagnostic) return;
+  const requestId = diagnosticContext.getStore()?.requestId;
+  try {
+    options.onDiagnostic({ ...event, ...(requestId ? { requestId } : {}) });
+  } catch {
+    // Diagnostics must never alter inference behavior.
+  }
 }
 
 /** Test-only cleanup, also useful for preventing leaked fake sockets. */
@@ -294,7 +329,11 @@ function conversationItemKind(value: unknown): string {
   return 'object';
 }
 
-function continuationMismatchSummary(entry: ConnectionEntry, payload: JsonObject): string {
+function conversationItemHash(value: unknown): string {
+  return createHash('sha256').update(canonicalJson(normalizeToolCallJson(value))).digest('hex').slice(0, 16);
+}
+
+function continuationMismatchDetails(entry: ConnectionEntry, payload: JsonObject): Record<string, unknown> {
   const full = inputArray(payload);
   const prefix = [...(entry.requestInput ?? []), ...(entry.expectedAssistant ?? [])];
   const comparable = Math.min(full.length, prefix.length);
@@ -305,9 +344,23 @@ function continuationMismatchSummary(entry: ConnectionEntry, payload: JsonObject
       break;
     }
   }
-  const expected = mismatch < prefix.length ? conversationItemKind(prefix[mismatch]) : 'none';
-  const actual = mismatch < full.length ? conversationItemKind(full[mismatch]) : 'none';
-  return `full_items=${full.length} expected_prefix_items=${prefix.length} first_mismatch=${mismatch} expected=${expected} actual=${actual}`;
+  const expected = mismatch < prefix.length ? prefix[mismatch] : undefined;
+  const actual = mismatch < full.length ? full[mismatch] : undefined;
+  return {
+    fullItems: full.length,
+    expectedPrefixItems: prefix.length,
+    firstMismatch: mismatch,
+    expectedKind: expected === undefined ? 'none' : conversationItemKind(expected),
+    actualKind: actual === undefined ? 'none' : conversationItemKind(actual),
+    ...(expected !== undefined ? { expectedHash: conversationItemHash(expected) } : {}),
+    ...(actual !== undefined ? { actualHash: conversationItemHash(actual) } : {}),
+  };
+}
+
+function continuationMismatchSummary(entry: ConnectionEntry, payload: JsonObject): string {
+  const details = continuationMismatchDetails(entry, payload);
+  return `full_items=${details.fullItems} expected_prefix_items=${details.expectedPrefixItems} `
+    + `first_mismatch=${details.firstMismatch} expected=${details.expectedKind} actual=${details.actualKind}`;
 }
 
 function continuationDelta(entry: ConnectionEntry, payload: JsonObject): unknown[] | undefined {
@@ -497,11 +550,17 @@ function failContext(entry: ConnectionEntry, ctx: RequestContext, message: strin
   closeContext(ctx);
 }
 
-function cleanupConnections(now: number, maxConnections: number): void {
+function cleanupConnections(now: number, maxConnections: number): Array<Record<string, unknown>> {
+  const evictions: Array<Record<string, unknown>> = [];
   for (const entry of connectionEntries()) {
     if (entry.inFlight) continue;
     if (now - entry.createdAt >= entry.options.hardTtlMs || now - entry.lastUsedAt >= entry.options.idleTtlMs) {
       entry.debug('evicting expired idle connection');
+      evictions.push({
+        connectionId: entry.debugId,
+        partitionKey: entry.key,
+        reason: now - entry.createdAt >= entry.options.hardTtlMs ? 'hard_ttl' : 'idle_ttl',
+      });
       deleteEntry(entry);
     }
   }
@@ -510,8 +569,16 @@ function cleanupConnections(now: number, maxConnections: number): void {
     .sort((left, right) => left.lastUsedAt - right.lastUsedAt);
   while (connectionCount() >= maxConnections && idle.length) {
     const oldest = idle.shift();
-    if (oldest) deleteEntry(oldest);
+    if (oldest) {
+      evictions.push({
+        connectionId: oldest.debugId,
+        partitionKey: oldest.key,
+        reason: 'global_lru_cap',
+      });
+      deleteEntry(oldest);
+    }
   }
+  return evictions;
 }
 
 function isModelDataEvent(type: string | undefined): boolean {
@@ -711,7 +778,7 @@ export function createResponsesWebSocketFetch(
     const promptFieldHashes = responsesWebSocketPromptFieldHashes(payload);
     const instructionsSnapshot = instructionsFromPayload(payload);
     const now = resolvedOptions.now();
-    cleanupConnections(now, resolvedOptions.maxConnections);
+    const evictions = cleanupConnections(now, resolvedOptions.maxConnections);
 
     const candidates = partitionKey ? connectionEntries(partitionKey) : [];
     const idleCandidates = candidates.filter(entry => !entry.inFlight);
@@ -737,16 +804,19 @@ export function createResponsesWebSocketFetch(
     let sendPayload = payload;
     let continued = false;
     let persistent = Boolean(partitionKey);
+    let decision: 'continuation' | 'parallel_isolated' | 'history_mismatch_new_head' | 'new_partition_head' | 'unpartitioned_socket';
 
     if (selected && selectedDelta) {
       sendPayload = { ...payload, input: selectedDelta, previous_response_id: selected.responseId };
       continued = true;
+      decision = 'continuation';
       debug(`continuing chain with ${selectedDelta.length} incremental input item(s)`);
     } else if (candidates.some(entry => entry.inFlight)) {
       // Claude auxiliary requests can share a session id. Never multiplex or
       // queue a request whose lineage cannot yet include the active response.
       selected = undefined;
       persistent = false;
+      decision = 'parallel_isolated';
       debug('parallel request using an isolated socket');
     } else if (diagnosticEntry) {
       // A rewind, branch, or hidden auxiliary inference gets its own full-context
@@ -755,7 +825,56 @@ export function createResponsesWebSocketFetch(
         `history mismatch starting an additional chain; retained ${candidates.length} existing head(s) `
         + `(${continuationMismatchSummary(diagnosticEntry, payload)})`,
       );
+      decision = 'history_mismatch_new_head';
+    } else if (partitionKey) {
+      decision = 'new_partition_head';
+    } else {
+      decision = 'unpartitioned_socket';
     }
+
+    const requestInput = inputArray(payload);
+    emitDiagnostic(options, {
+      event: 'ws_head_decision',
+      decision,
+      partitionKey,
+      keyTuple: {
+        wsUrl,
+        providerId: options.providerId ?? 'openai',
+        accountIdHash: options.accountId
+          ? createHash('sha256').update(options.accountId).digest('hex').slice(0, 16)
+          : '',
+        model: typeof payload.model === 'string' ? payload.model : undefined,
+        effort: typeof (payload.reasoning as JsonObject | undefined)?.effort === 'string'
+          ? String((payload.reasoning as JsonObject).effort).trim().toLowerCase()
+          : '',
+        promptCacheKey: typeof payload.prompt_cache_key === 'string' ? payload.prompt_cache_key : undefined,
+      },
+      promptFingerprint,
+      promptFieldHashes,
+      promptChanges,
+      input: {
+        count: requestInput.length,
+        kinds: requestInput.map(conversationItemKind),
+        hashes: requestInput.map(conversationItemHash),
+      },
+      candidateCount: candidates.length,
+      idleCandidateCount: idleCandidates.length,
+      matchingCandidateCount: matches.length,
+      activeConnectionCount: connectionCount(),
+      maxConnections: resolvedOptions.maxConnections,
+      selectedConnectionId: selected?.debugId,
+      createdConnectionId: selected ? undefined : nextConnectionDebugId,
+      incrementalInputItems: selectedDelta?.length,
+      heads: candidates.map(entry => ({
+        connectionId: entry.debugId,
+        inFlight: entry.inFlight,
+        ageMs: Math.max(0, now - entry.createdAt),
+        idleMs: Math.max(0, now - entry.lastUsedAt),
+        promptChanges: changedPromptFields(entry.promptFieldHashes, promptFieldHashes),
+        mismatch: continuationMismatchDetails(entry, payload),
+      })),
+      evictions,
+    });
 
     let activeContext: RequestContext | undefined;
     const stream = new ReadableStream<Uint8Array>({

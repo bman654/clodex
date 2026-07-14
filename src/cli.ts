@@ -39,7 +39,13 @@ import { runGeminiCommand, geminiHelpText } from './gemini.js';
 import { runAgyCommand, runAntigravityAppCommand, runAntigravityIdeCommand } from './antigravity.js';
 import { runCodexAppCommand } from './codex-app.js';
 import { runClaudeAppCommand } from './claude-app.js';
-import { prepareClaudeTraceLog, printTraceLog } from './trace-log.js';
+import {
+  getInferenceSessionLogPath,
+  getSessionLogPath,
+  prepareClaudeTraceLog,
+  printTraceLog,
+  writeProxyLifecycleLog,
+} from './trace-log.js';
 import { ANTIGRAVITY_BASE_URLS } from './oauth/antigravity-oauth.js';
 import { providersForTarget } from './target-compatibility.js';
 import { refreshModelsDevCacheAsync } from './registry/models-dev.js';
@@ -184,6 +190,7 @@ export function parseArgs(args: string[]): ParsedArgs {
       else if (arg === '--version' || arg === '-v') parsed.showVersion = true;
       else if (arg === '--vertex') parsed.vertex = true;
       else if (arg === '--http-proxy') parsed.httpProxy = true;
+      else if (arg === '--ws-diagnostics') parsed.serverWsDiagnostics = true;
       else if (arg === '--quick' || arg === '--saved') parsed.serverQuick = true;
       else if (arg === '--free-only') parsed.serverFreeOnly = true;
       else if (arg === '--no-free-only') parsed.serverFreeOnly = false;
@@ -609,6 +616,7 @@ ${pc.bold('Options:')}
   --no-mask-gateway-ids        Keep provider names in Anthropic model ids
   --password <value>           One-run network-mode server password
   --http-proxy                 Selective api.anthropic.com HTTP proxy (local only)
+  --ws-diagnostics             Log sanitized request envelopes and WebSocket head decisions
   --vertex                     Use Claude on Google Vertex AI
 
 ${pc.bold('Behavior:')}
@@ -1200,15 +1208,51 @@ async function runClaudeHttpProxyCommand(
     }
   }
 
+  const inferenceLogPath = getInferenceSessionLogPath('claude-http-proxy');
+  const proxyDebugLogPath = parsed.trace ? getSessionLogPath('claude-proxy-debug') : undefined;
   let started: Awaited<ReturnType<typeof startConfiguredHttpProxy>>;
   try {
-    started = await startConfiguredHttpProxy(0, parsed.trace);
+    started = await startConfiguredHttpProxy(0, parsed.trace, inferenceLogPath, proxyDebugLogPath);
   } catch (err) {
     p.log.error(`Failed to start HTTP proxy: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
   const { handle, loaded } = started;
+  const inheritedProxyPort = (() => {
+    const value = process.env['HTTPS_PROXY'] ?? process.env['HTTP_PROXY']
+      ?? process.env['https_proxy'] ?? process.env['http_proxy'];
+    if (!value) return undefined;
+    try {
+      const parsedUrl = new URL(value);
+      return (parsedUrl.hostname === '127.0.0.1' || parsedUrl.hostname === 'localhost') && parsedUrl.port
+        ? Number(parsedUrl.port)
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  })();
+  writeProxyLifecycleLog(inferenceLogPath, {
+    event: 'proxy_started',
+    pid: process.pid,
+    parentPid: process.ppid,
+    host: handle.host,
+    port: handle.port,
+    inheritedProxyPort,
+  });
+  let cleanlyStopped = false;
+  const onProcessExit = (exitCode: number) => {
+    if (cleanlyStopped) return;
+    writeProxyLifecycleLog(inferenceLogPath, {
+      event: 'proxy_process_exit',
+      pid: process.pid,
+      parentPid: process.ppid,
+      port: handle.port,
+      exitCode,
+      reason: 'process exited before proxy cleanup completed',
+    });
+  };
+  process.once('exit', onProcessExit);
   if (!agentStdout) {
     p.log.info(`HTTP proxy started on port ${handle.port}; Claude Code's Anthropic auth remains active.`);
     p.log.info(`Inference request log: ${handle.inferenceLogPath}`);
@@ -1220,16 +1264,36 @@ async function runClaudeHttpProxyCommand(
   }
 
   const childEnv = buildHttpProxyChildEnv(handle.port, handle.caCertPath);
-  const debugLogPath = prepareClaudeTraceLog();
-  const traceArgs = parsed.trace ? ['--debug-file', debugLogPath] : [];
-  if (parsed.trace && !agentStdout) p.log.info(`Debug log: ${debugLogPath}`);
+  const debugLogPath = parsed.trace
+    ? prepareClaudeTraceLog(getSessionLogPath('claude-debug'))
+    : undefined;
+  const traceArgs = debugLogPath ? ['--debug-file', debugLogPath] : [];
+  if (debugLogPath && !agentStdout) {
+    p.log.info(`Claude debug log: ${debugLogPath}`);
+    if (proxyDebugLogPath) p.log.info(`Adapter debug log: ${proxyDebugLogPath}`);
+  }
 
   try {
     const exitCode = await launchClaude(childEnv, undefined, [...traceArgs, ...claudeArgs]);
-    if (parsed.trace) printTraceLog(debugLogPath);
+    if (debugLogPath) printTraceLog(debugLogPath);
     return exitCode;
   } finally {
+    writeProxyLifecycleLog(inferenceLogPath, {
+      event: 'proxy_stopping',
+      pid: process.pid,
+      parentPid: process.ppid,
+      port: handle.port,
+      reason: 'Claude child exited',
+    });
     await handle.close();
+    cleanlyStopped = true;
+    process.off('exit', onProcessExit);
+    writeProxyLifecycleLog(inferenceLogPath, {
+      event: 'proxy_stopped',
+      pid: process.pid,
+      parentPid: process.ppid,
+      port: handle.port,
+    });
   }
 }
 
@@ -1650,6 +1714,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       freeOnly: parsed.serverFreeOnly,
       maskGatewayIds: parsed.serverMaskGatewayIds,
       password: parsed.serverPassword,
+      wsDiagnostics: parsed.serverWsDiagnostics,
     });
   }
 

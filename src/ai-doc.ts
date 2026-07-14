@@ -363,6 +363,9 @@ MODELS / FAVORITES
 
 API GATEWAY (for tools that speak Anthropic/OpenAI HTTP)
   relay-ai server                 foreground gateway on port 17645
+  relay-ai server --http-proxy    selective Claude Code HTTP proxy
+  relay-ai server --ws-diagnostics
+                                  opt-in sanitized WebSocket head diagnostics
   relay-ai server --vertex        Vertex AI gateway (gcloud ADC)
 
 DESKTOP APPS

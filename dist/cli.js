@@ -66,9 +66,11 @@ import {
   getCodexProxyDebugLogPath,
   getConfigPath,
   getGeminiProxyDebugLogPath,
+  getInferenceSessionLogPath,
   getProvidersPath,
   getProxyDebugLogPath,
   getReasoningCapabilities,
+  getSessionLogPath,
   grabRoundTripSignature,
   hasApplicationDefaultCredentials,
   injectClaudeIdentity,
@@ -169,9 +171,10 @@ import {
   translateRequest,
   upstreamHttpStatus,
   validateCustomEndpointUrl,
+  writeProxyLifecycleLog,
   writeSecureLogLine,
   zenRegistryStub
-} from "./chunk-ESF5TVL7.js";
+} from "./chunk-M2FSQM37.js";
 import {
   filterTemplates,
   init_provider_templates,
@@ -10843,6 +10846,9 @@ MODELS / FAVORITES
 
 API GATEWAY (for tools that speak Anthropic/OpenAI HTTP)
   relay-ai server                 foreground gateway on port 17645
+  relay-ai server --http-proxy    selective Claude Code HTTP proxy
+  relay-ai server --ws-diagnostics
+                                  opt-in sanitized WebSocket head diagnostics
   relay-ai server --vertex        Vertex AI gateway (gcloud ADC)
 
 DESKTOP APPS
@@ -11177,6 +11183,7 @@ function parseArgs(args) {
       else if (arg === "--version" || arg === "-v") parsed2.showVersion = true;
       else if (arg === "--vertex") parsed2.vertex = true;
       else if (arg === "--http-proxy") parsed2.httpProxy = true;
+      else if (arg === "--ws-diagnostics") parsed2.serverWsDiagnostics = true;
       else if (arg === "--quick" || arg === "--saved") parsed2.serverQuick = true;
       else if (arg === "--free-only") parsed2.serverFreeOnly = true;
       else if (arg === "--no-free-only") parsed2.serverFreeOnly = false;
@@ -11594,6 +11601,7 @@ ${pc12.bold("Options:")}
   --no-mask-gateway-ids        Keep provider names in Anthropic model ids
   --password <value>           One-run network-mode server password
   --http-proxy                 Selective api.anthropic.com HTTP proxy (local only)
+  --ws-diagnostics             Log sanitized request envelopes and WebSocket head decisions
   --vertex                     Use Claude on Google Vertex AI
 
 ${pc12.bold("Behavior:")}
@@ -12055,14 +12063,47 @@ async function runClaudeHttpProxyCommand(parsed, claudeArgs, agentStdout) {
       return 1;
     }
   }
+  const inferenceLogPath = getInferenceSessionLogPath("claude-http-proxy");
+  const proxyDebugLogPath = parsed.trace ? getSessionLogPath("claude-proxy-debug") : void 0;
   let started;
   try {
-    started = await startConfiguredHttpProxy(0, parsed.trace);
+    started = await startConfiguredHttpProxy(0, parsed.trace, inferenceLogPath, proxyDebugLogPath);
   } catch (err) {
     p14.log.error(`Failed to start HTTP proxy: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
   const { handle, loaded } = started;
+  const inheritedProxyPort = (() => {
+    const value = process.env["HTTPS_PROXY"] ?? process.env["HTTP_PROXY"] ?? process.env["https_proxy"] ?? process.env["http_proxy"];
+    if (!value) return void 0;
+    try {
+      const parsedUrl = new URL(value);
+      return (parsedUrl.hostname === "127.0.0.1" || parsedUrl.hostname === "localhost") && parsedUrl.port ? Number(parsedUrl.port) : void 0;
+    } catch {
+      return void 0;
+    }
+  })();
+  writeProxyLifecycleLog(inferenceLogPath, {
+    event: "proxy_started",
+    pid: process.pid,
+    parentPid: process.ppid,
+    host: handle.host,
+    port: handle.port,
+    inheritedProxyPort
+  });
+  let cleanlyStopped = false;
+  const onProcessExit = (exitCode) => {
+    if (cleanlyStopped) return;
+    writeProxyLifecycleLog(inferenceLogPath, {
+      event: "proxy_process_exit",
+      pid: process.pid,
+      parentPid: process.ppid,
+      port: handle.port,
+      exitCode,
+      reason: "process exited before proxy cleanup completed"
+    });
+  };
+  process.once("exit", onProcessExit);
   if (!agentStdout) {
     p14.log.info(`HTTP proxy started on port ${handle.port}; Claude Code's Anthropic auth remains active.`);
     p14.log.info(`Inference request log: ${handle.inferenceLogPath}`);
@@ -12073,15 +12114,33 @@ async function runClaudeHttpProxyCommand(parsed, claudeArgs, agentStdout) {
     }
   }
   const childEnv = buildHttpProxyChildEnv(handle.port, handle.caCertPath);
-  const debugLogPath = prepareClaudeTraceLog();
-  const traceArgs = parsed.trace ? ["--debug-file", debugLogPath] : [];
-  if (parsed.trace && !agentStdout) p14.log.info(`Debug log: ${debugLogPath}`);
+  const debugLogPath = parsed.trace ? prepareClaudeTraceLog(getSessionLogPath("claude-debug")) : void 0;
+  const traceArgs = debugLogPath ? ["--debug-file", debugLogPath] : [];
+  if (debugLogPath && !agentStdout) {
+    p14.log.info(`Claude debug log: ${debugLogPath}`);
+    if (proxyDebugLogPath) p14.log.info(`Adapter debug log: ${proxyDebugLogPath}`);
+  }
   try {
     const exitCode = await launchClaude(childEnv, void 0, [...traceArgs, ...claudeArgs]);
-    if (parsed.trace) printTraceLog(debugLogPath);
+    if (debugLogPath) printTraceLog(debugLogPath);
     return exitCode;
   } finally {
+    writeProxyLifecycleLog(inferenceLogPath, {
+      event: "proxy_stopping",
+      pid: process.pid,
+      parentPid: process.ppid,
+      port: handle.port,
+      reason: "Claude child exited"
+    });
     await handle.close();
+    cleanlyStopped = true;
+    process.off("exit", onProcessExit);
+    writeProxyLifecycleLog(inferenceLogPath, {
+      event: "proxy_stopped",
+      pid: process.pid,
+      parentPid: process.ppid,
+      port: handle.port
+    });
   }
 }
 async function runClaudeCommand(parsed) {
@@ -12459,7 +12518,8 @@ Error: ${parsed.error}
       providerIds: parsed.serverProviderIds,
       freeOnly: parsed.serverFreeOnly,
       maskGatewayIds: parsed.serverMaskGatewayIds,
-      password: parsed.serverPassword
+      password: parsed.serverPassword,
+      wsDiagnostics: parsed.serverWsDiagnostics
     });
   }
   if (parsed.command === "ui") {
@@ -12471,7 +12531,7 @@ Error: ${parsed.error}
       console.log("Usage: relay-ai ui [--trace]\n\nOpen the settings UI in your browser.");
       return 0;
     }
-    const { runUiCommand } = await import("./ui-command-I74Z6TIM.js");
+    const { runUiCommand } = await import("./ui-command-D3BV5JNU.js");
     return runUiCommand({ trace: parsed.trace });
   }
   if (parsed.command === "models") {

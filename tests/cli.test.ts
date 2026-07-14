@@ -159,6 +159,14 @@ describe('parseArgs', () => {
     });
   });
 
+  it('parses opt-in server WebSocket diagnostics', () => {
+    expect(parseArgs(['server', '--http-proxy', '--ws-diagnostics'])).toMatchObject({
+      command: 'server',
+      httpProxy: true,
+      serverWsDiagnostics: true,
+    });
+  });
+
   it('parses server quick-start aliases', () => {
     expect(parseArgs(['server', '--quick'])).toMatchObject({
       command: 'server',
@@ -378,7 +386,7 @@ describe('help text', () => {
     expect(help).toContain('relay-ai server');
     expect(help).toContain('relay-ai server --quick');
     expect(help).toContain('relay-ai server --vertex');
-    for (const option of ['--quick', '--saved', '--listen', '--providers', '--free-only', '--no-free-only', '--mask-gateway-ids', '--no-mask-gateway-ids', '--password']) {
+    for (const option of ['--quick', '--saved', '--listen', '--providers', '--free-only', '--no-free-only', '--mask-gateway-ids', '--no-mask-gateway-ids', '--password', '--ws-diagnostics']) {
       expect(help).toContain(option);
     }
     expect(help).toContain('registry providers');

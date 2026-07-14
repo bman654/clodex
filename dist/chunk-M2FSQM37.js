@@ -322,12 +322,17 @@ async function runOpenAiDeviceCodeFlow(onDeviceCode, opts) {
 
 // src/oauth/responses-websocket.ts
 import { createHash } from "crypto";
+import { AsyncLocalStorage } from "async_hooks";
 var RESPONSES_LITE_HEADER = "x-openai-internal-codex-responses-lite";
 var TERMINAL_EVENT_TYPES = /* @__PURE__ */ new Set(["response.completed", "response.failed", "response.incomplete"]);
 var FAILURE_EVENT_TYPES = /* @__PURE__ */ new Set(["error", "response.failed", "response.incomplete"]);
 var RESPONSES_WS_HARD_TTL_MS = 55 * 6e4;
 var RESPONSES_WS_IDLE_TTL_MS = 30 * 6e4;
 var RESPONSES_WS_MAX_CONNECTIONS = 32;
+var diagnosticContext = new AsyncLocalStorage();
+function withResponsesWebSocketDiagnosticContext(context, fn) {
+  return diagnosticContext.run(context, fn);
+}
 var connections = /* @__PURE__ */ new Map();
 var nextConnectionDebugId = 1;
 function connectionEntries(key) {
@@ -356,6 +361,14 @@ function unregisterEntry(entry) {
 }
 function debugKey(key) {
   return key ? key.slice(0, 12) : "none";
+}
+function emitDiagnostic(options, event) {
+  if (!options.onDiagnostic) return;
+  const requestId = diagnosticContext.getStore()?.requestId;
+  try {
+    options.onDiagnostic({ ...event, ...requestId ? { requestId } : {} });
+  } catch {
+  }
 }
 function toHeaderRecord(headers) {
   const out = {};
@@ -478,7 +491,10 @@ function conversationItemKind(value) {
   if (typeof record.role === "string") return record.role;
   return "object";
 }
-function continuationMismatchSummary(entry, payload) {
+function conversationItemHash(value) {
+  return createHash("sha256").update(canonicalJson(normalizeToolCallJson(value))).digest("hex").slice(0, 16);
+}
+function continuationMismatchDetails(entry, payload) {
   const full = inputArray(payload);
   const prefix = [...entry.requestInput ?? [], ...entry.expectedAssistant ?? []];
   const comparable = Math.min(full.length, prefix.length);
@@ -489,9 +505,21 @@ function continuationMismatchSummary(entry, payload) {
       break;
     }
   }
-  const expected = mismatch < prefix.length ? conversationItemKind(prefix[mismatch]) : "none";
-  const actual = mismatch < full.length ? conversationItemKind(full[mismatch]) : "none";
-  return `full_items=${full.length} expected_prefix_items=${prefix.length} first_mismatch=${mismatch} expected=${expected} actual=${actual}`;
+  const expected = mismatch < prefix.length ? prefix[mismatch] : void 0;
+  const actual = mismatch < full.length ? full[mismatch] : void 0;
+  return {
+    fullItems: full.length,
+    expectedPrefixItems: prefix.length,
+    firstMismatch: mismatch,
+    expectedKind: expected === void 0 ? "none" : conversationItemKind(expected),
+    actualKind: actual === void 0 ? "none" : conversationItemKind(actual),
+    ...expected !== void 0 ? { expectedHash: conversationItemHash(expected) } : {},
+    ...actual !== void 0 ? { actualHash: conversationItemHash(actual) } : {}
+  };
+}
+function continuationMismatchSummary(entry, payload) {
+  const details = continuationMismatchDetails(entry, payload);
+  return `full_items=${details.fullItems} expected_prefix_items=${details.expectedPrefixItems} first_mismatch=${details.firstMismatch} expected=${details.expectedKind} actual=${details.actualKind}`;
 }
 function continuationDelta(entry, payload) {
   if (!entry.responseId || !entry.requestInput || !entry.expectedAssistant) return void 0;
@@ -660,18 +688,32 @@ function failContext(entry, ctx, message) {
   closeContext(ctx);
 }
 function cleanupConnections(now, maxConnections) {
+  const evictions = [];
   for (const entry of connectionEntries()) {
     if (entry.inFlight) continue;
     if (now - entry.createdAt >= entry.options.hardTtlMs || now - entry.lastUsedAt >= entry.options.idleTtlMs) {
       entry.debug("evicting expired idle connection");
+      evictions.push({
+        connectionId: entry.debugId,
+        partitionKey: entry.key,
+        reason: now - entry.createdAt >= entry.options.hardTtlMs ? "hard_ttl" : "idle_ttl"
+      });
       deleteEntry(entry);
     }
   }
   const idle = connectionEntries().filter((entry) => !entry.inFlight).sort((left, right) => left.lastUsedAt - right.lastUsedAt);
   while (connectionCount() >= maxConnections && idle.length) {
     const oldest = idle.shift();
-    if (oldest) deleteEntry(oldest);
+    if (oldest) {
+      evictions.push({
+        connectionId: oldest.debugId,
+        partitionKey: oldest.key,
+        reason: "global_lru_cap"
+      });
+      deleteEntry(oldest);
+    }
   }
+  return evictions;
 }
 function isModelDataEvent(type) {
   return Boolean(type && (type.includes(".delta") || type === "response.output_item.added" || type === "response.output_item.done"));
@@ -836,7 +878,7 @@ function createResponsesWebSocketFetch(wsUrl, log8, options = {}) {
     const promptFieldHashes = responsesWebSocketPromptFieldHashes(payload);
     const instructionsSnapshot = instructionsFromPayload(payload);
     const now = resolvedOptions.now();
-    cleanupConnections(now, resolvedOptions.maxConnections);
+    const evictions = cleanupConnections(now, resolvedOptions.maxConnections);
     const candidates = partitionKey ? connectionEntries(partitionKey) : [];
     const idleCandidates = candidates.filter((entry) => !entry.inFlight);
     const matches = idleCandidates.map((entry) => ({ entry, delta: continuationDelta(entry, payload) })).filter((match) => match.delta !== void 0).sort((left, right) => left.delta.length - right.delta.length);
@@ -855,19 +897,66 @@ function createResponsesWebSocketFetch(wsUrl, log8, options = {}) {
     let sendPayload = payload;
     let continued = false;
     let persistent = Boolean(partitionKey);
+    let decision;
     if (selected && selectedDelta) {
       sendPayload = { ...payload, input: selectedDelta, previous_response_id: selected.responseId };
       continued = true;
+      decision = "continuation";
       debug(`continuing chain with ${selectedDelta.length} incremental input item(s)`);
     } else if (candidates.some((entry) => entry.inFlight)) {
       selected = void 0;
       persistent = false;
+      decision = "parallel_isolated";
       debug("parallel request using an isolated socket");
     } else if (diagnosticEntry) {
       debug(
         `history mismatch starting an additional chain; retained ${candidates.length} existing head(s) (${continuationMismatchSummary(diagnosticEntry, payload)})`
       );
+      decision = "history_mismatch_new_head";
+    } else if (partitionKey) {
+      decision = "new_partition_head";
+    } else {
+      decision = "unpartitioned_socket";
     }
+    const requestInput = inputArray(payload);
+    emitDiagnostic(options, {
+      event: "ws_head_decision",
+      decision,
+      partitionKey,
+      keyTuple: {
+        wsUrl,
+        providerId: options.providerId ?? "openai",
+        accountIdHash: options.accountId ? createHash("sha256").update(options.accountId).digest("hex").slice(0, 16) : "",
+        model: typeof payload.model === "string" ? payload.model : void 0,
+        effort: typeof payload.reasoning?.effort === "string" ? String(payload.reasoning.effort).trim().toLowerCase() : "",
+        promptCacheKey: typeof payload.prompt_cache_key === "string" ? payload.prompt_cache_key : void 0
+      },
+      promptFingerprint,
+      promptFieldHashes,
+      promptChanges,
+      input: {
+        count: requestInput.length,
+        kinds: requestInput.map(conversationItemKind),
+        hashes: requestInput.map(conversationItemHash)
+      },
+      candidateCount: candidates.length,
+      idleCandidateCount: idleCandidates.length,
+      matchingCandidateCount: matches.length,
+      activeConnectionCount: connectionCount(),
+      maxConnections: resolvedOptions.maxConnections,
+      selectedConnectionId: selected?.debugId,
+      createdConnectionId: selected ? void 0 : nextConnectionDebugId,
+      incrementalInputItems: selectedDelta?.length,
+      heads: candidates.map((entry) => ({
+        connectionId: entry.debugId,
+        inFlight: entry.inFlight,
+        ageMs: Math.max(0, now - entry.createdAt),
+        idleMs: Math.max(0, now - entry.lastUsedAt),
+        promptChanges: changedPromptFields(entry.promptFieldHashes, promptFieldHashes),
+        mismatch: continuationMismatchDetails(entry, payload)
+      })),
+      evictions
+    });
     let activeContext;
     const stream = new ReadableStream({
       start(controller) {
@@ -1145,7 +1234,8 @@ async function createLanguageModel(spec) {
       ...useResponsesEndpoint ? {
         fetch: createResponsesWebSocketFetch(CODEX_RESPONSES_LITE_WS_URL, spec.onDebug, {
           providerId: spec.providerId ?? "openai",
-          accountId
+          accountId,
+          onDiagnostic: spec.onWebSocketDiagnostic
         })
       } : {}
     } : { apiKey };
@@ -4332,6 +4422,7 @@ import {
   unlinkSync,
   writeFileSync as writeFileSync4
 } from "fs";
+import { createHash as createHash3 } from "crypto";
 import { join as join8 } from "path";
 import pc2 from "picocolors";
 var DIR_MODE2 = 448;
@@ -4344,6 +4435,8 @@ var PROVIDER_DEBUG_LOG = "provider-debug.log";
 var UI_DEBUG_LOG = "ui-debug.log";
 var INFERENCE_REQUEST_LOG = "inference-requests.jsonl";
 var INFERENCE_PROGRESS_INTERVAL_MS = 3e4;
+var INFERENCE_SESSION_DIR = "sessions";
+var inferenceSessionSequence = 0;
 function ensureLogsDir() {
   const dir = getLogsPath();
   mkdirSync5(dir, { recursive: true, mode: DIR_MODE2 });
@@ -4356,8 +4449,7 @@ function ensureLogsDir() {
 function getClaudeDebugLogPath() {
   return join8(ensureLogsDir(), CLAUDE_DEBUG_LOG);
 }
-function prepareClaudeTraceLog() {
-  const path = getClaudeDebugLogPath();
+function prepareClaudeTraceLog(path = getClaudeDebugLogPath()) {
   resetTraceLog(path);
   return path;
 }
@@ -4378,6 +4470,22 @@ function getUiDebugLogPath() {
 }
 function getInferenceRequestLogPath() {
   return join8(ensureLogsDir(), INFERENCE_REQUEST_LOG);
+}
+function getSessionLogPath(label = "session", extension = "log") {
+  const dir = join8(ensureLogsDir(), INFERENCE_SESSION_DIR);
+  mkdirSync5(dir, { recursive: true, mode: DIR_MODE2 });
+  try {
+    chmodSync4(dir, DIR_MODE2);
+  } catch {
+  }
+  const safeLabel = label.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "proxy";
+  const safeExtension = extension.toLowerCase().replace(/[^a-z0-9]+/g, "") || "log";
+  const timestamp = (/* @__PURE__ */ new Date()).toISOString().replace(/[-:.]/g, "").replace("T", "-").replace("Z", "Z");
+  const sequence = inferenceSessionSequence++;
+  return join8(dir, `${timestamp}-${safeLabel}-pid${process.pid}-${sequence}.${safeExtension}`);
+}
+function getInferenceSessionLogPath(label = "proxy") {
+  return getSessionLogPath(label, "jsonl");
 }
 var REQUEST_PREVIEW_ENV = "RELAY_AI_LOG_REQUEST_PREVIEW";
 var REQUEST_PREVIEW_MAX = 240;
@@ -4438,6 +4546,79 @@ function getLatestMessagePreview(messages, system) {
   const preview = blockSummary ? `${blockSummary} | system: ${systemText}` : `system: ${systemText}`;
   return compactLogValue(preview, REQUEST_PREVIEW_MAX + 20);
 }
+var REDACTED_DIAGNOSTIC_HEADER = "[REDACTED]";
+var SENSITIVE_DIAGNOSTIC_HEADER = /(?:^|[-_])(?:authorization|api[-_]?key|cookie|token|secret|credential)(?:$|[-_])/i;
+var CONVERSATION_BODY_FIELDS = /* @__PURE__ */ new Set(["system", "messages", "tools"]);
+function canonicalDiagnosticValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalDiagnosticValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value).filter(([, child]) => child !== void 0).sort(([left], [right]) => left.localeCompare(right)).map(([key, child]) => [key, canonicalDiagnosticValue(child)])
+  );
+}
+function diagnosticHash(value) {
+  return createHash3("sha256").update(JSON.stringify(canonicalDiagnosticValue(value)) ?? "undefined").digest("hex").slice(0, 16);
+}
+function diagnosticBytes(value) {
+  return Buffer.byteLength(JSON.stringify(value) ?? "");
+}
+function sanitizeDiagnosticHeaders(headers) {
+  const out = {};
+  for (const [name, value] of Object.entries(headers).sort(([left], [right]) => left.localeCompare(right))) {
+    if (value === void 0) continue;
+    out[name.toLowerCase()] = SENSITIVE_DIAGNOSTIC_HEADER.test(name) ? REDACTED_DIAGNOSTIC_HEADER : value;
+  }
+  return out;
+}
+function contentKinds(content) {
+  if (typeof content === "string") return ["text"];
+  if (!Array.isArray(content)) return [typeof content];
+  return content.map((item) => {
+    if (!item || typeof item !== "object") return typeof item;
+    const record = item;
+    return typeof record.type === "string" ? record.type : "object";
+  });
+}
+function summarizeDiagnosticRequestBody(body) {
+  const parameters = Object.fromEntries(
+    Object.entries(body).filter(([key]) => !CONVERSATION_BODY_FIELDS.has(key))
+  );
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const tools = Array.isArray(body.tools) ? body.tools : [];
+  return {
+    topLevelKeys: Object.keys(body).sort(),
+    parameters,
+    system: body.system === void 0 ? void 0 : {
+      hash: diagnosticHash(body.system),
+      bytes: diagnosticBytes(body.system),
+      blocks: Array.isArray(body.system) ? body.system.length : 1
+    },
+    messages: {
+      count: messages.length,
+      items: messages.map((message) => {
+        const record = message && typeof message === "object" ? message : {};
+        return {
+          role: typeof record.role === "string" ? record.role : "unknown",
+          contentKinds: contentKinds(record.content),
+          hash: diagnosticHash(message),
+          bytes: diagnosticBytes(message)
+        };
+      })
+    },
+    tools: {
+      count: tools.length,
+      items: tools.map((tool4) => {
+        const record = tool4 && typeof tool4 === "object" ? tool4 : {};
+        return {
+          name: typeof record.name === "string" ? compactLogValue(record.name, 200) : "unknown",
+          descriptionHash: diagnosticHash(record.description),
+          schemaHash: diagnosticHash(record.input_schema),
+          hash: diagnosticHash(tool4)
+        };
+      })
+    }
+  };
+}
 function writeInferenceRequestLog(path, entry) {
   const includePreview = process.env[REQUEST_PREVIEW_ENV] === "1" && entry.requestPreview;
   writeSecureLogLine(path, JSON.stringify({
@@ -4496,6 +4677,37 @@ function writeInferenceResponseLifecycleLog(path, entry) {
     ...cacheReadInputTokens !== void 0 ? { cacheReadInputTokens } : {},
     ...entry.lastPartType ? { lastPartType: compactLogValue(entry.lastPartType, 100) } : {},
     ...entry.errorType ? { errorType: compactLogValue(entry.errorType, 200) } : {}
+  }));
+}
+function writeProxyLifecycleLog(path, entry) {
+  writeSecureLogLine(path, JSON.stringify({
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    event: entry.event,
+    pid: nonNegativeInteger(entry.pid),
+    ...entry.parentPid !== void 0 ? { parentPid: nonNegativeInteger(entry.parentPid) } : {},
+    ...entry.host ? { host: compactLogValue(entry.host, 200) } : {},
+    ...entry.port !== void 0 ? { port: nonNegativeInteger(entry.port) } : {},
+    ...entry.adapterPort !== void 0 ? { adapterPort: nonNegativeInteger(entry.adapterPort) } : {},
+    ...entry.inheritedProxyPort !== void 0 ? { inheritedProxyPort: nonNegativeInteger(entry.inheritedProxyPort) } : {},
+    ...entry.exitCode !== void 0 ? { exitCode: Math.round(entry.exitCode) } : {},
+    ...entry.reason ? { reason: compactLogValue(entry.reason, 200) } : {}
+  }));
+}
+function writeWebSocketDiagnosticRequestLog(path, entry) {
+  writeSecureLogLine(path, JSON.stringify({
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    event: "request_diagnostic",
+    requestId: compactLogValue(entry.requestId, 100),
+    ...entry.provider ? { provider: compactLogValue(entry.provider, 200) } : {},
+    ...entry.route ? { route: entry.route } : {},
+    headers: sanitizeDiagnosticHeaders(entry.headers),
+    body: summarizeDiagnosticRequestBody(entry.body)
+  }));
+}
+function writeWebSocketDiagnosticLog(path, entry) {
+  writeSecureLogLine(path, JSON.stringify({
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    ...entry
   }));
 }
 function writeInferenceResponseErrorLog(path, entry) {
@@ -5629,7 +5841,7 @@ async function collectCloudCodeToAnthropic(upstreamRes, model, log8) {
 import { randomUUID as randomUUID5 } from "crypto";
 
 // src/sdk-adapter.ts
-import { createHash as createHash3 } from "crypto";
+import { createHash as createHash4 } from "crypto";
 import { streamText, generateText, tool as tool2, jsonSchema as jsonSchema2 } from "ai";
 
 // src/tool-search.ts
@@ -5798,7 +6010,7 @@ function extractClaudeSessionId(body, headerFallback) {
   return validClaudeSessionId(headerFallback);
 }
 function claudeSessionPromptCacheKey(sessionId) {
-  return "relay-session-" + createHash3("sha256").update(sessionId).digest("hex").slice(0, 32);
+  return "relay-session-" + createHash4("sha256").update(sessionId).digest("hex").slice(0, 32);
 }
 function anthropicEffortFromRequest(body) {
   const effort = body.output_config?.effort;
@@ -5808,7 +6020,7 @@ function anthropicEffortFromRequest(body) {
 function openAiPromptCacheKey(system, tools) {
   const toolSig = (tools ?? []).map((t) => `${t.name}${t.description ?? ""}${JSON.stringify(t.input_schema ?? {})}`).join("");
   const material = `${system ?? ""}\0${toolSig}`;
-  return "relay-" + createHash3("sha256").update(material).digest("hex").slice(0, 32);
+  return "relay-" + createHash4("sha256").update(material).digest("hex").slice(0, 32);
 }
 function supportsOpenAiPromptCacheBreakpoints(modelId) {
   const match = modelId.toLowerCase().match(/^gpt-(\d+)(?:\.(\d+))?(?:-|$)/);
@@ -6495,7 +6707,7 @@ function lookupRoute(byAlias, id) {
   }
   return void 0;
 }
-function startProxyCatalog(routes, defaultAliasId, debug = false, inferenceLogPath) {
+function startProxyCatalog(routes, defaultAliasId, debug = false, inferenceLogPath, debugLogPath, webSocketDiagnosticsLogPath) {
   const proxyToken = randomUUID5();
   silenceSdkWarnings();
   if (routes.length === 0) {
@@ -6503,7 +6715,7 @@ function startProxyCatalog(routes, defaultAliasId, debug = false, inferenceLogPa
   }
   const byAlias = new Map(routes.map((r) => [r.aliasId, r]));
   const defaultRoute = byAlias.get(defaultAliasId) ?? routes[0];
-  const plog = makeProxyLog(debug);
+  const plog = makeProxyLog(debug, debugLogPath);
   const onRejection = (reason) => {
     plog(() => `Unhandled Rejection: ${reason instanceof Error ? reason.stack || reason.message : String(reason)}`);
   };
@@ -6701,7 +6913,8 @@ function startProxyCatalog(routes, defaultAliasId, debug = false, inferenceLogPa
             headers: route.headers,
             useResponsesLite: route.useResponsesLite,
             preferWebSockets: route.preferWebSockets,
-            onDebug: (msg) => plog(() => msg)
+            onDebug: (msg) => plog(() => msg),
+            onWebSocketDiagnostic: webSocketDiagnosticsLogPath ? (event) => writeWebSocketDiagnosticLog(webSocketDiagnosticsLogPath, event) : void 0
           });
           translationLifecycle?.dispatched();
           if (clientWantsStream) {
@@ -6716,31 +6929,37 @@ function startProxyCatalog(routes, defaultAliasId, debug = false, inferenceLogPa
               }
               res.write(chunk);
             };
-            await streamAnthropicResponse(
-              model,
-              params,
-              originalModel,
-              writeStreamChunk,
-              plog,
-              {
-                onPart: (partType) => translationLifecycle?.onPart(partType),
-                initialInputTokens: estimateAnthropicInputTokens(anthropicBody),
-                abortSignal: clientAbort.signal
-              }
+            await withResponsesWebSocketDiagnosticContext(
+              { requestId: relayRequestId },
+              () => streamAnthropicResponse(
+                model,
+                params,
+                originalModel,
+                writeStreamChunk,
+                plog,
+                {
+                  onPart: (partType) => translationLifecycle?.onPart(partType),
+                  initialInputTokens: estimateAnthropicInputTokens(anthropicBody),
+                  abortSignal: clientAbort.signal
+                }
+              )
             );
             translationLifecycle?.complete();
             if (!res.headersSent) writeStreamChunk("");
             res.end();
           } else {
-            const anthropicResponse = await generateAnthropicResponse(
-              model,
-              params,
-              originalModel,
-              {
-                forceStream: openAiOAuth,
-                abortSignal: clientAbort.signal,
-                onPart: (partType) => translationLifecycle?.onPart(partType)
-              }
+            const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
+              { requestId: relayRequestId },
+              () => generateAnthropicResponse(
+                model,
+                params,
+                originalModel,
+                {
+                  forceStream: openAiOAuth,
+                  abortSignal: clientAbort.signal,
+                  onPart: (partType) => translationLifecycle?.onPart(partType)
+                }
+              )
             );
             translationLifecycle?.onOutput(JSON.stringify(anthropicResponse));
             translationLifecycle?.complete();
@@ -8368,15 +8587,57 @@ function requestHeadersWithoutProxyHeaders(req) {
   }
   return headers;
 }
-function forwardRawAnthropicRequest(req, res, rawBody, origin, rejectUnauthorized, onErrorResponse, onResponseUsage) {
+function forwardRawAnthropicRequest(req, res, rawBody, origin, rejectUnauthorized, onErrorResponse, onResponseUsage, lifecycle) {
   return new Promise((resolve2) => {
+    const startedAt = Date.now();
+    let lastActivityAt = startedAt;
+    let headersReceived = false;
+    let firstByteAt;
+    let statusCode;
+    let bytes = 0;
+    let chunks = 0;
     let settled = false;
+    let responseEnded = false;
+    let failed = false;
     let clientDisconnected = false;
+    const writeLifecycle = (event, extra = {}) => {
+      if (!lifecycle) return;
+      writeInferenceResponseLifecycleLog(lifecycle.logPath, {
+        event,
+        requestId: lifecycle.requestId,
+        modelId: lifecycle.modelId,
+        provider: lifecycle.provider,
+        route: "passthrough",
+        ...extra
+      });
+    };
+    const responsePhase = () => {
+      if (!headersReceived) return "waiting_for_headers";
+      if (firstByteAt === void 0) return "waiting_for_first_byte";
+      return responseEnded ? "delivering" : "streaming";
+    };
+    const progressTimer = lifecycle ? setInterval(() => {
+      const now = Date.now();
+      writeLifecycle("response_progress", {
+        statusCode,
+        phase: responsePhase(),
+        durationMs: now - startedAt,
+        ...firstByteAt !== void 0 ? { timeToFirstByteMs: firstByteAt - startedAt } : {},
+        idleMs: now - lastActivityAt,
+        bytes,
+        chunks
+      });
+    }, lifecycle.progressIntervalMs) : void 0;
+    progressTimer?.unref();
+    const stopProgress = () => {
+      if (progressTimer) clearInterval(progressTimer);
+    };
     const done = () => {
       if (settled) return;
       settled = true;
       resolve2();
     };
+    const errorType = (err) => err.code ?? err.name;
     const upstream = https.request({
       protocol: "https:",
       hostname: origin.hostname,
@@ -8387,13 +8648,76 @@ function forwardRawAnthropicRequest(req, res, rawBody, origin, rejectUnauthorize
       servername: net.isIP(origin.hostname) ? void 0 : origin.hostname,
       rejectUnauthorized
     }, (upstreamRes) => {
+      headersReceived = true;
+      statusCode = upstreamRes.statusCode ?? 502;
+      lastActivityAt = Date.now();
+      upstreamRes.on("data", (chunk) => {
+        const now = Date.now();
+        if (firstByteAt === void 0) {
+          firstByteAt = now;
+          writeLifecycle("response_started", {
+            statusCode,
+            durationMs: now - startedAt,
+            timeToFirstByteMs: now - startedAt
+          });
+        }
+        lastActivityAt = now;
+        bytes += chunk.length;
+        chunks += 1;
+      });
       copyResponse(upstreamRes, res, onErrorResponse, onResponseUsage);
-      upstreamRes.once("end", done);
-      upstreamRes.once("error", done);
+      upstreamRes.once("end", () => {
+        responseEnded = true;
+        lastActivityAt = Date.now();
+        done();
+      });
+      upstreamRes.once("error", (err) => {
+        if (clientDisconnected || failed) {
+          done();
+          return;
+        }
+        failed = true;
+        stopProgress();
+        const now = Date.now();
+        writeLifecycle("response_failed", {
+          statusCode,
+          phase: responsePhase(),
+          durationMs: now - startedAt,
+          ...firstByteAt !== void 0 ? { timeToFirstByteMs: firstByteAt - startedAt } : {},
+          idleMs: now - lastActivityAt,
+          bytes,
+          chunks,
+          errorType: errorType(err)
+        });
+        done();
+      });
+    });
+    res.once("finish", () => {
+      stopProgress();
+      if (failed || clientDisconnected) return;
+      const now = Date.now();
+      writeLifecycle("response_completed", {
+        statusCode,
+        durationMs: now - startedAt,
+        ...firstByteAt !== void 0 ? { timeToFirstByteMs: firstByteAt - startedAt } : {},
+        bytes,
+        chunks
+      });
     });
     res.once("close", () => {
-      if (res.writableFinished) return;
+      stopProgress();
+      if (res.writableFinished || failed) return;
       clientDisconnected = true;
+      const now = Date.now();
+      writeLifecycle("response_client_disconnected", {
+        statusCode,
+        phase: responsePhase(),
+        durationMs: now - startedAt,
+        ...firstByteAt !== void 0 ? { timeToFirstByteMs: firstByteAt - startedAt } : {},
+        idleMs: now - lastActivityAt,
+        bytes,
+        chunks
+      });
       upstream.destroy(new Error("Client disconnected"));
       done();
     });
@@ -8402,6 +8726,19 @@ function forwardRawAnthropicRequest(req, res, rawBody, origin, rejectUnauthorize
         done();
         return;
       }
+      failed = true;
+      stopProgress();
+      const now = Date.now();
+      writeLifecycle("response_failed", {
+        statusCode: 502,
+        phase: responsePhase(),
+        durationMs: now - startedAt,
+        idleMs: now - lastActivityAt,
+        bytes,
+        chunks,
+        errorType: errorType(err)
+      });
+      onErrorResponse?.(502, `Anthropic upstream unreachable: ${err.message}`);
       if (!res.headersSent) res.writeHead(502, { "Content-Type": "text/plain" });
       res.end(`Anthropic upstream unreachable: ${err.message}`);
       done();
@@ -8623,7 +8960,9 @@ async function startHttpProxy(options) {
       options.routes,
       options.routes[0].aliasId,
       options.debug,
-      options.inferenceLogPath
+      options.inferenceLogPath,
+      options.debugLogPath,
+      options.webSocketDiagnosticsLogPath
     );
   }
   const mitmServer = https.createServer({
@@ -8661,6 +9000,16 @@ async function startHttpProxy(options) {
           requestPreview: getLatestMessagePreview(parsed?.messages, parsed?.system)
         });
       }
+      if (messagesEndpoint === "messages" && options.webSocketDiagnosticsLogPath) {
+        const provider = route ? route.providerId ?? route.aliasId.split(":")[1] ?? "unknown" : "anthropic";
+        writeWebSocketDiagnosticRequestLog(options.webSocketDiagnosticsLogPath, {
+          requestId,
+          provider,
+          route: route ? "translated" : "passthrough",
+          headers: req.headers,
+          body: parsed ? parsed : {}
+        });
+      }
       if (route && adapter) {
         const adapterBody = parsed?.model === route.aliasId ? rawBody : Buffer.from(JSON.stringify({ ...parsed, model: route.aliasId }));
         await forwardToAdapter(req, res, adapterBody, adapter, messagesEndpoint === "messages" && options.inferenceLogPath ? {
@@ -8693,7 +9042,14 @@ async function startHttpProxy(options) {
           provider: "anthropic",
           route: "passthrough",
           ...usage
-        }) : void 0
+        }) : void 0,
+        messagesEndpoint === "messages" && options.inferenceLogPath ? {
+          logPath: options.inferenceLogPath,
+          requestId,
+          modelId: typeof parsed?.model === "string" ? parsed.model : "unknown",
+          provider: "anthropic",
+          progressIntervalMs: options.responseProgressIntervalMs ?? INFERENCE_PROGRESS_INTERVAL_MS
+        } : void 0
       );
       return;
     }
@@ -8762,6 +9118,7 @@ async function startHttpProxy(options) {
       ...options.routes.map((route) => route.aliasId)
     ],
     inferenceLogPath: options.inferenceLogPath,
+    webSocketDiagnosticsLogPath: options.webSocketDiagnosticsLogPath,
     close: async () => {
       for (const socket of sockets) socket.destroy();
       await new Promise((resolve2) => proxyServer.close(() => resolve2()));
@@ -8821,16 +9178,17 @@ function reportSkippedHttpProxyFavorites(loaded) {
     );
   }
 }
-async function startConfiguredHttpProxy(port, debug = false) {
+async function startConfiguredHttpProxy(port, debug = false, inferenceLogPath = getInferenceRequestLogPath(), debugLogPath, webSocketDiagnosticsLogPath) {
   const loaded = await loadHttpProxyRoutes();
-  const inferenceLogPath = getInferenceRequestLogPath();
   const handle = await startHttpProxy({
     host: "127.0.0.1",
     port,
     routes: loaded.routes,
     modelAliases: loaded.aliases,
     debug,
-    inferenceLogPath
+    debugLogPath,
+    inferenceLogPath,
+    webSocketDiagnosticsLogPath
   });
   handle.caCertPath = ensureHttpProxyCaBundle(
     handle.caCertPath,
@@ -8849,10 +9207,17 @@ function waitForShutdown() {
     process.once("SIGTERM", done);
   });
 }
-async function runHttpProxyServerCommand(debug = false) {
+async function runHttpProxyServerCommand(debug = false, webSocketDiagnostics = false) {
+  const webSocketDiagnosticsLogPath = webSocketDiagnostics ? getSessionLogPath("server-websocket-diagnostics", "jsonl") : void 0;
   let started;
   try {
-    started = await startConfiguredHttpProxy(17645, debug);
+    started = await startConfiguredHttpProxy(
+      17645,
+      debug,
+      getInferenceRequestLogPath(),
+      void 0,
+      webSocketDiagnosticsLogPath
+    );
   } catch (err) {
     p2.log.error(`Failed to start HTTP proxy: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
@@ -8864,6 +9229,10 @@ async function runHttpProxyServerCommand(debug = false) {
   console.log(`  HTTP_PROXY=http://127.0.0.1:${handle.port}`);
   console.log(`  NODE_EXTRA_CA_CERTS=${handle.caCertPath}`);
   console.log(`  Request log: ${handle.inferenceLogPath}`);
+  if (handle.webSocketDiagnosticsLogPath) {
+    console.log(`  WebSocket diagnostics: ${handle.webSocketDiagnosticsLogPath}`);
+    console.log(pc3.yellow("  Diagnostic mode records request headers and metadata; credential headers are redacted."));
+  }
   console.log("");
   printHttpProxyModels(loaded.routes, loaded.aliases);
   reportSkippedHttpProxyFavorites(loaded);
@@ -8989,6 +9358,7 @@ async function askSaveServerPassword() {
 
 // src/server/router.ts
 import { createServer as createServer4 } from "http";
+import { randomUUID as randomUUID7 } from "crypto";
 
 // src/openai-adapter.ts
 import { tool as tool3, jsonSchema as jsonSchema3, streamText as streamText2, generateText as generateText2 } from "ai";
@@ -9245,6 +9615,16 @@ async function handleAnthropicMessages(req, res, options, modelCache, plog) {
     plog(`model not found: ${body.model}`);
     return;
   }
+  const requestId = randomUUID7();
+  if (options.webSocketDiagnosticsLogPath) {
+    writeWebSocketDiagnosticRequestLog(options.webSocketDiagnosticsLogPath, {
+      requestId,
+      provider: inferenceProvider(model),
+      route: model.modelFormat === "anthropic" ? "passthrough" : "translated",
+      headers: req.headers,
+      body
+    });
+  }
   plog(() => `anthropic-messages model=${body.model} format=${model.modelFormat} npm=${model.npm ?? "none"} stream=${body.stream}`);
   if (model.modelFormat === "anthropic") {
     if (model.baseUrl && !/^https?:\/\//i.test(model.baseUrl)) {
@@ -9259,6 +9639,7 @@ async function handleAnthropicMessages(req, res, options, modelCache, plog) {
     const forwardBody = { ...body, model: upstreamModelId(model) };
     const isOAuth = model.authType === "oauth";
     auditInference(options, {
+      requestId,
       modelId: body.model,
       effort: anthropicEffortFromRequest(body) ?? model.defaultEffort,
       provider: inferenceProvider(model),
@@ -9287,6 +9668,7 @@ async function handleAnthropicMessages(req, res, options, modelCache, plog) {
         model.apiKey = refreshed;
       },
       onUpstreamError: options.inferenceLogPath ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath, {
+        requestId,
         modelId: body.model,
         provider: inferenceProvider(model),
         route: "passthrough",
@@ -9303,13 +9685,22 @@ async function handleAnthropicMessages(req, res, options, modelCache, plog) {
     }
     const apiKey = model.apiKey ?? options.apiKey;
     auditInference(options, {
+      requestId,
       modelId: body.model,
       effort: anthropicEffortFromRequest(body) ?? model.defaultEffort,
       provider: inferenceProvider(model),
       route: "translated",
       requestPreview: getLatestMessagePreview(body.messages, body.system)
     });
-    const languageModel = await getOrInitLanguageModel(modelCache, model, model.npm, model.apiBaseUrl, apiKey, options.vertex);
+    const languageModel = await getOrInitLanguageModel(
+      modelCache,
+      model,
+      model.npm,
+      model.apiBaseUrl,
+      apiKey,
+      options.vertex,
+      options.webSocketDiagnosticsLogPath
+    );
     const npmMaxTools = maxToolsForNpm(model.npm);
     const toolCount = Array.isArray(body.tools) ? body.tools.length : 0;
     if (npmMaxTools !== void 0 && toolCount > npmMaxTools) {
@@ -9344,13 +9735,19 @@ async function handleAnthropicMessages(req, res, options, modelCache, plog) {
           }
           res.write(chunk);
         };
-        await streamAnthropicResponse(languageModel, params, responseModelId, writeStreamChunk, void 0, {
-          initialInputTokens: estimateAnthropicInputTokens(body)
-        });
+        await withResponsesWebSocketDiagnosticContext(
+          { requestId },
+          () => streamAnthropicResponse(languageModel, params, responseModelId, writeStreamChunk, void 0, {
+            initialInputTokens: estimateAnthropicInputTokens(body)
+          })
+        );
         if (!res.headersSent) writeStreamChunk("");
         res.end();
       } else {
-        const anthropicResponse = await generateAnthropicResponse(languageModel, params, responseModelId);
+        const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
+          { requestId },
+          () => generateAnthropicResponse(languageModel, params, responseModelId)
+        );
         sendJson(res, 200, anthropicResponse);
       }
     } catch (err) {
@@ -9477,7 +9874,7 @@ function backendFor(options, model) {
   if (model.sourceBackend === "go") return options.backends.go;
   throw new Error(`Provider ${model.sourceBackend} is not a cloud backend \u2014 model must set baseUrl/completionsUrl`);
 }
-async function getOrInitLanguageModel(modelCache, model, npm, baseURL, apiKey, vertex) {
+async function getOrInitLanguageModel(modelCache, model, npm, baseURL, apiKey, vertex, webSocketDiagnosticsLogPath) {
   const cacheKey = [
     model.providerId ?? model.sourceBackend,
     model.id,
@@ -9498,7 +9895,8 @@ async function getOrInitLanguageModel(modelCache, model, npm, baseURL, apiKey, v
       vertex,
       headers: model.headers,
       useResponsesLite: model.useResponsesLite,
-      preferWebSockets: model.preferWebSockets
+      preferWebSockets: model.preferWebSockets,
+      onWebSocketDiagnostic: webSocketDiagnosticsLogPath ? (event) => writeWebSocketDiagnosticLog(webSocketDiagnosticsLogPath, event) : void 0
     });
     modelCache.set(cacheKey, languageModel);
   }
@@ -10073,7 +10471,7 @@ async function runServerCommand(options = {}) {
       p5.log.error("--http-proxy is a local-only server mode and cannot be combined with gateway server options.");
       return 1;
     }
-    return runHttpProxyServerCommand();
+    return runHttpProxyServerCommand(false, options.wsDiagnostics);
   }
   if (options.vertex) {
     return runVertexServerCommand();
@@ -10151,6 +10549,7 @@ async function runServerCommand(options = {}) {
   }
   const gateway = runConfig.maskGatewayIds ? { maskGatewayIds: true } : void 0;
   const inferenceLogPath = getInferenceRequestLogPath();
+  const webSocketDiagnosticsLogPath = options.wsDiagnostics ? getSessionLogPath("server-websocket-diagnostics", "jsonl") : void 0;
   const server = await startServer({
     host,
     port: 17645,
@@ -10159,13 +10558,18 @@ async function runServerCommand(options = {}) {
     catalog: createGatewayModelCatalog(models, gateway),
     backends: BACKENDS,
     gateway,
-    inferenceLogPath
+    inferenceLogPath,
+    webSocketDiagnosticsLogPath
   });
   console.log("");
   console.log(pc6.bold(pc6.green("Relay AI server running")));
   console.log(`  Anthropic:  http://127.0.0.1:${server.port}/anthropic`);
   console.log(`  OpenAI:     http://127.0.0.1:${server.port}/openai/v1`);
   console.log(`  Request log: ${inferenceLogPath}`);
+  if (webSocketDiagnosticsLogPath) {
+    console.log(`  WebSocket diagnostics: ${webSocketDiagnosticsLogPath}`);
+    console.log(pc6.yellow("  Diagnostic mode records request headers and metadata; credential headers are redacted."));
+  }
   if (mode === "network") {
     for (const { name, address } of getLocalIps()) {
       console.log(`  Network (${name}):`);
@@ -12456,6 +12860,9 @@ export {
   getGeminiProxyDebugLogPath,
   getUiDebugLogPath,
   getInferenceRequestLogPath,
+  getSessionLogPath,
+  getInferenceSessionLogPath,
+  writeProxyLifecycleLog,
   makeTraceLogger,
   writeSecureLogLine,
   printTraceLog,
@@ -12539,4 +12946,4 @@ export {
   quitClaudeAppGracefully,
   launchOrRestartClaudeApp
 };
-//# sourceMappingURL=chunk-ESF5TVL7.js.map
+//# sourceMappingURL=chunk-M2FSQM37.js.map

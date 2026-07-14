@@ -156,6 +156,8 @@ export interface ParsedArgs {
   serverPassword?: string;
   /** Run Claude/server through the selective api.anthropic.com HTTP proxy. */
   httpProxy?: boolean;
+  /** Opt-in server request-envelope and WebSocket head diagnostics. */
+  serverWsDiagnostics?: boolean;
   /** Print saved HTTP-proxy model names without opening the favorites manager. */
   favoritesList?: boolean;
   /** Save a short HTTP-proxy model alias (`name=relay:provider:model`). */

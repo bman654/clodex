@@ -7,7 +7,7 @@ import type { ProxyRoute } from '../proxy.js';
 import { buildHttpProxyRoutes, type HttpProxyRouteResult } from './routes.js';
 import { startHttpProxy, type HttpProxyHandle } from './server.js';
 import { ensureHttpProxyCaBundle } from './ca.js';
-import { getInferenceRequestLogPath } from '../trace-log.js';
+import { getInferenceRequestLogPath, getSessionLogPath } from '../trace-log.js';
 
 export interface LoadedHttpProxyRoutes extends HttpProxyRouteResult {
   favoriteCount: number;
@@ -77,16 +77,20 @@ export function reportSkippedHttpProxyFavorites(loaded: LoadedHttpProxyRoutes): 
 export async function startConfiguredHttpProxy(
   port: number,
   debug = false,
+  inferenceLogPath = getInferenceRequestLogPath(),
+  debugLogPath?: string,
+  webSocketDiagnosticsLogPath?: string,
 ): Promise<{ handle: HttpProxyHandle; loaded: LoadedHttpProxyRoutes }> {
   const loaded = await loadHttpProxyRoutes();
-  const inferenceLogPath = getInferenceRequestLogPath();
   const handle = await startHttpProxy({
     host: '127.0.0.1',
     port,
     routes: loaded.routes,
     modelAliases: loaded.aliases,
     debug,
+    debugLogPath,
     inferenceLogPath,
+    webSocketDiagnosticsLogPath,
   });
   handle.caCertPath = ensureHttpProxyCaBundle(
     handle.caCertPath,
@@ -107,10 +111,19 @@ function waitForShutdown(): Promise<void> {
   });
 }
 
-export async function runHttpProxyServerCommand(debug = false): Promise<number> {
+export async function runHttpProxyServerCommand(debug = false, webSocketDiagnostics = false): Promise<number> {
+  const webSocketDiagnosticsLogPath = webSocketDiagnostics
+    ? getSessionLogPath('server-websocket-diagnostics', 'jsonl')
+    : undefined;
   let started: Awaited<ReturnType<typeof startConfiguredHttpProxy>>;
   try {
-    started = await startConfiguredHttpProxy(17645, debug);
+    started = await startConfiguredHttpProxy(
+      17645,
+      debug,
+      getInferenceRequestLogPath(),
+      undefined,
+      webSocketDiagnosticsLogPath,
+    );
   } catch (err) {
     p.log.error(`Failed to start HTTP proxy: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
@@ -123,6 +136,10 @@ export async function runHttpProxyServerCommand(debug = false): Promise<number> 
   console.log(`  HTTP_PROXY=http://127.0.0.1:${handle.port}`);
   console.log(`  NODE_EXTRA_CA_CERTS=${handle.caCertPath}`);
   console.log(`  Request log: ${handle.inferenceLogPath}`);
+  if (handle.webSocketDiagnosticsLogPath) {
+    console.log(`  WebSocket diagnostics: ${handle.webSocketDiagnosticsLogPath}`);
+    console.log(pc.yellow('  Diagnostic mode records request headers and metadata; credential headers are redacted.'));
+  }
   console.log('');
   printHttpProxyModels(loaded.routes, loaded.aliases);
   reportSkippedHttpProxyFavorites(loaded);

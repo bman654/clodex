@@ -8,6 +8,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import pc from 'picocolors';
 import { getLogsPath } from './paths.js';
@@ -23,6 +24,8 @@ export const PROVIDER_DEBUG_LOG = 'provider-debug.log';
 export const UI_DEBUG_LOG = 'ui-debug.log';
 export const INFERENCE_REQUEST_LOG = 'inference-requests.jsonl';
 export const INFERENCE_PROGRESS_INTERVAL_MS = 30_000;
+const INFERENCE_SESSION_DIR = 'sessions';
+let inferenceSessionSequence = 0;
 
 export function ensureLogsDir(): string {
   const dir = getLogsPath();
@@ -39,8 +42,7 @@ export function getClaudeDebugLogPath(): string {
   return join(ensureLogsDir(), CLAUDE_DEBUG_LOG);
 }
 
-export function prepareClaudeTraceLog(): string {
-  const path = getClaudeDebugLogPath();
+export function prepareClaudeTraceLog(path = getClaudeDebugLogPath()): string {
   resetTraceLog(path);
   return path;
 }
@@ -67,6 +69,27 @@ export function getUiDebugLogPath(): string {
 
 export function getInferenceRequestLogPath(): string {
   return join(ensureLogsDir(), INFERENCE_REQUEST_LOG);
+}
+
+/** Create a collision-resistant log path for one short-lived process. */
+export function getSessionLogPath(label = 'session', extension = 'log'): string {
+  const dir = join(ensureLogsDir(), INFERENCE_SESSION_DIR);
+  mkdirSync(dir, { recursive: true, mode: DIR_MODE });
+  try {
+    chmodSync(dir, DIR_MODE);
+  } catch {
+    // best-effort
+  }
+  const safeLabel = label.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'proxy';
+  const safeExtension = extension.toLowerCase().replace(/[^a-z0-9]+/g, '') || 'log';
+  const timestamp = new Date().toISOString().replace(/[-:.]/g, '').replace('T', '-').replace('Z', 'Z');
+  const sequence = inferenceSessionSequence++;
+  return join(dir, `${timestamp}-${safeLabel}-pid${process.pid}-${sequence}.${safeExtension}`);
+}
+
+/** Create a collision-resistant JSONL path for one short-lived proxy process. */
+export function getInferenceSessionLogPath(label = 'proxy'): string {
+  return getSessionLogPath(label, 'jsonl');
 }
 
 const REQUEST_PREVIEW_ENV = 'RELAY_AI_LOG_REQUEST_PREVIEW';
@@ -223,6 +246,128 @@ export interface InferenceResponseLifecycleLogEntry {
   errorType?: string;
 }
 
+export type ProxyLifecycleEvent =
+  | 'proxy_started'
+  | 'proxy_stopping'
+  | 'proxy_stopped'
+  | 'proxy_process_exit';
+
+export interface ProxyLifecycleLogEntry {
+  event: ProxyLifecycleEvent;
+  pid: number;
+  parentPid?: number;
+  host?: string;
+  port?: number;
+  adapterPort?: number;
+  inheritedProxyPort?: number;
+  exitCode?: number;
+  reason?: string;
+}
+
+export interface WebSocketDiagnosticRequestLogEntry {
+  requestId: string;
+  provider?: string;
+  route?: 'passthrough' | 'translated';
+  headers: Record<string, string | string[] | undefined>;
+  body: Record<string, unknown>;
+}
+
+const REDACTED_DIAGNOSTIC_HEADER = '[REDACTED]';
+const SENSITIVE_DIAGNOSTIC_HEADER = /(?:^|[-_])(?:authorization|api[-_]?key|cookie|token|secret|credential)(?:$|[-_])/i;
+const CONVERSATION_BODY_FIELDS = new Set(['system', 'messages', 'tools']);
+
+function canonicalDiagnosticValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalDiagnosticValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, child]) => child !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => [key, canonicalDiagnosticValue(child)]),
+  );
+}
+
+function diagnosticHash(value: unknown): string {
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalDiagnosticValue(value)) ?? 'undefined')
+    .digest('hex')
+    .slice(0, 16);
+}
+
+function diagnosticBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value) ?? '');
+}
+
+/** Preserve every inbound header except credential-bearing values. */
+export function sanitizeDiagnosticHeaders(
+  headers: Record<string, string | string[] | undefined>,
+): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {};
+  for (const [name, value] of Object.entries(headers).sort(([left], [right]) => left.localeCompare(right))) {
+    if (value === undefined) continue;
+    out[name.toLowerCase()] = SENSITIVE_DIAGNOSTIC_HEADER.test(name)
+      ? REDACTED_DIAGNOSTIC_HEADER
+      : value;
+  }
+  return out;
+}
+
+function contentKinds(content: unknown): string[] {
+  if (typeof content === 'string') return ['text'];
+  if (!Array.isArray(content)) return [typeof content];
+  return content.map(item => {
+    if (!item || typeof item !== 'object') return typeof item;
+    const record = item as Record<string, unknown>;
+    return typeof record.type === 'string' ? record.type : 'object';
+  });
+}
+
+/**
+ * Capture the complete non-conversation envelope plus hashes/shapes for prompt
+ * fields. Hashes make rewinds and harness requests comparable without writing
+ * message, system-prompt, tool-description, schema, or tool-result content.
+ */
+export function summarizeDiagnosticRequestBody(body: Record<string, unknown>): Record<string, unknown> {
+  const parameters = Object.fromEntries(
+    Object.entries(body).filter(([key]) => !CONVERSATION_BODY_FIELDS.has(key)),
+  );
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const tools = Array.isArray(body.tools) ? body.tools : [];
+  return {
+    topLevelKeys: Object.keys(body).sort(),
+    parameters,
+    system: body.system === undefined ? undefined : {
+      hash: diagnosticHash(body.system),
+      bytes: diagnosticBytes(body.system),
+      blocks: Array.isArray(body.system) ? body.system.length : 1,
+    },
+    messages: {
+      count: messages.length,
+      items: messages.map(message => {
+        const record = message && typeof message === 'object' ? message as Record<string, unknown> : {};
+        return {
+          role: typeof record.role === 'string' ? record.role : 'unknown',
+          contentKinds: contentKinds(record.content),
+          hash: diagnosticHash(message),
+          bytes: diagnosticBytes(message),
+        };
+      }),
+    },
+    tools: {
+      count: tools.length,
+      items: tools.map(tool => {
+        const record = tool && typeof tool === 'object' ? tool as Record<string, unknown> : {};
+        return {
+          name: typeof record.name === 'string' ? compactLogValue(record.name, 200) : 'unknown',
+          descriptionHash: diagnosticHash(record.description),
+          schemaHash: diagnosticHash(record.input_schema),
+          hash: diagnosticHash(tool),
+        };
+      }),
+    },
+  };
+}
+
 /** Append privacy-minimal routing metadata, plus an explicitly enabled request preview. */
 export function writeInferenceRequestLog(
   path: string,
@@ -293,6 +438,49 @@ export function writeInferenceResponseLifecycleLog(
     ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
     ...(entry.lastPartType ? { lastPartType: compactLogValue(entry.lastPartType, 100) } : {}),
     ...(entry.errorType ? { errorType: compactLogValue(entry.errorType, 200) } : {}),
+  }));
+}
+
+/** Record enough process lifetime metadata to distinguish a dead local proxy from an upstream failure. */
+export function writeProxyLifecycleLog(path: string, entry: ProxyLifecycleLogEntry): void {
+  writeSecureLogLine(path, JSON.stringify({
+    timestamp: new Date().toISOString(),
+    event: entry.event,
+    pid: nonNegativeInteger(entry.pid),
+    ...(entry.parentPid !== undefined ? { parentPid: nonNegativeInteger(entry.parentPid) } : {}),
+    ...(entry.host ? { host: compactLogValue(entry.host, 200) } : {}),
+    ...(entry.port !== undefined ? { port: nonNegativeInteger(entry.port) } : {}),
+    ...(entry.adapterPort !== undefined ? { adapterPort: nonNegativeInteger(entry.adapterPort) } : {}),
+    ...(entry.inheritedProxyPort !== undefined ? { inheritedProxyPort: nonNegativeInteger(entry.inheritedProxyPort) } : {}),
+    ...(entry.exitCode !== undefined ? { exitCode: Math.round(entry.exitCode) } : {}),
+    ...(entry.reason ? { reason: compactLogValue(entry.reason, 200) } : {}),
+  }));
+}
+
+/** Write one opt-in request-envelope diagnostic without conversation content. */
+export function writeWebSocketDiagnosticRequestLog(
+  path: string,
+  entry: WebSocketDiagnosticRequestLogEntry,
+): void {
+  writeSecureLogLine(path, JSON.stringify({
+    timestamp: new Date().toISOString(),
+    event: 'request_diagnostic',
+    requestId: compactLogValue(entry.requestId, 100),
+    ...(entry.provider ? { provider: compactLogValue(entry.provider, 200) } : {}),
+    ...(entry.route ? { route: entry.route } : {}),
+    headers: sanitizeDiagnosticHeaders(entry.headers),
+    body: summarizeDiagnosticRequestBody(entry.body),
+  }));
+}
+
+/** Append a structured WebSocket transport diagnostic event. */
+export function writeWebSocketDiagnosticLog(
+  path: string,
+  entry: Record<string, unknown>,
+): void {
+  writeSecureLogLine(path, JSON.stringify({
+    timestamp: new Date().toISOString(),
+    ...entry,
   }));
 }
 

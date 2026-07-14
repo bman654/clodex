@@ -24,6 +24,8 @@ import {
   resetResponsesWebSocketConnectionsForTests,
   responsesWebSocketPartitionKey,
   responsesWebSocketPromptFingerprint,
+  withResponsesWebSocketDiagnosticContext,
+  type ResponsesWebSocketDiagnosticEvent,
 } from '../src/oauth/responses-websocket.js';
 
 const WS_URL = 'wss://chatgpt.com/backend-api/codex/responses';
@@ -245,6 +247,77 @@ describe('createResponsesWebSocketFetch', () => {
 
     emitTextResponse(socket, 'resp_2', 'hello again');
     await readAll(second);
+  });
+
+  it('emits correlated privacy-safe reasons when a history mismatch creates another head', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      providerId: 'openai',
+      accountId: 'private-account-id',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const firstInput = [{ role: 'user', content: [{ type: 'input_text', text: 'private first prompt' }] }];
+    const first = await withResponsesWebSocketDiagnosticContext(
+      { requestId: 'req-first' },
+      () => wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(firstInput)),
+      }),
+    );
+    const firstSocket = lastSocket();
+    firstSocket.emit('open');
+    emitTextResponse(firstSocket, 'resp_first', 'private answer');
+    await readAll(first);
+
+    const branchInput = [{ role: 'user', content: [{ type: 'input_text', text: 'private divergent prompt' }] }];
+    const branch = await withResponsesWebSocketDiagnosticContext(
+      { requestId: 'req-branch' },
+      () => wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(branchInput)),
+      }),
+    );
+    const branchSocket = lastSocket();
+    branchSocket.emit('open');
+    emitTextResponse(branchSocket, 'resp_branch', 'private branch answer');
+    await readAll(branch);
+
+    const firstDecision = diagnostics.find(event => event.requestId === 'req-first');
+    const branchDecision = diagnostics.find(event => event.requestId === 'req-branch');
+    expect(firstDecision).toMatchObject({
+      event: 'ws_head_decision',
+      decision: 'new_partition_head',
+      candidateCount: 0,
+      createdConnectionId: 1,
+      keyTuple: {
+        providerId: 'openai',
+        model: 'gpt-5.6-sol',
+        effort: 'high',
+        promptCacheKey: 'relay-session-abc',
+        accountIdHash: expect.any(String),
+      },
+    });
+    expect(branchDecision).toMatchObject({
+      event: 'ws_head_decision',
+      decision: 'history_mismatch_new_head',
+      candidateCount: 1,
+      matchingCandidateCount: 0,
+      createdConnectionId: 2,
+      heads: [{
+        connectionId: 1,
+        mismatch: {
+          firstMismatch: 0,
+          expectedKind: 'user',
+          actualKind: 'user',
+          expectedHash: expect.any(String),
+          actualHash: expect.any(String),
+        },
+      }],
+    });
+    const serialized = JSON.stringify(diagnostics);
+    expect(serialized).not.toContain('private-account-id');
+    expect(serialized).not.toContain('private first prompt');
+    expect(serialized).not.toContain('private divergent prompt');
+    expect(serialized).not.toContain('private answer');
+    expect(serialized).not.toContain('private branch answer');
   });
 
   it('continues a tool loop with only the function_call_output', async () => {

@@ -87,10 +87,21 @@ relay-ai providers import
 If a model fails mid-session (not the login prompt above):
 
 ```bash
-relay-ai claude --trace
+relay-ai claude --trace               # Relay gateway mode
+relay-ai claude --http-proxy --trace  # transparent Anthropic HTTP proxy mode
 ```
 
-After exit, relay-ai prints errors from `~/.relay-ai/logs/claude-debug.log` (secrets redacted in the summary). The proxy also logs to `~/.relay-ai/logs/proxy-debug.log` when `--trace` is set.
+After exit, relay-ai prints errors from Claude Code's debug log (secrets redacted in the summary). In HTTP-proxy session mode, both that log and the translated-model adapter debug log get unique files under `~/.relay-ai/logs/sessions/`; their exact paths are printed at startup. Other launch modes retain their command-specific debug paths under `~/.relay-ai/logs/`.
+
+`relay-ai claude --http-proxy` always writes a separate privacy-minimal request/lifecycle log under `~/.relay-ai/logs/sessions/`; `--trace` is not required. The startup message prints its exact path. Every Anthropic passthrough and translated `/v1/messages` request gets a correlated request ID, upstream status, timing/progress records, and a terminal completion, failure, or client-disconnect event. Session-level start/stop records include the relay PID and listening port.
+
+- `response_failed` with `errorType: "ECONNREFUSED"` means relay reached the local listener but its upstream connection was refused.
+- No request record at the failure time, combined with a dead recorded proxy port, means Claude could not reach relay itself.
+- `proxy_started` without `proxy_stopped` means the relay process did not complete normal cleanup. `SIGKILL` and machine termination cannot log their own cause.
+
+To find the session file for a known proxy port, run `rg '"port":58972' ~/.relay-ai/logs/sessions` (replace the port as needed).
+
+For OpenAI OAuth WebSocket continuation/cache investigations, restart the standalone server with `--ws-diagnostics` (for example, `relay-ai server --http-proxy --ws-diagnostics`). The printed per-process JSONL path contains sanitized request envelopes and correlated `ws_head_decision` events, including whether relay continued a head, created one for a history mismatch, isolated a parallel request, or evicted an idle head. Credential-bearing headers are redacted and conversation fields are represented only by types, lengths, and hashes. Disable the flag after capturing the sessions you need.
 
 ---
 

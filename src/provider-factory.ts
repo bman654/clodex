@@ -5,7 +5,10 @@ import type { LanguageModel } from 'ai';
 import { wrapLanguageModel, extractReasoningMiddleware } from 'ai';
 import { VERTEX_ANTHROPIC_NPM, CODEX_RESPONSES_LITE_VERSION, CODEX_RESPONSES_LITE_WS_URL } from './constants.js';
 import { extractOpenAiAccountId } from './oauth/openai.js';
-import { createResponsesWebSocketFetch } from './oauth/responses-websocket.js';
+import {
+  createResponsesWebSocketFetch,
+  type ResponsesWebSocketDiagnosticEvent,
+} from './oauth/responses-websocket.js';
 import {
   CLAUDE_CODE_USER_AGENT,
   injectClaudeIdentity,
@@ -92,6 +95,8 @@ export interface ProviderModelSpec {
   preferWebSockets?: boolean;
   /** Optional debug logger (wired to the proxy trace log) for transport-level diagnostics. */
   onDebug?: (msg: string) => void;
+  /** Optional privacy-safe structured WebSocket diagnostics. */
+  onWebSocketDiagnostic?: (event: ResponsesWebSocketDiagnosticEvent) => void;
 }
 
 /** True when this provider routes through the SDK adapter (local providers + Zen/Go openai-format). */
@@ -176,6 +181,7 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
                 fetch: createResponsesWebSocketFetch(CODEX_RESPONSES_LITE_WS_URL, spec.onDebug, {
                   providerId: spec.providerId ?? 'openai',
                   accountId,
+                  onDiagnostic: spec.onWebSocketDiagnostic,
                 }),
               }
             : {}),
