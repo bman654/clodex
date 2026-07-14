@@ -162,8 +162,14 @@ describe('createResponsesWebSocketFetch', () => {
 
   it('logs privacy-safe raw cache usage from the terminal response event', async () => {
     const debug: string[] = [];
-    const wsFetch = createResponsesWebSocketFetch(WS_URL, message => debug.push(message));
-    const res = await wsFetch('https://x', { method: 'POST', headers: {}, body: '{}' });
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, message => debug.push(message), {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await withResponsesWebSocketDiagnosticContext(
+      { requestId: 'req-usage' },
+      () => wsFetch('https://x', { method: 'POST', headers: {}, body: '{}' }),
+    );
     const socket = lastSocket();
     socket.emit('open');
     socket.emit('message', Buffer.from(JSON.stringify({
@@ -182,6 +188,18 @@ describe('createResponsesWebSocketFetch', () => {
     expect(debug).toContain(
       'ws: usage input_tokens=1200 cached_tokens=900 cache_write_tokens=200 output_tokens=50',
     );
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_usage',
+      requestId: 'req-usage',
+      connectionId: 1,
+      generation: 'isolated',
+      continued: false,
+      retried: false,
+      inputTokens: 1_200,
+      cachedTokens: 900,
+      cacheWriteTokens: 200,
+      outputTokens: 50,
+    }));
   });
 
   it('surfaces a socket error as an SSE error event', async () => {
@@ -408,6 +426,127 @@ describe('createResponsesWebSocketFetch', () => {
     await readAll(second);
   });
 
+  it('continues when Claude omits reasoning but exactly echoes the following function call', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'inspect it' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-omitted-reasoning',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_reason_tool' } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc_private', summary: [] },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 1,
+      item: {
+        type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'Read',
+        arguments: '{"path":"file.ts"}', status: 'completed',
+      },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.completed', response: { id: 'resp_reason_tool' },
+    })));
+    await readAll(first);
+
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_1', name: 'Read', arguments: '{"path":"file.ts"}',
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_1', output: 'contents' };
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([...input, echoedCall, toolOutput])),
+    });
+
+    expect(fakeSockets).toHaveLength(1);
+    const sent = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_reason_tool');
+    expect(sent.input).toEqual([toolOutput]);
+    expect(diagnostics.at(-1)).toMatchObject({
+      event: 'ws_head_decision',
+      decision: 'continuation',
+      continuationMatchMode: 'omitted_reasoning',
+      promotedConnectionId: 1,
+      selectedGeneration: 'established',
+    });
+    emitTextResponse(socket, 'resp_after_tool', 'done');
+    await readAll(second);
+  });
+
+  it('continues when Claude omits reasoning but exactly echoes the following assistant text', async () => {
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'answer it' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-omitted-reasoning-text' });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_reason_text' } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc_private', summary: [] },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 1,
+      item: {
+        type: 'message', id: 'msg_1',
+        content: [{ type: 'output_text', text: 'the answer' }], status: 'completed',
+      },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_reason_text' } })));
+    await readAll(first);
+
+    const nextUser = { role: 'user', content: [{ type: 'input_text', text: 'thanks' }] };
+    await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([
+        ...input,
+        { role: 'assistant', content: [{ type: 'output_text', text: 'the answer' }] },
+        nextUser,
+      ])),
+    });
+
+    expect(fakeSockets).toHaveLength(1);
+    const sent = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_reason_text');
+    expect(sent.input).toEqual([nextUser]);
+  });
+
+  it('does not ignore a mismatch in the assistant item after omitted reasoning', async () => {
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'inspect it' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-reasoning-mismatch' });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_reason_tool' } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc_private', summary: [] },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 1,
+      item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'Read', arguments: '{}', status: 'completed' },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_reason_tool' } })));
+    await readAll(first);
+
+    await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([
+        ...input,
+        { type: 'function_call', call_id: 'call_1', name: 'Write', arguments: '{}' },
+        { type: 'function_call_output', call_id: 'call_1', output: 'contents' },
+      ])),
+    });
+    expect(fakeSockets).toHaveLength(2);
+  });
+
   it('isolates an unrelated parallel request and preserves the main chain head', async () => {
     const input = [{ role: 'user', content: [{ type: 'input_text', text: 'main' }] }];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-parallel' });
@@ -585,6 +724,208 @@ describe('createResponsesWebSocketFetch', () => {
     const sent = JSON.parse(replacement.send.mock.calls[0]![0] as string);
     expect(sent.previous_response_id).toBeUndefined();
     expect(sent.input).toEqual(full);
+  });
+
+  it('starts and resumes TTL clocks only after each response stream finishes', async () => {
+    let now = 1_000;
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-paused-ttl',
+      nurseryIdleTtlMs: 100,
+      idleTtlMs: 100,
+      hardTtlMs: 100,
+      now: () => now,
+    });
+    const firstInput = [{ role: 'user', content: [{ type: 'input_text', text: 'one' }] }];
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(firstInput)),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+
+    // The initial stream lasts far longer than every TTL, but none of that
+    // in-flight time should age the retained head.
+    now = 2_000;
+    emitTextResponse(socket, 'resp_pause_1', 'answer one');
+    await readAll(first);
+
+    now = 2_050;
+    const secondInput = [
+      ...firstInput,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'answer one' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'two' }] },
+    ];
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(secondInput)),
+    });
+    expect(fakeSockets).toHaveLength(1);
+
+    // Suspend the already-running clocks during another long response.
+    now = 3_050;
+    emitTextResponse(socket, 'resp_pause_2', 'answer two');
+    await readAll(second);
+
+    now = 3_099;
+    const thirdInput = [
+      ...secondInput,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'answer two' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'three' }] },
+    ];
+    await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(thirdInput)),
+    });
+
+    expect(fakeSockets).toHaveLength(1);
+    const sent = JSON.parse(socket.send.mock.calls[2]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_pause_2');
+  });
+
+  it('promotes a continued nursery head and preserves it past the nursery TTL at capacity', async () => {
+    let now = 1_000;
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-generations',
+      nurseryIdleTtlMs: 100,
+      idleTtlMs: 1_000,
+      hardTtlMs: 10_000,
+      maxConnections: 1,
+      now: () => now,
+    });
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'one' }] }];
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    emitTextResponse(socket, 'resp_gen_1', 'answer one');
+    await readAll(first);
+
+    now += 50;
+    const secondInput = [
+      ...input,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'answer one' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'two' }] },
+    ];
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(secondInput)),
+    });
+    expect(fakeSockets).toHaveLength(1);
+    emitTextResponse(socket, 'resp_gen_2', 'answer two');
+    await readAll(second);
+
+    now += 150;
+    const thirdInput = [
+      ...secondInput,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'answer two' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'three' }] },
+    ];
+    await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(thirdInput)),
+    });
+    expect(fakeSockets).toHaveLength(1);
+    const sent = JSON.parse(socket.send.mock.calls[2]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_gen_2');
+  });
+
+  it('expires an unpromoted head on the shorter nursery TTL', async () => {
+    let now = 1_000;
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-nursery-ttl',
+      nurseryIdleTtlMs: 100,
+      idleTtlMs: 1_000,
+      hardTtlMs: 10_000,
+      now: () => now,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'one' }] }];
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    emitTextResponse(socket, 'resp_nursery', 'answer');
+    await readAll(first);
+
+    now += 101;
+    await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([
+        ...input,
+        { role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+        { role: 'user', content: [{ type: 'input_text', text: 'two' }] },
+      ])),
+    });
+
+    expect(fakeSockets).toHaveLength(2);
+    expect(socket.close).toHaveBeenCalled();
+    expect(diagnostics.at(-1)).toMatchObject({
+      event: 'ws_head_decision',
+      decision: 'new_partition_head',
+      evictions: [{
+        connectionId: 1,
+        generation: 'nursery',
+        reason: 'nursery_idle_ttl',
+      }],
+    });
+  });
+
+  it('keeps separate nursery capacity and evicts there without displacing a full established LRU', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-generation-lru',
+      maxConnections: 1,
+      maxNurseryConnections: 1,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const mainInput = [{ role: 'user', content: [{ type: 'input_text', text: 'main' }] }];
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(mainInput)),
+    });
+    const mainSocket = lastSocket();
+    mainSocket.emit('open');
+    emitTextResponse(mainSocket, 'resp_main_1', 'main answer');
+    await readAll(first);
+
+    const mainNext = [
+      ...mainInput,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'main answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'continue main' }] },
+    ];
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(mainNext)),
+    });
+    emitTextResponse(mainSocket, 'resp_main_2', 'continued');
+    await readAll(second);
+
+    const branch = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([
+        { role: 'user', content: [{ type: 'input_text', text: 'branch one' }] },
+      ])),
+    });
+    const nurserySocket = lastSocket();
+    nurserySocket.emit('open');
+    emitTextResponse(nurserySocket, 'resp_branch_1', 'branch answer');
+    await readAll(branch);
+    expect(fakeSockets).toHaveLength(2);
+    expect(mainSocket.close).not.toHaveBeenCalled();
+    expect(nurserySocket.close).not.toHaveBeenCalled();
+
+    await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([
+        { role: 'user', content: [{ type: 'input_text', text: 'branch two' }] },
+      ])),
+    });
+
+    expect(fakeSockets).toHaveLength(3);
+    expect(nurserySocket.close).toHaveBeenCalled();
+    expect(mainSocket.close).not.toHaveBeenCalled();
+    expect(diagnostics.at(-1)).toMatchObject({
+      event: 'ws_head_decision',
+      decision: 'history_mismatch_new_head',
+      evictions: [{
+        connectionId: 2,
+        generation: 'nursery',
+        reason: 'nursery_lru_cap',
+      }],
+    });
   });
 
   it('partitions by provider, account, model, effort, and session only', () => {

@@ -328,7 +328,9 @@ var TERMINAL_EVENT_TYPES = /* @__PURE__ */ new Set(["response.completed", "respo
 var FAILURE_EVENT_TYPES = /* @__PURE__ */ new Set(["error", "response.failed", "response.incomplete"]);
 var RESPONSES_WS_HARD_TTL_MS = 55 * 6e4;
 var RESPONSES_WS_IDLE_TTL_MS = 30 * 6e4;
+var RESPONSES_WS_NURSERY_IDLE_TTL_MS = 5 * 6e4;
 var RESPONSES_WS_MAX_CONNECTIONS = 32;
+var RESPONSES_WS_MAX_NURSERY_CONNECTIONS = 8;
 var diagnosticContext = new AsyncLocalStorage();
 function withResponsesWebSocketDiagnosticContext(context, fn) {
   return diagnosticContext.run(context, fn);
@@ -342,6 +344,9 @@ function connectionCount() {
   let count = 0;
   for (const entries of connections.values()) count += entries.size;
   return count;
+}
+function connectionCountByGeneration(generation) {
+  return connectionEntries().filter((entry) => entry.generation === generation).length;
 }
 function registerEntry(entry) {
   if (!entry.key) return;
@@ -362,11 +367,10 @@ function unregisterEntry(entry) {
 function debugKey(key) {
   return key ? key.slice(0, 12) : "none";
 }
-function emitDiagnostic(options, event) {
+function emitDiagnostic(options, event, correlatedRequestId = diagnosticContext.getStore()?.requestId) {
   if (!options.onDiagnostic) return;
-  const requestId = diagnosticContext.getStore()?.requestId;
   try {
-    options.onDiagnostic({ ...event, ...requestId ? { requestId } : {} });
+    options.onDiagnostic({ ...event, ...correlatedRequestId ? { requestId: correlatedRequestId } : {} });
   } catch {
   }
 }
@@ -521,12 +525,20 @@ function continuationMismatchSummary(entry, payload) {
   const details = continuationMismatchDetails(entry, payload);
   return `full_items=${details.fullItems} expected_prefix_items=${details.expectedPrefixItems} first_mismatch=${details.firstMismatch} expected=${details.expectedKind} actual=${details.actualKind}`;
 }
-function continuationDelta(entry, payload) {
+function continuationMatch(entry, payload) {
   if (!entry.responseId || !entry.requestInput || !entry.expectedAssistant) return void 0;
   const full = inputArray(payload);
-  const prefix = [...entry.requestInput, ...entry.expectedAssistant];
-  if (full.length <= prefix.length || !arraysEqual(full.slice(0, prefix.length), prefix)) return void 0;
-  return full.slice(prefix.length);
+  const exactPrefix = [...entry.requestInput, ...entry.expectedAssistant];
+  if (full.length > exactPrefix.length && arraysEqual(full.slice(0, exactPrefix.length), exactPrefix)) {
+    return { delta: full.slice(exactPrefix.length), mode: "exact" };
+  }
+  const echoedAssistant = entry.expectedAssistant.filter((item) => conversationItemKind(item) !== "reasoning");
+  if (echoedAssistant.length === entry.expectedAssistant.length) return void 0;
+  const echoablePrefix = [...entry.requestInput, ...echoedAssistant];
+  if (full.length <= echoablePrefix.length || !arraysEqual(full.slice(0, echoablePrefix.length), echoablePrefix)) {
+    return void 0;
+  }
+  return { delta: full.slice(echoablePrefix.length), mode: "omitted_reasoning" };
 }
 function eventType(event) {
   return event && typeof event === "object" && typeof event.type === "string" ? event.type : void 0;
@@ -547,7 +559,7 @@ function responseIdFromEvent(event) {
   if (!response || typeof response !== "object") return void 0;
   return typeof response.id === "string" ? response.id : void 0;
 }
-function responseUsageDebug(event) {
+function responseUsage(event) {
   if (!event || typeof event !== "object") return void 0;
   const response = event.response;
   if (!response || typeof response !== "object") return void 0;
@@ -556,7 +568,15 @@ function responseUsageDebug(event) {
   const usageRecord = usage;
   const details = usageRecord.input_tokens_details && typeof usageRecord.input_tokens_details === "object" ? usageRecord.input_tokens_details : {};
   const number = (value) => typeof value === "number" && Number.isFinite(value) ? value : 0;
-  return `usage input_tokens=${number(usageRecord.input_tokens)} cached_tokens=${number(details.cached_tokens)} cache_write_tokens=${number(details.cache_write_tokens ?? usageRecord.cache_write_tokens)} output_tokens=${number(usageRecord.output_tokens)}`;
+  return {
+    inputTokens: number(usageRecord.input_tokens),
+    cachedTokens: number(details.cached_tokens),
+    cacheWriteTokens: number(details.cache_write_tokens ?? usageRecord.cache_write_tokens),
+    outputTokens: number(usageRecord.output_tokens)
+  };
+}
+function responseUsageDebug(usage) {
+  return `usage input_tokens=${usage.inputTokens} cached_tokens=${usage.cachedTokens} cache_write_tokens=${usage.cacheWriteTokens} output_tokens=${usage.outputTokens}`;
 }
 function outputAccumulator(ctx, index) {
   let accumulator = ctx.outputByIndex.get(index);
@@ -687,28 +707,36 @@ function failContext(entry, ctx, message) {
   deleteEntry(entry);
   closeContext(ctx);
 }
-function cleanupConnections(now, maxConnections) {
+function cleanupExpiredConnections(now) {
   const evictions = [];
   for (const entry of connectionEntries()) {
     if (entry.inFlight) continue;
-    if (now - entry.createdAt >= entry.options.hardTtlMs || now - entry.lastUsedAt >= entry.options.idleTtlMs) {
+    const idleTtlMs = entry.generation === "nursery" ? entry.options.nurseryIdleTtlMs : entry.options.idleTtlMs;
+    const ttlAgeMs = Math.max(0, now - entry.createdAt - entry.ttlPausedMs);
+    if (ttlAgeMs >= entry.options.hardTtlMs || now - entry.lastUsedAt >= idleTtlMs) {
       entry.debug("evicting expired idle connection");
       evictions.push({
         connectionId: entry.debugId,
         partitionKey: entry.key,
-        reason: now - entry.createdAt >= entry.options.hardTtlMs ? "hard_ttl" : "idle_ttl"
+        generation: entry.generation,
+        reason: ttlAgeMs >= entry.options.hardTtlMs ? "hard_ttl" : entry.generation === "nursery" ? "nursery_idle_ttl" : "idle_ttl"
       });
       deleteEntry(entry);
     }
   }
-  const idle = connectionEntries().filter((entry) => !entry.inFlight).sort((left, right) => left.lastUsedAt - right.lastUsedAt);
-  while (connectionCount() >= maxConnections && idle.length) {
+  return evictions;
+}
+function evictOldestIdleGeneration(generation, maxConnections, reason) {
+  const evictions = [];
+  const idle = connectionEntries().filter((entry) => !entry.inFlight && entry.generation === generation).sort((left, right) => left.lastUsedAt - right.lastUsedAt);
+  while (connectionCountByGeneration(generation) >= maxConnections && idle.length) {
     const oldest = idle.shift();
     if (oldest) {
       evictions.push({
         connectionId: oldest.debugId,
         partitionKey: oldest.key,
-        reason: "global_lru_cap"
+        generation: oldest.generation,
+        reason
       });
       deleteEntry(oldest);
     }
@@ -729,11 +757,18 @@ function sendContext(entry, ctx) {
   entry.socket.send(outgoing);
 }
 function dispatchContext(entry, ctx) {
+  const now = entry.options.now();
   entry.inFlight = true;
+  entry.inFlightStartedAt = now;
   entry.current = ctx;
-  entry.lastUsedAt = entry.options.now();
   ctx.entry = entry;
   if (entry.open) sendContext(entry, ctx);
+}
+function finishInFlightPeriod(entry, now) {
+  if (entry.inFlightStartedAt !== void 0) {
+    entry.ttlPausedMs += Math.max(0, now - entry.inFlightStartedAt);
+    entry.inFlightStartedAt = void 0;
+  }
 }
 function resetContextForRetry(ctx) {
   ctx.continued = false;
@@ -760,8 +795,18 @@ function handleSocketMessage(entry, data) {
   const type = eventType(event);
   captureOutput(ctx, event);
   if (type === "response.completed") {
-    const usage = responseUsageDebug(event);
-    if (usage) entry.debug(usage);
+    const usage = responseUsage(event);
+    if (usage) {
+      entry.debug(responseUsageDebug(usage));
+      ctx.emitDiagnostic?.({
+        event: "ws_response_usage",
+        connectionId: entry.debugId,
+        generation: entry.generation,
+        continued: ctx.continued,
+        retried: ctx.retried,
+        ...usage
+      });
+    }
   }
   if (isModelDataEvent(type)) ctx.emittedModelData = true;
   const previousMissing = responseErrorCode(event) === "previous_response_not_found";
@@ -780,12 +825,14 @@ function handleSocketMessage(entry, data) {
     flushPending(ctx);
     const failed = FAILURE_EVENT_TYPES.has(type ?? "");
     if (!failed && ctx.responseId && entry.persistent) {
+      const now = entry.options.now();
+      finishInFlightPeriod(entry, now);
       entry.responseId = ctx.responseId;
       entry.requestInput = inputArray(ctx.originalPayload);
       entry.expectedAssistant = expectedAssistantItems(ctx);
       entry.promptFieldHashes = ctx.promptFieldHashes;
       entry.instructionsSnapshot = ctx.instructionsSnapshot;
-      entry.lastUsedAt = entry.options.now();
+      entry.lastUsedAt = now;
       entry.inFlight = false;
       entry.current = void 0;
       entry.debug(`chain head updated; socket retained (${ctx.frameCount} frame(s))`);
@@ -809,8 +856,10 @@ function createConnection(WebSocket, wsUrl, headers, persistent, key, options, d
     key: persistent ? key : void 0,
     socket,
     persistent,
+    generation: persistent ? "nursery" : "isolated",
     open: false,
     createdAt: now,
+    ttlPausedMs: 0,
     lastUsedAt: now,
     inFlight: false,
     options,
@@ -859,7 +908,9 @@ function createResponsesWebSocketFetch(wsUrl, log8, options = {}) {
   const resolvedOptions = {
     hardTtlMs: options.hardTtlMs ?? RESPONSES_WS_HARD_TTL_MS,
     idleTtlMs: options.idleTtlMs ?? RESPONSES_WS_IDLE_TTL_MS,
+    nurseryIdleTtlMs: options.nurseryIdleTtlMs ?? Math.min(RESPONSES_WS_NURSERY_IDLE_TTL_MS, options.idleTtlMs ?? RESPONSES_WS_IDLE_TTL_MS),
     maxConnections: options.maxConnections ?? RESPONSES_WS_MAX_CONNECTIONS,
+    maxNurseryConnections: options.maxNurseryConnections ?? RESPONSES_WS_MAX_NURSERY_CONNECTIONS,
     now: options.now ?? Date.now
   };
   return async (_input, init) => {
@@ -877,13 +928,15 @@ function createResponsesWebSocketFetch(wsUrl, log8, options = {}) {
     const promptFingerprint = responsesWebSocketPromptFingerprint(payload);
     const promptFieldHashes = responsesWebSocketPromptFieldHashes(payload);
     const instructionsSnapshot = instructionsFromPayload(payload);
+    const diagnosticRequestId = diagnosticContext.getStore()?.requestId;
     const now = resolvedOptions.now();
-    const evictions = cleanupConnections(now, resolvedOptions.maxConnections);
+    const evictions = cleanupExpiredConnections(now);
     const candidates = partitionKey ? connectionEntries(partitionKey) : [];
     const idleCandidates = candidates.filter((entry) => !entry.inFlight);
-    const matches = idleCandidates.map((entry) => ({ entry, delta: continuationDelta(entry, payload) })).filter((match) => match.delta !== void 0).sort((left, right) => left.delta.length - right.delta.length);
+    const matches = idleCandidates.map((entry) => ({ entry, match: continuationMatch(entry, payload) })).filter((candidate) => candidate.match !== void 0).sort((left, right) => left.match.delta.length - right.match.delta.length || (left.match.mode === right.match.mode ? 0 : left.match.mode === "exact" ? -1 : 1));
     let selected = matches[0]?.entry;
-    const selectedDelta = matches[0]?.delta;
+    const selectedMatch = matches[0]?.match;
+    const selectedDelta = selectedMatch?.delta;
     const diagnosticEntry = selected ?? [...idleCandidates].sort((left, right) => right.lastUsedAt - left.lastUsedAt)[0] ?? candidates[0];
     debug(
       `lookup key=${debugKey(partitionKey)} prompt=${debugKey(promptFingerprint)} hit=${candidates.length > 0} heads=${candidates.length} active_connections=${connectionCount()}`
@@ -897,12 +950,24 @@ function createResponsesWebSocketFetch(wsUrl, log8, options = {}) {
     let sendPayload = payload;
     let continued = false;
     let persistent = Boolean(partitionKey);
+    let promotedConnectionId;
     let decision;
     if (selected && selectedDelta) {
       sendPayload = { ...payload, input: selectedDelta, previous_response_id: selected.responseId };
       continued = true;
+      if (selected.generation === "nursery") {
+        evictions.push(...evictOldestIdleGeneration(
+          "established",
+          resolvedOptions.maxConnections,
+          "established_lru_cap"
+        ));
+        selected.generation = "established";
+        promotedConnectionId = selected.debugId;
+      }
       decision = "continuation";
-      debug(`continuing chain with ${selectedDelta.length} incremental input item(s)`);
+      debug(
+        `continuing chain with ${selectedDelta.length} incremental input item(s)` + (selectedMatch.mode === "omitted_reasoning" ? " after accepting omitted reasoning" : "")
+      );
     } else if (candidates.some((entry) => entry.inFlight)) {
       selected = void 0;
       persistent = false;
@@ -917,6 +982,13 @@ function createResponsesWebSocketFetch(wsUrl, log8, options = {}) {
       decision = "new_partition_head";
     } else {
       decision = "unpartitioned_socket";
+    }
+    if (!selected && persistent) {
+      evictions.push(...evictOldestIdleGeneration(
+        "nursery",
+        resolvedOptions.maxNurseryConnections,
+        "nursery_lru_cap"
+      ));
     }
     const requestInput = inputArray(payload);
     emitDiagnostic(options, {
@@ -943,20 +1015,30 @@ function createResponsesWebSocketFetch(wsUrl, log8, options = {}) {
       idleCandidateCount: idleCandidates.length,
       matchingCandidateCount: matches.length,
       activeConnectionCount: connectionCount(),
+      nurseryConnectionCount: connectionCountByGeneration("nursery"),
+      establishedConnectionCount: connectionCountByGeneration("established"),
       maxConnections: resolvedOptions.maxConnections,
+      maxNurseryConnections: resolvedOptions.maxNurseryConnections,
       selectedConnectionId: selected?.debugId,
+      selectedGeneration: selected?.generation,
+      continuationMatchMode: selectedMatch?.mode,
+      promotedConnectionId,
       createdConnectionId: selected ? void 0 : nextConnectionDebugId,
+      createdGeneration: selected ? void 0 : persistent ? "nursery" : "isolated",
       incrementalInputItems: selectedDelta?.length,
       heads: candidates.map((entry) => ({
         connectionId: entry.debugId,
+        generation: entry.generation,
         inFlight: entry.inFlight,
-        ageMs: Math.max(0, now - entry.createdAt),
+        ageMs: Math.max(0, now - entry.createdAt - entry.ttlPausedMs),
+        physicalAgeMs: Math.max(0, now - entry.createdAt),
+        ttlPausedMs: entry.ttlPausedMs,
         idleMs: Math.max(0, now - entry.lastUsedAt),
         promptChanges: changedPromptFields(entry.promptFieldHashes, promptFieldHashes),
         mismatch: continuationMismatchDetails(entry, payload)
       })),
       evictions
-    });
+    }, diagnosticRequestId);
     let activeContext;
     const stream = new ReadableStream({
       start(controller) {
@@ -975,6 +1057,7 @@ function createResponsesWebSocketFetch(wsUrl, log8, options = {}) {
           emittedModelData: false,
           outputByIndex: /* @__PURE__ */ new Map(),
           outputIndexByItemId: /* @__PURE__ */ new Map(),
+          emitDiagnostic: options.onDiagnostic ? (event) => emitDiagnostic(options, event, diagnosticRequestId) : void 0,
           createReplacement: () => createConnection(
             WebSocket,
             wsUrl,
@@ -12946,4 +13029,4 @@ export {
   quitClaudeAppGracefully,
   launchOrRestartClaudeApp
 };
-//# sourceMappingURL=chunk-M2FSQM37.js.map
+//# sourceMappingURL=chunk-C7NNNSAI.js.map

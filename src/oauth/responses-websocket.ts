@@ -18,7 +18,9 @@ const FAILURE_EVENT_TYPES = new Set(['error', 'response.failed', 'response.incom
 
 export const RESPONSES_WS_HARD_TTL_MS = 55 * 60_000;
 export const RESPONSES_WS_IDLE_TTL_MS = 30 * 60_000;
+export const RESPONSES_WS_NURSERY_IDLE_TTL_MS = 5 * 60_000;
 export const RESPONSES_WS_MAX_CONNECTIONS = 32;
+export const RESPONSES_WS_MAX_NURSERY_CONNECTIONS = 8;
 
 export interface ResponsesWebSocketFetchOptions {
   providerId?: string;
@@ -26,7 +28,9 @@ export interface ResponsesWebSocketFetchOptions {
   /** Test overrides; production callers should leave these unset. */
   hardTtlMs?: number;
   idleTtlMs?: number;
+  nurseryIdleTtlMs?: number;
   maxConnections?: number;
+  maxNurseryConnections?: number;
   now?: () => number;
   /** Opt-in structured transport diagnostics; never receives conversation content. */
   onDiagnostic?: (event: ResponsesWebSocketDiagnosticEvent) => void;
@@ -77,6 +81,7 @@ interface RequestContext {
   emittedModelData: boolean;
   outputByIndex: Map<number, OutputAccumulator>;
   outputIndexByItemId: Map<string, number>;
+  emitDiagnostic?: (event: { event: string } & Record<string, unknown>) => void;
   entry?: ConnectionEntry;
   createReplacement: () => ConnectionEntry;
   abortCleanup?: () => void;
@@ -87,8 +92,11 @@ interface ConnectionEntry {
   key?: string;
   socket: WsWebSocket;
   persistent: boolean;
+  generation: 'nursery' | 'established' | 'isolated';
   open: boolean;
   createdAt: number;
+  ttlPausedMs: number;
+  inFlightStartedAt?: number;
   lastUsedAt: number;
   inFlight: boolean;
   current?: RequestContext;
@@ -97,7 +105,7 @@ interface ConnectionEntry {
   responseId?: string;
   requestInput?: unknown[];
   expectedAssistant?: unknown[];
-  options: Required<Pick<ResponsesWebSocketFetchOptions, 'hardTtlMs' | 'idleTtlMs' | 'maxConnections' | 'now'>>;
+  options: Required<Pick<ResponsesWebSocketFetchOptions, 'hardTtlMs' | 'idleTtlMs' | 'nurseryIdleTtlMs' | 'maxConnections' | 'now'>>;
   debug: (message: string) => void;
 }
 
@@ -105,6 +113,9 @@ interface ConnectionEntry {
 // once: rewinds/branches, hidden title-generation requests, and stop hooks can
 // all share its model/effort/cache key. Retain each head and select by exact
 // conversation prefix instead of letting the newest branch replace the rest.
+// New heads live in a separately capped nursery LRU until their first reuse;
+// established heads therefore never consume nursery capacity, and one-shot
+// nursery traffic never consumes the established LRU's 32 reserved slots.
 const connections = new Map<string, Set<ConnectionEntry>>();
 let nextConnectionDebugId = 1;
 
@@ -116,6 +127,10 @@ function connectionCount(): number {
   let count = 0;
   for (const entries of connections.values()) count += entries.size;
   return count;
+}
+
+function connectionCountByGeneration(generation: ConnectionEntry['generation']): number {
+  return connectionEntries().filter(entry => entry.generation === generation).length;
 }
 
 function registerEntry(entry: ConnectionEntry): void {
@@ -143,11 +158,11 @@ function debugKey(key: string | undefined): string {
 function emitDiagnostic(
   options: ResponsesWebSocketFetchOptions,
   event: { event: string } & Record<string, unknown>,
+  correlatedRequestId = diagnosticContext.getStore()?.requestId,
 ): void {
   if (!options.onDiagnostic) return;
-  const requestId = diagnosticContext.getStore()?.requestId;
   try {
-    options.onDiagnostic({ ...event, ...(requestId ? { requestId } : {}) });
+    options.onDiagnostic({ ...event, ...(correlatedRequestId ? { requestId: correlatedRequestId } : {}) });
   } catch {
     // Diagnostics must never alter inference behavior.
   }
@@ -321,6 +336,13 @@ function arraysEqual(left: unknown[], right: unknown[]): boolean {
   return canonicalJson(normalizeToolCallJson(left)) === canonicalJson(normalizeToolCallJson(right));
 }
 
+type ContinuationMatchMode = 'exact' | 'omitted_reasoning';
+
+interface ContinuationMatch {
+  delta: unknown[];
+  mode: ContinuationMatchMode;
+}
+
 function conversationItemKind(value: unknown): string {
   if (!value || typeof value !== 'object') return typeof value;
   const record = value as JsonObject;
@@ -363,12 +385,26 @@ function continuationMismatchSummary(entry: ConnectionEntry, payload: JsonObject
     + `first_mismatch=${details.firstMismatch} expected=${details.expectedKind} actual=${details.actualKind}`;
 }
 
-function continuationDelta(entry: ConnectionEntry, payload: JsonObject): unknown[] | undefined {
+function continuationMatch(entry: ConnectionEntry, payload: JsonObject): ContinuationMatch | undefined {
   if (!entry.responseId || !entry.requestInput || !entry.expectedAssistant) return undefined;
   const full = inputArray(payload);
-  const prefix = [...entry.requestInput, ...entry.expectedAssistant];
-  if (full.length <= prefix.length || !arraysEqual(full.slice(0, prefix.length), prefix)) return undefined;
-  return full.slice(prefix.length);
+  const exactPrefix = [...entry.requestInput, ...entry.expectedAssistant];
+  if (full.length > exactPrefix.length && arraysEqual(full.slice(0, exactPrefix.length), exactPrefix)) {
+    return { delta: full.slice(exactPrefix.length), mode: 'exact' };
+  }
+
+  // Claude does not always echo an OpenAI reasoning item back into its
+  // Anthropic-format history, even though it faithfully echoes the function
+  // call or assistant text that followed it. The omitted reasoning already
+  // belongs to previous_response_id, so it is safe to continue only when the
+  // remaining response items still match exactly.
+  const echoedAssistant = entry.expectedAssistant.filter(item => conversationItemKind(item) !== 'reasoning');
+  if (echoedAssistant.length === entry.expectedAssistant.length) return undefined;
+  const echoablePrefix = [...entry.requestInput, ...echoedAssistant];
+  if (full.length <= echoablePrefix.length || !arraysEqual(full.slice(0, echoablePrefix.length), echoablePrefix)) {
+    return undefined;
+  }
+  return { delta: full.slice(echoablePrefix.length), mode: 'omitted_reasoning' };
 }
 
 function eventType(event: unknown): string | undefined {
@@ -395,7 +431,14 @@ function responseIdFromEvent(event: unknown): string | undefined {
   return typeof (response as JsonObject).id === 'string' ? (response as JsonObject).id as string : undefined;
 }
 
-function responseUsageDebug(event: unknown): string | undefined {
+interface ResponseUsage {
+  inputTokens: number;
+  cachedTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
+}
+
+function responseUsage(event: unknown): ResponseUsage | undefined {
   if (!event || typeof event !== 'object') return undefined;
   const response = (event as JsonObject).response;
   if (!response || typeof response !== 'object') return undefined;
@@ -406,10 +449,19 @@ function responseUsageDebug(event: unknown): string | undefined {
     ? usageRecord.input_tokens_details as JsonObject
     : {};
   const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : 0;
-  return `usage input_tokens=${number(usageRecord.input_tokens)} `
-    + `cached_tokens=${number(details.cached_tokens)} `
-    + `cache_write_tokens=${number(details.cache_write_tokens ?? usageRecord.cache_write_tokens)} `
-    + `output_tokens=${number(usageRecord.output_tokens)}`;
+  return {
+    inputTokens: number(usageRecord.input_tokens),
+    cachedTokens: number(details.cached_tokens),
+    cacheWriteTokens: number(details.cache_write_tokens ?? usageRecord.cache_write_tokens),
+    outputTokens: number(usageRecord.output_tokens),
+  };
+}
+
+function responseUsageDebug(usage: ResponseUsage): string {
+  return `usage input_tokens=${usage.inputTokens} `
+    + `cached_tokens=${usage.cachedTokens} `
+    + `cache_write_tokens=${usage.cacheWriteTokens} `
+    + `output_tokens=${usage.outputTokens}`;
 }
 
 function outputAccumulator(ctx: RequestContext, index: number): OutputAccumulator {
@@ -550,30 +602,47 @@ function failContext(entry: ConnectionEntry, ctx: RequestContext, message: strin
   closeContext(ctx);
 }
 
-function cleanupConnections(now: number, maxConnections: number): Array<Record<string, unknown>> {
+function cleanupExpiredConnections(now: number): Array<Record<string, unknown>> {
   const evictions: Array<Record<string, unknown>> = [];
   for (const entry of connectionEntries()) {
     if (entry.inFlight) continue;
-    if (now - entry.createdAt >= entry.options.hardTtlMs || now - entry.lastUsedAt >= entry.options.idleTtlMs) {
+    const idleTtlMs = entry.generation === 'nursery'
+      ? entry.options.nurseryIdleTtlMs
+      : entry.options.idleTtlMs;
+    const ttlAgeMs = Math.max(0, now - entry.createdAt - entry.ttlPausedMs);
+    if (ttlAgeMs >= entry.options.hardTtlMs || now - entry.lastUsedAt >= idleTtlMs) {
       entry.debug('evicting expired idle connection');
       evictions.push({
         connectionId: entry.debugId,
         partitionKey: entry.key,
-        reason: now - entry.createdAt >= entry.options.hardTtlMs ? 'hard_ttl' : 'idle_ttl',
+        generation: entry.generation,
+        reason: ttlAgeMs >= entry.options.hardTtlMs
+          ? 'hard_ttl'
+          : entry.generation === 'nursery' ? 'nursery_idle_ttl' : 'idle_ttl',
       });
       deleteEntry(entry);
     }
   }
+  return evictions;
+}
+
+function evictOldestIdleGeneration(
+  generation: 'nursery' | 'established',
+  maxConnections: number,
+  reason: 'nursery_lru_cap' | 'established_lru_cap',
+): Array<Record<string, unknown>> {
+  const evictions: Array<Record<string, unknown>> = [];
   const idle = connectionEntries()
-    .filter(entry => !entry.inFlight)
+    .filter(entry => !entry.inFlight && entry.generation === generation)
     .sort((left, right) => left.lastUsedAt - right.lastUsedAt);
-  while (connectionCount() >= maxConnections && idle.length) {
+  while (connectionCountByGeneration(generation) >= maxConnections && idle.length) {
     const oldest = idle.shift();
     if (oldest) {
       evictions.push({
         connectionId: oldest.debugId,
         partitionKey: oldest.key,
-        reason: 'global_lru_cap',
+        generation: oldest.generation,
+        reason,
       });
       deleteEntry(oldest);
     }
@@ -608,11 +677,19 @@ function sendContext(entry: ConnectionEntry, ctx: RequestContext): void {
 }
 
 function dispatchContext(entry: ConnectionEntry, ctx: RequestContext): void {
+  const now = entry.options.now();
   entry.inFlight = true;
+  entry.inFlightStartedAt = now;
   entry.current = ctx;
-  entry.lastUsedAt = entry.options.now();
   ctx.entry = entry;
   if (entry.open) sendContext(entry, ctx);
+}
+
+function finishInFlightPeriod(entry: ConnectionEntry, now: number): void {
+  if (entry.inFlightStartedAt !== undefined) {
+    entry.ttlPausedMs += Math.max(0, now - entry.inFlightStartedAt);
+    entry.inFlightStartedAt = undefined;
+  }
 }
 
 function resetContextForRetry(ctx: RequestContext): void {
@@ -642,8 +719,18 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   const type = eventType(event);
   captureOutput(ctx, event);
   if (type === 'response.completed') {
-    const usage = responseUsageDebug(event);
-    if (usage) entry.debug(usage);
+    const usage = responseUsage(event);
+    if (usage) {
+      entry.debug(responseUsageDebug(usage));
+      ctx.emitDiagnostic?.({
+        event: 'ws_response_usage',
+        connectionId: entry.debugId,
+        generation: entry.generation,
+        continued: ctx.continued,
+        retried: ctx.retried,
+        ...usage,
+      });
+    }
   }
   if (isModelDataEvent(type)) ctx.emittedModelData = true;
 
@@ -665,12 +752,14 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
     flushPending(ctx);
     const failed = FAILURE_EVENT_TYPES.has(type ?? '');
     if (!failed && ctx.responseId && entry.persistent) {
+      const now = entry.options.now();
+      finishInFlightPeriod(entry, now);
       entry.responseId = ctx.responseId;
       entry.requestInput = inputArray(ctx.originalPayload);
       entry.expectedAssistant = expectedAssistantItems(ctx);
       entry.promptFieldHashes = ctx.promptFieldHashes;
       entry.instructionsSnapshot = ctx.instructionsSnapshot;
-      entry.lastUsedAt = entry.options.now();
+      entry.lastUsedAt = now;
       entry.inFlight = false;
       entry.current = undefined;
       entry.debug(`chain head updated; socket retained (${ctx.frameCount} frame(s))`);
@@ -700,8 +789,10 @@ function createConnection(
     key: persistent ? key : undefined,
     socket,
     persistent,
+    generation: persistent ? 'nursery' : 'isolated',
     open: false,
     createdAt: now,
+    ttlPausedMs: 0,
     lastUsedAt: now,
     inFlight: false,
     options,
@@ -756,7 +847,10 @@ export function createResponsesWebSocketFetch(
   const resolvedOptions = {
     hardTtlMs: options.hardTtlMs ?? RESPONSES_WS_HARD_TTL_MS,
     idleTtlMs: options.idleTtlMs ?? RESPONSES_WS_IDLE_TTL_MS,
+    nurseryIdleTtlMs: options.nurseryIdleTtlMs
+      ?? Math.min(RESPONSES_WS_NURSERY_IDLE_TTL_MS, options.idleTtlMs ?? RESPONSES_WS_IDLE_TTL_MS),
     maxConnections: options.maxConnections ?? RESPONSES_WS_MAX_CONNECTIONS,
+    maxNurseryConnections: options.maxNurseryConnections ?? RESPONSES_WS_MAX_NURSERY_CONNECTIONS,
     now: options.now ?? Date.now,
   };
 
@@ -777,18 +871,21 @@ export function createResponsesWebSocketFetch(
     const promptFingerprint = responsesWebSocketPromptFingerprint(payload);
     const promptFieldHashes = responsesWebSocketPromptFieldHashes(payload);
     const instructionsSnapshot = instructionsFromPayload(payload);
+    const diagnosticRequestId = diagnosticContext.getStore()?.requestId;
     const now = resolvedOptions.now();
-    const evictions = cleanupConnections(now, resolvedOptions.maxConnections);
+    const evictions = cleanupExpiredConnections(now);
 
     const candidates = partitionKey ? connectionEntries(partitionKey) : [];
     const idleCandidates = candidates.filter(entry => !entry.inFlight);
     const matches = idleCandidates
-      .map(entry => ({ entry, delta: continuationDelta(entry, payload) }))
-      .filter((match): match is { entry: ConnectionEntry; delta: unknown[] } => match.delta !== undefined)
+      .map(entry => ({ entry, match: continuationMatch(entry, payload) }))
+      .filter((candidate): candidate is { entry: ConnectionEntry; match: ContinuationMatch } => candidate.match !== undefined)
       // Prefer the longest matching history, which produces the smallest delta.
-      .sort((left, right) => left.delta.length - right.delta.length);
+      .sort((left, right) => left.match.delta.length - right.match.delta.length
+        || (left.match.mode === right.match.mode ? 0 : left.match.mode === 'exact' ? -1 : 1));
     let selected: ConnectionEntry | undefined = matches[0]?.entry;
-    const selectedDelta = matches[0]?.delta;
+    const selectedMatch = matches[0]?.match;
+    const selectedDelta = selectedMatch?.delta;
     const diagnosticEntry = selected
       ?? [...idleCandidates].sort((left, right) => right.lastUsedAt - left.lastUsedAt)[0]
       ?? candidates[0];
@@ -804,13 +901,26 @@ export function createResponsesWebSocketFetch(
     let sendPayload = payload;
     let continued = false;
     let persistent = Boolean(partitionKey);
+    let promotedConnectionId: number | undefined;
     let decision: 'continuation' | 'parallel_isolated' | 'history_mismatch_new_head' | 'new_partition_head' | 'unpartitioned_socket';
 
     if (selected && selectedDelta) {
       sendPayload = { ...payload, input: selectedDelta, previous_response_id: selected.responseId };
       continued = true;
+      if (selected.generation === 'nursery') {
+        evictions.push(...evictOldestIdleGeneration(
+          'established',
+          resolvedOptions.maxConnections,
+          'established_lru_cap',
+        ));
+        selected.generation = 'established';
+        promotedConnectionId = selected.debugId;
+      }
       decision = 'continuation';
-      debug(`continuing chain with ${selectedDelta.length} incremental input item(s)`);
+      debug(
+        `continuing chain with ${selectedDelta.length} incremental input item(s)`
+        + (selectedMatch.mode === 'omitted_reasoning' ? ' after accepting omitted reasoning' : ''),
+      );
     } else if (candidates.some(entry => entry.inFlight)) {
       // Claude auxiliary requests can share a session id. Never multiplex or
       // queue a request whose lineage cannot yet include the active response.
@@ -830,6 +940,14 @@ export function createResponsesWebSocketFetch(
       decision = 'new_partition_head';
     } else {
       decision = 'unpartitioned_socket';
+    }
+
+    if (!selected && persistent) {
+      evictions.push(...evictOldestIdleGeneration(
+        'nursery',
+        resolvedOptions.maxNurseryConnections,
+        'nursery_lru_cap',
+      ));
     }
 
     const requestInput = inputArray(payload);
@@ -861,20 +979,30 @@ export function createResponsesWebSocketFetch(
       idleCandidateCount: idleCandidates.length,
       matchingCandidateCount: matches.length,
       activeConnectionCount: connectionCount(),
+      nurseryConnectionCount: connectionCountByGeneration('nursery'),
+      establishedConnectionCount: connectionCountByGeneration('established'),
       maxConnections: resolvedOptions.maxConnections,
+      maxNurseryConnections: resolvedOptions.maxNurseryConnections,
       selectedConnectionId: selected?.debugId,
+      selectedGeneration: selected?.generation,
+      continuationMatchMode: selectedMatch?.mode,
+      promotedConnectionId,
       createdConnectionId: selected ? undefined : nextConnectionDebugId,
+      createdGeneration: selected ? undefined : persistent ? 'nursery' : 'isolated',
       incrementalInputItems: selectedDelta?.length,
       heads: candidates.map(entry => ({
         connectionId: entry.debugId,
+        generation: entry.generation,
         inFlight: entry.inFlight,
-        ageMs: Math.max(0, now - entry.createdAt),
+        ageMs: Math.max(0, now - entry.createdAt - entry.ttlPausedMs),
+        physicalAgeMs: Math.max(0, now - entry.createdAt),
+        ttlPausedMs: entry.ttlPausedMs,
         idleMs: Math.max(0, now - entry.lastUsedAt),
         promptChanges: changedPromptFields(entry.promptFieldHashes, promptFieldHashes),
         mismatch: continuationMismatchDetails(entry, payload),
       })),
       evictions,
-    });
+    }, diagnosticRequestId);
 
     let activeContext: RequestContext | undefined;
     const stream = new ReadableStream<Uint8Array>({
@@ -894,6 +1022,9 @@ export function createResponsesWebSocketFetch(
           emittedModelData: false,
           outputByIndex: new Map(),
           outputIndexByItemId: new Map(),
+          emitDiagnostic: options.onDiagnostic
+            ? event => emitDiagnostic(options, event, diagnosticRequestId)
+            : undefined,
           createReplacement: () => createConnection(
             WebSocket as unknown as WebSocketConstructor,
             wsUrl,
