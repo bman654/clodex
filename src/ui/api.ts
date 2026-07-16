@@ -778,8 +778,19 @@ async function handleStartServer(req: IncomingMessage, res: ServerResponse): Pro
     const body = JSON.parse(await readBody(req)) as Omit<Partial<GatewayServerStartRequest>, 'mode'> & {
       mode?: unknown;
     };
+
+    // Optional port override, valid in every mode. Absent/undefined → default (17645) downstream.
+    let port: number | undefined;
+    if (body.port !== undefined) {
+      const parsed = Number(body.port);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+        sendJson(res, 400, { error: 'port must be an integer between 1 and 65535' }); return;
+      }
+      port = parsed;
+    }
+
     if (body.mode === 'http-proxy') {
-      const result = await startGatewayServer({ mode: 'http-proxy' });
+      const result = await startGatewayServer({ mode: 'http-proxy', port });
       sendJson(res, 200, result);
       return;
     }
@@ -805,6 +816,7 @@ async function handleStartServer(req: IncomingMessage, res: ServerResponse): Pro
       passwordMode: body.passwordMode === 'saved' ? 'saved' : 'new',
       password: typeof body.password === 'string' ? body.password : undefined,
       savePassword: Boolean(body.savePassword),
+      port,
     };
     const result = await startGatewayServer(request);
     sendJson(res, 200, result);

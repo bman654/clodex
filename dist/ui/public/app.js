@@ -42,6 +42,7 @@ const state = {
       passwordMode: 'new',        // 'saved' | 'new'
       password: '',
       savePassword: false,
+      port: '',                   // '' means default 17645
     },
   },
 };
@@ -2142,6 +2143,29 @@ function renderServerNetworkOptions() {
   `;
 }
 
+// Empty port is allowed (means default 17645); otherwise must be an integer 1–65535.
+function serverPortValid(f) {
+  const raw = (f.port ?? '').trim();
+  if (raw === '') return true;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 1 && n <= 65535;
+}
+
+function renderServerPortField(f) {
+  const invalid = !serverPortValid(f);
+  return `
+    <div class="server-field">
+      <div class="server-field-label">Port</div>
+      <input type="number" class="key-input" min="1" max="65535" placeholder="17645"
+             value="${escapeHtml(f.port)}" oninput="setServerPort(this.value)">
+      <div class="server-field-hint">
+        Default 17645. Set a different port to run this alongside another relay-ai server instance.
+      </div>
+      ${invalid ? '<div class="key-feedback error">Port must be a whole number between 1 and 65535.</div>' : ''}
+    </div>
+  `;
+}
+
 function renderServerSetup(s) {
   const f = s.form;
   const modePicker = `
@@ -2155,6 +2179,7 @@ function renderServerSetup(s) {
   `;
 
   if (f.mode === 'http-proxy') {
+    const proxyCanStart = serverPortValid(f) && !s.starting;
     return `
       <div class="server-setup">
         ${modePicker}
@@ -2163,8 +2188,9 @@ function renderServerSetup(s) {
           <p>Keeps Claude Code's normal Anthropic login and forwards first-party models unchanged. Compatible global favorites are available by typing their <code>relay:&lt;provider&gt;:&lt;model&gt;</code> name in <code>/model</code>.</p>
           <p>The proxy listens only on this machine. After it starts, use the environment variables shown below and leave <code>ANTHROPIC_BASE_URL</code> unset.</p>
         </div>
+        ${renderServerPortField(f)}
         ${s.error ? `<div class="key-feedback error server-start-error">${escapeHtml(s.error)}</div>` : ''}
-        <button class="btn btn-primary server-start-btn" ${s.starting ? 'disabled' : ''} onclick="submitServerStart()">
+        <button class="btn btn-primary server-start-btn" ${proxyCanStart ? '' : 'disabled'} onclick="submitServerStart()">
           ${s.starting ? 'Starting…' : 'Start HTTP Proxy'}
         </button>
       </div>
@@ -2174,11 +2200,13 @@ function renderServerSetup(s) {
   const specific = f.expose === 'specific';
   const providersOk = f.expose === 'favorites' || (specific && f.exposedProviders.length > 0);
   const passwordOk = f.listenMode !== 'network' || f.passwordMode === 'saved' || f.password.trim().length > 0;
-  const canStart = providersOk && passwordOk && !s.starting;
+  const portOk = serverPortValid(f);
+  const canStart = providersOk && passwordOk && portOk && !s.starting;
 
   let hint = '';
   if (!providersOk) hint = 'Select at least one provider to expose.';
   else if (!passwordOk) hint = 'Enter a server password for network mode.';
+  else if (!portOk) hint = 'Enter a valid port (1–65535) or leave it blank for 17645.';
 
   return `
     <div class="server-setup">
@@ -2211,6 +2239,8 @@ function renderServerSetup(s) {
         ])}
         ${f.listenMode === 'network' ? renderServerNetworkOptions() : ''}
       </div>
+
+      ${renderServerPortField(f)}
 
       ${s.error ? `<div class="key-feedback error server-start-error">${escapeHtml(s.error)}</div>` : ''}
 
@@ -2414,14 +2444,21 @@ function setServerSavePassword(checked) {
   state.server.form.savePassword = checked;
 }
 
+function setServerPort(value) {
+  state.server.form.port = value;
+}
+
 async function submitServerStart() {
   const f = state.server.form;
   state.server.starting = true;
   state.server.error = null;
   renderServerPanel();
 
+  const portRaw = (f.port ?? '').trim();
+  const port = portRaw === '' ? undefined : Number(portRaw);
+
   const body = f.mode === 'http-proxy'
-    ? { mode: 'http-proxy' }
+    ? { mode: 'http-proxy', ...(port !== undefined ? { port } : {}) }
     : {
         mode: 'gateway',
         favoritesOnly: f.expose === 'favorites',
@@ -2432,6 +2469,7 @@ async function submitServerStart() {
         passwordMode: f.passwordMode,
         password: f.password,
         savePassword: f.savePassword,
+        ...(port !== undefined ? { port } : {}),
       };
 
   let result;
@@ -2493,6 +2531,7 @@ window.setServerListenMode = setServerListenMode;
 window.setServerPasswordMode = setServerPasswordMode;
 window.setServerPassword = setServerPassword;
 window.setServerSavePassword = setServerSavePassword;
+window.setServerPort = setServerPort;
 window.submitServerStart = submitServerStart;
 window.stopServerGateway = stopServerGateway;
 window.copyServerValue = copyServerValue;

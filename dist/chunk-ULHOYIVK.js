@@ -141,6 +141,7 @@ var CONFLICTING_ENV_VARS = [
 ];
 var OPENCODE_CACHE_PATH = join(homedir(), ".cache", "opencode", "models.json");
 var MAX_MODEL_CATALOG = 20;
+var DEFAULT_SERVER_PORT = 17645;
 var VERTEX_ANTHROPIC_NPM = "@ai-sdk/google-vertex/anthropic";
 function classifyModelFormat(modelId, providerNpm) {
   if (providerNpm === "@ai-sdk/anthropic") return "anthropic";
@@ -9602,12 +9603,12 @@ function waitForShutdown() {
     process.once("SIGTERM", done);
   });
 }
-async function runHttpProxyServerCommand(debug = false, webSocketDiagnostics = false) {
+async function runHttpProxyServerCommand(debug = false, webSocketDiagnostics = false, port) {
   const webSocketDiagnosticsLogPath = webSocketDiagnostics ? getSessionLogPath("server-websocket-diagnostics", "jsonl") : void 0;
   let started;
   try {
     started = await startConfiguredHttpProxy(
-      17645,
+      port ?? DEFAULT_SERVER_PORT,
       debug,
       getInferenceRequestLogPath(),
       void 0,
@@ -10804,7 +10805,7 @@ async function runServerWizard() {
     promptForPassword: true
   };
 }
-async function runVertexServerCommand() {
+async function runVertexServerCommand(port) {
   relayIntro("Vertex Gateway");
   const vertexConfig = buildVertexRuntimeConfig();
   if (!vertexConfig) {
@@ -10826,7 +10827,7 @@ async function runVertexServerCommand() {
   const inferenceLogPath = getInferenceRequestLogPath();
   const server = await startServer({
     host,
-    port: 17645,
+    port: port ?? DEFAULT_SERVER_PORT,
     apiKey: "vertex-local",
     serverPassword,
     catalog: createVertexModelCatalog(models),
@@ -10888,10 +10889,10 @@ async function runServerCommand(options = {}) {
       p5.log.error("--http-proxy is a local-only server mode and cannot be combined with gateway server options.");
       return 1;
     }
-    return runHttpProxyServerCommand(false, options.wsDiagnostics);
+    return runHttpProxyServerCommand(false, options.wsDiagnostics, options.port);
   }
   if (options.vertex) {
-    return runVertexServerCommand();
+    return runVertexServerCommand(options.port);
   }
   const apiKey = await resolveServerUpstreamApiKey();
   if (!apiKey) {
@@ -10969,7 +10970,7 @@ async function runServerCommand(options = {}) {
   const webSocketDiagnosticsLogPath = options.wsDiagnostics ? getSessionLogPath("server-websocket-diagnostics", "jsonl") : void 0;
   const server = await startServer({
     host,
-    port: 17645,
+    port: options.port ?? DEFAULT_SERVER_PORT,
     apiKey,
     serverPassword,
     catalog: createGatewayModelCatalog(models, gateway),
@@ -13153,6 +13154,7 @@ async function launchOrRestartClaudeApp(prompt = "Restart Claude Desktop to appl
 export {
   BACKENDS,
   MAX_MODEL_CATALOG,
+  DEFAULT_SERVER_PORT,
   VERTEX_ANTHROPIC_NPM,
   VERSION,
   requestOpenAiDeviceCode,
@@ -13364,4 +13366,4 @@ export {
   quitClaudeAppGracefully,
   launchOrRestartClaudeApp
 };
-//# sourceMappingURL=chunk-K634BCLH.js.map
+//# sourceMappingURL=chunk-ULHOYIVK.js.map

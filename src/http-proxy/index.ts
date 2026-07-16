@@ -1,6 +1,7 @@
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import { loadPreferences } from '../config.js';
+import { DEFAULT_SERVER_PORT } from '../constants.js';
 import { fetchProviderCatalog, resolveLocalProviderApiKey } from '../provider-catalog.js';
 import { providersForTarget } from '../target-compatibility.js';
 import type { ProxyRoute } from '../proxy.js';
@@ -124,14 +125,14 @@ function waitForShutdown(): Promise<void> {
   });
 }
 
-export async function runHttpProxyServerCommand(debug = false, webSocketDiagnostics = false): Promise<number> {
+export async function runHttpProxyServerCommand(debug = false, webSocketDiagnostics = false, port?: number): Promise<number> {
   const webSocketDiagnosticsLogPath = webSocketDiagnostics
     ? getSessionLogPath('server-websocket-diagnostics', 'jsonl')
     : undefined;
   let started: Awaited<ReturnType<typeof startConfiguredHttpProxy>>;
   try {
     started = await startConfiguredHttpProxy(
-      17645,
+      port ?? DEFAULT_SERVER_PORT,
       debug,
       getInferenceRequestLogPath(),
       undefined,

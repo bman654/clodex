@@ -154,6 +154,8 @@ export interface ParsedArgs {
   serverMaskGatewayIds?: boolean;
   /** One-run network password for `relay-ai server`. */
   serverPassword?: string;
+  /** One-run TCP port override for `relay-ai server` (gateway and --http-proxy modes). */
+  serverPort?: number;
   /** Run Claude/server through the selective api.anthropic.com HTTP proxy. */
   httpProxy?: boolean;
   /** Opt-in server request-envelope and WebSocket head diagnostics. */

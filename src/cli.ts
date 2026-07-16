@@ -219,6 +219,17 @@ export function parseArgs(args: string[]): ParsedArgs {
         parsed.serverPassword = consumed.value;
         i = consumed.next;
       }
+      else if (arg === '--port' || arg.startsWith('--port=')) {
+        const consumed = consumeServerOptionValue(arg, rest, i, '--port', parsed);
+        if (!consumed) return parsed;
+        const port = Number(consumed.value);
+        if (!Number.isInteger(port) || port < 1 || port > 65535) {
+          parsed.error = '--port must be an integer between 1 and 65535';
+          return parsed;
+        }
+        parsed.serverPort = port;
+        i = consumed.next;
+      }
       else if (!parsed.error) parsed.error = `Unknown server option: ${arg}`;
     }
     return parsed;
@@ -615,6 +626,7 @@ ${pc.bold('Options:')}
   --mask-gateway-ids           Mask provider names in Anthropic model ids
   --no-mask-gateway-ids        Keep provider names in Anthropic model ids
   --password <value>           One-run network-mode server password
+  --port <1-65535>             Listen port (default 17645); applies to all modes
   --http-proxy                 Selective api.anthropic.com HTTP proxy (local only)
   --ws-diagnostics             Log sanitized request envelopes and WebSocket head decisions
   --vertex                     Use Claude on Google Vertex AI
@@ -627,7 +639,7 @@ ${pc.bold('Behavior:')}
   Network quick mode requires a saved password or --password.
   --vertex: Anthropic-compatible gateway to Claude on Google Vertex AI using
   local gcloud Application Default Credentials (no OpenCode API key).
-  Binds to port 17645. Network mode asks for a server password.
+  Binds to port 17645 (override with --port). Network mode asks for a server password.
 
 ${pc.bold('HTTP proxy env:')}
   Start relay-ai server --http-proxy, then export the HTTPS_PROXY, HTTP_PROXY,
@@ -1715,6 +1727,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       maskGatewayIds: parsed.serverMaskGatewayIds,
       password: parsed.serverPassword,
       wsDiagnostics: parsed.serverWsDiagnostics,
+      port: parsed.serverPort,
     });
   }
 

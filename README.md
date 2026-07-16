@@ -322,6 +322,13 @@ unset ANTHROPIC_BASE_URL
 claude
 ```
 
+Both server modes bind port **17645** by default, so to run a transparent HTTP proxy and a [registry gateway](#registry-gateway-relay-ai-server) at the same time, give one of them a different port with `--port`:
+
+```bash
+relay-ai server --http-proxy                # proxy on 17645
+relay-ai server --quick --port 18099        # gateway on 18099 (e.g. for an OpenAI-compatible client)
+```
+
 HTTP proxy model names use a positive namespace and come from compatible global favorites:
 
 ```text
@@ -376,6 +383,7 @@ Any one-run server option also skips the wizard:
 | `--free-only` / `--no-free-only` | Enable or disable the free/free-access model filter for this run |
 | `--mask-gateway-ids` / `--no-mask-gateway-ids` | Enable or disable discovery id masking for this run |
 | `--password <value>` | One-run password for network mode when you do not want to use a saved password |
+| `--port <1-65535>` | Listen on a port other than the default **17645** (works in every server mode, including `--http-proxy` and `--vertex`) |
 
 Non-interactive shells (scripts, services, CI, pipes) use quick mode automatically. If quick mode resolves to network mode, relay-ai uses `--password` first, then a saved server password; without either it exits with a clear error instead of prompting.
 

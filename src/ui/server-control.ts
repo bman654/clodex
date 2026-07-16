@@ -3,7 +3,7 @@
 // Stops automatically when the UI process exits, same as closing a terminal running
 // `relay-ai server` with Ctrl+C.
 
-import { BACKENDS, MAX_MODEL_CATALOG } from '../constants.js';
+import { BACKENDS, MAX_MODEL_CATALOG, DEFAULT_SERVER_PORT } from '../constants.js';
 import {
   getSavedServerPassword,
   getServerExposedProviders,
@@ -56,10 +56,14 @@ export interface GatewayServerStartRequest {
   passwordMode?: 'saved' | 'new';
   password?: string;
   savePassword?: boolean;
+  /** TCP port override; defaults to DEFAULT_SERVER_PORT (17645). */
+  port?: number;
 }
 
 export interface HttpProxyServerStartRequest {
   mode: 'http-proxy';
+  /** TCP port override; defaults to DEFAULT_SERVER_PORT (17645). */
+  port?: number;
 }
 
 export type ServerStartRequest = GatewayServerStartRequest | HttpProxyServerStartRequest;
@@ -245,7 +249,7 @@ export function startGatewayServer(
 async function doStartGatewayServer(
   req: ServerStartRequest,
 ): Promise<{ ok: true; status: ServerStatusPayload } | { ok: false; error: string }> {
-  if (req.mode === 'http-proxy') return doStartHttpProxyServer();
+  if (req.mode === 'http-proxy') return doStartHttpProxyServer(req.port);
 
   if (req.listenMode !== 'local' && req.listenMode !== 'network') {
     return { ok: false, error: 'Invalid listen mode.' };
@@ -316,11 +320,12 @@ async function doStartGatewayServer(
   const gateway = req.maskGatewayIds ? { maskGatewayIds: true as const } : undefined;
   const inferenceLogPath = getInferenceRequestLogPath();
 
+  const port = req.port ?? DEFAULT_SERVER_PORT;
   let handle: ServerHandle;
   try {
     handle = await startServer({
       host,
-      port: 17645,
+      port,
       apiKey,
       serverPassword,
       catalog: createGatewayModelCatalog(models, gateway),
@@ -331,7 +336,7 @@ async function doStartGatewayServer(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     const message = code === 'EADDRINUSE'
-      ? 'Port 17645 is already in use — stop the other relay-ai server instance first.'
+      ? `Port ${port} is already in use — choose a different port or stop the other relay-ai server instance first.`
       : `Failed to start server: ${err instanceof Error ? err.message : String(err)}`;
     return { ok: false, error: message };
   }
@@ -367,16 +372,17 @@ function proxyModelRows(loaded: LoadedHttpProxyRoutes): HttpProxyModelRow[] {
   ];
 }
 
-async function doStartHttpProxyServer(): Promise<
+async function doStartHttpProxyServer(portOverride?: number): Promise<
   { ok: true; status: ServerStatusPayload } | { ok: false; error: string }
 > {
+  const port = portOverride ?? DEFAULT_SERVER_PORT;
   let started: Awaited<ReturnType<typeof startConfiguredHttpProxy>>;
   try {
-    started = await startConfiguredHttpProxy(17645);
+    started = await startConfiguredHttpProxy(port);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     const message = code === 'EADDRINUSE'
-      ? 'Port 17645 is already in use — stop the other relay-ai server instance first.'
+      ? `Port ${port} is already in use — choose a different port or stop the other relay-ai server instance first.`
       : `Failed to start HTTP proxy: ${err instanceof Error ? err.message : String(err)}`;
     return { ok: false, error: message };
   }

@@ -19,7 +19,7 @@ import {
   setServerListenMode,
   setServerMaskGatewayIds,
 } from '../config.js';
-import { BACKENDS, MAX_MODEL_CATALOG } from '../constants.js';
+import { BACKENDS, MAX_MODEL_CATALOG, DEFAULT_SERVER_PORT } from '../constants.js';
 import {
   fetchProviderCatalog,
   localProvidersToServerModels,
@@ -81,6 +81,8 @@ export interface ServerCommandOptions {
   maskGatewayIds?: boolean;
   password?: string;
   wsDiagnostics?: boolean;
+  /** TCP port override; defaults to DEFAULT_SERVER_PORT (17645). Applies to gateway, vertex, and http-proxy modes. */
+  port?: number;
 }
 
 export function getLocalIps(): Array<{ name: string; address: string }> {
@@ -356,7 +358,7 @@ async function runServerWizard(): Promise<{ runConfig: ServerRunConfig; promptFo
   };
 }
 
-async function runVertexServerCommand(): Promise<number> {
+async function runVertexServerCommand(port?: number): Promise<number> {
   relayIntro('Vertex Gateway');
 
   const vertexConfig = buildVertexRuntimeConfig();
@@ -384,7 +386,7 @@ async function runVertexServerCommand(): Promise<number> {
 
   const server = await startServer({
     host,
-    port: 17645,
+    port: port ?? DEFAULT_SERVER_PORT,
     apiKey: 'vertex-local',
     serverPassword,
     catalog: createVertexModelCatalog(models),
@@ -459,10 +461,10 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
       p.log.error('--http-proxy is a local-only server mode and cannot be combined with gateway server options.');
       return 1;
     }
-    return runHttpProxyServerCommand(false, options.wsDiagnostics);
+    return runHttpProxyServerCommand(false, options.wsDiagnostics, options.port);
   }
   if (options.vertex) {
-    return runVertexServerCommand();
+    return runVertexServerCommand(options.port);
   }
 
   const apiKey = await resolveServerUpstreamApiKey();
@@ -555,7 +557,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     : undefined;
   const server = await startServer({
     host,
-    port: 17645,
+    port: options.port ?? DEFAULT_SERVER_PORT,
     apiKey,
     serverPassword,
     catalog: createGatewayModelCatalog(models, gateway),

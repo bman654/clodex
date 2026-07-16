@@ -63,6 +63,29 @@ describe('parseArgs', () => {
     });
   });
 
+  it('parses server --port with space and = forms', () => {
+    expect(parseArgs(['server', '--port', '18000'])).toMatchObject({
+      command: 'server',
+      serverPort: 18000,
+    });
+    expect(parseArgs(['server', '--port=9090'])).toMatchObject({
+      command: 'server',
+      serverPort: 9090,
+    });
+    expect(parseArgs(['server', '--http-proxy', '--port', '18000'])).toMatchObject({
+      command: 'server',
+      httpProxy: true,
+      serverPort: 18000,
+    });
+  });
+
+  it('rejects invalid server --port values', () => {
+    expect(parseArgs(['server', '--port', '0']).error).toBeTruthy();
+    expect(parseArgs(['server', '--port', '70000']).error).toBeTruthy();
+    expect(parseArgs(['server', '--port', 'abc']).error).toBeTruthy();
+    expect(parseArgs(['server', '--port']).error).toBeTruthy();
+  });
+
   it('passes claude -c through unchanged', () => {
     expect(parseArgs(['claude', '-c']).claudeArgs).toEqual(['-c']);
   });
@@ -241,9 +264,9 @@ describe('parseArgs', () => {
   });
 
   it('rejects unknown server options', () => {
-    expect(parseArgs(['server', '--port', '1234'])).toMatchObject({
+    expect(parseArgs(['server', '--bogus', '1234'])).toMatchObject({
       command: 'server',
-      error: 'Unknown server option: --port',
+      error: 'Unknown server option: --bogus',
     });
   });
 

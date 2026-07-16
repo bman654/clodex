@@ -59,6 +59,9 @@ export const OPENCODE_CACHE_PATH = join(homedir(), '.cache', 'opencode', 'models
 /** Max models in favorites list and mid-session /model switch catalog. */
 export const MAX_MODEL_CATALOG = 20;
 
+/** Default TCP port for `relay-ai server` (gateway and --http-proxy modes). Override with --port. */
+export const DEFAULT_SERVER_PORT = 17645;
+
 /** Vercel AI SDK package for Anthropic Claude models on Google Vertex AI (ADC auth). */
 export const VERTEX_ANTHROPIC_NPM = '@ai-sdk/google-vertex/anthropic';
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import {
   BACKENDS,
+  DEFAULT_SERVER_PORT,
   MAX_MODEL_CATALOG,
   VERSION,
   addCustomEndpointProvider,
@@ -66,7 +67,7 @@ import {
   summarizeServerProviders,
   validateCustomEndpointUrl,
   writeSecureLogLine
-} from "./chunk-K634BCLH.js";
+} from "./chunk-ULHOYIVK.js";
 import {
   __toCommonJS,
   init_provider_templates,
@@ -436,7 +437,7 @@ function startGatewayServer(req) {
   return startInFlight;
 }
 async function doStartGatewayServer(req) {
-  if (req.mode === "http-proxy") return doStartHttpProxyServer();
+  if (req.mode === "http-proxy") return doStartHttpProxyServer(req.port);
   if (req.listenMode !== "local" && req.listenMode !== "network") {
     return { ok: false, error: "Invalid listen mode." };
   }
@@ -494,11 +495,12 @@ async function doStartGatewayServer(req) {
   const host = req.listenMode === "network" ? "0.0.0.0" : "127.0.0.1";
   const gateway = req.maskGatewayIds ? { maskGatewayIds: true } : void 0;
   const inferenceLogPath = getInferenceRequestLogPath();
+  const port = req.port ?? DEFAULT_SERVER_PORT;
   let handle;
   try {
     handle = await startServer({
       host,
-      port: 17645,
+      port,
       apiKey,
       serverPassword,
       catalog: createGatewayModelCatalog(models, gateway),
@@ -508,7 +510,7 @@ async function doStartGatewayServer(req) {
     });
   } catch (err) {
     const code = err?.code;
-    const message = code === "EADDRINUSE" ? "Port 17645 is already in use \u2014 stop the other relay-ai server instance first." : `Failed to start server: ${err instanceof Error ? err.message : String(err)}`;
+    const message = code === "EADDRINUSE" ? `Port ${port} is already in use \u2014 choose a different port or stop the other relay-ai server instance first.` : `Failed to start server: ${err instanceof Error ? err.message : String(err)}`;
     return { ok: false, error: message };
   }
   running = {
@@ -539,13 +541,14 @@ function proxyModelRows(loaded) {
     }))
   ];
 }
-async function doStartHttpProxyServer() {
+async function doStartHttpProxyServer(portOverride) {
+  const port = portOverride ?? DEFAULT_SERVER_PORT;
   let started;
   try {
-    started = await startConfiguredHttpProxy(17645);
+    started = await startConfiguredHttpProxy(port);
   } catch (err) {
     const code = err?.code;
-    const message = code === "EADDRINUSE" ? "Port 17645 is already in use \u2014 stop the other relay-ai server instance first." : `Failed to start HTTP proxy: ${err instanceof Error ? err.message : String(err)}`;
+    const message = code === "EADDRINUSE" ? `Port ${port} is already in use \u2014 choose a different port or stop the other relay-ai server instance first.` : `Failed to start HTTP proxy: ${err instanceof Error ? err.message : String(err)}`;
     return { ok: false, error: message };
   }
   running = {
@@ -1208,8 +1211,17 @@ async function handleGetServerProviders(res) {
 async function handleStartServer(req, res) {
   try {
     const body = JSON.parse(await readBody(req));
+    let port;
+    if (body.port !== void 0) {
+      const parsed = Number(body.port);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535) {
+        sendJson(res, 400, { error: "port must be an integer between 1 and 65535" });
+        return;
+      }
+      port = parsed;
+    }
     if (body.mode === "http-proxy") {
-      const result2 = await startGatewayServer({ mode: "http-proxy" });
+      const result2 = await startGatewayServer({ mode: "http-proxy", port });
       sendJson(res, 200, result2);
       return;
     }
@@ -1238,7 +1250,8 @@ async function handleStartServer(req, res) {
       listenMode: body.listenMode,
       passwordMode: body.passwordMode === "saved" ? "saved" : "new",
       password: typeof body.password === "string" ? body.password : void 0,
-      savePassword: Boolean(body.savePassword)
+      savePassword: Boolean(body.savePassword),
+      port
     };
     const result = await startGatewayServer(request);
     sendJson(res, 200, result);
@@ -1477,4 +1490,4 @@ export {
   resolveUiShutdownDecision,
   runUiCommand
 };
-//# sourceMappingURL=ui-command-EFSBLJFO.js.map
+//# sourceMappingURL=ui-command-6FKA6XXV.js.map
