@@ -22,3 +22,6 @@ vertex-models.json
 .gemini/
 .planning/
 ANTIGRAVITY-DEBUG-SESSION.md
+
+# Personal model alias config for the custom-model patcher (edit the example)
+scripts/patch-custom-models/model-config.json

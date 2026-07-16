@@ -339,6 +339,8 @@ relay-ai models --alias luna=relay:openai-oauth:gpt-5.6-luna
 
 Then `/model luna` routes to that favorite. `relay-ai models --list` prints aliases before their canonical `relay:` names. Remove one with `relay-ai models --unalias luna`. Alias names may contain letters, numbers, dots, underscores, and hyphens.
 
+Because these names aren't built in, Claude Code treats them as unknown: they're rejected by the Agent tool's `model` argument, don't appear in the interactive `/model` picker, and are assumed to be 200k-context. The optional [`scripts/patch-custom-models`](scripts/patch-custom-models/) tool patches your installed Claude Code binary (via [tweakcc](https://github.com/Piebald-AI/tweakcc)) so chosen `relay:` models are accepted everywhere a built-in alias is, show up in the picker, and report their real context window. It's a convenience — `/model <name>` works without it.
+
 The proxy decrypts only TLS connections to `api.anthropic.com`; every other HTTPS host is blind-tunneled. On `/v1/messages`, an exact configured `relay:` model goes through the existing AI SDK adapter with that provider's credential. Every other model and every other Anthropic path goes to Anthropic with the original request body bytes and authorization header. Anthropic credentials are never persisted, reused, or forwarded to a model provider. The generated CA and private key live under `~/.relay-ai/http-proxy/`; the private files are mode `0600`. Session mode also preserves an existing `NODE_EXTRA_CA_CERTS` bundle by combining it with Relay's CA.
 
 ### Registry gateway (`relay-ai server`)
