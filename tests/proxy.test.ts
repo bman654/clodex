@@ -193,6 +193,106 @@ describe('SDK anonymous route handling', () => {
   });
 });
 
+describe('catalog model aliases', () => {
+  it('routes alias names to their target route without rewriting the requested model id', async () => {
+    const defaultRoute: ProxyRoute = {
+      aliasId: 'relay:test:default-model',
+      realModelId: 'default-model',
+      displayName: 'Default Model',
+      upstreamUrl: '',
+      apiKey: '',
+      modelFormat: 'openai',
+      npm: 'missing-sdk-provider-that-must-not-load',
+      providerId: 'test-provider',
+    };
+    const aliasTarget: ProxyRoute = {
+      aliasId: 'relay:openai-oauth:gpt-5.6-sol',
+      realModelId: 'gpt-5.6-sol',
+      displayName: 'GPT-5.6 Sol',
+      upstreamUrl: 'https://upstream-sol.example',
+      apiKey: 'provider-key',
+      modelFormat: 'anthropic',
+      providerId: 'openai-oauth',
+    };
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ id: 'msg_1', type: 'message', role: 'assistant', model: 'gpt-5.6-sol', content: [], usage: { input_tokens: 1, output_tokens: 1 } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const handle = await startProxyCatalog(
+      [defaultRoute, aliasTarget],
+      defaultRoute.aliasId,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      [{ name: 'sol', routeId: aliasTarget.aliasId }],
+    );
+
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: 'sol',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+
+      // Resolved to the alias target (not the default route's missing SDK → 502)
+      expect(res.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      expect(String(url)).toContain('upstream-sol.example');
+      expect(JSON.parse(init.body as string).model).toBe('gpt-5.6-sol');
+
+      // GET /v1/models/<alias> resolves too
+      const modelLookup = await new Promise<number>((resolve, reject) => {
+        http.get(
+          { hostname: '127.0.0.1', port: handle.port, path: '/v1/models/sol' },
+          res2 => { res2.resume(); resolve(res2.statusCode ?? 0); },
+        ).on('error', reject);
+      });
+      expect(modelLookup).toBe(200);
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('ignores aliases whose target route is absent', async () => {
+    const route: ProxyRoute = {
+      aliasId: 'relay:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: '',
+      modelFormat: 'openai',
+      npm: 'missing-sdk-provider-that-must-not-load',
+      providerId: 'test-provider',
+    };
+    const handle = await startProxyCatalog(
+      [route],
+      route.aliasId,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      [{ name: 'ghost', routeId: 'relay:test:not-a-route' }],
+    );
+
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        http.get(
+          { hostname: '127.0.0.1', port: handle.port, path: '/v1/models/ghost' },
+          res2 => { res2.resume(); resolve(res2.statusCode ?? 0); },
+        ).on('error', reject);
+      });
+      expect(status).toBe(404);
+    } finally {
+      handle.close();
+    }
+  });
+});
+
 describe('token counting', () => {
   it('returns a local estimate for translated routes without loading or invoking the provider', async () => {
     const route: ProxyRoute = {

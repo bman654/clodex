@@ -678,6 +678,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       options.inferenceLogPath,
       options.debugLogPath,
       options.webSocketDiagnosticsLogPath,
+      options.modelAliases,
     );
   }
 
@@ -744,10 +745,13 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       }
 
       if (route && adapter) {
-        const adapterBody = parsed?.model === route.aliasId
-          ? rawBody
-          : Buffer.from(JSON.stringify({ ...parsed, model: route.aliasId }));
-        await forwardToAdapter(req, res, adapterBody, adapter, messagesEndpoint === 'messages' && options.inferenceLogPath
+        // Forward the body untouched — the adapter resolves alias names itself
+        // (it is built from the same routes + modelAliases as routesById above)
+        // and must echo the client's requested model id in response messages.
+        // Claude Code resolves context windows from the response model field, so
+        // substituting the canonical route id here breaks its window lookup for
+        // patched/alias model ids (wrong auto-compact threshold → agent death).
+        await forwardToAdapter(req, res, rawBody, adapter, messagesEndpoint === 'messages' && options.inferenceLogPath
           ? {
               logPath: options.inferenceLogPath,
               requestId,

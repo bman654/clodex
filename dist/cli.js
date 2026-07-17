@@ -174,7 +174,7 @@ import {
   writeProxyLifecycleLog,
   writeSecureLogLine,
   zenRegistryStub
-} from "./chunk-ULHOYIVK.js";
+} from "./chunk-KIWWWNZP.js";
 import {
   filterTemplates,
   init_provider_templates,
@@ -12536,7 +12536,7 @@ Error: ${parsed.error}
       console.log("Usage: relay-ai ui [--trace]\n\nOpen the settings UI in your browser.");
       return 0;
     }
-    const { runUiCommand } = await import("./ui-command-6FKA6XXV.js");
+    const { runUiCommand } = await import("./ui-command-XXQBTWA5.js");
     return runUiCommand({ trace: parsed.trace });
   }
   if (parsed.command === "models") {

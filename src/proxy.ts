@@ -244,6 +244,12 @@ function lookupRoute(byAlias: Map<string, ProxyRoute>, id: string): ProxyRoute |
   return undefined;
 }
 
+/** Short alias name → route id, resolvable in request bodies alongside route aliasIds. */
+export interface ProxyModelAlias {
+  name: string;
+  routeId: string;
+}
+
 /** Multi-model proxy: routes each request by body.model to the correct upstream. */
 export function startProxyCatalog(
   routes: ProxyRoute[],
@@ -252,6 +258,7 @@ export function startProxyCatalog(
   inferenceLogPath?: string,
   debugLogPath?: string,
   webSocketDiagnosticsLogPath?: string,
+  modelAliases?: ProxyModelAlias[],
 ): Promise<ProxyHandle> {
   const proxyToken = randomUUID();
   silenceSdkWarnings();
@@ -261,6 +268,10 @@ export function startProxyCatalog(
   }
 
   const byAlias = new Map(routes.map(r => [r.aliasId, r]));
+  for (const alias of modelAliases ?? []) {
+    const route = byAlias.get(alias.routeId);
+    if (route && !byAlias.has(alias.name)) byAlias.set(alias.name, route);
+  }
   const defaultRoute = byAlias.get(defaultAliasId) ?? routes[0]!;
 
   const plog = makeProxyLog(debug, debugLogPath);

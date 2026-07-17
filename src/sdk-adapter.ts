@@ -74,6 +74,7 @@ export interface AnthropicRequest {
   thinking?: { type?: string; budget_tokens?: number };
   output_config?: { effort?: string };
   metadata?: { user_id?: unknown };
+  diagnostics?: unknown;
 }
 
 export interface TranslateRequestOptions {
@@ -166,7 +167,7 @@ export interface SdkCallParams {
   messages: ModelMessage[];
   allowSystemInMessages?: boolean;
   tools?: Record<string, ReturnType<typeof tool>>;
-  toolChoice?: 'auto' | 'required' | { type: 'tool'; toolName: string };
+  toolChoice?: 'auto' | 'none' | 'required' | { type: 'tool'; toolName: string };
   maxOutputTokens?: number;
   temperature?: number;
   providerOptions?: Record<string, Record<string, unknown>>;
@@ -402,6 +403,33 @@ export function translateToolChoice(tc: AnthropicRequest['tool_choice']): SdkCal
   return undefined;
 }
 
+const COMPACT_TEXT_ONLY_START = 'CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.';
+const COMPACT_TEXT_ONLY_END = 'REMINDER: Do NOT call any tools. Respond with plain text only';
+
+/**
+ * Claude Code's structured-output agents inherit the terminal StructuredOutput
+ * tool when they fork a reactive compaction turn, even though the compact prompt
+ * requires plain text and rejects every tool call. OpenAI-family models tend to
+ * call that highly salient tool, leaving Claude Code with an empty summary.
+ *
+ * Detect only the observed compact envelope. If Claude Code changes it, this
+ * deliberately fails open rather than stripping tools from an ordinary request.
+ */
+function isClaudeCodeStructuredOutputCompactRequest(body: AnthropicRequest): boolean {
+  if (body.diagnostics !== undefined) return false;
+  if (!body.tools?.some(candidate => candidate.name === 'StructuredOutput')) return false;
+
+  const finalMessage = body.messages.at(-1);
+  if (!finalMessage || finalMessage.role !== 'user') return false;
+  const text = typeof finalMessage.content === 'string'
+    ? finalMessage.content
+    : finalMessage.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text ?? '')
+      .join('\n');
+  return text.includes(COMPACT_TEXT_ONLY_START) && text.includes(COMPACT_TEXT_ONLY_END);
+}
+
 export function translateRequest(
   body: AnthropicRequest,
   npm: string,
@@ -418,7 +446,10 @@ export function translateRequest(
   const systemText = baseSystem?.trim() || (options?.openAiOAuth ? 'You are a coding assistant.' : undefined);
 
   // resolveUpstreamTools uses the shared proxy types; the adapter keeps its own
-  // minimal request shapes, so cast at this boundary.
+  // minimal request shapes, so cast at this boundary. Keep compact-request tool
+  // definitions intact for prompt-cache prefix reuse; toolChoice='none' below
+  // makes them unavailable at the provider API rather than by prompt compliance.
+  const compactRequest = isClaudeCodeStructuredOutputCompactRequest(body);
   let upstreamTools = resolveUpstreamTools(
     body.tools as unknown as AnthropicToolDefinition[] | undefined,
     messages as unknown as AnthropicRequestMessage[],
@@ -473,7 +504,7 @@ export function translateRequest(
     ],
     allowSystemInMessages: true,
     tools: translateTools(upstreamTools.length ? upstreamTools : undefined),
-    toolChoice: translateToolChoice(body.tool_choice),
+    toolChoice: compactRequest ? 'none' : translateToolChoice(body.tool_choice),
     maxOutputTokens: options?.openAiOAuth ? undefined : body.max_tokens,
     temperature: body.temperature,
     providerOptions,

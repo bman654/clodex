@@ -388,6 +388,62 @@ describe('translateRequest', () => {
     }, '@ai-sdk/xai');
     expect(params.tools && Object.keys(params.tools)).toEqual(['Read']);
   });
+
+  it('disables tools for Claude Code compact requests without changing ordinary structured output', () => {
+    const compactInstruction = [
+      'CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.',
+      'Your task is to create a detailed summary of the conversation so far.',
+      'REMINDER: Do NOT call any tools. Respond with plain text only.',
+    ].join('\n');
+    const tools = [
+      { name: 'Read', input_schema: { type: 'object' } },
+      { name: 'StructuredOutput', input_schema: { type: 'object' } },
+    ];
+    const compactBody = {
+      model: 'gpt-5.6-sol',
+      messages: [{
+        role: 'user' as const,
+        content: [
+          { type: 'tool_result', tool_use_id: 'call_1', content: 'file body' },
+          { type: 'text', text: compactInstruction },
+        ],
+      }],
+      tools,
+      tool_choice: { type: 'any' as const },
+    };
+
+    const compact = translateRequest(compactBody, '@ai-sdk/openai', { openAiOAuth: true });
+    expect(compact.tools && Object.keys(compact.tools)).toEqual(['Read', 'StructuredOutput']);
+    expect(compact.toolChoice).toBe('none');
+    expect(compact.messages.map(message => message.role)).toEqual(['tool', 'user']);
+    expect(compact.messages[1]).toMatchObject({
+      role: 'user',
+      content: [{ type: 'text', text: compactInstruction }],
+    });
+    expect(tools).toEqual([
+      { name: 'Read', input_schema: { type: 'object' } },
+      { name: 'StructuredOutput', input_schema: { type: 'object' } },
+    ]);
+
+    const partialMarker = translateRequest({
+      ...compactBody,
+      messages: [{
+        role: 'user',
+        content: compactInstruction.replace(/\nREMINDER:.*$/, ''),
+      }],
+    }, '@ai-sdk/openai', { openAiOAuth: true });
+    expect(partialMarker.tools && Object.keys(partialMarker.tools)).toEqual(['Read', 'StructuredOutput']);
+    expect(partialMarker.toolChoice).toBe('required');
+
+    const ordinary = translateRequest({
+      ...compactBody,
+      diagnostics: { previous_message_id: null },
+    }, '@ai-sdk/openai', { openAiOAuth: true });
+    expect(ordinary.tools && Object.keys(ordinary.tools)).toEqual(['Read', 'StructuredOutput']);
+    expect(ordinary.toolChoice).toBe('required');
+    expect(compact.providerOptions?.openai?.promptCacheKey)
+      .toBe(ordinary.providerOptions?.openai?.promptCacheKey);
+  });
 });
 
 describe('generateAnthropicResponse', () => {

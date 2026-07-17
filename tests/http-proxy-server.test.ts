@@ -613,8 +613,10 @@ describe('selective HTTP proxy', () => {
       await once(aliasSocket, 'close');
 
       expect(anthropicRequests).toBe(0);
+      // The alias name reaches the adapter unrewritten: the adapter resolves it
+      // via its own modelAliases and echoes it back as the response model id.
       expect(JSON.parse(adapterBody)).toMatchObject({
-        model: 'relay:groq:llama-3.3-70b',
+        model: 'llama',
         messages: [],
       });
       const aliasEntries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));

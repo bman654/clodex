@@ -6500,11 +6500,22 @@ function translateToolChoice(tc) {
   if (tc.type === "tool" && tc.name) return { type: "tool", toolName: tc.name };
   return void 0;
 }
+var COMPACT_TEXT_ONLY_START = "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.";
+var COMPACT_TEXT_ONLY_END = "REMINDER: Do NOT call any tools. Respond with plain text only";
+function isClaudeCodeStructuredOutputCompactRequest(body) {
+  if (body.diagnostics !== void 0) return false;
+  if (!body.tools?.some((candidate) => candidate.name === "StructuredOutput")) return false;
+  const finalMessage = body.messages.at(-1);
+  if (!finalMessage || finalMessage.role !== "user") return false;
+  const text4 = typeof finalMessage.content === "string" ? finalMessage.content : finalMessage.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n");
+  return text4.includes(COMPACT_TEXT_ONLY_START) && text4.includes(COMPACT_TEXT_ONLY_END);
+}
 function translateRequest2(body, npm, options) {
   const messages = body.messages ?? [];
   annotateToolNames(messages);
   const baseSystem = systemToString(body.system, options?.openAiOAuth === true);
   const systemText = baseSystem?.trim() || (options?.openAiOAuth ? "You are a coding assistant." : void 0);
+  const compactRequest = isClaudeCodeStructuredOutputCompactRequest(body);
   let upstreamTools = resolveUpstreamTools(
     body.tools,
     messages
@@ -6541,7 +6552,7 @@ function translateRequest2(body, npm, options) {
     ],
     allowSystemInMessages: true,
     tools: translateTools3(upstreamTools.length ? upstreamTools : void 0),
-    toolChoice: translateToolChoice(body.tool_choice),
+    toolChoice: compactRequest ? "none" : translateToolChoice(body.tool_choice),
     maxOutputTokens: options?.openAiOAuth ? void 0 : body.max_tokens,
     temperature: body.temperature,
     providerOptions
@@ -7058,13 +7069,17 @@ function lookupRoute(byAlias, id) {
   }
   return void 0;
 }
-function startProxyCatalog(routes, defaultAliasId, debug = false, inferenceLogPath, debugLogPath, webSocketDiagnosticsLogPath) {
+function startProxyCatalog(routes, defaultAliasId, debug = false, inferenceLogPath, debugLogPath, webSocketDiagnosticsLogPath, modelAliases) {
   const proxyToken = randomUUID5();
   silenceSdkWarnings();
   if (routes.length === 0) {
     return Promise.reject(new Error("Proxy catalog requires at least one route"));
   }
   const byAlias = new Map(routes.map((r) => [r.aliasId, r]));
+  for (const alias of modelAliases ?? []) {
+    const route = byAlias.get(alias.routeId);
+    if (route && !byAlias.has(alias.name)) byAlias.set(alias.name, route);
+  }
   const defaultRoute = byAlias.get(defaultAliasId) ?? routes[0];
   const plog = makeProxyLog(debug, debugLogPath);
   const onRejection = (reason) => {
@@ -9332,7 +9347,8 @@ async function startHttpProxy(options) {
       options.debug,
       options.inferenceLogPath,
       options.debugLogPath,
-      options.webSocketDiagnosticsLogPath
+      options.webSocketDiagnosticsLogPath,
+      options.modelAliases
     );
   }
   const mitmServer = https.createServer({
@@ -9385,8 +9401,7 @@ async function startHttpProxy(options) {
         });
       }
       if (route && adapter) {
-        const adapterBody = parsed?.model === route.aliasId ? rawBody : Buffer.from(JSON.stringify({ ...parsed, model: route.aliasId }));
-        await forwardToAdapter(req, res, adapterBody, adapter, messagesEndpoint === "messages" && options.inferenceLogPath ? {
+        await forwardToAdapter(req, res, rawBody, adapter, messagesEndpoint === "messages" && options.inferenceLogPath ? {
           logPath: options.inferenceLogPath,
           requestId,
           modelId: typeof parsed?.model === "string" ? parsed.model : "unknown",
@@ -13366,4 +13381,4 @@ export {
   quitClaudeAppGracefully,
   launchOrRestartClaudeApp
 };
-//# sourceMappingURL=chunk-ULHOYIVK.js.map
+//# sourceMappingURL=chunk-KIWWWNZP.js.map
