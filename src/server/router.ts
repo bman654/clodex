@@ -345,9 +345,10 @@ async function handleAnthropicMessages(
     if (npmMaxTools !== undefined && toolCount > npmMaxTools) {
       plog(`tools truncated: ${toolCount} → ${npmMaxTools} (provider limit)`);
     }
+    const openAiOAuth = model.npm === '@ai-sdk/openai' && model.authType === 'oauth';
     const params = sdkTranslateRequest(body as unknown as AnthropicRequest, model.npm!, {
       defaultEffort: anthropicEffortFromRequest(body as AnthropicRequest) ? undefined : model.defaultEffort,
-      openAiOAuth: model.npm === '@ai-sdk/openai' && model.authType === 'oauth',
+      openAiOAuth,
       claudeSessionId,
       reasoningMetadata: {
         providerId: model.providerId,
@@ -388,9 +389,12 @@ async function handleAnthropicMessages(
         if (!res.headersSent) writeStreamChunk('');
         res.end();
       } else {
+        // ChatGPT/Codex OAuth routes only ever answer as SSE (the WebSocket fetch
+        // returns text/event-stream unconditionally), so stream internally and
+        // collect the result instead of issuing a non-streaming SDK request.
         const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
           { requestId, claudeSessionId },
-          () => generateAnthropicResponse(languageModel, params, responseModelId),
+          () => generateAnthropicResponse(languageModel, params, responseModelId, { forceStream: openAiOAuth }),
         );
         sendJson(res, 200, anthropicResponse);
       }
@@ -497,7 +501,8 @@ async function handleOpenAIChatCompletions(
   });
   const baseURL = model.modelFormat === 'anthropic' ? model.baseUrl : model.apiBaseUrl;
   const languageModel = await getOrInitLanguageModel(modelCache, model, npm, baseURL, apiKey);
-  const params = translateOpenAiRequest(body as unknown as OpenAiRequest);
+  const openAiOAuth = npm === '@ai-sdk/openai' && model.authType === 'oauth';
+  const params = translateOpenAiRequest(body as unknown as OpenAiRequest, { openAiOAuth });
   const clientWantsStream = Boolean(body.stream);
   const responseModelId = getResponseModelId(body.model, model, options);
 
@@ -519,7 +524,10 @@ async function handleOpenAIChatCompletions(
       if (!res.headersSent) writeStreamChunk('');
       res.end();
     } else {
-      const response = await generateOpenAiResponse(languageModel, params, responseModelId);
+      // ChatGPT/Codex OAuth routes only ever answer as SSE (the WebSocket fetch
+      // returns text/event-stream unconditionally), so stream internally and
+      // collect the result instead of issuing a non-streaming SDK request.
+      const response = await generateOpenAiResponse(languageModel, params, responseModelId, { forceStream: openAiOAuth });
       sendJson(res, 200, response);
     }
   } catch (err) {

@@ -33,7 +33,13 @@ export interface OpenAiRequest {
 
 // ── Translation: OpenAI Request → SDK Call Params ───────────────────────────
 
-export function translateOpenAiRequest(body: OpenAiRequest): SdkCallParams {
+export function translateOpenAiRequest(
+  body: OpenAiRequest,
+  options?: {
+    /** ChatGPT Codex OAuth requires instructions in providerOptions and manages its own output limit. */
+    openAiOAuth?: boolean;
+  },
+): SdkCallParams {
   // Pre-scan to map tool_call_id → function name so tool result messages can reference it.
   const toolNameById = new Map<string, string>();
   for (const msg of body.messages) {
@@ -114,6 +120,28 @@ export function translateOpenAiRequest(body: OpenAiRequest): SdkCallParams {
     }
   }
 
+  if (options?.openAiOAuth) {
+    // Mirror the OAuth shaping in sdk-adapter's translateRequest: the ChatGPT
+    // Codex OAuth backend rejects the standard system/instructions field (it
+    // requires providerOptions.openai.instructions), manages its own output
+    // limit (an explicit max_output_tokens yields an empty finish:'other'
+    // response), and expects store:false.
+    const instructions = system?.trim() || 'You are a coding assistant.';
+    return {
+      messages,
+      tools,
+      toolChoice: sdkToolChoice,
+      temperature: body.temperature,
+      providerOptions: {
+        openai: {
+          store: false,
+          include: ['reasoning.encrypted_content'],
+          instructions,
+        },
+      },
+    };
+  }
+
   return {
     instructions: system,
     messages,
@@ -126,12 +154,58 @@ export function translateOpenAiRequest(body: OpenAiRequest): SdkCallParams {
 
 // ── Translation: SDK Response → OpenAI JSON / SSE ───────────────────────────
 
+export interface CollectedOpenAiStream {
+  text: string;
+  toolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }>;
+  finishReason: string | undefined;
+  usage: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | undefined;
+}
+
+/** Reduce an SDK full stream into the fields a non-streaming chat completion needs. */
+export async function collectOpenAiStream(stream: AsyncIterable<unknown>): Promise<CollectedOpenAiStream> {
+  const collected: CollectedOpenAiStream = { text: '', toolCalls: [], finishReason: undefined, usage: undefined };
+  for await (const part of stream) {
+    const p = part as any;
+    switch (p.type) {
+      case 'text-delta':
+        collected.text += p.textDelta ?? p.text ?? '';
+        break;
+      case 'tool-call':
+        collected.toolCalls.push({
+          toolCallId: p.toolCallId ?? '',
+          toolName: p.toolName ?? '',
+          input: p.input,
+        });
+        break;
+      case 'finish':
+        collected.finishReason = p.finishReason ?? collected.finishReason;
+        collected.usage = p.totalUsage ?? p.usage ?? collected.usage;
+        break;
+      case 'error':
+        throw p.error instanceof Error || (p.error && typeof p.error === 'object')
+          ? p.error
+          : new Error(typeof p.error === 'string' ? p.error : 'Upstream stream failed');
+    }
+  }
+  return collected;
+}
+
 export async function generateOpenAiResponse(
   model: LanguageModel,
   params: SdkCallParams,
   responseModelId: string,
+  options?: { forceStream?: boolean },
 ) {
-  const result: any = await generateText({ model, ...(params as any) });
+  let result: { text: string; toolCalls?: CollectedOpenAiStream['toolCalls']; finishReason?: string; usage?: CollectedOpenAiStream['usage'] };
+  if (options?.forceStream) {
+    // Some upstreams (e.g. ChatGPT's Codex OAuth backend) only ever answer as a
+    // stream. Request a real stream from the SDK and collect it into one
+    // response instead of issuing a non-streaming request upstream.
+    const { stream } = streamText({ model, ...(params as any), onError: () => {} });
+    result = await collectOpenAiStream(stream);
+  } else {
+    result = (await generateText({ model, ...(params as any) })) as any;
+  }
   const message: Record<string, any> = { role: 'assistant', content: result.text || null };
 
   if (result.toolCalls?.length) {

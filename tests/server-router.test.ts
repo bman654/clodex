@@ -7,6 +7,7 @@ import { createGatewayModelCatalog, type ServerModelInfo } from '../src/server/m
 import { startServer, type ServerHandle } from '../src/server/router.js';
 import { createLanguageModel } from '../src/provider-factory.js';
 import { generateAnthropicResponse } from '../src/sdk-adapter.js';
+import { generateOpenAiResponse } from '../src/openai-adapter.js';
 
 vi.mock('../src/provider-factory.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/provider-factory.js')>();
@@ -342,6 +343,102 @@ describe('server router', () => {
     expect(body.error.type).toBe('invalid_request_error');
     expect(body.error.message).toMatch(/^prompt is too long: \d+ tokens > 10 maximum$/);
     expect(body.request_id).toEqual(expect.any(String));
+  });
+
+  it('forces internal streaming for non-streaming requests on OpenAI OAuth routes', async () => {
+    const oauthCatalog = createGatewayModelCatalog([{
+      id: 'gpt-oauth',
+      name: 'GPT OAuth',
+      isFree: false,
+      brand: 'OpenAI',
+      providerId: 'openai-oauth',
+      sourceBackend: 'openai-oauth',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      authType: 'oauth',
+      apiKey: 'oauth-access-token',
+    }]);
+    const server = await startTestServer({ catalog: oauthCatalog });
+
+    const messagesResponse = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'anthropic-openai-oauth__gpt-oauth',
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+    });
+    expect(messagesResponse.status).toBe(200);
+    expect(vi.mocked(generateAnthropicResponse)).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.any(String),
+      expect.objectContaining({ forceStream: true }),
+    );
+
+    const chatResponse = await fetch(`${server.url}/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-oauth',
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+    });
+    expect(chatResponse.status).toBe(200);
+    expect(vi.mocked(generateOpenAiResponse)).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.any(String),
+      expect.objectContaining({ forceStream: true }),
+    );
+  });
+
+  it('does not force streaming for non-streaming requests on API-key routes', async () => {
+    const apiKeyCatalog = createGatewayModelCatalog([{
+      id: 'gpt-api',
+      name: 'GPT API',
+      isFree: false,
+      brand: 'OpenAI',
+      providerId: 'openai',
+      sourceBackend: 'openai',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      authType: 'api',
+      apiKey: 'sk-test',
+    }]);
+    const server = await startTestServer({ catalog: apiKeyCatalog });
+
+    const messagesResponse = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'anthropic-openai__gpt-api',
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+    });
+    expect(messagesResponse.status).toBe(200);
+    expect(vi.mocked(generateAnthropicResponse)).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.any(String),
+      expect.objectContaining({ forceStream: false }),
+    );
+
+    const chatResponse = await fetch(`${server.url}/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-api',
+        messages: [{ role: 'user', content: 'ping' }],
+      }),
+    });
+    expect(chatResponse.status).toBe(200);
+    expect(vi.mocked(generateOpenAiResponse)).toHaveBeenLastCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.any(String),
+      expect.objectContaining({ forceStream: false }),
+    );
   });
 
   it('forwards OpenAI chat completions for OpenAI-format models unchanged', async () => {
