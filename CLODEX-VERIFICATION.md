@@ -138,5 +138,5 @@ real commands (including `claude -p`) but NEVER add them to the automated test s
 - F1. No `claude -p`/E2E invocations exist inside `tests/` or any vitest file.
 - F2. CLODEX-BRIEF.md's "Prime directive" was honored — the verifier's spot-check
   diffs (B8) found no gratuitous rewrites.
-- F3. All work is committed on `worktree-clodex` with a clean `git status`; `dist/`
-  rebuilt in the final commit.
+- F3. All work is committed on `worktree-clodex` with a clean `git status`. `dist/`
+  is NOT tracked (gitignored); it is rebuilt by `prepublishOnly` and the publish CI.

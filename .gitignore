@@ -25,3 +25,6 @@ ANTIGRAVITY-DEBUG-SESSION.md
 
 # Personal model alias config for the custom-model patcher (edit the example)
 scripts/patch-custom-models/model-config.json
+
+# build output — rebuilt by prepublishOnly and CI before publish
+dist/

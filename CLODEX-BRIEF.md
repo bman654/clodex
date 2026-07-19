@@ -180,7 +180,7 @@ Replace README.md entirely:
   (branch `worktree-clodex`). Work only here.
 - Commit incrementally with clear messages (strip commits separate from rename
   commits separate from feature commits, roughly).
-- `dist/` is committed by convention — rebuild before final commit.
+- `dist/` is gitignored (not committed); `prepublishOnly` and publish CI rebuild it.
 - The machine has working OpenAI OAuth credentials under `~/.relay-ai` — the
   migration copy makes real end-to-end testing possible. Do not delete or mutate
   `~/.relay-ai` itself.

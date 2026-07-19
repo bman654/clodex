@@ -11,13 +11,12 @@ Publishing is automated by GitHub Actions (`.github/workflows/publish.yml`): **p
 ```bash
 # 1. Land all code changes and a CHANGELOG.md "## [x.y.z]" section first (committed).
 npm version patch --no-git-tag-version   # bump package.json + package-lock
-npm run build                            # rebuild dist — VERSION derives from package.json
 git add -A && git commit -m "release: vX.Y.Z"
 git tag vX.Y.Z
 git push --follow-tags
 ```
 
-`package.json` is the single source of truth for the version (`src/constants.ts::VERSION` reads `pkg.version`). Never hardcode a version string anywhere. `dist/` is committed, so rebuild it in the release commit.
+`package.json` is the single source of truth for the version (`src/constants.ts::VERSION` reads `pkg.version`). Never hardcode a version string anywhere. `dist/` is gitignored — `prepublishOnly` and the publish CI rebuild it; never commit build output.
 
 ## Commands
 
