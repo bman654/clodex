@@ -517,10 +517,6 @@ var package_default = {
   description: "Bridge Claude Code to OpenAI models \u2014 OpenAI API key or ChatGPT/Codex-plan OAuth, with prompt caching, auto-compaction, model switching, and a Claude Code binary patcher",
   author: "Brandon Wallace",
   license: "MIT",
-  repository: {
-    type: "git",
-    url: "git+https://github.com/jacob-bd/relay-ai.git"
-  },
   keywords: [
     "claude",
     "claude-code",
@@ -550,7 +546,6 @@ var package_default = {
     test: "vitest run",
     "test:watch": "vitest",
     typecheck: "tsc --noEmit",
-    "refresh:models-dev": "node scripts/refresh-models-dev-cache.mjs",
     prepublishOnly: `node -e "if (require('./package.json').version !== require('./package-lock.json').version) { console.error('Error: package.json and package-lock.json versions are out of sync! Run npm install to sync.'); process.exit(1); }" && npm run build`
   },
   dependencies: {
