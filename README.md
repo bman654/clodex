@@ -1,700 +1,135 @@
-<p align="center">
-  <img src="assets/banner.png" alt="relay-ai banner" width="100%">
-</p>
+# clodex
 
-# relay-ai
+**clodex** bridges [Claude Code](https://docs.anthropic.com/en/docs/claude-code) to OpenAI models — with an OpenAI API key or a ChatGPT/Codex-plan OAuth login. It translates Claude Code's Anthropic wire format to the OpenAI API through the Vercel AI SDK, with working prompt caching, accurate context windows and auto-compaction, live mid-session model switching, and an optional Claude Code binary patcher that makes your OpenAI models first-class citizens inside Claude Code (validated names, `/model` entries, correct context reporting).
 
+> clodex is derived from the original [relay-ai](https://github.com/jacob-bd/relay-ai) project, heavily modified and streamlined for this one use case, with the full commit history preserved.
 
-> Relay any model into any coding agent — launch tools, switch providers, and run local API gateways.
-
-[![npm version](https://img.shields.io/npm/v/@jacobbd/relay-ai)](https://www.npmjs.com/package/@jacobbd/relay-ai)
-[![License](https://img.shields.io/npm/l/@jacobbd/relay-ai)](LICENSE)
-
-> ☕ **If you find relay-ai useful, consider [buying me a coffee](https://buymeacoffee.com/jacobbd).**
-> It's free and built in my spare time — but testing every provider runs up a real AI bill. A coffee helps me cover it and keep shipping. Thank you! 🙏
->
-> <a href="https://buymeacoffee.com/jacobbd"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="42"></a>
-
-📺 **Watch the Demos**
-
-| **Claude Code / Cowork / Desktop** | **Codex CLI & Desktop App** | **Gemini CLI** | **v0.4.1: UI & Antigravity** |
-|:---:|:---:|:---:|:---:|
-| [![Claude Demo](https://img.youtube.com/vi/IvsUPHLhX0o/mqdefault.jpg)](https://youtu.be/IvsUPHLhX0o) | [![Codex Demo](https://img.youtube.com/vi/42oiOB8IAu4/mqdefault.jpg)](https://youtu.be/42oiOB8IAu4) | [![Gemini Demo](https://img.youtube.com/vi/g7JKvqOHJl4/mqdefault.jpg)](https://www.youtube.com/watch?v=g7JKvqOHJl4) | [![UI & Antigravity Demo](https://img.youtube.com/vi/8vXJ0LfpdoY/mqdefault.jpg)](https://www.youtube.com/watch?v=8vXJ0LfpdoY) |
-
-**relay-ai** is an interactive CLI — and now a **visual launcher** — that connects AI coding tools to any provider and runs local API gateways on your machine. It supports **Claude Code**, **Claude Desktop (Cowork + Code)**, the **OpenAI Codex CLI**, the **ChatGPT desktop app in Codex mode (macOS + Windows)**, **Google Gemini CLI**, and experimental **Antigravity CLI / IDE** support.
-
-Pick your backend:
-
-- **Your providers** — configure once with `relay-ai providers` (Groq, Mistral, Nvidia, DeepSeek, custom OpenAI/Anthropic endpoints, and more)
-- **OpenCode Zen / Go** — cloud models with your OpenCode API key (optional; add via `relay-ai providers`)
-- **One-time OpenCode import** — bring existing OpenCode provider settings into the registry (`relay-ai providers import`)
-- **Google Vertex AI** — Claude on Vertex via `relay-ai server --vertex` and local gcloud credentials (no OpenCode key required)
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `relay-ai` | Print help (does not launch Claude Code) |
-| `relay-ai ui` | **Open the visual launcher** — manage providers and launch any tool from a browser UI |
-| `relay-ai claude` | Pick a provider → launch Claude Code |
-| `relay-ai providers` | Add, import, list, remove, and refresh your AI providers |
-| `relay-ai models` | Manage favorite models for mid-session `/model` switching |
-| `relay-ai server` | Foreground API gateway (registry providers + optional Zen/Go) |
-| `relay-ai server --vertex` | Foreground Anthropic-compatible gateway to Claude on Vertex AI |
-| `relay-ai claude-app` | Launch Claude Desktop app with registry providers ([guide](docs/CLAUDE_DESKTOP_SETUP.md)) |
-| `relay-ai codex` | Launch OpenAI Codex CLI with registry providers ([guide](docs/CODEX.md)) |
-| `relay-ai codex-app` (alias `chatgpt`) | Launch ChatGPT desktop app in Codex mode with registry providers ([guide](docs/CODEX.md)) |
-| `relay-ai gemini` | Launch Google Gemini CLI with registry providers |
-| `relay-ai agy` | Launch Antigravity CLI with Relay models ([warning + guide](docs/ANTIGRAVITY.md)) |
-| `relay-ai antigravity` | Launch Antigravity app with Relay models, macOS ([warning + guide](docs/ANTIGRAVITY.md)) |
-| `relay-ai antigravity-ide` | Launch Antigravity IDE with Relay models, macOS ([warning + guide](docs/ANTIGRAVITY.md)) |
-| `relay-ai providers auth <id>` | Authenticate an OAuth provider (GitHub Copilot, xAI, OpenAI) |
-| `relay-ai --ai` | Full agent reference for scripts and alef-agent ([guide](docs/AI-AGENTS.md)) |
-
-## Features
-
-- **Visual launcher UI:** `relay-ai ui` opens a browser dashboard — launch any supported tool with a point-and-click model picker. Pick provider and model in the UI; the terminal opens straight to the running session with no second selection step. Manage providers and favorites without leaving the browser.
-- **Server tab in the UI:** Run either the registry gateway or transparent Claude Code HTTP proxy from a browser form instead of a terminal wizard. Gateway mode shows live URLs, API key, and catalog; HTTP proxy mode shows the required proxy/CA environment values and usable `relay:` favorite names. Both have one-click Stop.
-- **Native provider registry:** `relay-ai providers` stores config in `~/.relay-ai/providers.json` and secrets in the OS keychain — no OpenCode binary required at launch. See **[docs/PROVIDERS.md](docs/PROVIDERS.md)** for a full list of providers and known issues.
-- **Provider templates:** Add Groq, Mistral, Together, OpenRouter, and 15+ SDK-backed providers, plus custom OpenAI/Anthropic-compatible endpoints
-- **OpenCode import:** One-time migration from OpenCode (`providers import`); validates API keys and skips placeholders like `anything`
-- **OpenCode Zen / Go:** Optional cloud backends when you have an OpenCode API key
-- **SDK adapter proxy:** Non-Anthropic providers route through the Vercel AI SDK (same packages OpenCode uses), so Claude Code still speaks Anthropic format. Labeled `(via proxy)` in the picker
-- **Favorite models:** Save up to 20 and switch mid-session with Claude Code's `/model` command
-- **Smart model pickers:** Recent models per provider, search for large lists (>25), paginated browse (15 per page)
-- **Refresh model lists:** `relay-ai providers refresh-models` updates cached catalogs per provider
-- **API server:** Run a local gateway on port **17645** for Claude Code, Claude Desktop, or any Anthropic-compatible client
-- **Server wizard:** Filter exposed providers, mask discovery ids for Claude Desktop, optional favorites-only catalog, local vs network listen mode — available in the terminal (`relay-ai server`) or the `relay-ai ui` Server tab
-- **Vertex gateway:** Anthropic-compatible Claude on Google Vertex AI using gcloud Application Default Credentials
-- **Antigravity CLI / app / IDE support:** Experimental local Cloud Code gateway for Antigravity's native model picker. Read the account warning before using it
-- **Clean environment isolation:** We strip 17 conflicting env vars (Vertex AI, Bedrock, AWS, Foundry, stale Anthropic config) from the child process only. We never touch `~/.claude/settings.json` (see caveat below)
-- **Secure key storage:** Per-provider keys and the OpenCode API key go in the OS credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service) or your shell profile
-- **Cross-platform:** macOS, Windows, Linux (Ubuntu, Fedora, distros with GNOME Keyring or KWallet)
-- **Dry run mode:** Walk through the full wizard and preview the launch command without starting anything
-- **Preference memory:** Last provider and model are pre-selected next time
-- **Agent / headless launch:** Boot flags (`--provider`, `--model`), clean NDJSON/JSONL stdout for alef-agent, and `relay-ai --ai` reference — see **[docs/AI-AGENTS.md](docs/AI-AGENTS.md)**
-
-## Supported tools
-
-| Tool | Command | Status |
-|------|---------|--------|
-| **Visual launcher UI** | `relay-ai ui` | ✅ Supported — browser dashboard for all tools |
-| Provider registry | `relay-ai providers` | ✅ Supported ([guide](docs/PROVIDERS.md)) |
-| Claude Code | `relay-ai claude` | ✅ Supported |
-| Favorite models | `relay-ai models` | ✅ Supported |
-| OpenCode API server | `relay-ai server` | ✅ Supported |
-| Vertex API gateway | `relay-ai server --vertex` | ✅ Supported |
-| Claude Desktop (Cowork + Code) | `relay-ai claude-app` | ✅ Supported macOS + Windows ([guide](docs/CLAUDE_DESKTOP_SETUP.md)) |
-| Codex CLI | `relay-ai codex` | ✅ Supported ([guide](docs/CODEX.md)) |
-| ChatGPT desktop app (Codex mode) | `relay-ai codex-app` (alias `chatgpt`) | ✅ Supported macOS + Windows ([guide](docs/CODEX.md)) |
-| Google Gemini CLI | `relay-ai gemini` | ⚠️ Experimental, model switching is done via .model prompt |
-| Antigravity CLI | `relay-ai agy` | ⚠️ Experimental, use a throwaway Google account ([guide](docs/ANTIGRAVITY.md)) |
-| Antigravity app | `relay-ai antigravity` | ⚠️ Experimental macOS + Windows support, use a throwaway Google account ([guide](docs/ANTIGRAVITY.md)) |
-| Antigravity IDE | `relay-ai antigravity-ide` | ⚠️ Experimental macOS + Windows support, use a throwaway Google account ([guide](docs/ANTIGRAVITY.md)) |
-| GitHub Copilot OAuth | `relay-ai providers auth github-copilot` | ✅ Device code flow ([guide](docs/SUBSCRIPTION-OAUTH.md)) |
-| xAI SuperGrok OAuth | `relay-ai providers auth xai-oauth` | ✅ Device code flow ([guide](docs/SUBSCRIPTION-OAUTH.md)) |
-| OpenAI ChatGPT OAuth | `relay-ai providers auth openai-oauth` | ✅ Device code flow ([guide](docs/SUBSCRIPTION-OAUTH.md)) |
-
-## Prerequisites
-
-- Node.js 22+ (Node.js 24 LTS or newer recommended)
-- A supported AI coding tool installed (e.g. [Claude Code](https://www.npmjs.com/package/@anthropic-ai/claude-code), [OpenAI Codex](https://www.npmjs.com/package/@openai/codex), or [Google Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli))
-- At least one provider configured via `relay-ai providers add` or `import` — **or** an [OpenCode API key](https://opencode.ai/auth) for Zen/Go cloud backends
-- [OpenCode CLI](https://opencode.ai) only if you want **one-time import** from an existing OpenCode setup (optional)
-- For **Vertex gateway:** [Google Cloud SDK](https://cloud.google.com/sdk) with `gcloud auth application-default login`, a GCP project with Vertex AI enabled, and Claude partner models enabled in that project
-- For **Antigravity CLI / IDE:** a Google account is still needed for Antigravity authentication. Do **not** use your main Google account. Use a throwaway or secondary account you can afford to lose.
-
-**A note on providers:** relay-ai keeps your provider list in `~/.relay-ai/providers.json`. You can add providers directly (API key + template), import from OpenCode once, or use Zen/Go cloud backends. OpenCode is not required after setup.
-
-## Installation
-
-To install the CLI globally:
+## Get started (ChatGPT/Codex plan)
 
 ```bash
-npm install -g @jacobbd/relay-ai
+npm install -g clodex          # 1. install the CLI (Node 22+)
+clodex providers auth openai   # 2. sign in with your ChatGPT/Codex plan (device-code OAuth)
+clodex models                  # 3. pick favorite models and short aliases
+clodex patch                   # 4. (optional) patch Claude Code so those models are first-class
+clodex claude                  # 5. launch Claude Code on an OpenAI model
 ```
 
-### Upgrading
+1. **Install** — puts the `clodex` command on your PATH.
+2. **Sign in** — opens a device-code OAuth flow for your ChatGPT/Codex plan; the token is stored in your OS credential store. (API-key users: `clodex providers add` instead.)
+3. **Pick models** — an interactive manager for favorites (max 20) and short aliases like `sol`. Favorites drive the `/model` switch menu, proxy-mode routing, and the patcher.
+4. **Patch** *(optional but recommended for proxy mode)* — bakes your favorites and aliases into the Claude Code binary so they pass model validation, appear in `/model`, and report their real context windows. Re-run after each `claude` update; `clodex patch --restore` undoes it.
+5. **Launch** — starts Claude Code bridged to the model you choose.
 
-To upgrade to the latest version:
+## Bridge modes
 
-```bash
-npm update -g @jacobbd/relay-ai
+Both `clodex claude` and `clodex server` support two bridge modes. Using `--endpoint` or `--proxy` once is remembered as that command's default (per command).
+
+- **`--endpoint`** (default on first run): clodex runs a local Anthropic-format gateway and launches Claude Code with `ANTHROPIC_BASE_URL` pointed at it. All traffic goes through the gateway. With favorites saved, the gateway is multi-route and Claude Code's `/model` menu lists your starting model plus favorites for live switching.
+- **`--proxy`** (`--http-proxy` is an alias): a selective man-in-the-middle proxy for `api.anthropic.com`. Claude Code keeps its normal Anthropic login — Anthropic models work untouched — while models named `clodex:<provider-id>:<model-id>` (or their saved aliases) route to OpenAI. Switch with `/model clodex:openai-oauth:gpt-5.6-sol` or `/model sol` after patching.
+
+## CLI reference
+
+### `clodex claude [options] [claude-flags]`
+
+Launch Claude Code bridged to OpenAI models. Unrecognized flags (and everything after `--`) pass through to Claude Code (`-c`, `--resume`, `--print`, …).
+
+| Flag | Effect |
+| --- | --- |
+| `--endpoint` | Endpoint bridge mode: local gateway + `ANTHROPIC_BASE_URL` (persisted as default) |
+| `--proxy` / `--http-proxy` | Proxy bridge mode: keep Claude Code's Anthropic auth; `clodex:` models route to OpenAI (persisted as default) |
+| `--dry-run` | Run the wizard but print a launch preview instead of launching |
+| `--trace` | Write debug logs to `~/.clodex/logs/` and show errors on exit |
+| `--provider <id>` | Boot provider id (`openai` or `openai-oauth`); with `--model`, skips the wizard |
+| `--model <id>` | Boot model id; with `--provider`, skips the wizard |
+| `--help`, `--version` | Help / version |
+
+Notes:
+
+- Claude Code may save the launched model to `~/.claude/settings.json`, so bare `claude` later can still show a clodex model name. Reset with `claude --model sonnet`.
+- Non-interactive stdin reuses your last provider/model instead of showing the wizard.
+
+### `clodex server [options]`
+
+Foreground gateway, same two bridge modes, no Claude Code launch — point any Anthropic-format (or OpenAI-format) client at it.
+
+| Flag | Effect |
+| --- | --- |
+| `--endpoint` | Endpoint mode: Anthropic-format HTTP gateway (persisted as default) |
+| `--proxy` / `--http-proxy` | Proxy mode: selective `api.anthropic.com` MITM proxy (persisted; local only) |
+| `--quick`, `--saved` | Start immediately from saved/default settings, no prompts |
+| `--listen local\|network` | One-run listen mode override |
+| `--providers all\|favorites\|id1,id2` | One-run provider catalog override |
+| `--mask-gateway-ids` / `--no-mask-gateway-ids` | Mask or keep provider names in Anthropic model ids |
+| `--password <value>` | One-run network-mode server password |
+| `--port <1-65535>` | Listen port (default 17645); applies to both modes |
+| `--ws-diagnostics` | Log sanitized request envelopes and WebSocket head decisions |
+| `--help`, `--version` | Help / version |
+
+Endpoint-mode endpoints (default port 17645):
+
+```
+ANTHROPIC_BASE_URL=http://127.0.0.1:17645/anthropic
+OPENAI_BASE_URL=http://127.0.0.1:17645/openai/v1
 ```
 
-### Uninstallation
+Use any API key locally; network mode requires the server password. Proxy mode prints `HTTPS_PROXY`, `HTTP_PROXY`, and `NODE_EXTRA_CA_CERTS` values to export — do **not** set `ANTHROPIC_BASE_URL` in that mode.
 
-To uninstall the CLI globally:
+### `clodex patch [--restore]`
 
-```bash
-npm uninstall -g @jacobbd/relay-ai
+Patch the installed Claude Code binary so clodex favorites and aliases are first-class: accepted by the Agent tool's model field, listed in `/model`, resolved to their real ids, and reporting the correct context window.
+
+| Flag | Effect |
+| --- | --- |
+| `--restore` | Restore the pristine (unpatched) Claude Code binary |
+| `--trace` | Show the underlying tweakcc output |
+| `--help` | Help |
+
+The patch map is built from your favorites and aliases; context windows come from provider metadata. A pristine per-version backup is kept, and a manifest (`~/.clodex/patch-state.json`) makes re-runs no-ops until your config or Claude Code version changes — then the binary is restored first and re-patched fresh. `clodex claude` checks patch freshness at launch and offers to re-patch (a non-blocking notice when not interactive). Re-run `clodex patch` after every `claude` update.
+
+### `clodex models` / `clodex favorites`
+
+Manage favorite models (max 20) and short aliases. Favorites feed the endpoint-mode `/model` switch menu, proxy-mode routing, and the patcher. Saved to `~/.clodex/config.json`.
+
+| Flag | Effect |
+| --- | --- |
+| *(none)* | Interactive manager: search all providers or browse one at a time |
+| `--list` | Print the exact `clodex:<provider-id>:<model-id>` names (and aliases) without opening the manager |
+| `--alias <name=target>` | Save a short name for a favorite, e.g. `--alias sol=clodex:openai-oauth:gpt-5.6-sol` (the `clodex:` prefix is optional in the target) |
+| `--unalias <name>` | Remove a saved short name |
+| `--help`, `--version` | Help / version |
+
+### `clodex providers [subcommand]`
+
+| Subcommand | Effect |
+| --- | --- |
+| *(none)* | Provider hub wizard |
+| `add` | Add OpenAI with an API key (choose OAuth or API key) |
+| `auth openai` | Sign in with ChatGPT/Codex-plan OAuth (device code) |
+| `list` | Show configured providers |
+| `remove <id>` | Remove a provider by id |
+| `refresh-models [id]` | Update cached model lists |
+
+Providers supported: `openai` (API key, platform.openai.com) and `openai-oauth` (ChatGPT/Codex plan).
+
+### Root
+
 ```
-
-> [!NOTE]
-> If you use a Node version manager like **NVM**, make sure you run the uninstall command using the active Node version that was used to install it (e.g., run `nvm use <version>` first).
-
-To fully remove the tool and all its configuration data, you can delete the configuration directory (`.relay-ai`) on your operating system:
-
-- **macOS / Linux**:
-  ```bash
-  rm -rf ~/.relay-ai
-  ```
-- **Windows**:
-  - In Command Prompt:
-    ```cmd
-    rmdir /s /q "%USERPROFILE%\.relay-ai"
-    ```
-  - In PowerShell:
-    ```powershell
-    Remove-Item -Recurse -Force "$env:USERPROFILE\.relay-ai"
-    ```
-
-
-## Setup
-
-### Configure providers
-
-```bash
-relay-ai providers          # hub: add, import, list, refresh models
-relay-ai providers add      # pick a template or custom endpoint
-relay-ai providers import   # one-time migration from OpenCode (optional)
+clodex --help       # overview of all commands
+clodex --version    # version
 ```
-
-On first `relay-ai claude` run with an empty registry, an inline wizard walks you through Quick start (Zen), import, or opening `relay-ai providers`.
-
-### OpenCode API key (Zen/Go only)
-
-Grab your key at [opencode.ai/auth](https://opencode.ai/auth) if you use OpenCode Zen or Go (skip for registry-only or Vertex setups).
-
-| Platform | Secure storage | Plaintext fallback |
-|----------|---------------|-------------------|
-| macOS | Keychain (optional: + `~/.zshrc` auto-load) | Shell profile |
-| Windows | Credential Manager | `setx` user env var |
-| Linux (desktop) | Secret Service (GNOME Keyring / KWallet) | Shell profile |
-| Linux (headless) | n/a | Shell profile |
-
-The key is active in your current session right away, no matter which option you pick. No terminal restart needed.
-
-## Usage
-
-### Visual launcher (`relay-ai ui`)
-
-```bash
-relay-ai ui
-```
-
-Opens a browser-based dashboard on a random local port. From the UI you can:
-
-- **Launch any supported tool** — app cards for Claude Code CLI, Codex CLI, Gemini CLI, Antigravity CLI, Antigravity App, Antigravity IDE, Claude Code Desktop, and the ChatGPT Desktop app (Codex mode). Select a provider and model in the card, then click **Launch** — a native terminal opens with the selection pre-wired. No second picker in the terminal.
-- **Manage General Favorites** — the sidebar shows your saved favorite models with a slot indicator (Slots used X/20). Favorites launch through all supported agents.
-- **Manage Antigravity Favorites** — separate favorites panel for Antigravity sessions.
-- **Manage providers** — add providers from templates, delete providers, and refresh model lists inline, all without leaving the browser.
-- **Run the Server tab** — choose the registry API gateway or transparent HTTP proxy. The gateway form exposes its provider filters, discovery masking, listen mode, URLs, API key, and model catalog. HTTP proxy mode shows the `HTTPS_PROXY`, `HTTP_PROXY`, and `NODE_EXTRA_CA_CERTS` values plus the usable `relay:` model names. Both run in the UI process and stop when you close the dashboard.
-
-Press `Ctrl+C` in the terminal where `relay-ai ui` is running to shut down the dashboard server (this also stops whichever Server-tab mode is running).
-
-### Launch Claude Code
-
-```bash
-relay-ai claude
-```
-
-First run: pick a provider from your registry (or complete the inline setup wizard). If you've added OpenCode Zen/Go, those appear alongside registry providers like Groq, Nvidia, or DeepSeek.
-
-#### Favorite models and mid-session switching
-
-Save the models you bounce between:
-
-```bash
-relay-ai models
-```
-
-Add up to 20 favorites from Zen, Go, or any OpenCode-configured provider. When you have favorites, `relay-ai claude` starts a multi-route proxy automatically. Claude Code's `/model` command lists your starting model plus favorites. Switch live, no restart.
-
-No favorites? Launch works like before: single model, no switch menu. `--dry-run` ignores saved favorites so you can preview a single-model launch.
-
-To print the exact model names available in HTTP proxy mode without opening the manager:
-
-```bash
-relay-ai models --list
-```
-
-#### `relay-ai claude` options
-
-| Flag | Description |
-|------|-------------|
-| `--dry-run` | Run the full wizard but preview the launch command instead of executing |
-| `--http-proxy` | Keep Claude Code's normal Anthropic login and route `relay:` favorites selectively |
-| `--setup` | Reminder to use `relay-ai providers` for provider setup |
-| `--trace` | Write debug logs to `~/.relay-ai/logs/` and show errors on exit |
-| `--help` | Show command help |
-| `--version` | Show version |
-
-```bash
-relay-ai claude --dry-run
-relay-ai claude --setup
-relay-ai claude --trace
-relay-ai claude --http-proxy
-```
-
-Claude Code flags and session IDs pass through unchanged:
-
-```bash
-relay-ai claude -c
-relay-ai claude --resume abc-123
-relay-ai claude abc-123
-```
-
-**Non-interactive / agent launch** — skip the wizard with boot flags:
-
-```bash
-relay-ai claude --provider groq --model llama-3.3-70b-versatile -p "Summarize README.md"
-relay-ai claude --model zen__deepseek-v4-flash-free -p "task" --output-format stream-json
-```
-
-| Flag | Description |
-|------|-------------|
-| `--provider` | Boot provider id (skip wizard with `--model` or in print mode) |
-| `--model` | Boot model id, or slug `provider__model-id` |
-
-For alef-agent, NDJSON streaming, Codex `exec --json`, and sandbox defaults, see **[docs/AI-AGENTS.md](docs/AI-AGENTS.md)** and run `relay-ai --ai`.
-
-Use `--` when you want every following token passed directly to Claude Code:
-
-```bash
-relay-ai claude -- --print "hello"
-relay-ai claude -- --dangerously-skip-permissions
-relay-ai claude --dry-run -- --print "test"
-```
-
-## Server mode
-
-Run relay-ai as a foreground API gateway on port **17645**:
-
-| Mode | Command | Auth | Models |
-|------|---------|------|--------|
-| **Registry gateway** | `relay-ai server` | Per-provider keys in registry (+ OpenCode key for Zen/Go if exposed) | Providers you configured |
-| **HTTP proxy** | `relay-ai server --http-proxy` | Claude Code's own Anthropic login + provider keys for favorites | Anthropic models plus favorite `relay:` models |
-| **Vertex gateway** | `relay-ai server --vertex` | gcloud Application Default Credentials | Claude on Vertex AI |
-
-Server modes append privacy-minimal JSON records to `~/.relay-ai/logs/inference-requests.jsonl` (or the equivalent under `RELAY_AI_HOME`). Each `relay-ai claude --http-proxy` process instead gets its own file under `~/.relay-ai/logs/sessions/`, so concurrent and nested Claude sessions do not interleave. The launcher prints the exact path. Each request record contains the timestamp, requested model id, known effort, provider, and whether the request was passed through or translated. HTTP-proxy records also contain a `requestId` for correlation and whether streaming was requested. An upstream HTTP failure adds an `event: "upstream_error"` record with the real upstream `statusCode` and—when the AI SDK retried—the final error's `isRetryable` value and `attemptCount`. By default, prompts, headers, credentials, and response bodies are never logged. Watch a standalone server live with:
-
-```bash
-tail -f ~/.relay-ai/logs/inference-requests.jsonl
-```
-
-HTTP-proxy requests log their complete response lifecycle for both Anthropic passthrough and translated routes. `response_started` includes the upstream status when response bytes begin; `response_completed` means the response finished writing to Claude Code. Translated routes additionally emit `translation_started` and `translation_completed` around the AI SDK stream. While a request remains open, progress records appear every 30 seconds with chunk, byte, and idle counters. `translation_failed`, `response_failed`, or `response_client_disconnected` identify the boundary that terminated early. A passthrough socket failure records errors such as `ECONNREFUSED` in `errorType`.
-
-Session files also contain `proxy_started`, `proxy_stopping`, and `proxy_stopped` records with the relay PID and listening port. `proxy_started` without a terminal record means the process was killed or crashed before cleanup; a refusal of that local port cannot be written by the dead process itself. `proxy_process_exit` is written when Node receives a normal process exit before cleanup, but `SIGKILL` and machine termination cannot be observed.
-
-For temporary local debugging, set `RELAY_AI_LOG_REQUEST_PREVIEW=1` before starting the server. Request records then include `requestPreview`, containing the role and up to 240 characters of text from the most recent message; when that turn contains only non-text blocks, the preview includes both their types and system text so Claude Code's Haiku/background requests remain identifiable. Upstream error records include up to 2,000 characters of the redacted response body or SDK error data as `errorContent`. Image data, tool inputs/results, headers, and credentials remain excluded. Request and error text may contain sensitive information, so unset the variable and restart the server when debugging is complete.
-
-To investigate OpenAI OAuth WebSocket head accumulation, start either server mode with `--ws-diagnostics`:
-
-```bash
-relay-ai server --http-proxy --ws-diagnostics
-# or: relay-ai server --quick --ws-diagnostics
-```
-
-This non-default mode creates a private per-process `server-websocket-diagnostics` JSONL file under `~/.relay-ai/logs/sessions/` and prints its exact path. `request_diagnostic` records contain the complete non-conversation request envelope, all inbound header names and safe values, raw metadata, and content-free hashes/shapes for system prompts, messages, and tools. Authorization, API-key, cookie, token, secret, and credential header values are always replaced with `[REDACTED]`. Correlated records carry both `requestId` and the validated `claudeSessionId` when Claude supplies one, making the relay log directly searchable from a Claude session or agent transcript. `ws_head_decision` records include the full partition tuple (with the OAuth account id hashed), candidate-head counts, nursery/established generations, prompt-field hashes, per-item conversation hashes/types, the first mismatch for every candidate, the selected lifecycle decision, and LRU/TTL evictions. `ws_response_usage` records report correlated input, cached, cache-write, and output token counts without response content. `ws_response_error` records identify upstream failure events, socket errors/closes, failed upgrades, connection lifecycle state, and whether model data had already been emitted; error messages and close reasons are represented only by byte lengths and hashes. `ws_response_protocol_anomaly` records identify invalid reasoning start/delta/end sequences using event types, summary indexes, state labels, and hashed item ids without reasoning content. No conversation, system-prompt, tool-description/schema, tool-result, error-message, close-reason, or reasoning text is written. Treat the file as sensitive operational metadata and disable the flag after collecting the needed sessions.
-
-> **Claude Desktop (Cowork + Code):** For the automated macOS/Windows setup, use `relay-ai claude-app`. For manual or network setups, see [docs/CLAUDE_DESKTOP_SETUP.md](docs/CLAUDE_DESKTOP_SETUP.md).
-
-### Transparent HTTP proxy (`relay-ai server --http-proxy`)
-
-This mode preserves Claude Code's normal Anthropic authentication. It does **not** set `ANTHROPIC_BASE_URL` and does not perform a separate Anthropic OAuth flow.
-
-The session launcher is the easiest form:
-
-```bash
-relay-ai claude --http-proxy
-```
-
-For a standalone proxy, start the server and export the three values it prints:
-
-```bash
-relay-ai server --http-proxy
-
-export HTTPS_PROXY="http://127.0.0.1:17645"
-export HTTP_PROXY="http://127.0.0.1:17645"
-export NODE_EXTRA_CA_CERTS="$HOME/.relay-ai/http-proxy/relay-ai-ca.pem"
-unset ANTHROPIC_BASE_URL
-claude
-```
-
-Both server modes bind port **17645** by default, so to run a transparent HTTP proxy and a [registry gateway](#registry-gateway-relay-ai-server) at the same time, give one of them a different port with `--port`:
-
-```bash
-relay-ai server --http-proxy                # proxy on 17645
-relay-ai server --quick --port 18099        # gateway on 18099 (e.g. for an OpenAI-compatible client)
-```
-
-HTTP proxy model names use a positive namespace and come from compatible global favorites:
-
-```text
-relay:<provider-id>:<model-id>
-relay:groq:llama-3.3-70b-versatile
-```
-
-Run `relay-ai models --list` or read the list printed when the proxy starts, then type `/model relay:<provider-id>:<model-id>` in Claude Code. These names cannot be injected into Claude Code's built-in OAuth model picker, but `/model` accepts the exact freeform name.
-
-For a shorter name, save an alias for an existing favorite:
-
-```bash
-relay-ai models --alias luna=relay:openai-oauth:gpt-5.6-luna
-```
-
-Then `/model luna` routes to that favorite. `relay-ai models --list` prints aliases before their canonical `relay:` names. Remove one with `relay-ai models --unalias luna`. Alias names may contain letters, numbers, dots, underscores, and hyphens.
-
-Because these names aren't built in, Claude Code treats them as unknown: they're rejected by the Agent tool's `model` argument, don't appear in the interactive `/model` picker, and are assumed to be 200k-context. The optional [`scripts/patch-custom-models`](scripts/patch-custom-models/) tool patches your installed Claude Code binary (via [tweakcc](https://github.com/Piebald-AI/tweakcc)) so chosen `relay:` models are accepted everywhere a built-in alias is, show up in the picker, and report their real context window. It's a convenience — `/model <name>` works without it.
-
-The proxy decrypts only TLS connections to `api.anthropic.com`; every other HTTPS host is blind-tunneled. On `/v1/messages`, an exact configured `relay:` model goes through the existing AI SDK adapter with that provider's credential. Every other model and every other Anthropic path goes to Anthropic with the original request body bytes and authorization header. Anthropic credentials are never persisted, reused, or forwarded to a model provider. The generated CA and private key live under `~/.relay-ai/http-proxy/`; the private files are mode `0600`. Session mode also preserves an existing `NODE_EXTRA_CA_CERTS` bundle by combining it with Relay's CA.
-
-### Registry gateway (`relay-ai server`)
-
-Works with any providers in your registry. Zen/Go models appear when you have an OpenCode API key and those providers are exposed.
-
-The wizard asks:
-
-| Prompt | What it does |
-|--------|--------------|
-| **Configure & start** vs **Start with saved settings** | Full wizard or one-step launch from saved server preferences |
-| **Exposed providers** | Limit which providers appear in the catalog (Zen, Go, Groq, OpenAI, etc.) |
-| **Mask gateway model ids for discovery?** | Recommended **Yes** for Claude Desktop — hides competitor vendor strings in model ids so discovery works |
-| **Expose only favorite models?** | Optional cap at your favorites (manage with `relay-ai models`) |
-| **Listen mode** | **Local only** (`127.0.0.1`) or **Network** (`0.0.0.0` + server password) |
-
-The same options are available without a terminal in the [Server tab of `relay-ai ui`](#visual-launcher-relay-ai-ui), which also supports the transparent HTTP proxy mode and shows the relevant connection details and model names live.
-
-After you configure the server once, start it without prompts:
-
-```bash
-relay-ai server --quick
-# same as:
-relay-ai server --saved
-```
-
-Any one-run server option also skips the wizard:
-
-| Option | Meaning |
-|--------|---------|
-| `--listen local\|network` | Override the saved listen mode for this run |
-| `--providers all\|favorites\|id1,id2` | Expose all providers, favorites only, or a comma-separated provider id list |
-| `--free-only` / `--no-free-only` | Enable or disable the free/free-access model filter for this run |
-| `--mask-gateway-ids` / `--no-mask-gateway-ids` | Enable or disable discovery id masking for this run |
-| `--password <value>` | One-run password for network mode when you do not want to use a saved password |
-| `--port <1-65535>` | Listen on a port other than the default **17645** (works in every server mode, including `--http-proxy` and `--vertex`) |
-
-Non-interactive shells (scripts, services, CI, pipes) use quick mode automatically. If quick mode resolves to network mode, relay-ai uses `--password` first, then a saved server password; without either it exits with a clear error instead of prompting.
-
-**Local mode** — point any Anthropic-compatible client at your machine:
-
-```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:17645/anthropic"
-export ANTHROPIC_API_KEY="anything"
-```
-
-**Network mode** — other devices on your LAN:
-
-```bash
-export ANTHROPIC_BASE_URL="http://<server-ip>:17645/anthropic"
-export ANTHROPIC_API_KEY="<server-password>"
-```
-
-By default the server password stays in memory only. If you choose to save it, relay-ai stores it in the OS credential store when available, with `~/.relay-ai/config.json` as a fallback.
-
-OpenAI-format models also get an OpenAI-compatible endpoint:
-
-```bash
-export OPENAI_BASE_URL="http://127.0.0.1:17645/openai/v1"
-export OPENAI_API_KEY="anything"
-```
-
-Health check:
-
-```bash
-curl -s http://127.0.0.1:17645/health
-curl -s http://127.0.0.1:17645/anthropic/v1/models | head
-```
-
-The spinner reports how many models loaded and how many came from registry providers.
-
-### Vertex gateway (`relay-ai server --vertex`)
-
-Anthropic-compatible gateway to Claude on Google Vertex AI. No OpenCode API key required.
-
-**Setup:**
-
-```bash
-gcloud auth application-default login
-export ANTHROPIC_VERTEX_PROJECT_ID="your-gcp-project"   # or GOOGLE_CLOUD_PROJECT
-export GOOGLE_CLOUD_LOCATION="global"                   # optional; default: global
-relay-ai server --vertex
-```
-
-**Default models:** `claude-sonnet-4-6`, `claude-opus-4-6`, `claude-haiku-4-5`
-
-**Shorthand aliases** (for Claude Code `/model` and `settings.json`): `sonnet`, `opus`, `haiku`. Append `[1m]` for 1M context on Sonnet and Opus only (Haiku stays 200k).
-
-**Custom catalog:** copy `assets/vertex-models.example.json` to `~/.relay-ai/vertex-models.json` and edit. Override the config directory with `RELAY_AI_HOME`.
-
-When the gateway is running:
-
-```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:17645/anthropic"
-export ANTHROPIC_API_KEY="anything"
-```
-
-**Claude Code tip:** When routing through the gateway, unset native Vertex env vars so Claude Code doesn't bypass the proxy:
-
-```bash
-unset CLAUDE_CODE_USE_VERTEX ANTHROPIC_VERTEX_PROJECT_ID CLOUD_ML_REGION
-```
-
-## Antigravity CLI, app, and IDE support
-
-Relay AI can launch the Antigravity CLI, standalone Antigravity app, and Antigravity IDE through a local Cloud Code gateway. This lets Antigravity's native model picker show Relay models from your configured providers.
-
-```bash
-relay-ai agy
-relay-ai antigravity
-relay-ai antigravity-ide
-```
-
-> ⚠️ **Do not use your main Google account with Antigravity support.**
->
-> Antigravity still requires Google authentication before it will run. Relay AI routes Cloud Code generation through your local gateway, but the Antigravity CLI, app, and IDE are still Google software and may contact Google for auth, telemetry, updates, or account checks.
->
-> This kind of use is probably not what Google intended, may violate Google's terms of service, and could lead to account restrictions or bans. Use a throwaway Google account, a secondary account, or another account you can afford to lose. A free Google account should be enough for authentication. Seriously, don't risk your real Gmail, Workspace, YouTube, Drive, or business account for this.
-
-Read the full setup and risk notes in **[docs/ANTIGRAVITY.md](docs/ANTIGRAVITY.md)** before launching any Antigravity surface.
-
-## OAuth Providers
-
-relay-ai supports OAuth providers that use device-code sign-in, so you can connect an existing subscription without pasting an API key. See **[docs/SUBSCRIPTION-OAUTH.md](docs/SUBSCRIPTION-OAUTH.md)** for setup details.
-
-Device code flows for existing subscriptions:
-
-```bash
-relay-ai providers auth github-copilot   # GitHub Copilot
-relay-ai providers auth openai-oauth     # ChatGPT Plus / Pro
-relay-ai providers auth xai-oauth        # xAI SuperGrok
-```
-
-### Codex CLI (`relay-ai codex`)
-
-Launch [OpenAI Codex CLI](https://developers.openai.com/codex/cli) with registry providers. Requires `npm install -g @openai/codex`.
-
-```bash
-relay-ai providers add    # Anthropic, xAI, OpenAI, etc.
-relay-ai codex            # pick provider + model → Codex TUI
-```
-
-### Claude Desktop app (`relay-ai claude-app`)
-
-Launch **Claude Desktop** (macOS or Windows) with registry providers:
-
-```bash
-relay-ai claude-app
-```
-
-This command automates the "Third-Party Inference" (Developer Mode) setup. It temporarily configures Claude Desktop to point at a local gateway, launches the app, and routes traffic to your chosen provider.
-
-- **Keep the terminal open:** The proxy runs in the foreground.
-- **Ctrl+C to restore:** When you're done, press `Ctrl+C` in the terminal to automatically restore Claude Desktop to its normal Anthropic cloud mode.
-- **Cleanup:** If the terminal crashes, run `relay-ai claude-app --restore`.
-
-For manual network setups (e.g., remote cloud desktop), you can still use `relay-ai server`. See the full [Claude Desktop Setup Guide](docs/CLAUDE_DESKTOP_SETUP.md).
-
-relay-ai writes a **temporary** profile (`~/.codex/relay-ai-launch.config.toml`) and removes it when Codex exits. After a crash: `relay-ai codex --restore`.
-
-**Sandbox / network:** `relay-ai codex` defaults to **`danger-full-access`** (profile + `-s` flag) so shell tools like `curl`, `nlm`, and npm can reach the network. Override for one session:
-
-```bash
-relay-ai codex -s workspace-write
-```
-
-Pass Codex flags directly after `relay-ai codex` — you do **not** need `--` before `-s`. Codex’s `--dangerously-bypass-approvals-and-sandbox` also passes through if you need it.
-
-Full details: **[docs/CODEX.md](docs/CODEX.md)** — CLI + desktop app, configs, restore, sandbox, routing.
-
-For agent / alef-agent integration (boot flags, NDJSON, JSONL): **[docs/AI-AGENTS.md](docs/AI-AGENTS.md)** and `relay-ai --ai`.
-
-### ChatGPT desktop app / Codex mode (`relay-ai codex-app`, alias `relay-ai chatgpt`)
-
-> OpenAI merged the standalone Codex app into the ChatGPT desktop app on 2026-07-09 — it's now named "ChatGPT" on disk (bundle id and config format unchanged) and opens in Codex mode for existing Codex users. `relay-ai codex-app` and `relay-ai chatgpt` are the same command.
-
-Launch the **ChatGPT app in Codex mode** (macOS or Windows) with registry providers:
-
-```bash
-relay-ai codex-app
-```
-
-Patches `~/.codex/config.toml` with backup; **Ctrl+C** in the relay-ai terminal asks whether to close ChatGPT Desktop and restore your config (choose "No, keep session running" to decline and keep going). The app keeps Codex's built-in `openai` provider active so existing conversation history remains visible, and routes the selected model through a foreground local proxy. Preview config without writing: `relay-ai codex-app --config`. Recovery: `relay-ai codex-app --restore`.
-
-See **[docs/CODEX.md](docs/CODEX.md)** for CLI vs app differences, file ownership, and troubleshooting.
-
-> **Known limitation — MCP tools (Context7, chrome-devtools, etc.) don't work with non-native models.** Codex wraps local `[mcp_servers.*]` tools in a proprietary, undocumented format that only Codex's own ChatGPT backend can dispatch. When routed through relay-ai (or *any* non-native model provider — this also affects Ollama, OpenRouter, LiteLLM, LM Studio identically), the model can see and call the tools, but Codex's own dispatcher rejects every call with `unsupported call: ...`. This is a confirmed, currently open upstream bug ([openai/codex#20652](https://github.com/openai/codex/issues/20652)) — there is no workaround on relay-ai's side. MCP tools work normally with Codex's native OpenAI/ChatGPT models. See the [MCP troubleshooting row in docs/CODEX.md](docs/CODEX.md#troubleshooting) for details.
-
-**Reasoning effort:** Capable models show Codex's native reasoning picker (low/medium/high, etc.). relay-ai maps your choice to each provider's SDK options and preserves existing `model_reasoning_effort` in Codex config. Claude Code `/effort` and the `relay-ai server` gateway use the same mapping — see the [reasoning section in docs/CODEX.md](docs/CODEX.md#reasoning-effort).
-
-### Google Gemini CLI (`relay-ai gemini`)
-
-Launch the [Google Gemini CLI](https://www.npmjs.com/package/@google/gemini-cli) with registry providers.
-
-```bash
-relay-ai gemini
-```
-
-Pick provider → pick model → Gemini prompt loop opens. Non-interactive tasks with streaming NDJSON are also fully supported:
-
-```bash
-relay-ai gemini --provider google --model gemini-2.5-flash -p "Review this file" -o stream-json
-```
-
-For agent / alef-agent integration (boot flags, NDJSON): **[docs/AI-AGENTS.md](docs/AI-AGENTS.md)** and `relay-ai --ai`.
-
-## How it works
-
-### OpenCode Zen / Go filtering
-
-When OpenCode Zen is in your registry, `subscriptionFilter` controls which Zen models appear (`free` = free tier only; default = all Zen models). Add or change Zen via `relay-ai providers`.
-
-### Environment isolation
-
-When you launch, relay-ai builds a clean child environment:
-
-1. Removes 17 conflicting env vars from the child process (Vertex AI, Bedrock, AWS, Foundry, stale Anthropic config)
-2. Sets `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, and `ANTHROPIC_MODEL` for the session
-3. Passes `--model <selected>` to Claude Code as a backup override
-
-`--http-proxy` is intentionally different: it leaves normal Anthropic credentials and model selection in place, removes any `ANTHROPIC_BASE_URL`, and sets only the local HTTP proxy and CA trust variables.
-
-Set `RELAY_AI_CLAUDE_PATH` to make `relay-ai claude` launch an exact Claude Code executable instead of using a saved app-path override or searching `PATH`. This is useful with launchers that supply their bundled Claude executable to a process wrapper:
-
-```bash
-#!/usr/bin/env bash
-claude_path=$1
-shift
-
-exec env RELAY_AI_CLAUDE_PATH="$claude_path" \
-  relay-ai claude --http-proxy -- "$@"
-```
-
-If the wrapper itself is launched by an already proxied Claude process, clear the outer relay variables before starting the nested relay. The new Claude child receives the new proxy values automatically:
-
-```bash
-exec env -u HTTPS_PROXY -u HTTP_PROXY -u https_proxy -u http_proxy \
-  -u NODE_EXTRA_CA_CERTS \
-  RELAY_AI_CLAUDE_PATH="$claude_path" \
-  relay-ai claude --http-proxy -- "$@"
-```
-
-When Claude Code exits (normal exit, Ctrl+C, terminal close), your shell is unchanged. No cleanup step. No restore needed.
-
-**Caveat: Claude Code persists the model.** relay-ai doesn't edit `~/.claude/settings.json`, but Claude Code saves the model you launched with (via `--model` and `ANTHROPIC_MODEL`). A later bare `claude` launch may still show that model, e.g. `anthropic-opencode-go__deepseek-v4-flash` from a prior relay-ai session. To get back to a first-party default, run `claude --model sonnet` (or your preferred Claude model), or remove the `"model"` key from `~/.claude/settings.json`. If you used the favorites switch menu, Claude Code may also cache the gateway catalog at `~/.claude/cache/gateway-models.json`. Delete that file if `/model` shows stale entries from a dead proxy.
-
-### Model compatibility
-
-OpenCode exposes models through different API formats. relay-ai handles them when it can:
-
-| Model format | Examples | How it works | Label |
-|---|---|---|---|
-| Anthropic native | Claude, Qwen, MiniMax (Go) | Direct connection | *(none)* |
-| OpenAI chat completions | DeepSeek, Kimi, MiMo, GLM, Grok, GPT-4o (OpenCode OpenAI provider) | SDK adapter proxy (Vercel AI SDK) | `via proxy` |
-| OpenAI Responses API | GPT-5.4+, GPT-5.5, Codex, o-series (OpenCode OpenAI provider only) | Same proxy; SDK picks Responses API | `via proxy` |
-| Gemini native | Gemini (OpenCode Google provider) | SDK adapter, Gemini native API | `via proxy` |
-| Other SDK providers | Cerebras, Perplexity, Bedrock, Vertex, Together AI, etc. | Whatever `api.npm` OpenCode assigns | `via proxy` |
-| Not in cloud wizard | GPT, Gemini on OpenCode Zen/Go | Use an OpenCode-configured provider instead (OpenAI/Google in OpenCode config) | `not yet supported` |
-
-The SDK adapter proxy starts on a random local port for proxy-routed models and stops when Claude Code exits. Each `relay-ai claude` session gets its own port, so multiple terminals are fine. (`relay-ai server` uses fixed port `17645`. One server instance per machine.)
-
-For public-API OpenAI GPT-5.6+ routes, relay preserves Claude Code's inline system-message order and translates Anthropic `cache_control` blocks into OpenAI prompt-cache breakpoints with a 30-minute minimum lifetime. Cache reads and writes are returned through Anthropic-compatible usage fields. ChatGPT/Codex OAuth routes use a hashed Claude session cache key plus persistent WebSocket `previous_response_id` continuation, sending only newly appended tool/user input after exact history validation. Multiple divergent heads can coexist inside a session partition for rewinds and branches. Current instructions, tools, and other request options are forwarded on every create, while Claude Code's volatile Anthropic-only `x-anthropic-billing-header` attribution is omitted from OpenAI instructions so it cannot invalidate the stable prompt prefix. The OAuth backend requires `store:false` and does not accept the public API's `prompt_cache_options` or explicit breakpoints. Reconnects, changed model/effort, and continuation failures safely fall back to full context.
-
-### Provider notes
-
-**Mistral (free tier):** Rate limits are tight. Expect HTTP 429 during tool-heavy sessions. Claude Code retries with backoff. That's Mistral throttling, not a proxy bug.
-
-**OpenAI (OpenCode-configured provider):** Configure OpenAI in [OpenCode](https://opencode.ai) with your API key, then pick the OpenAI provider at launch. Newer GPT models use OpenAI's Responses API. The SDK picks `responses` vs `chat` from the model ID. OpenCode catalog IDs can differ from API IDs (e.g. `gpt-5.5-fast` maps to upstream `gpt-5.5`). If you see "model not available", run `relay-ai claude --trace` and check `~/.relay-ai/logs/claude-debug.log`.
-
-`CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` is set for direct (non-proxy) routes only. Proxy sessions keep tool-search betas.
-
-### API key storage
-
-relay-ai uses [`@napi-rs/keyring`](https://www.npmjs.com/package/@napi-rs/keyring) for the OS credential store. On later runs it checks silently. Key found? Wizard skips the prompt.
-
-| Platform | Credential store | Notes |
-|----------|-----------------|-------|
-| macOS | macOS Keychain | Optional `~/.zshrc` auto-load line for system-wide availability |
-| Windows | Windows Credential Manager | `setx` available as plaintext alternative |
-| Linux (desktop) | Secret Service API (GNOME Keyring, KWallet) | Needs a running keyring daemon |
-| Linux (headless) | Not available | Falls back to shell profile or session-only |
-
-If the native module fails to load, credential store options are skipped and you get shell profile / session-only storage.
 
 ## Configuration
 
-**Provider registry** (no secrets in this file):
+- Config home: `~/.clodex` (override with `CLODEX_HOME`). On first run, config is migrated automatically from a legacy `~/.relay-ai` directory if present; the legacy directory is never modified.
+- Credentials live in the OS credential store (Keychain / Windows Credential Manager / Secret Service) under the `clodex` service.
+- `CLODEX_CLAUDE_PATH` overrides Claude Code binary discovery.
 
-```text
-~/.relay-ai/providers.json
-```
+## Known limitations
 
-Manage with `relay-ai providers`. API keys are stored in the OS keychain (`keyring:provider:<id>`).
-
-**App preferences** — favorites, HTTP-proxy model aliases, last provider/model, server settings, optional server password:
-
-```text
-~/.relay-ai/config.json
-```
-
-Override the config directory:
-
-```bash
-export RELAY_AI_HOME="/path/to/your/relay-ai-home"
-```
-
-The OpenCode API key (for Zen/Go) and per-provider keys are stored separately, based on what you chose during setup (Keychain, credential store, or shell profile).
-
-## Troubleshooting
-
-See **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** for common issues — especially **“Not logged in”** after accidentally choosing **No** on Claude Code’s custom API key prompt.
-
-## Upgrading from opencode-starter
-
-If you used the old **opencode-starter** CLI, relay-ai migrates automatically on first run:
-
-- Config moves from `~/.opencode-starter/` → `~/.relay-ai/`
-- Legacy Keychain / credential-store entries are read and re-saved under `relay-ai`
-- The CLI command is now `relay-ai` (not `opencode-starter`)
-- Launch Claude Code with `relay-ai claude` (bare `relay-ai` prints help)
-
-The deprecated `OPENCODE_STARTER_HOME` env var still works as a fallback for `RELAY_AI_HOME`.
-
-## Contributing
-
-Private beta right now. Issues and PRs welcome on GitHub.
-
-## Support
-
-If relay-ai saves you time or money, you can help cover the AI bills that go into building and testing it against every provider. Any support is hugely appreciated. 🙏
-
-<a href="https://buymeacoffee.com/jacobbd"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" height="42"></a>
-
-## Disclaimer
-
-This project and its creator have **no affiliation** with OpenCode, Anthropic, Claude, Google, GitHub, OpenAI, xAI, or any other vendor named or integrated here. Trademarks belong to their respective owners.
-
-relay-ai was built for **education and research**, and mostly for fun. It routes inference through services you configure yourself (OpenCode Zen/Go, OpenCode-configured providers, Vertex AI, and gateways you run locally). Use at your own risk.
-
-## Vibe Coding Alert
-
-Full transparency: this project was vibe coded with AI coding assistants. If you're an experienced developer, you might look at parts of this codebase and wince. That's okay.
-
-The goal was to scratch an itch: launch Claude Code and Claude Desktop (Cowork + Code) against OpenCode backends and Vertex without fighting env vars, proxies, and model discovery. The code works. It's not corporate polish.
-
-If something makes you cringe, open an issue or PR. Human expertise is irreplaceable. For the tone and spirit of this section, see [notebooklm-mcp-cli](https://github.com/jacob-bd/notebooklm-mcp-cli) on the same GitHub org.
+- Cost display inside Claude Code is inaccurate for OpenAI models (Claude Code applies its own pricing table).
+- In the endpoint-mode switch menu, the displayed context window reflects the launch model and does not update on live `/model` switches (Claude Code fetches window metadata once at startup). Proxy mode with `clodex patch` reports correct per-model windows.
+- ChatGPT/Codex OAuth requires `store:false` upstream; some OpenAI cache controls are intentionally omitted on OAuth routes because they returned empty responses during compatibility testing.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

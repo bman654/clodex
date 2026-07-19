@@ -27,7 +27,7 @@ jobs:
 
       - run: npm publish
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.RELAYAI }}
+          NODE_AUTH_TOKEN: ${{ secrets.CLODEX_NPM_TOKEN }}
 
       # Create a GitHub Release from the matching CHANGELOG.md section.
       - name: Create GitHub Release
