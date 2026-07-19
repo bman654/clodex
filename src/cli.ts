@@ -970,9 +970,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   const bridgeMode = resolveBridgeMode('claude', parsed.bridgeMode, { persist: !dryRun });
 
   // Launch-time patch check: prompt on TTY, notice otherwise. Never blocks the launch.
-  if (!dryRun) {
-    await runLaunchPatchCheck({ agentStdout });
-  }
+  await runLaunchPatchCheck({ agentStdout, dryRun });
 
   if (bridgeMode === 'proxy') {
     return runClaudeHttpProxyCommand(parsed, claudeArgs, agentStdout);
@@ -991,6 +989,18 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   if (launchPlan.error) {
     console.error(pc.red(`\nError: ${launchPlan.error}\n`));
     return 1;
+  }
+  // Without a TTY the interactive wizard cannot run — fall back to the last-used
+  // provider/model (like print mode) instead of crashing on a clack prompt.
+  if (!launchPlan.skip && process.stdin.isTTY !== true) {
+    const savedPrefs = dryRun ? loadPreferences() : prefs;
+    if (savedPrefs.lastProvider && savedPrefs.lastModel) {
+      launchPlan.skip = true;
+      launchPlan.target = { providerId: savedPrefs.lastProvider, modelId: savedPrefs.lastModel };
+    } else {
+      console.error(pc.red('\nError: interactive wizard requires a TTY. Pass --provider and --model, or run once interactively.\n'));
+      return 1;
+    }
   }
   const switchMenuActive = favorites.length > 0 && !launchPlan.skip;
 

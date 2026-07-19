@@ -11071,7 +11071,8 @@ function sha256File(path) {
 }
 function resolveClaudeBinaryForPatch() {
   const envOverride = process.env["TWEAKCC_CC_INSTALLATION_PATH"];
-  const source = envOverride?.trim() || findClaudeBinary();
+  const nativeSymlink = join8(homedir4(), ".local", "bin", "claude");
+  const source = envOverride?.trim() || (existsSync9(nativeSymlink) ? nativeSymlink : null) || findClaudeBinary();
   if (!source) return null;
   let resolved;
   try {
@@ -11213,9 +11214,10 @@ async function runPatchCommand(opts = {}) {
     return 1;
   }
   try {
-    const restoreFirst = state !== "unpatched" && manifest !== null && manifest.claudeVersion === version;
+    const backup = pristineBackupPath(version, binaryPath);
+    const restoreFirst = existsSync9(backup) && sha256File(backup) !== sha256File(binaryPath);
     if (restoreFirst) {
-      p11.log.info("Patch config changed \u2014 restoring the pristine binary before re-patching.");
+      p11.log.info("Binary differs from its pristine backup \u2014 restoring it before patching fresh.");
     }
     const outcome = await applyPatch(binaryPath, version, desired, configHash, {
       trace: opts.trace ?? false,
@@ -11250,7 +11252,7 @@ async function runLaunchPatchCheck(opts = {}) {
       binarySize: statSync2(resolved.binaryPath).size
     });
     if (state === "current") return;
-    const interactive = !opts.agentStdout && process.stdin.isTTY === true && process.stdout.isTTY === true;
+    const interactive = !opts.dryRun && !opts.agentStdout && process.stdin.isTTY === true && process.stdout.isTTY === true;
     if (!interactive) {
       if (!opts.agentStdout) {
         console.error(pc12.dim(`clodex: claude binary is ${state === "unpatched" ? "not patched" : "stale-patched"} for your favorites \u2014 run \`clodex patch\`.`));
@@ -12058,9 +12060,7 @@ async function runClaudeCommand(parsed) {
     return 1;
   }
   const bridgeMode = resolveBridgeMode("claude", parsed.bridgeMode, { persist: !dryRun });
-  if (!dryRun) {
-    await runLaunchPatchCheck({ agentStdout });
-  }
+  await runLaunchPatchCheck({ agentStdout, dryRun });
   if (bridgeMode === "proxy") {
     return runClaudeHttpProxyCommand(parsed, claudeArgs, agentStdout);
   }
@@ -12078,6 +12078,16 @@ async function runClaudeCommand(parsed) {
 Error: ${launchPlan.error}
 `));
     return 1;
+  }
+  if (!launchPlan.skip && process.stdin.isTTY !== true) {
+    const savedPrefs = dryRun ? loadPreferences() : prefs;
+    if (savedPrefs.lastProvider && savedPrefs.lastModel) {
+      launchPlan.skip = true;
+      launchPlan.target = { providerId: savedPrefs.lastProvider, modelId: savedPrefs.lastModel };
+    } else {
+      console.error(pc13.red("\nError: interactive wizard requires a TTY. Pass --provider and --model, or run once interactively.\n"));
+      return 1;
+    }
   }
   const switchMenuActive = favorites.length > 0 && !launchPlan.skip;
   if (!agentStdout) relayIntro("Claude Code");

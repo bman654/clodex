@@ -238,9 +238,18 @@ function sha256File(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
+/**
+ * Locate the REAL native binary, bypassing wrapper shims (e.g. cmux) that a
+ * plain PATH lookup can return. Order (ported from the relay-ai wrapper):
+ * TWEAKCC_CC_INSTALLATION_PATH → ~/.local/bin/claude (stable native-install
+ * symlink) → findClaudeBinary() PATH lookup.
+ */
 export function resolveClaudeBinaryForPatch(): { binaryPath: string; version: string } | null {
   const envOverride = process.env['TWEAKCC_CC_INSTALLATION_PATH'];
-  const source = envOverride?.trim() || findClaudeBinary();
+  const nativeSymlink = join(homedir(), '.local', 'bin', 'claude');
+  const source = envOverride?.trim()
+    || (existsSync(nativeSymlink) ? nativeSymlink : null)
+    || findClaudeBinary();
   if (!source) return null;
   let resolved: string;
   try {
@@ -425,10 +434,13 @@ export async function runPatchCommand(opts: { restore?: boolean; trace?: boolean
   }
 
   try {
-    // Never patch on top of a patch: any state except a fresh binary restores first.
-    const restoreFirst = state !== 'unpatched' && manifest !== null && manifest.claudeVersion === version;
+    // Never patch on top of a patch: whenever a pristine backup exists for this
+    // version and the live binary differs from it (stale clodex patch, an old
+    // relay-ai patch, or a lost manifest), restore the backup before patching.
+    const backup = pristineBackupPath(version, binaryPath);
+    const restoreFirst = existsSync(backup) && sha256File(backup) !== sha256File(binaryPath);
     if (restoreFirst) {
-      p.log.info('Patch config changed — restoring the pristine binary before re-patching.');
+      p.log.info('Binary differs from its pristine backup — restoring it before patching fresh.');
     }
     const outcome = await applyPatch(binaryPath, version, desired, configHash, {
       trace: opts.trace ?? false,
@@ -457,7 +469,7 @@ export async function runPatchCommand(opts: { restore?: boolean; trace?: boolean
  *  - non-TTY (or agent stdout mode): one-line notice, never prompt, never block.
  *  - concurrent launches: the lock loser prints a notice and continues.
  */
-export async function runLaunchPatchCheck(opts: { agentStdout?: boolean } = {}): Promise<void> {
+export async function runLaunchPatchCheck(opts: { agentStdout?: boolean; dryRun?: boolean } = {}): Promise<void> {
   try {
     const desired = buildDesiredPatchConfig();
     if (Object.keys(desired.config).length === 0) return; // nothing to patch
@@ -475,7 +487,8 @@ export async function runLaunchPatchCheck(opts: { agentStdout?: boolean } = {}):
     });
     if (state === 'current') return;
 
-    const interactive = !opts.agentStdout && process.stdin.isTTY === true && process.stdout.isTTY === true;
+    const interactive = !opts.dryRun && !opts.agentStdout
+      && process.stdin.isTTY === true && process.stdout.isTTY === true;
     if (!interactive) {
       if (!opts.agentStdout) {
         console.error(pc.dim(`clodex: claude binary is ${state === 'unpatched' ? 'not patched' : 'stale-patched'} for your favorites — run \`clodex patch\`.`));
