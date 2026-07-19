@@ -1,6 +1,6 @@
 // src/oauth/callback-server.ts — CLI fallback local callback server for PKCE OAuth flows.
 // Primary path: the GUI server handles /oauth/callback when the UI is open.
-// This is only used when running `relay-ai providers auth <provider>` without the GUI.
+// This is only used when running `clodex providers auth <provider>` without the GUI.
 
 import http from 'node:http';
 

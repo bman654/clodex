@@ -7,11 +7,11 @@ export function isValidModelAlias(name: string): boolean {
   return MODEL_ALIAS_PATTERN.test(name);
 }
 
-/** Parse `luna=relay:openai-oauth:gpt-5.6-luna` (the `relay:` prefix is optional). */
+/** Parse `luna=clodex:openai-oauth:gpt-5.6-luna` (the `clodex:` prefix is optional). */
 export function parseModelAliasAssignment(value: string): ModelAlias | { error: string } {
   const separator = value.indexOf('=');
   if (separator < 1 || separator === value.length - 1) {
-    return { error: 'Alias must use name=relay:<provider-id>:<model-id>.' };
+    return { error: 'Alias must use name=clodex:<provider-id>:<model-id>.' };
   }
 
   const name = value.slice(0, separator).trim();
@@ -20,10 +20,10 @@ export function parseModelAliasAssignment(value: string): ModelAlias | { error: 
   }
 
   const rawTarget = value.slice(separator + 1).trim();
-  const target = rawTarget.startsWith('relay:') ? rawTarget.slice('relay:'.length) : rawTarget;
+  const target = rawTarget.startsWith('clodex:') ? rawTarget.slice('clodex:'.length) : rawTarget;
   const targetSeparator = target.indexOf(':');
   if (targetSeparator < 1 || targetSeparator === target.length - 1) {
-    return { error: 'Alias target must use relay:<provider-id>:<model-id>.' };
+    return { error: 'Alias target must use clodex:<provider-id>:<model-id>.' };
   }
 
   return {
@@ -36,5 +36,5 @@ export function parseModelAliasAssignment(value: string): ModelAlias | { error: 
 }
 
 export function modelAliasTarget(alias: Pick<ModelAlias, 'providerId' | 'modelId'>): string {
-  return `relay:${alias.providerId}:${alias.modelId}`;
+  return `clodex:${alias.providerId}:${alias.modelId}`;
 }

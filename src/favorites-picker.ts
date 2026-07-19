@@ -1,4 +1,4 @@
-// Global cross-provider search for relay-ai models (favorites manager).
+// Global cross-provider search for clodex models (favorites manager).
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
 import type { FavoriteModel, LocalProvider, LocalProviderModel } from './types.js';

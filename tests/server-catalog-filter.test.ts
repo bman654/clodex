@@ -59,19 +59,6 @@ describe('filterServerModelsByFavorites', () => {
   });
 });
 
-describe('filterServerModelsByFreeStatus', () => {
-  it('keeps verified free and free-provider access models', () => {
-    const filtered = filterServerModelsByFreeStatus([
-      model({ id: 'hy3', providerId: 'kilo', isFree: true, freeStatus: 'verified_free' }),
-      model({ id: 'nemotron', providerId: 'nvidia', isFree: true, freeStatus: 'free_provider' }),
-      model({ id: 'paid', providerId: 'openai', isFree: false, freeStatus: 'paid' }),
-      model({ id: 'unknown', providerId: 'custom', isFree: false, freeStatus: 'unknown' }),
-    ]);
-
-    expect(filtered.map(m => m.id)).toEqual(['hy3', 'nemotron']);
-  });
-});
-
 describe('resolveInitialServerProviders', () => {
   const available = [
     { id: 'google', name: 'Google', modelCount: 18 },

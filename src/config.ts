@@ -1,7 +1,7 @@
-import type { UserPreferences, FavoriteModel } from './types.js';
-import { dirname, join } from 'node:path';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { getAppHome, getConfigPath, getLegacyAppHome, getLegacyConfPath } from './paths.js';
+import type { UserPreferences } from './types.js';
+import { dirname } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { ensureLegacyAppHomeMigrated, getConfigPath } from './paths.js';
 
 function readJsonFile(path: string): UserPreferences | null {
   try {
@@ -12,47 +12,8 @@ function readJsonFile(path: string): UserPreferences | null {
   }
 }
 
-function ensureAppHomeMigrated(): void {
-  const configPath = getConfigPath();
-  if (existsSync(configPath)) return;
-
-  const legacyConfig = join(getLegacyAppHome(), 'config.json');
-  if (!existsSync(legacyConfig)) return;
-
-  mkdirSync(getAppHome(), { recursive: true, mode: 0o700 });
-  copyFileSync(legacyConfig, configPath);
-
-  const legacyVertex = join(getLegacyAppHome(), 'vertex-models.json');
-  const vertexPath = join(getAppHome(), 'vertex-models.json');
-  if (existsSync(legacyVertex) && !existsSync(vertexPath)) {
-    copyFileSync(legacyVertex, vertexPath);
-  }
-}
-
-function ensureConfigMigrated(): void {
-  ensureAppHomeMigrated();
-
-  const configPath = getConfigPath();
-  if (existsSync(configPath)) return;
-
-  const legacyPath = getLegacyConfPath();
-  if (!existsSync(legacyPath)) return;
-
-  const legacy = readJsonFile(legacyPath);
-  if (!legacy) return;
-
-  mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
-  writeFileSync(configPath, `${JSON.stringify(legacy, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-
-  try {
-    renameSync(legacyPath, `${legacyPath}.migrated`);
-  } catch {
-    // Migration copy is enough; renaming is best-effort.
-  }
-}
-
 function readConfig(): UserPreferences {
-  ensureConfigMigrated();
+  ensureLegacyAppHomeMigrated();
   return readJsonFile(getConfigPath()) ?? {};
 }
 
@@ -152,7 +113,7 @@ export function recordLaunchSelection(
   });
 }
 
-const SERVER_PASSWORD_SERVICE = 'relay-ai-server-password';
+const SERVER_PASSWORD_SERVICE = 'clodex-server-password';
 const SERVER_PASSWORD_ACCOUNT = 'server-password';
 
 async function getServerPasswordKeyring(): Promise<any | null> {

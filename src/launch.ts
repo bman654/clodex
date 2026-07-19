@@ -22,7 +22,7 @@ const FALLBACK_PATHS = isWindows
     ];
 
 export function findClaudeBinary(): string | null {
-  const environmentOverride = process.env['RELAY_AI_CLAUDE_PATH'];
+  const environmentOverride = process.env['CLODEX_CLAUDE_PATH'];
   if (environmentOverride?.trim()) {
     return existsSync(environmentOverride) ? environmentOverride : null;
   }

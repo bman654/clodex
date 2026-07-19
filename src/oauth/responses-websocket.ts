@@ -2,7 +2,7 @@
 // ChatGPT/Codex Responses backend.
 //
 // The Vercel AI SDK still sees a fetch-like SSE response per model call. Behind
-// that interface, relay-ai retains one sequential WebSocket chain per opaque
+// that interface, clodex retains one sequential WebSocket chain per opaque
 // Claude session/model/effort/account partition and uses previous_response_id
 // only after proving the next translated conversation appends to the chain head.
 
@@ -1030,7 +1030,7 @@ function createConnection(
   socket.on('open', () => {
     entry.open = true;
     debug(`connection=${entry.debugId} opened`);
-    // Persistent cache sockets must not keep a finished relay-ai CLI process alive.
+    // Persistent cache sockets must not keep a finished clodex CLI process alive.
     (socket as unknown as { _socket?: { unref?: () => void } })._socket?.unref?.();
     const ctx = entry.current;
     if (ctx && !ctx.closed) sendContext(entry, ctx);

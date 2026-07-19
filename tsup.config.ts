@@ -14,8 +14,6 @@ export default defineConfig({
     '@napi-rs/keyring',
     'ws',
     /^@ai-sdk\//,
-    '@openrouter/ai-sdk-provider',
-    'gitlab-ai-provider',
     'open',
   ],
 });

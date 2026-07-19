@@ -145,7 +145,7 @@ export async function runHttpProxyServerCommand(debug = false, webSocketDiagnost
 
   const { handle, loaded } = started;
   console.log('');
-  console.log(pc.bold(pc.green('Relay AI HTTP proxy running')));
+  console.log(pc.bold(pc.green('clodex proxy-mode server running')));
   console.log(`  HTTPS_PROXY=http://127.0.0.1:${handle.port}`);
   console.log(`  HTTP_PROXY=http://127.0.0.1:${handle.port}`);
   console.log(`  NODE_EXTRA_CA_CERTS=${handle.caCertPath}`);

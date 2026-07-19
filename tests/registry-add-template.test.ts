@@ -64,7 +64,7 @@ describe('registry/add-template', () => {
     vi.mocked(providerFactory.isSdkMigratedNpm).mockReturnValue(false);
     const res = await addProviderFromTemplate(dummyTemplate, 'key');
     expect(res.added).toBe(false);
-    expect(res.error).toContain('is not available in relay-ai');
+    expect(res.error).toContain('is not available in clodex');
   });
 
   it('fails on empty API key', async () => {

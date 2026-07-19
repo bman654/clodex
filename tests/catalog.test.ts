@@ -59,26 +59,26 @@ describe('localModelToRoute', () => {
 
   it('preserves OAuth provider data for catalog routes', () => {
     const provider: LocalProvider = {
-      id: 'antigravity',
-      name: 'Antigravity',
+      id: 'openai-oauth',
+      name: 'OpenAI OAuth (ChatGPT)',
       apiKey: 'oauth-token',
       authType: 'oauth',
-      providerData: { projectId: 'project-123', tier: 'free-tier' },
+      providerData: { plan: 'pro' },
       models: [{
-        id: 'gemini-3.5-flash-high',
-        name: 'Gemini 3.5 Flash High',
-        family: 'gemini',
-        brand: 'Google',
-        modelFormat: 'cloud-code',
-        upstreamModelId: 'gemini-3.5-flash-high',
+        id: 'gpt-5.6-sol',
+        name: 'GPT-5.6 Sol',
+        family: 'gpt',
+        brand: 'GPT',
+        modelFormat: 'openai',
+        upstreamModelId: 'gpt-5.6-sol',
+        npm: '@ai-sdk/openai',
       }],
     };
     const route = localModelToRoute(provider, provider.models[0]!);
     expect(route).toMatchObject({
-      aliasId: 'anthropic-antigravity__gemini-3.5-flash-high[1m]',
-      modelFormat: 'cloud-code',
-      upstreamUrl: 'https://daily-cloudcode-pa.googleapis.com',
-      providerData: { projectId: 'project-123', tier: 'free-tier' },
+      modelFormat: 'openai',
+      authType: 'oauth',
+      providerData: { plan: 'pro' },
     });
   });
 

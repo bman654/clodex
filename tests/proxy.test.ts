@@ -54,7 +54,7 @@ describe('Anthropic endpoint routing', () => {
 
   it('estimates only input-context fields', () => {
     const base = estimateAnthropicInputTokens({
-      model: 'relay:test:model',
+      model: 'clodex:test:model',
       messages: [{ role: 'user', content: 'hello world' }],
     });
     expect(base).toBeGreaterThan(0);
@@ -78,90 +78,6 @@ describe('aliasModelId', () => {
 
   it('uses stable provider id slug in alias', () => {
     expect(aliasModelId('deepseek-v4', 'go')).toBe('anthropic-go__deepseek-v4');
-  });
-});
-
-describe('cloud-code handler 401 retry', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.clearAllMocks();
-  });
-
-  it('retries with refreshed token on upstream 401 and succeeds', async () => {
-    const refreshToken = vi.fn().mockResolvedValue('refreshed-token');
-    const route: ProxyRoute = {
-      aliasId: 'claude-sonnet-4-6',
-      realModelId: 'claude-sonnet-4-6',
-      displayName: 'Claude Sonnet',
-      upstreamUrl: 'https://cloudcode.googleapis.com',
-      apiKey: 'original-token',
-      modelFormat: 'cloud-code',
-      providerId: 'antigravity',
-      authType: 'oauth',
-      providerData: { projectId: 'proj-123' },
-      refreshToken,
-    };
-
-    let callCount = 0;
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (_url: string, opts: RequestInit) => {
-      callCount++;
-      const auth = (opts.headers as Record<string, string>)['Authorization'];
-      if (auth === 'Bearer original-token') {
-        return { ok: false, status: 401, text: async () => 'token expired' };
-      }
-      // second call with refreshed token
-      return {
-        ok: true,
-        status: 200,
-        headers: { get: () => 'text/event-stream' },
-        body: { getReader: () => ({ read: vi.fn().mockResolvedValue({ done: true }) }) },
-      };
-    }));
-
-    const handle = await startProxyCatalog([route], route.aliasId, false);
-    const res = await postToProxy(handle.port, handle.token, {
-      model: 'claude-sonnet-4-6',
-      max_tokens: 100,
-      messages: [{ role: 'user', content: 'hi' }],
-      stream: false,
-    });
-
-    handle.close();
-    expect(refreshToken).toHaveBeenCalledOnce();
-    expect(callCount).toBe(2); // original + retry
-    expect(res.status).not.toBe(401);
-  });
-
-  it('does not retry when refreshToken is not set', async () => {
-    const route: ProxyRoute = {
-      aliasId: 'claude-sonnet-4-6',
-      realModelId: 'claude-sonnet-4-6',
-      displayName: 'Claude Sonnet',
-      upstreamUrl: 'https://cloudcode.googleapis.com',
-      apiKey: 'original-token',
-      modelFormat: 'cloud-code',
-      providerId: 'antigravity',
-      authType: 'oauth',
-      providerData: { projectId: 'proj-123' },
-      // no refreshToken
-    };
-
-    let callCount = 0;
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(async () => {
-      callCount++;
-      return { ok: false, status: 401, text: async () => 'token expired' };
-    }));
-
-    const handle = await startProxyCatalog([route], route.aliasId, false);
-    await postToProxy(handle.port, handle.token, {
-      model: 'claude-sonnet-4-6',
-      max_tokens: 100,
-      messages: [{ role: 'user', content: 'hi' }],
-      stream: false,
-    });
-
-    handle.close();
-    expect(callCount).toBe(1); // no retry
   });
 });
 
@@ -196,7 +112,7 @@ describe('SDK anonymous route handling', () => {
 describe('catalog model aliases', () => {
   it('routes alias names to their target route without rewriting the requested model id', async () => {
     const defaultRoute: ProxyRoute = {
-      aliasId: 'relay:test:default-model',
+      aliasId: 'clodex:test:default-model',
       realModelId: 'default-model',
       displayName: 'Default Model',
       upstreamUrl: '',
@@ -206,7 +122,7 @@ describe('catalog model aliases', () => {
       providerId: 'test-provider',
     };
     const aliasTarget: ProxyRoute = {
-      aliasId: 'relay:openai-oauth:gpt-5.6-sol',
+      aliasId: 'clodex:openai-oauth:gpt-5.6-sol',
       realModelId: 'gpt-5.6-sol',
       displayName: 'GPT-5.6 Sol',
       upstreamUrl: 'https://upstream-sol.example',
@@ -260,7 +176,7 @@ describe('catalog model aliases', () => {
 
   it('ignores aliases whose target route is absent', async () => {
     const route: ProxyRoute = {
-      aliasId: 'relay:test:translated-model',
+      aliasId: 'clodex:test:translated-model',
       realModelId: 'translated-model',
       displayName: 'Translated Model',
       upstreamUrl: '',
@@ -276,7 +192,7 @@ describe('catalog model aliases', () => {
       undefined,
       undefined,
       undefined,
-      [{ name: 'ghost', routeId: 'relay:test:not-a-route' }],
+      [{ name: 'ghost', routeId: 'clodex:test:not-a-route' }],
     );
 
     try {
@@ -296,7 +212,7 @@ describe('catalog model aliases', () => {
 describe('token counting', () => {
   it('returns a local estimate for translated routes without loading or invoking the provider', async () => {
     const route: ProxyRoute = {
-      aliasId: 'relay:test:translated-model',
+      aliasId: 'clodex:test:translated-model',
       realModelId: 'translated-model',
       displayName: 'Translated Model',
       upstreamUrl: '',
@@ -328,7 +244,7 @@ describe('token counting', () => {
     }));
     vi.stubGlobal('fetch', fetchMock);
     const route: ProxyRoute = {
-      aliasId: 'relay:anthropic:sonnet',
+      aliasId: 'clodex:anthropic:sonnet',
       realModelId: 'claude-sonnet-4-6',
       displayName: 'Claude Sonnet',
       upstreamUrl: 'https://api.anthropic.com',
@@ -361,7 +277,7 @@ describe('token counting', () => {
 
 describe('translated request cancellation', () => {
   it('aborts the SDK provider request and records translation cancellation', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-sdk-cancel-'));
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-sdk-cancel-'));
     const inferenceLogPath = join(dir, 'inference.jsonl');
     let upstreamReceivedResolve!: () => void;
     const upstreamReceived = new Promise<void>(resolve => { upstreamReceivedResolve = resolve; });
@@ -384,7 +300,7 @@ describe('translated request cancellation', () => {
     if (!address || typeof address === 'string') throw new Error('test upstream did not bind');
 
     const route: ProxyRoute = {
-      aliasId: 'relay:test:translated-model',
+      aliasId: 'clodex:test:translated-model',
       realModelId: 'translated-model',
       displayName: 'Translated Model',
       upstreamUrl: '',
@@ -440,10 +356,10 @@ describe('translated request cancellation', () => {
 
 describe('SDK translated error logging', () => {
   it('returns an HTTP error when request translation throws instead of leaving the client pending', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-sdk-translation-error-'));
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-sdk-translation-error-'));
     const inferenceLogPath = join(dir, 'inference.jsonl');
     const route: ProxyRoute = {
-      aliasId: 'relay:test:translated-model',
+      aliasId: 'clodex:test:translated-model',
       realModelId: 'translated-model',
       displayName: 'Translated Model',
       upstreamUrl: '',
@@ -480,10 +396,10 @@ describe('SDK translated error logging', () => {
   });
 
   it('preserves a pre-stream HTTP failure and logs the AI SDK response body', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-sdk-error-'));
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-sdk-error-'));
     const inferenceLogPath = join(dir, 'inference.jsonl');
-    const previousRequestPreview = process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
-    process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = '1';
+    const previousRequestPreview = process.env['CLODEX_LOG_REQUEST_PREVIEW'];
+    process.env['CLODEX_LOG_REQUEST_PREVIEW'] = '1';
     const upstream = http.createServer((req, res) => {
       req.resume();
       res.writeHead(400, { 'Content-Type': 'application/json', 'Connection': 'close' });
@@ -497,7 +413,7 @@ describe('SDK translated error logging', () => {
     if (!address || typeof address === 'string') throw new Error('test upstream did not bind');
 
     const route: ProxyRoute = {
-      aliasId: 'relay:test:translated-model',
+      aliasId: 'clodex:test:translated-model',
       realModelId: 'translated-model',
       displayName: 'Translated Model',
       upstreamUrl: '',
@@ -548,8 +464,8 @@ describe('SDK translated error logging', () => {
         lastPartType: 'error',
       }));
     } finally {
-      if (previousRequestPreview === undefined) delete process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
-      else process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = previousRequestPreview;
+      if (previousRequestPreview === undefined) delete process.env['CLODEX_LOG_REQUEST_PREVIEW'];
+      else process.env['CLODEX_LOG_REQUEST_PREVIEW'] = previousRequestPreview;
       handle.close();
       await new Promise<void>(resolve => upstream.close(() => resolve()));
       rmSync(dir, { recursive: true, force: true });
@@ -576,7 +492,7 @@ describe('SDK translated error logging', () => {
     if (!address || typeof address === 'string') throw new Error('test upstream did not bind');
 
     const route: ProxyRoute = {
-      aliasId: 'relay:test:small-context',
+      aliasId: 'clodex:test:small-context',
       realModelId: 'small-context',
       displayName: 'Small Context Model',
       upstreamUrl: '',
@@ -616,7 +532,7 @@ describe('SDK translated error logging', () => {
   }, 20_000);
 
   it('logs SDK input and translated output through successful stream completion', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-sdk-success-'));
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-sdk-success-'));
     const inferenceLogPath = join(dir, 'inference.jsonl');
     const upstream = http.createServer((req, res) => {
       req.resume();
@@ -638,7 +554,7 @@ describe('SDK translated error logging', () => {
     if (!address || typeof address === 'string') throw new Error('test upstream did not bind');
 
     const route: ProxyRoute = {
-      aliasId: 'relay:test:translated-model',
+      aliasId: 'clodex:test:translated-model',
       realModelId: 'translated-model',
       displayName: 'Translated Model',
       upstreamUrl: '',
@@ -706,7 +622,7 @@ describe('SDK translated error logging', () => {
   }, 20_000);
 
   it('logs dispatch and completion for a non-streaming translated request', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-sdk-nonstream-'));
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-sdk-nonstream-'));
     const inferenceLogPath = join(dir, 'inference.jsonl');
     const upstream = http.createServer((req, res) => {
       req.resume();
@@ -727,7 +643,7 @@ describe('SDK translated error logging', () => {
     const address = upstream.address();
     if (!address || typeof address === 'string') throw new Error('test upstream did not bind');
     const route: ProxyRoute = {
-      aliasId: 'relay:test:translated-model',
+      aliasId: 'clodex:test:translated-model',
       realModelId: 'translated-model',
       displayName: 'Translated Model',
       upstreamUrl: '',

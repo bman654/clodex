@@ -12,8 +12,8 @@ export interface HttpProxyCertificates {
 }
 
 const CERT_DIR = 'http-proxy';
-const CA_CERT_FILE = 'relay-ai-ca.pem';
-const CA_KEY_FILE = 'relay-ai-ca-key.pem';
+const CA_CERT_FILE = 'clodex-ca.pem';
+const CA_KEY_FILE = 'clodex-ca-key.pem';
 const SERVER_CERT_FILE = 'api.anthropic.com.pem';
 const SERVER_KEY_FILE = 'api.anthropic.com-key.pem';
 const CERT_VERSION_FILE = 'version';
@@ -57,7 +57,7 @@ function generateCertificates(paths: ReturnType<typeof certPaths>): void {
   caCert.serialNumber = serialNumber();
   caCert.validity.notBefore = new Date(Date.now() - 24 * 60 * 60 * 1000);
   caCert.validity.notAfter = new Date(Date.now() + 10 * 365 * 24 * 60 * 60 * 1000);
-  const caAttrs = [{ name: 'commonName', value: 'Relay AI local HTTP proxy CA' }];
+  const caAttrs = [{ name: 'commonName', value: 'clodex local HTTP proxy CA' }];
   caCert.setSubject(caAttrs);
   caCert.setIssuer(caAttrs);
   caCert.setExtensions([

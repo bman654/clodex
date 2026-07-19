@@ -32,7 +32,6 @@ export function isTargetCompatibleModel(ctx: TargetCompatibilityContext): Target
   }
 
   if (ctx.model.modelFormat === 'openai') {
-    if (ctx.providerId === 'zen' || ctx.providerId === 'go') return { compatible: true };
     if (ctx.model.npm) return { compatible: true };
     return { compatible: false, reason: 'OpenAI-format model is missing an SDK provider package' };
   }

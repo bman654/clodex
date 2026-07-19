@@ -6,12 +6,6 @@ export type ModelFormat = 'anthropic' | 'openai' | 'unsupported';
 
 export type StarterCommand = 'root' | 'claude' | 'server' | 'models' | 'providers' | 'patch';
 
-export interface BackendConfig {
-  id: 'zen' | 'go';
-  name: string;
-  baseUrl: string;
-}
-
 export interface ModelCost {
   input: number;
   output: number;
@@ -19,21 +13,6 @@ export interface ModelCost {
   cache_write?: number;
 }
 
-export interface ModelInfo {
-  id: string;
-  name: string;
-  isFree: boolean;
-  freeStatus?: FreeStatus;
-  brand: string;
-  sourceBackend: 'zen' | 'go';
-  modelFormat: ModelFormat;
-  cost?: ModelCost;
-  contextWindow?: number;
-  /** Broad model metadata: model can produce reasoning/thinking output. */
-  reasoning?: boolean;
-  /** Streaming/interleaved reasoning field name from metadata, e.g. reasoning_content. */
-  interleavedReasoningField?: string;
-}
 
 export interface LocalProviderModel {
   id: string;

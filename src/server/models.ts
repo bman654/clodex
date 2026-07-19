@@ -9,8 +9,7 @@ export interface GatewayModelOptions {
 }
 
 export type ServerModelFormat = 'anthropic' | 'openai' | 'cloud-code' | 'unsupported';
-export type ServerBackendId = 'zen' | 'go';
-export type ServerModelSource = ServerBackendId | 'vertex' | (string & {});
+export type ServerModelSource = string;
 
 export interface ServerModelInfo {
   id: string;
@@ -47,7 +46,7 @@ export interface ServerModelInfo {
   contextWindow?: number;
   /** Picker label for gateway aliases, e.g. "OpenCode Go" or local provider name. */
   providerLabel?: string;
-  /** Provider id for filtering: `zen`, `go`, or a local OpenCode provider id. */
+  /** Provider id for filtering. */
   providerId?: string;
   /** Static headers sent on every upstream request (e.g. a plan/auth-tracking header a custom endpoint requires). */
   headers?: Record<string, string>;
@@ -110,10 +109,10 @@ export function formatAnthropicModels(models: ServerModelInfo[]) {
 }
 
 export function gatewayProviderLabel(model: ServerModelInfo): string {
-  return model.providerLabel ?? (model.sourceBackend === 'go' ? 'OpenCode Go' : 'OpenCode Zen');
+  return model.providerLabel ?? model.sourceBackend;
 }
 
-/** Stable slug for gateway alias ids — provider id when set, else zen/go backend id. */
+/** Stable slug for gateway alias ids — provider id when set, else the source backend id. */
 export function gatewayProviderId(model: ServerModelInfo): string {
   return model.providerId ?? model.sourceBackend;
 }
@@ -195,12 +194,7 @@ export function buildDedupedModelRows(models: ServerModelInfo[], opts?: GatewayM
 }
 
 export function supportsDirectOpenAIChatCompletions(model: ServerModelInfo): boolean {
-  return model.modelFormat === 'openai'
-    && (
-      !!model.completionsUrl
-      || model.sourceBackend === 'zen'
-      || model.sourceBackend === 'go'
-    );
+  return model.modelFormat === 'openai' && !!model.completionsUrl;
 }
 
 export function formatOpenAIModels(models: ServerModelInfo[]) {

@@ -43,7 +43,7 @@ export async function requestOpenAiDeviceCode(): Promise<OpenAiDeviceCodeData> {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'User-Agent': `relay-ai/${VERSION}`,
+      'User-Agent': `clodex/${VERSION}`,
     },
     body: JSON.stringify({ client_id: CLIENT_ID }),
   });
@@ -71,7 +71,7 @@ export async function pollOpenAiDeviceCodeToken(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'User-Agent': `relay-ai/${VERSION}`,
+        'User-Agent': `clodex/${VERSION}`,
       },
       body: JSON.stringify({
         device_auth_id: deviceData.device_auth_id,

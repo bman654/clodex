@@ -8,7 +8,6 @@ import {
   supportsDirectOpenAIChatCompletions,
   type GatewayModelOptions,
   type ModelCatalog,
-  type ServerBackendId,
   type ServerModelInfo,
   upstreamModelId,
 } from './models.js';
@@ -62,24 +61,13 @@ import {
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
 
-export interface ServerBackend {
-  baseUrl: string;
-}
-
-export interface VertexServerConfig {
-  project: string;
-  location: string;
-}
-
 export interface ServerOptions {
   host: string;
   port: number;
   apiKey: string;
   serverPassword: string | null;
   catalog: ModelCatalog;
-  backends: Record<ServerBackendId, ServerBackend>;
   gateway?: GatewayModelOptions;
-  vertex?: VertexServerConfig;
   /** When set, append structured debug lines to this file path. */
   debugLogPath?: string;
   /** When set, append privacy-minimal inference routing records as JSONL. */
@@ -270,9 +258,11 @@ async function handleAnthropicMessages(
       sendJson(res, 400, { error: { message: `Invalid provider baseUrl: must be http:// or https://` } });
       return;
     }
-    const messagesUrl = model.baseUrl
-      ? `${model.baseUrl}/v1/messages`
-      : `${backendFor(options, model).baseUrl}/v1/messages`;
+    if (!model.baseUrl) {
+      sendJson(res, 400, { error: { message: `Model ${model.id} has no Anthropic baseUrl configured` } });
+      return;
+    }
+    const messagesUrl = `${model.baseUrl}/v1/messages`;
     const apiKey = model.apiKey ?? options.apiKey;
     const betaHeaderRaw = req.headers['anthropic-beta'];
     const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
@@ -348,7 +338,6 @@ async function handleAnthropicMessages(
       model.npm!,
       model.apiBaseUrl,
       apiKey,
-      options.vertex,
       options.webSocketDiagnosticsLogPath,
     );
     const npmMaxTools = maxToolsForNpm(model.npm);
@@ -464,9 +453,11 @@ async function handleOpenAIChatCompletions(
       sendJson(res, 400, { error: { message: `Invalid provider completionsUrl: must be http:// or https://` } });
       return;
     }
-    const completionsUrl = model.completionsUrl
-      ? model.completionsUrl
-      : `${backendFor(options, model).baseUrl}/v1/chat/completions`;
+    if (!model.completionsUrl) {
+      sendJson(res, 400, { error: { message: `Model ${model.id} has no completionsUrl configured` } });
+      return;
+    }
+    const completionsUrl = model.completionsUrl;
     const apiKey = model.apiKey ?? options.apiKey;
     auditInference(options, {
       modelId: body.model,
@@ -505,7 +496,7 @@ async function handleOpenAIChatCompletions(
     requestPreview: getLatestMessagePreview(body.messages, body.system),
   });
   const baseURL = model.modelFormat === 'anthropic' ? model.baseUrl : model.apiBaseUrl;
-  const languageModel = await getOrInitLanguageModel(modelCache, model, npm, baseURL, apiKey, options.vertex);
+  const languageModel = await getOrInitLanguageModel(modelCache, model, npm, baseURL, apiKey);
   const params = translateOpenAiRequest(body as unknown as OpenAiRequest);
   const clientWantsStream = Boolean(body.stream);
   const responseModelId = getResponseModelId(body.model, model, options);
@@ -559,22 +550,12 @@ function lookupModel(res: ServerResponse, catalog: ModelCatalog, modelId: unknow
   return model;
 }
 
-function backendFor(options: ServerOptions, model: ServerModelInfo): ServerBackend {
-  if (model.sourceBackend === 'vertex') {
-    throw new Error(`Vertex models route through the SDK adapter, not cloud backends: ${model.id}`);
-  }
-  if (model.sourceBackend === 'zen') return options.backends.zen;
-  if (model.sourceBackend === 'go') return options.backends.go;
-  throw new Error(`Provider ${model.sourceBackend} is not a cloud backend — model must set baseUrl/completionsUrl`);
-}
-
 async function getOrInitLanguageModel(
   modelCache: Map<string, LanguageModel>,
   model: ServerModelInfo,
   npm: string,
   baseURL: string | undefined,
   apiKey: string,
-  vertex: VertexServerConfig | undefined,
   webSocketDiagnosticsLogPath?: string,
 ): Promise<LanguageModel> {
   const cacheKey = [
@@ -594,7 +575,6 @@ async function getOrInitLanguageModel(
       providerId: model.providerId ?? model.sourceBackend,
       authType: model.authType,
       oauthAccountId: model.oauthAccountId,
-      vertex,
       headers: model.headers,
       useResponsesLite: model.useResponsesLite,
       preferWebSockets: model.preferWebSockets,

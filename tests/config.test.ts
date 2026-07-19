@@ -1,60 +1,59 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import {
   clearSavedServerPassword,
   getAppPathOverride,
   getSavedServerPassword,
-  getServerFreeModelsOnly,
   getServerListenMode,
   loadPreferences,
   recordLaunchFolder,
+  resolveBridgeMode,
   savePreferences,
   setAppPathOverride,
   setSavedServerPassword,
-  setServerFreeModelsOnly,
   setServerListenMode,
 } from '../src/config.js';
-import { getAppHome, getConfigPath, getLegacyAppHome, getLegacyConfPath } from '../src/paths.js';
+import {
+  getAppHome,
+  getConfigPath,
+  getLegacyAppHome,
+  resetLegacyMigrationForTests,
+} from '../src/paths.js';
 
 let tempHome: string;
 let previousHome: string | undefined;
 
 beforeEach(() => {
-  tempHome = mkdtempSync(join(tmpdir(), 'relay-ai-test-'));
+  tempHome = mkdtempSync(join(tmpdir(), 'clodex-test-'));
   previousHome = process.env['HOME'];
   process.env['HOME'] = tempHome;
-  process.env['RELAY_AI_HOME'] = join(tempHome, 'app-home');
+  process.env['CLODEX_HOME'] = join(tempHome, 'app-home');
+  resetLegacyMigrationForTests();
 });
 
 afterEach(() => {
   rmSync(tempHome, { recursive: true, force: true });
   if (previousHome === undefined) delete process.env['HOME'];
   else process.env['HOME'] = previousHome;
-  delete process.env['RELAY_AI_HOME'];
+  delete process.env['CLODEX_HOME'];
+  resetLegacyMigrationForTests();
 });
 
 describe('app paths', () => {
-  it('uses RELAY_AI_HOME when set', () => {
-    process.env['RELAY_AI_HOME'] = join(tempHome, 'custom-home');
+  it('uses CLODEX_HOME when set', () => {
+    process.env['CLODEX_HOME'] = join(tempHome, 'custom-home');
 
     expect(getAppHome()).toBe(join(tempHome, 'custom-home'));
   });
 
-  it('still accepts legacy OPENCODE_STARTER_HOME override', () => {
-    delete process.env['RELAY_AI_HOME'];
-    process.env['OPENCODE_STARTER_HOME'] = join(tempHome, 'legacy-override');
-
-    expect(getAppHome()).toBe(join(tempHome, 'legacy-override'));
-  });
-
-  it('defaults to a .relay-ai folder under the user home', () => {
-    expect(getAppHome({ HOME: tempHome })).toBe(join(tempHome, '.relay-ai'));
+  it('defaults to a .clodex folder under the user home', () => {
+    expect(getAppHome({ HOME: tempHome })).toBe(join(tempHome, '.clodex'));
   });
 
   it('stores config.json inside the app home', () => {
-    process.env['RELAY_AI_HOME'] = join(tempHome, 'app');
+    process.env['CLODEX_HOME'] = join(tempHome, 'app');
 
     expect(getConfigPath()).toBe(join(tempHome, 'app', 'config.json'));
   });
@@ -62,49 +61,39 @@ describe('app paths', () => {
 
 describe('dotfolder config', () => {
   it('writes preferences to config.json in the app home', () => {
-    savePreferences({ lastBackend: 'zen', lastModel: 'claude-sonnet-4-6' });
+    savePreferences({ lastProvider: 'openai-oauth', lastModel: 'gpt-5.6-sol' });
 
     expect(loadPreferences()).toMatchObject({
-      lastBackend: 'zen',
-      lastModel: 'claude-sonnet-4-6',
+      lastProvider: 'openai-oauth',
+      lastModel: 'gpt-5.6-sol',
     });
     expect(JSON.parse(readFileSync(getConfigPath(), 'utf8'))).toMatchObject({
-      lastBackend: 'zen',
-      lastModel: 'claude-sonnet-4-6',
+      lastProvider: 'openai-oauth',
+      lastModel: 'gpt-5.6-sol',
     });
   });
 
-  it('saves Antigravity CLI favorites separately from global favorites', () => {
+  it('saves favorites and aliases', () => {
     savePreferences({
-      favoriteModels: [{ providerId: 'global', modelId: 'claude' }],
-      modelAliases: [{ name: 'luna', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' }],
-      antigravityCliFavoriteModels: [{ providerId: 'xai-oauth', modelId: 'grok-4.3' }],
-      antigravityCliFavoritesHintShown: true,
+      favoriteModels: [{ providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
+      modelAliases: [{ name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
     });
 
     expect(loadPreferences()).toMatchObject({
-      favoriteModels: [{ providerId: 'global', modelId: 'claude' }],
-      modelAliases: [{ name: 'luna', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' }],
-      antigravityCliFavoriteModels: [{ providerId: 'xai-oauth', modelId: 'grok-4.3' }],
-      antigravityCliFavoritesHintShown: true,
-    });
-    expect(JSON.parse(readFileSync(getConfigPath(), 'utf8'))).toMatchObject({
-      favoriteModels: [{ providerId: 'global', modelId: 'claude' }],
-      modelAliases: [{ name: 'luna', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' }],
-      antigravityCliFavoriteModels: [{ providerId: 'xai-oauth', modelId: 'grok-4.3' }],
-      antigravityCliFavoritesHintShown: true,
+      favoriteModels: [{ providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
+      modelAliases: [{ name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
     });
   });
 
   it('saves and clears app path overrides', () => {
-    setAppPathOverride('codex', '/tmp/custom-codex');
+    setAppPathOverride('claude', '/tmp/custom-claude');
 
-    expect(getAppPathOverride('codex')).toBe('/tmp/custom-codex');
-    expect(loadPreferences().appPathOverrides).toEqual({ codex: '/tmp/custom-codex' });
+    expect(getAppPathOverride('claude')).toBe('/tmp/custom-claude');
+    expect(loadPreferences().appPathOverrides).toEqual({ claude: '/tmp/custom-claude' });
 
-    setAppPathOverride('codex', null);
+    setAppPathOverride('claude', null);
 
-    expect(getAppPathOverride('codex')).toBeUndefined();
+    expect(getAppPathOverride('claude')).toBeUndefined();
     expect(loadPreferences().appPathOverrides).toBeUndefined();
   });
 
@@ -119,14 +108,6 @@ describe('dotfolder config', () => {
     ]);
   });
 
-  it('migrates legacy lastProvider opencode to zen on read', () => {
-    const configPath = getConfigPath();
-    mkdirSync(dirname(configPath), { recursive: true });
-    writeFileSync(configPath, JSON.stringify({ lastProvider: 'opencode' }), 'utf8');
-
-    expect(loadPreferences().lastProvider).toBe('zen');
-  });
-
   it('returns null when no server password is saved', async () => {
     expect(await getSavedServerPassword()).toBeNull();
   });
@@ -137,16 +118,6 @@ describe('dotfolder config', () => {
 
     await clearSavedServerPassword();
     expect(await getSavedServerPassword()).toBeNull();
-  });
-
-  it('saves server free-models-only preference', () => {
-    expect(getServerFreeModelsOnly()).toBe(false);
-
-    setServerFreeModelsOnly(true);
-    expect(getServerFreeModelsOnly()).toBe(true);
-
-    setServerFreeModelsOnly(false);
-    expect(getServerFreeModelsOnly()).toBe(false);
   });
 
   it('saves server listen-mode preference', () => {
@@ -160,38 +131,74 @@ describe('dotfolder config', () => {
   });
 
   it('creates the app home lazily', () => {
-    expect(existsSync(process.env['RELAY_AI_HOME']!)).toBe(false);
+    expect(existsSync(process.env['CLODEX_HOME']!)).toBe(false);
 
-    savePreferences({ lastProvider: 'zen' });
+    savePreferences({ lastProvider: 'openai' });
 
-    expect(existsSync(process.env['RELAY_AI_HOME']!)).toBe(true);
+    expect(existsSync(process.env['CLODEX_HOME']!)).toBe(true);
+  });
+});
+
+describe('bridge-mode memory', () => {
+  it('defaults both commands to endpoint mode', () => {
+    expect(resolveBridgeMode('claude', undefined)).toBe('endpoint');
+    expect(resolveBridgeMode('server', undefined)).toBe('endpoint');
   });
 
-  it('migrates config from the previous conf path once', () => {
-    const legacyPath = getLegacyConfPath();
-    rmSync(process.env['RELAY_AI_HOME']!, { recursive: true, force: true });
-    mkdirSync(dirname(legacyPath), { recursive: true });
-    writeFileSync(legacyPath, JSON.stringify({ lastProvider: 'nvidia' }), 'utf8');
+  it('persists an explicit mode as the new default per command', () => {
+    expect(resolveBridgeMode('claude', 'proxy')).toBe('proxy');
+    expect(resolveBridgeMode('claude', undefined)).toBe('proxy');
+    // server is remembered independently
+    expect(resolveBridgeMode('server', undefined)).toBe('endpoint');
 
-    expect(loadPreferences().lastProvider).toBe('nvidia');
-    expect(JSON.parse(readFileSync(getConfigPath(), 'utf8'))).toMatchObject({
-      lastProvider: 'nvidia',
-    });
-    expect(existsSync(`${legacyPath}.migrated`)).toBe(true);
+    expect(resolveBridgeMode('server', 'proxy')).toBe('proxy');
+    expect(resolveBridgeMode('server', undefined)).toBe('proxy');
+
+    expect(resolveBridgeMode('claude', 'endpoint')).toBe('endpoint');
+    expect(resolveBridgeMode('claude', undefined)).toBe('endpoint');
+    expect(resolveBridgeMode('server', undefined)).toBe('proxy');
   });
 
-  it('migrates config from ~/.opencode-starter on first read', () => {
-    delete process.env['RELAY_AI_HOME'];
-    delete process.env['OPENCODE_STARTER_HOME'];
-    const legacyAppHome = getLegacyAppHome({ HOME: tempHome });
-    mkdirSync(legacyAppHome, { recursive: true });
-    writeFileSync(join(legacyAppHome, 'config.json'), JSON.stringify({ lastModel: 'claude' }), 'utf8');
+  it('does not persist when persist is false', () => {
+    expect(resolveBridgeMode('claude', 'proxy', { persist: false })).toBe('proxy');
+    expect(resolveBridgeMode('claude', undefined)).toBe('endpoint');
+  });
+});
 
-    expect(loadPreferences().lastModel).toBe('claude');
-    const migratedPath = getConfigPath({ HOME: tempHome });
-    expect(existsSync(migratedPath)).toBe(true);
-    expect(JSON.parse(readFileSync(migratedPath, 'utf8'))).toMatchObject({
-      lastModel: 'claude',
-    });
+describe('legacy ~/.relay-ai migration', () => {
+  it('copies config and auth state on first read when the clodex home is missing', () => {
+    delete process.env['CLODEX_HOME'];
+    const legacyHome = getLegacyAppHome({ HOME: tempHome });
+    mkdirSync(join(legacyHome, 'http-proxy'), { recursive: true });
+    writeFileSync(join(legacyHome, 'config.json'), JSON.stringify({ lastModel: 'gpt-5.6-sol' }), 'utf8');
+    writeFileSync(join(legacyHome, 'providers.json'), JSON.stringify({ schemaVersion: 1, providers: [] }), 'utf8');
+    writeFileSync(join(legacyHome, 'http-proxy', 'ca.pem'), 'PEM', 'utf8');
+    mkdirSync(join(legacyHome, 'logs'), { recursive: true });
+    writeFileSync(join(legacyHome, 'logs', 'session.log'), 'log', 'utf8');
+    resetLegacyMigrationForTests();
+
+    expect(loadPreferences().lastModel).toBe('gpt-5.6-sol');
+    const appHome = getAppHome({ HOME: tempHome });
+    expect(existsSync(join(appHome, 'config.json'))).toBe(true);
+    expect(existsSync(join(appHome, 'providers.json'))).toBe(true);
+    expect(existsSync(join(appHome, 'http-proxy', 'ca.pem'))).toBe(true);
+    // logs are session state, not config — never copied
+    expect(existsSync(join(appHome, 'logs'))).toBe(false);
+    // the legacy home is never modified
+    expect(readFileSync(join(legacyHome, 'config.json'), 'utf8')).toContain('gpt-5.6-sol');
+  });
+
+  it('does not migrate when the clodex home already exists', () => {
+    delete process.env['CLODEX_HOME'];
+    const appHome = getAppHome({ HOME: tempHome });
+    mkdirSync(appHome, { recursive: true });
+    writeFileSync(join(appHome, 'config.json'), JSON.stringify({ lastModel: 'existing' }), 'utf8');
+
+    const legacyHome = getLegacyAppHome({ HOME: tempHome });
+    mkdirSync(legacyHome, { recursive: true });
+    writeFileSync(join(legacyHome, 'config.json'), JSON.stringify({ lastModel: 'legacy' }), 'utf8');
+    resetLegacyMigrationForTests();
+
+    expect(loadPreferences().lastModel).toBe('existing');
   });
 });

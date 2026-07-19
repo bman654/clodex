@@ -158,7 +158,6 @@ export async function fetchTemplateModels(
       models: [],
       baseUrl: '',
       error: 'This provider needs a base URL.',
-      hint: 'Use relay-ai providers import from OpenCode for advanced setups.',
     };
   }
 
@@ -212,7 +211,7 @@ export async function fetchTemplateModels(
     }
 
     let logTrace: ((msg: string) => void) | undefined;
-    if (process.env.RELAY_AI_TRACE === '1') {
+    if (process.env.CLODEX_TRACE === '1') {
       logTrace = makeTraceLogger(getProviderDebugLogPath());
     }
 

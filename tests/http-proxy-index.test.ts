@@ -5,7 +5,7 @@ import type { ProxyRoute } from '../src/proxy.js';
 describe('HTTP proxy startup model list', () => {
   it('prints the available context beside the full model name', () => {
     const route: ProxyRoute = {
-      aliasId: 'relay:openai-oauth:gpt-5.6-sol',
+      aliasId: 'clodex:openai-oauth:gpt-5.6-sol',
       realModelId: 'gpt-5.6-sol',
       displayName: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
       upstreamUrl: '',

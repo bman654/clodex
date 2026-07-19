@@ -6,7 +6,7 @@ import type { ProxyRoute } from '../proxy.js';
 import { isValidModelAlias } from '../model-aliases.js';
 import type { FavoriteModel, LocalProvider, ModelAlias } from '../types.js';
 
-export const HTTP_PROXY_MODEL_PREFIX = 'relay:';
+export const HTTP_PROXY_MODEL_PREFIX = 'clodex:';
 
 export function httpProxyModelId(providerId: string, modelId: string): string {
   return `${HTTP_PROXY_MODEL_PREFIX}${providerId}:${modelId}`;

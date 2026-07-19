@@ -11,8 +11,8 @@ import { gzipSync } from 'node:zlib';
 import { ensureHttpProxyCaBundle, ensureHttpProxyCertificates } from '../src/http-proxy/ca.js';
 import { shouldInterceptConnect, startHttpProxy } from '../src/http-proxy/server.js';
 
-const testHome = mkdtempSync(join(tmpdir(), 'relay-ai-http-proxy-'));
-const previousRelayHome = process.env['RELAY_AI_HOME'];
+const testHome = mkdtempSync(join(tmpdir(), 'clodex-http-proxy-'));
+const previousRelayHome = process.env['CLODEX_HOME'];
 
 async function listen(server: http.Server | https.Server): Promise<number> {
   server.listen(0, '127.0.0.1');
@@ -53,12 +53,12 @@ function activeProxySockets(proxyPort: number): net.Socket[] {
 }
 
 beforeAll(() => {
-  process.env['RELAY_AI_HOME'] = testHome;
+  process.env['CLODEX_HOME'] = testHome;
 });
 
 afterAll(() => {
-  if (previousRelayHome === undefined) delete process.env['RELAY_AI_HOME'];
-  else process.env['RELAY_AI_HOME'] = previousRelayHome;
+  if (previousRelayHome === undefined) delete process.env['CLODEX_HOME'];
+  else process.env['CLODEX_HOME'] = previousRelayHome;
   rmSync(testHome, { recursive: true, force: true });
 });
 
@@ -115,8 +115,8 @@ describe('selective HTTP proxy', () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'anthropic-inference.jsonl');
     const webSocketDiagnosticsLogPath = join(testHome, 'websocket-diagnostics.jsonl');
-    const previousRequestPreview = process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
-    process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = '1';
+    const previousRequestPreview = process.env['CLODEX_LOG_REQUEST_PREVIEW'];
+    process.env['CLODEX_LOG_REQUEST_PREVIEW'] = '1';
     let receivedBody = Buffer.alloc(0);
     let receivedAuth: string | undefined;
     let receivedPath: string | undefined;
@@ -242,8 +242,8 @@ describe('selective HTTP proxy', () => {
       expect(diagnosticRaw).not.toContain('private-image-data');
       expect(diagnosticRaw).not.toContain('identify this Sonnet request');
     } finally {
-      if (previousRequestPreview === undefined) delete process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
-      else process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = previousRequestPreview;
+      if (previousRequestPreview === undefined) delete process.env['CLODEX_LOG_REQUEST_PREVIEW'];
+      else process.env['CLODEX_LOG_REQUEST_PREVIEW'] = previousRequestPreview;
       await proxy.close();
       await new Promise<void>(resolve => origin.close(() => resolve()));
     }
@@ -252,8 +252,8 @@ describe('selective HTTP proxy', () => {
   it('logs Haiku passthrough status, error body, and system fallback preview', async () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'haiku-error-inference.jsonl');
-    const previousRequestPreview = process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
-    process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = '1';
+    const previousRequestPreview = process.env['CLODEX_LOG_REQUEST_PREVIEW'];
+    process.env['CLODEX_LOG_REQUEST_PREVIEW'] = '1';
     const origin = https.createServer({
       key: certificates.serverKey,
       cert: certificates.serverCert,
@@ -322,8 +322,8 @@ describe('selective HTTP proxy', () => {
       }));
       expect(readFileSync(inferenceLogPath, 'utf8')).not.toContain('private tool output');
     } finally {
-      if (previousRequestPreview === undefined) delete process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
-      else process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = previousRequestPreview;
+      if (previousRequestPreview === undefined) delete process.env['CLODEX_LOG_REQUEST_PREVIEW'];
+      else process.env['CLODEX_LOG_REQUEST_PREVIEW'] = previousRequestPreview;
       await proxy.close();
       await new Promise<void>(resolve => origin.close(() => resolve()));
     }
@@ -332,8 +332,8 @@ describe('selective HTTP proxy', () => {
   it('logs a partial upstream error body when the origin resets before end', async () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'partial-error-inference.jsonl');
-    const previousRequestPreview = process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
-    process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = '1';
+    const previousRequestPreview = process.env['CLODEX_LOG_REQUEST_PREVIEW'];
+    process.env['CLODEX_LOG_REQUEST_PREVIEW'] = '1';
     const origin = https.createServer({
       key: certificates.serverKey,
       cert: certificates.serverCert,
@@ -391,8 +391,8 @@ describe('selective HTTP proxy', () => {
         statusCode: 503,
       }));
     } finally {
-      if (previousRequestPreview === undefined) delete process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
-      else process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = previousRequestPreview;
+      if (previousRequestPreview === undefined) delete process.env['CLODEX_LOG_REQUEST_PREVIEW'];
+      else process.env['CLODEX_LOG_REQUEST_PREVIEW'] = previousRequestPreview;
       await proxy.close();
       await new Promise<void>(resolve => origin.close(() => resolve()));
     }
@@ -502,7 +502,7 @@ describe('selective HTTP proxy', () => {
     const adapterPort = await listen(adapterServer);
     const proxy = await startHttpProxy({
       routes: [{
-        aliasId: 'relay:groq:llama-3.3-70b',
+        aliasId: 'clodex:groq:llama-3.3-70b',
         realModelId: 'llama-3.3-70b-versatile',
         displayName: 'Llama 3.3 70B (Groq)',
         upstreamUrl: '',
@@ -513,7 +513,7 @@ describe('selective HTTP proxy', () => {
       }],
       modelAliases: [{
         name: 'llama',
-        routeId: 'relay:groq:llama-3.3-70b',
+        routeId: 'clodex:groq:llama-3.3-70b',
         displayName: 'Llama 3.3 70B (Groq)',
       }],
       adapterHandle: {
@@ -532,7 +532,7 @@ describe('selective HTTP proxy', () => {
 
     try {
       const body = JSON.stringify({
-        model: 'relay:groq:llama-3.3-70b',
+        model: 'clodex:groq:llama-3.3-70b',
         output_config: { effort: 'medium' },
         messages: [],
         stream: true,
@@ -562,7 +562,7 @@ describe('selective HTTP proxy', () => {
       const relayEntries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       const requestEntry = relayEntries.find(entry => !entry.event);
       expect(requestEntry).toMatchObject({
-        modelId: 'relay:groq:llama-3.3-70b',
+        modelId: 'clodex:groq:llama-3.3-70b',
         effort: 'medium',
         provider: 'groq',
         route: 'translated',
@@ -584,7 +584,7 @@ describe('selective HTTP proxy', () => {
       expect(relayEntries).toContainEqual(expect.objectContaining({
         event: 'response_usage',
         requestId: requestEntry.requestId,
-        modelId: 'relay:groq:llama-3.3-70b',
+        modelId: 'clodex:groq:llama-3.3-70b',
         provider: 'groq',
         route: 'translated',
         usageStage: 'message_start',
@@ -625,7 +625,7 @@ describe('selective HTTP proxy', () => {
         route: 'translated',
       });
 
-      const typoBody = JSON.stringify({ model: 'relay:groq:typo', messages: [] });
+      const typoBody = JSON.stringify({ model: 'clodex:groq:typo', messages: [] });
       const typoSocket = await connectMitm(proxy.port, certificates.caCert);
       typoSocket.resume();
       typoSocket.write([
@@ -642,8 +642,8 @@ describe('selective HTTP proxy', () => {
       expect(anthropicRequests).toBe(1);
       expect(fallbackAuth).toBe('Bearer subscription-oauth-token');
       const inferenceEntries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-      expect(inferenceEntries.find(entry => !entry.event && entry.modelId === 'relay:groq:typo')).toMatchObject({
-        modelId: 'relay:groq:typo',
+      expect(inferenceEntries.find(entry => !entry.event && entry.modelId === 'clodex:groq:typo')).toMatchObject({
+        modelId: 'clodex:groq:typo',
         provider: 'anthropic',
         route: 'passthrough',
       });
@@ -678,7 +678,7 @@ describe('selective HTTP proxy', () => {
     });
     const adapterPort = await listen(adapterServer);
     const route = {
-      aliasId: 'relay:test:translated-model',
+      aliasId: 'clodex:test:translated-model',
       realModelId: 'translated-model',
       displayName: 'Translated Model',
       upstreamUrl: '',
@@ -746,7 +746,7 @@ describe('selective HTTP proxy', () => {
     });
     const adapterPort = await listen(adapterServer);
     const route = {
-      aliasId: 'relay:test:translated-model',
+      aliasId: 'clodex:test:translated-model',
       realModelId: 'translated-model',
       displayName: 'Translated Model',
       upstreamUrl: '',
@@ -816,7 +816,7 @@ describe('selective HTTP proxy', () => {
     });
     const adapterPort = await listen(adapterServer);
     const route = {
-      aliasId: 'relay:test:translated-model',
+      aliasId: 'clodex:test:translated-model',
       realModelId: 'translated-model',
       displayName: 'Translated Model',
       upstreamUrl: '',

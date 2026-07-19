@@ -4,14 +4,12 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parseProvidersArgs, providerHubChoiceValue, providersHelpText, runProvidersAdd } from '../src/providers-command.js';
 import {
-  addZenRegistryStub,
   removeProviderFromRegistry,
   toggleProviderEnabled,
 } from '../src/registry/crud.js';
 import { emptyRegistry, loadRegistry, saveRegistry } from '../src/registry/io.js';
-import { zenRegistryStub } from '../src/registry/builtins.js';
 import { providerAuthHelpText } from '../src/registry/provider-auth.js';
-import { PROVIDER_TEMPLATES } from '../src/provider-templates.js';
+import type { RegistryProvider } from '../src/registry/types.js';
 import * as env from '../src/env.js';
 
 const selectMock = vi.hoisted(() => vi.fn());
@@ -24,146 +22,131 @@ vi.mock('@clack/prompts', async importOriginal => {
   };
 });
 
+function openaiEntry(partial: Partial<RegistryProvider> = {}): RegistryProvider {
+  return {
+    id: 'openai',
+    templateId: 'openai',
+    name: 'OpenAI',
+    enabled: true,
+    authRef: 'keyring:provider:openai',
+    api: { npm: '@ai-sdk/openai', url: 'https://api.openai.com/v1' },
+    addedAt: new Date().toISOString(),
+    ...partial,
+  };
+}
+
 describe('parseProvidersArgs', () => {
   it('defaults to hub', () => {
     expect(parseProvidersArgs([])).toEqual({ subcommand: 'hub', showHelp: false });
   });
 
-  it('parses add, import, list, remove, refresh-models', () => {
+  it('parses add, list, remove, refresh-models, auth', () => {
     expect(parseProvidersArgs(['add'])).toEqual({ subcommand: 'add', showHelp: false });
-    expect(parseProvidersArgs(['import'])).toEqual({ subcommand: 'import', showHelp: false });
     expect(parseProvidersArgs(['list'])).toEqual({ subcommand: 'list', showHelp: false });
-    expect(parseProvidersArgs(['remove', 'groq'])).toEqual({
+    expect(parseProvidersArgs(['remove', 'openai'])).toEqual({
       subcommand: 'remove',
       showHelp: false,
-      removeId: 'groq',
+      removeId: 'openai',
     });
     expect(parseProvidersArgs(['refresh-models'])).toEqual({ subcommand: 'refresh-models', showHelp: false });
-    expect(parseProvidersArgs(['refresh-models', 'nvidia'])).toEqual({
+    expect(parseProvidersArgs(['refresh-models', 'openai-oauth'])).toEqual({
       subcommand: 'refresh-models',
       showHelp: false,
-      removeId: 'nvidia',
+      removeId: 'openai-oauth',
     });
-    expect(parseProvidersArgs(['auth', 'xai', '--native'])).toEqual({
+    expect(parseProvidersArgs(['auth', 'openai', '--native'])).toEqual({
       subcommand: 'auth',
       showHelp: false,
-      removeId: 'xai',
+      removeId: 'openai',
       authMethod: 'native',
     });
+  });
+
+  it('rejects the removed import subcommand', () => {
+    expect(parseProvidersArgs(['import']).error).toContain('Unknown providers subcommand');
   });
 
   it('reports remove without id', () => {
     expect(parseProvidersArgs(['remove']).error).toContain('Usage');
   });
 
-  it('annotates phase in help text', () => {
+  it('mentions only kept subcommands in help text', () => {
     const help = providersHelpText();
     expect(help).toContain('providers add');
     expect(help).toContain('providers remove');
     expect(help).toContain('refresh-models');
-    expect(help).toContain('Phase 1.1');
-    for (const template of PROVIDER_TEMPLATES.filter(t => t.hidden)) {
-      expect(help).not.toContain(template.id);
-      expect(help).not.toContain(template.name);
-    }
+    expect(help).toContain('auth openai');
+    expect(help).not.toContain('import');
+    expect(help).not.toContain('OpenCode');
   });
 
-  it('keeps hidden provider ids out of auth help', () => {
+  it('mentions only openai in auth help', () => {
     const help = providerAuthHelpText();
-    expect(help).toContain('github-copilot');
     expect(help).toContain('openai');
-    expect(help).toContain('xai');
-    for (const template of PROVIDER_TEMPLATES.filter(t => t.hidden)) {
-      expect(help).not.toContain(template.id);
-      expect(help).not.toContain(template.name);
-    }
+    expect(help).not.toContain('github-copilot');
+    expect(help).not.toContain('xai');
   });
 
   it('returns provider:id for all entries', () => {
     expect(providerHubChoiceValue({
-      id: 'zen',
-      name: 'OpenCode Zen',
+      id: 'openai-oauth',
+      name: 'OpenAI (ChatGPT)',
       modelCount: 6,
       enabled: true,
       authLabel: 'keychain',
       inRegistry: true,
-    })).toBe('provider:zen');
-    expect(providerHubChoiceValue({
-      id: 'groq',
-      name: 'Groq',
-      modelCount: 3,
-      enabled: true,
-      authLabel: 'keychain',
-      inRegistry: true,
-    })).toBe('provider:groq');
+    })).toBe('provider:openai-oauth');
   });
 });
 
 describe('registry crud', () => {
   let home: string;
-  const prevHome = process.env.RELAY_AI_HOME;
+  const prevHome = process.env.CLODEX_HOME;
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), 'relay-ai-crud-'));
-    process.env.RELAY_AI_HOME = home;
+    home = mkdtempSync(join(tmpdir(), 'clodex-crud-'));
+    process.env.CLODEX_HOME = home;
   });
 
   afterEach(() => {
-    if (prevHome === undefined) delete process.env.RELAY_AI_HOME;
-    else process.env.RELAY_AI_HOME = prevHome;
+    if (prevHome === undefined) delete process.env.CLODEX_HOME;
+    else process.env.CLODEX_HOME = prevHome;
     rmSync(home, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
 
-  it('adds zen stub once', () => {
-    expect(addZenRegistryStub()).toEqual({ added: true });
-    expect(addZenRegistryStub()).toEqual({ added: false, reason: 'OpenCode Zen is already configured.' });
-    expect(loadRegistry().providers).toHaveLength(1);
-  });
-
   it('toggles provider enabled state', () => {
     const registry = emptyRegistry();
-    registry.providers.push(zenRegistryStub());
+    registry.providers.push(openaiEntry());
     saveRegistry(registry);
 
-    expect(toggleProviderEnabled('zen')).toEqual({ toggled: true, enabled: false });
+    expect(toggleProviderEnabled('openai')).toEqual({ toggled: true, enabled: false });
     expect(loadRegistry().providers[0]?.enabled).toBe(false);
   });
 
-  it('removes provider and deletes non-global credentials', async () => {
+  it('removes provider and deletes its credential', async () => {
     const registry = emptyRegistry();
-    registry.providers.push({
-      ...zenRegistryStub(),
-      id: 'groq',
-      templateId: 'groq',
-      name: 'Groq',
-      authRef: 'keyring:provider:groq',
-    });
+    registry.providers.push(openaiEntry());
     saveRegistry(registry);
 
     const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(true);
-    const result = await removeProviderFromRegistry('groq');
+    const result = await removeProviderFromRegistry('openai');
     expect(result.removed).toBe(true);
     expect(result.credentialDeleted).toBe(true);
     expect(loadRegistry().providers).toHaveLength(0);
-    expect(deleteSpy).toHaveBeenCalledWith('keyring:provider:groq');
+    expect(deleteSpy).toHaveBeenCalledWith('keyring:provider:openai');
   });
 
-  it('keeps global opencode credential when another provider still references it', async () => {
+  it('keeps a shared credential when another provider still references it', async () => {
     const registry = emptyRegistry();
-    registry.providers.push(zenRegistryStub(), {
-      id: 'go',
-      templateId: 'go',
-      name: 'OpenCode Go',
-      enabled: true,
-      authRef: 'keyring:global:opencode',
-      api: {},
-      addedAt: new Date().toISOString(),
-    });
+    registry.providers.push(
+      openaiEntry({ authRef: 'keyring:provider:shared' }),
+      openaiEntry({ id: 'openai-oauth', name: 'OpenAI (ChatGPT)', authType: 'oauth', authRef: 'keyring:provider:shared' }),
+    );
     saveRegistry(registry);
 
     const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(true);
-    const result = await removeProviderFromRegistry('zen');
+    const result = await removeProviderFromRegistry('openai');
     expect(result.removed).toBe(true);
     expect(result.credentialDeleted).toBe(false);
     expect(deleteSpy).not.toHaveBeenCalled();
@@ -173,27 +156,27 @@ describe('registry crud', () => {
 
 describe('providers add menu', () => {
   let home: string;
-  const prevHome = process.env.RELAY_AI_HOME;
+  const prevHome = process.env.CLODEX_HOME;
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), 'relay-ai-providers-add-'));
-    process.env.RELAY_AI_HOME = home;
+    home = mkdtempSync(join(tmpdir(), 'clodex-providers-add-'));
+    process.env.CLODEX_HOME = home;
     selectMock.mockReset();
   });
 
   afterEach(() => {
-    if (prevHome === undefined) delete process.env.RELAY_AI_HOME;
-    else process.env.RELAY_AI_HOME = prevHome;
+    if (prevHome === undefined) delete process.env.CLODEX_HOME;
+    else process.env.CLODEX_HOME = prevHome;
     rmSync(home, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
 
-  it('shows native templates first, custom server second, and OpenCode import last', async () => {
+  it('offers ChatGPT OAuth first and API key second', async () => {
     selectMock.mockResolvedValue('noop');
 
     await runProvidersAdd();
 
-    const options = selectMock.mock.calls[0]?.[0].options.map(option => option.value);
-    expect(options).toEqual(['templates', 'custom', 'import']);
+    const options = selectMock.mock.calls[0]?.[0].options.map((option: { value: string }) => option.value);
+    expect(options).toEqual(['oauth', 'apikey']);
   });
 });

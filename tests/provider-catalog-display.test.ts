@@ -13,16 +13,16 @@ import { emptyRegistry, saveRegistry } from '../src/registry/io.js';
 
 describe('provider-catalog-display', () => {
   let home: string;
-  const prevHome = process.env.RELAY_AI_HOME;
+  const prevHome = process.env.CLODEX_HOME;
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), 'relay-ai-display-'));
-    process.env.RELAY_AI_HOME = home;
+    home = mkdtempSync(join(tmpdir(), 'clodex-display-'));
+    process.env.CLODEX_HOME = home;
   });
 
   afterEach(() => {
-    if (prevHome === undefined) delete process.env.RELAY_AI_HOME;
-    else process.env.RELAY_AI_HOME = prevHome;
+    if (prevHome === undefined) delete process.env.CLODEX_HOME;
+    else process.env.CLODEX_HOME = prevHome;
     rmSync(home, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -66,8 +66,8 @@ describe('provider-catalog-display', () => {
       expect(env.resolveProviderCredential).toHaveBeenCalledWith('groq', 'keyring:provider:groq');
     });
 
-    it('returns "anonymous" for providers with no stored key that support anonymous free access (e.g. Kilo Code)', async () => {
-      const provider = { id: 'kilo', name: 'Kilo Code', apiKey: '', models: [] } as any;
+    it('returns "anonymous" for providers declared authType none', async () => {
+      const provider = { id: 'local', name: 'Local', apiKey: '', authType: 'none', models: [] } as any;
       expect(await resolveLocalProviderApiKey(provider)).toBe('anonymous');
     });
 
@@ -80,7 +80,7 @@ describe('provider-catalog-display', () => {
   });
 
   describe('formatRegistryAuthLabel', () => {
-    it('distinguishes OAuth, API key, and OpenCode key', () => {
+    it('distinguishes OAuth, API key, and env refs', () => {
       expect(formatRegistryAuthLabel({
         authRef: 'keyring:oauth:provider:xai',
         authType: 'oauth',
@@ -90,8 +90,8 @@ describe('provider-catalog-display', () => {
         authType: 'api',
       } as any)).toBe('keychain (API key)');
       expect(formatRegistryAuthLabel({
-        authRef: 'keyring:global:opencode',
-      } as any)).toBe('keychain (OpenCode API key)');
+        authRef: 'env:OPENAI_API_KEY',
+      } as any)).toBe('env:OPENAI_API_KEY');
     });
   });
 

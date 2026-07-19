@@ -1,6 +1,0 @@
-{
-  "relay:openai-oauth:gpt-5.6-sol": { "alias": "sol", "context": 272000 },
-  "relay:openai-oauth:gpt-5.6-terra": { "alias": "terra", "context": 272000 },
-  "relay:openai-oauth:gpt-5.6-luna": { "alias": "luna", "context": 272000 },
-  "relay:groq:llama-3.3-70b-versatile": "llama"
-}

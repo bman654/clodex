@@ -4,8 +4,6 @@ import {
   hasCompleteExplicitLaunch,
   isClaudeMachineReadableOutput,
   isClaudePrintMode,
-  isCodexMachineReadableOutput,
-  isCodexNonInteractive,
   normalizeClaudeAgentArgs,
   parseModelSlug,
   planLaunchWizard,
@@ -44,18 +42,11 @@ describe('launch-target', () => {
     expect(isClaudePrintMode(['-c'])).toBe(false);
   });
 
-  it('detects codex non-interactive args', () => {
-    expect(isCodexNonInteractive(['exec', 'fix bug'])).toBe(true);
-    expect(isCodexNonInteractive(['fix bug'])).toBe(true);
-    expect(isCodexNonInteractive(['-s', 'danger-full-access'])).toBe(false);
-  });
-
   it('resolves explicit slug-only model', () => {
     expect(hasCompleteExplicitLaunch({ modelId: 'zen__deepseek-v4-flash-free' })).toBe(true);
     const target = resolveLaunchTarget(
       { modelId: 'zen__deepseek-v4-flash-free' },
       {},
-      'codex',
     );
     expect(target).toEqual({ providerId: 'zen', modelId: 'deepseek-v4-flash-free' });
   });
@@ -70,7 +61,7 @@ describe('launch-target', () => {
     const plan = planLaunchWizard({
       explicit: { providerId: 'zen', modelId: 'deepseek-v4-flash-free' },
       childArgs: [],
-      agent: 'codex',
+      agent: 'claude',
       prefs: {},
     });
     expect(plan.skip).toBe(true);
@@ -99,14 +90,11 @@ describe('launch-target', () => {
     expect(plan.error).toContain('Print mode requires');
   });
 
-  it('detects machine-readable claude and codex output', () => {
+  it('detects machine-readable claude output', () => {
     expect(isClaudeMachineReadableOutput(['-p', 'hi', '--output-format', 'stream-json'])).toBe(true);
     expect(isClaudeMachineReadableOutput(['-p', 'hi', '--output-format', 'text'])).toBe(false);
     expect(isClaudeMachineReadableOutput(['-p', 'hi', '--output-format=json'])).toBe(true);
-    expect(isCodexMachineReadableOutput(['exec', '--json', 'hi'])).toBe(true);
-    expect(isCodexMachineReadableOutput(['exec', 'hi'])).toBe(false);
     expect(wantsCleanAgentStdout('claude', ['-p', 'x', '--output-format', 'stream-json'])).toBe(true);
-    expect(wantsCleanAgentStdout('codex', ['exec', '--json', 'x'])).toBe(true);
   });
 
   it('adds --verbose for claude stream-json print mode', () => {

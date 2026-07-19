@@ -90,7 +90,7 @@ describe('createResponsesWebSocketFetch', () => {
       headers: {
         Authorization: 'Bearer tok',
         'ChatGPT-Account-Id': 'acct-123',
-        originator: 'relay-ai',
+        originator: 'clodex',
         version: '0.144.1',
         'x-openai-internal-codex-responses-lite': 'true',
       },

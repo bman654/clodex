@@ -6,7 +6,7 @@ import type { LocalProvider } from '../types.js';
 import { materializeRegistry } from './materialize.js';
 import { loadRegistry } from './io.js';
 
-/** Load enabled providers from ~/.relay-ai/providers.json with resolved credentials. */
+/** Load enabled providers from ~/.clodex/providers.json with resolved credentials. */
 export async function loadRegistryProviders(
   diag?: (msg: string) => void,
   opts?: { agent?: CompatibilityAgent },

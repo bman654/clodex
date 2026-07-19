@@ -172,7 +172,7 @@ describe('runServerCommand', () => {
     expect(state.startServerOptions).toMatchObject({
       host: '127.0.0.1',
       port: 17645,
-      apiKey: 'real-key',
+      apiKey: 'registry-local',
       serverPassword: null,
     });
     expect(state.close).toHaveBeenCalledOnce();
@@ -295,7 +295,7 @@ describe('formatModelCatalogLines', () => {
 
     const lines = formatModelCatalogLines(catalogModels);
 
-    expect(lines).toContain('  OpenCode Go (2, 1 duplicate hidden)');
+    expect(lines).toContain('  go (2, 1 duplicate hidden)');
     expect(lines.some(line => line.includes('#') && line.includes('Model') && line.includes('Anthropic ID') && line.includes('OpenAI ID'))).toBe(true);
     expect(lines.some(line => line.includes('DeepSeek V4 Flash') && line.includes('anthropic-go__deepseek-v4-flash') && line.includes('deepseek-v4-flash'))).toBe(true);
     expect(lines.filter(line => line.includes('DeepSeek V4 Flash'))).toHaveLength(1);

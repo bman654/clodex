@@ -87,18 +87,13 @@ async function startUpstream(responseBody: any): Promise<{ baseUrl: string; requ
   };
 }
 
-const catalog = createGatewayModelCatalog([
-  model('claude-native', 'anthropic', 'zen'),
-  model('openai-format', 'openai', 'go'),
-  model('bad-format', 'unsupported', 'zen'),
-]);
-
 const handles: Array<ServerHandle | { close: () => Promise<void> }> = [];
 
 function model(
   id: string,
   modelFormat: ServerModelInfo['modelFormat'],
   sourceBackend: ServerModelInfo['sourceBackend'],
+  urls: { baseUrl?: string; completionsUrl?: string } = {},
 ): ServerModelInfo {
   return {
     id,
@@ -107,7 +102,16 @@ function model(
     brand: 'Other',
     sourceBackend,
     modelFormat,
+    ...urls,
   };
+}
+
+function defaultCatalog(upstreamBaseUrl: string) {
+  return createGatewayModelCatalog([
+    model('claude-native', 'anthropic', 'zen', { baseUrl: upstreamBaseUrl }),
+    model('openai-format', 'openai', 'go', { completionsUrl: `${upstreamBaseUrl}/v1/chat/completions` }),
+    model('bad-format', 'unsupported', 'zen'),
+  ]);
 }
 
 async function startTestServer(options: Partial<Parameters<typeof startServer>[0]> = {}): Promise<ServerHandle> {
@@ -123,11 +127,7 @@ async function startTestServer(options: Partial<Parameters<typeof startServer>[0
     port: 0,
     apiKey: 'real-opencode-key',
     serverPassword: null,
-    catalog,
-    backends: {
-      zen: { baseUrl: upstream.baseUrl },
-      go: { baseUrl: upstream.baseUrl },
-    },
+    catalog: defaultCatalog(upstream.baseUrl),
     ...options,
   });
   handles.push(handle);
@@ -148,10 +148,17 @@ afterEach(async () => {
 
 describe('server router', () => {
   it('logs inference routing metadata without request content', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-server-audit-'));
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-server-audit-'));
     const inferenceLogPath = join(dir, 'requests.jsonl');
+    const auditUpstream = await startUpstream({
+      id: 'msg-audit',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'ok' }],
+    });
+    handles.push(auditUpstream);
     const auditCatalog = createGatewayModelCatalog([
-      model('claude-native', 'anthropic', 'zen'),
+      model('claude-native', 'anthropic', 'zen', { baseUrl: auditUpstream.baseUrl }),
       {
         id: 'llama-test',
         name: 'Llama Test',
@@ -247,10 +254,9 @@ describe('server router', () => {
     });
     handles.push(upstream);
     const server = await startTestServer({
-      backends: {
-        zen: { baseUrl: upstream.baseUrl },
-        go: { baseUrl: upstream.baseUrl },
-      },
+      catalog: createGatewayModelCatalog([
+        model('claude-native', 'anthropic', 'zen', { baseUrl: upstream.baseUrl }),
+      ]),
     });
 
     const response = await fetch(`${server.url}/anthropic/v1/messages`, {
@@ -345,10 +351,9 @@ describe('server router', () => {
     });
     handles.push(upstream);
     const server = await startTestServer({
-      backends: {
-        zen: { baseUrl: upstream.baseUrl },
-        go: { baseUrl: upstream.baseUrl },
-      },
+      catalog: createGatewayModelCatalog([
+        model('openai-format', 'openai', 'go', { completionsUrl: `${upstream.baseUrl}/v1/chat/completions` }),
+      ]),
     });
 
     const body = { model: 'openai-format', messages: [{ role: 'user', content: 'hi' }], temperature: 0.2 };

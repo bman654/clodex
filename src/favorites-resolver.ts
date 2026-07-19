@@ -1,5 +1,5 @@
 // src/favorites-resolver.ts
-import type { FavoriteModel, LocalProvider, LocalProviderModel, ModelInfo } from './types.js';
+import type { FavoriteModel, LocalProvider, LocalProviderModel } from './types.js';
 import type { ServerModelInfo } from './server/models.js';
 import { shouldHideModel, type CompatibilityAgent } from './model-compatibility.js';
 import { resolveLocalProviderApiKey } from './provider-catalog.js';
@@ -22,7 +22,7 @@ export interface ResolvedFavorite {
 export interface ResolveContext {
   /** When set, call shouldHideModel with this agent to filter blacklisted favorites. */
   agent?: CompatibilityAgent;
-  /** Claude: registry providers from opencode. */
+  /** Claude: registry providers. */
   localProviders?: LocalProvider[];
   /** Server: pre-loaded server model list. */
   serverModels?: ServerModelInfo[];
@@ -37,11 +37,6 @@ export interface LocalModelLookupResult {
 
 export type LocalModelLookup =
   (providerId: string, modelId: string) => LocalModelLookupResult | undefined;
-
-const ZEN_GO_PROVIDER_NAME: Record<'zen' | 'go', string> = {
-  zen: 'OpenCode Zen',
-  go: 'OpenCode Go',
-};
 
 export async function resolveFavorite(
   fav: FavoriteModel,

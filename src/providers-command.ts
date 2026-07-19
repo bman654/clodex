@@ -284,7 +284,8 @@ export async function runProvidersAdd(): Promise<number> {
   }
 
   if (choice === 'oauth') return runProvidersAuth('openai');
-  return runTemplateAddFlow();
+  if (choice === 'apikey') return runTemplateAddFlow();
+  return 0;
 }
 
 export async function runProvidersRemove(id: string, interactive = false): Promise<number> {

@@ -1,4 +1,4 @@
-// src/trace-log.ts — debug log paths under ~/.relay-ai/logs/ with secret redaction
+// src/trace-log.ts — debug log paths under ~/.clodex/logs/ with secret redaction
 
 import {
   chmodSync,
@@ -99,7 +99,7 @@ export function getInferenceSessionLogPath(label = 'proxy'): string {
   return getSessionLogPath(label, 'jsonl');
 }
 
-const REQUEST_PREVIEW_ENV = 'RELAY_AI_LOG_REQUEST_PREVIEW';
+const REQUEST_PREVIEW_ENV = 'CLODEX_LOG_REQUEST_PREVIEW';
 const REQUEST_PREVIEW_MAX = 240;
 const RESPONSE_ERROR_MAX = 2_000;
 

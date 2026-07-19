@@ -2,8 +2,6 @@ import pc from 'picocolors';
 import { networkInterfaces } from 'node:os';
 import * as p from '@clack/prompts';
 import { relayIntro } from '../ui.js';
-import { resolveApiKey, readFromCredentialStore } from '../env.js';
-import { sanitizeCredential } from './auth.js';
 import {
   getSavedServerPassword,
   getServerExposedProviders,
@@ -17,14 +15,13 @@ import {
   setServerListenMode,
   setServerMaskGatewayIds,
 } from '../config.js';
-import { BACKENDS, MAX_MODEL_CATALOG, DEFAULT_SERVER_PORT } from '../constants.js';
+import { MAX_MODEL_CATALOG, DEFAULT_SERVER_PORT } from '../constants.js';
 import {
   fetchProviderCatalog,
   localProvidersToServerModels,
 } from '../provider-catalog.js';
 import { providersForTarget } from '../target-compatibility.js';
 import { loadRegistry } from '../registry/io.js';
-import type { ModelInfo } from '../types.js';
 import type { ServerModelInfo, GatewayModelOptions } from './models.js';
 import {
   upstreamModelId,
@@ -242,7 +239,7 @@ async function getServerPasswordForQuickMode(
   if (savedPassword) return { password: savedPassword, wasSaved: true };
 
   p.log.error('Network server quick-start needs a saved server password or `--password <value>`.');
-  p.log.info('Run `relay-ai server` and choose Configure & start to save one, or pass a one-run password.');
+  p.log.info('Run `clodex server` and choose Configure & start to save one, or pass a one-run password.');
   return undefined;
 }
 
@@ -315,7 +312,7 @@ async function runServerWizard(): Promise<{ runConfig: ServerRunConfig; promptFo
   if (favoritesOnly === null) return undefined;
   setServerFavoritesOnly(favoritesOnly);
   if (favoritesOnly) {
-    p.log.info('Manage favorites with `relay-ai models`.');
+    p.log.info('Manage favorites with `clodex models`.');
   }
 
 
@@ -340,20 +337,6 @@ async function runServerWizard(): Promise<{ runConfig: ServerRunConfig; promptFo
 }
 
 export async function resolveServerUpstreamApiKey(): Promise<string | null> {
-  let apiKey = sanitizeCredential(resolveApiKey());
-  if (apiKey) return apiKey;
-
-  apiKey = sanitizeCredential(await readFromCredentialStore((reason) => {
-    p.log.warn(`Credential store unavailable — ${reason}`);
-  }));
-  if (apiKey) {
-    const isMac = process.platform === 'darwin';
-    const isWindows = process.platform === 'win32';
-    const storeName = isMac ? 'macOS Keychain' : isWindows ? 'Windows Credential Manager' : 'Secret Service';
-    p.log.success(`Found key in ${storeName}`);
-    return apiKey;
-  }
-
   const catalog = await fetchProviderCatalog({ agent: 'server' });
   if (catalog.some(provider => provider.apiKey.trim() || provider.models.length > 0)) {
     return 'registry-local';
@@ -377,7 +360,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   }
   const apiKey = await resolveServerUpstreamApiKey();
   if (!apiKey) {
-    p.log.error('No providers configured. Run `relay-ai providers add` or import, or set OPENCODE_API_KEY for Zen/Go.');
+    p.log.error('No providers configured. Run `clodex providers` to add OpenAI.');
     return 1;
   }
 
@@ -412,13 +395,13 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
       const favorites = loadPreferences().favoriteModels ?? [];
       if (favorites.length === 0) {
         spinner.stop(pc.red('No favorite models configured'));
-        p.log.error('Run `relay-ai models` to add favorites, or turn off favorites-only in the server wizard.');
+        p.log.error('Run `clodex models` to add favorites, or turn off favorites-only in the server wizard.');
         return 1;
       }
       models = filterServerModelsByFavorites(models, favorites).slice(0, MAX_MODEL_CATALOG);
       if (models.length === 0) {
         spinner.stop(pc.red('No favorite models matched the current provider filter'));
-        p.log.error('Adjust favorites with `relay-ai models` or change exposed providers in the server wizard.');
+        p.log.error('Adjust favorites with `clodex models` or change exposed providers in the server wizard.');
         return 1;
       }
     }
@@ -426,11 +409,11 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
       p.log.info(
         `Favorites-only mode active — GET /anthropic/v1/models returns ${models.length} favorites.`,
       );
-      p.log.info('Desktop/Cowork picker will only show these. Edit with `relay-ai models`.');
+      p.log.info('Desktop/Cowork picker will only show these. Edit with `clodex models`.');
     }
     if (models.length === 0) {
       spinner.stop(pc.red('No models to expose'));
-      p.log.error('Add providers with `relay-ai providers add` or configure exposed providers in the server wizard.');
+      p.log.error('Add providers with `clodex providers add` or configure exposed providers in the server wizard.');
       return 1;
     }
 
@@ -460,14 +443,13 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     apiKey,
     serverPassword,
     catalog: createGatewayModelCatalog(models, gateway),
-    backends: BACKENDS,
     gateway,
     inferenceLogPath,
     webSocketDiagnosticsLogPath,
   });
 
   console.log('');
-  console.log(pc.bold(pc.green('Relay AI server running')));
+  console.log(pc.bold(pc.green('clodex server running')));
   console.log(`  Anthropic:  http://127.0.0.1:${server.port}/anthropic`);
   console.log(`  OpenAI:     http://127.0.0.1:${server.port}/openai/v1`);
   console.log(`  Request log: ${inferenceLogPath}`);
@@ -482,7 +464,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
       console.log(`    OpenAI:     http://${address}:${server.port}/openai/v1`);
     }
     if (passwordWasSaved) {
-      console.log('  API key:    saved, rotate with `relay-ai server --setup`');
+      console.log('  API key:    saved, rotate with `clodex server --setup`');
     } else {
       console.log(`  API key:    ${serverPassword}`);
     }

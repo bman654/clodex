@@ -27,13 +27,13 @@ async function probeTemplatePackage(template: ProviderTemplate): Promise<string 
   if (!template.supported) return template.unsupportedReason ?? 'Provider is not supported yet.';
   if (!template.npm) return 'Template is missing an SDK package.';
   if (!isSdkMigratedNpm(template.npm) && template.npm !== '@ai-sdk/anthropic') {
-    return `SDK package ${template.npm} is not available in relay-ai.`;
+    return `SDK package ${template.npm} is not available in clodex.`;
   }
   try {
     await import(template.npm);
     return null;
   } catch {
-    return `Could not load ${template.npm}. Run npm install in your relay-ai checkout.`;
+    return `Could not load ${template.npm}. Run npm install in your clodex checkout.`;
   }
 }
 
@@ -71,7 +71,7 @@ export async function addProviderFromTemplate(
     return {
       added: false,
       error: `${template.name} is already configured.`,
-      hint: `Remove it first with: relay-ai providers remove ${template.id}`,
+      hint: `Remove it first with: clodex providers remove ${template.id}`,
     };
   }
 

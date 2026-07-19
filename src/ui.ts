@@ -1,4 +1,4 @@
-// Shared relay-ai CLI styling — @clack/prompts + picocolors.
+// Shared clodex CLI styling — @clack/prompts + picocolors.
 // Use printPanel for important callouts (p.note dims all body text).
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
@@ -57,7 +57,7 @@ export function printPanel(title: string, lines: string[]): void {
 }
 
 export function relayIntro(section: string): void {
-  p.intro(`${pc.bold(pc.cyan('Relay AI'))}${pc.bold(` — ${section}`)}`);
+  p.intro(`${pc.bold(pc.cyan('clodex'))}${pc.bold(` — ${section}`)}`);
 }
 
 export function relayOutro(status: string, detail?: string): void {
@@ -85,31 +85,11 @@ export function fmtProviderBracket(providerId: string, providerName: string, isF
 
 function providerTagColor(providerId: string): (text: string) => string {
   switch (providerId) {
-    case 'zen':
-      return pc.yellow;
-    case 'go':
-      return pc.green;
-    case 'openrouter':
-      return pc.blue;
-    case 'deepseek':
-      return pc.magenta;
     case 'anthropic':
       return pc.yellow;
-    case 'google':
-      return pc.cyan;
     case 'openai':
+    case 'openai-oauth':
       return pc.white;
-    case 'xai':
-    case 'xai-oauth':
-      return pc.white;
-    case 'groq':
-      return pc.red;
-    case 'mistral':
-      return pc.red;
-    case 'togetherai':
-      return pc.blue;
-    case 'nvidia':
-      return pc.green;
     default:
       return pc.yellow;
   }
@@ -173,13 +153,7 @@ export function confirmLaunchMessage(
   return `Launch ${pc.bold(target)} · ${fmtModel(modelLabel, modelId)} ${pc.dim('via')} ${fmtProvider(providerName)}?${viaSuffix}`;
 }
 
-export function logActiveModel(modelLabel: string, modelId: string): void {
-  p.log.success(`${pc.bold('Active model:')} ${fmtModel(modelLabel, modelId)}`);
-}
 
-export function logProxy(port: number): void {
-  p.log.info(`${pc.dim('Proxy')} ${pc.cyan(pc.bold(`127.0.0.1:${port}`))}`);
-}
 
 export function logConnected(name: string, modelCount: number): void {
   p.log.success(
@@ -188,9 +162,9 @@ export function logConnected(name: string, modelCount: number): void {
 }
 
 export function printWelcomePanel(): void {
-  printPanel(pc.cyan('Welcome to relay-ai'), [
+  printPanel(pc.cyan('Welcome to clodex'), [
     `${pc.white("Let's get you set up.")}`,
-    `${pc.dim('Pick a path below — you can always add more providers later with ')}${fmtCommand('relay-ai providers')}${pc.dim('.')}`,
+    `${pc.dim('You can manage providers later with ')}${fmtCommand('clodex providers')}${pc.dim('.')}`,
   ]);
 }
 
@@ -203,29 +177,8 @@ export function printEnvConflictPanel(conflicts: ConflictInfo[]): void {
   ]);
 }
 
-export function printApiKeyPanel(url: string): void {
-  printPanel(pc.cyan('OpenCode API key'), [
-    `${pc.white('Get a free key at:')} ${fmtUrl(url)}`,
-    `${pc.dim('Paste it below — relay-ai stores it in your system keychain when possible.')}`,
-  ]);
-}
 
-export function printDryRunPanel(): void {
-  printPanel(pc.yellow('Dry run'), [
-    `${pc.white('Simulating first-run — ')}${pc.yellow(pc.bold('no keys read or written'))}${pc.white('.')}`,
-  ]);
-}
 
-export function printImportConflictPanel(
-  providerName: string,
-  existingHint: string,
-  incomingHint: string,
-): void {
-  printPanel(pc.yellow(`Provider "${providerName}" already configured`), [
-    `${pc.bold('Existing')}  ${pc.white(existingHint)}`,
-    `${pc.bold('Imported')}  ${pc.white(incomingHint)}`,
-  ]);
-}
 
 export function printProviderDetailPanel(
   name: string,
@@ -238,12 +191,6 @@ export function printProviderDetailPanel(
   ]);
 }
 
-export function printCloudProviderPanel(name: string): void {
-  printPanel(pc.cyan('Cloud provider'), [
-    `${fmtProvider(name)} ${pc.white('is active via your saved OpenCode API key.')}`,
-    `${pc.dim('Models are fetched live — no separate setup needed.')}`,
-  ]);
-}
 
 export function printOAuthStepsPanel(title: string, providerLabel: string): void {
   printPanel(pc.cyan(title), [
@@ -253,52 +200,12 @@ export function printOAuthStepsPanel(title: string, providerLabel: string): void
   ]);
 }
 
+
 export function printGatewayMaskPanel(): void {
   printPanel(pc.cyan('Claude Desktop / Cowork'), [
     `${pc.white('Gateway discovery filters competitor model names in ids.')}`,
     `${pc.white('Masking keeps discovery working while display names stay readable.')}`,
   ]);
-}
-
-export async function confirmSubscriptionOAuthRisk(
-  providerId: 'claude-code' | 'antigravity',
-): Promise<boolean> {
-  const isGoogle = providerId === 'antigravity';
-  const providerLabel = isGoogle ? 'Antigravity / Google' : 'Claude Code';
-  const service = isGoogle
-    ? 'Google account (Gmail, Drive, YouTube, Workspace, and all tied services)'
-    : 'Anthropic account (Claude Pro / Max subscription)';
-  const enforcementNote = isGoogle
-    ? 'Community reports: Google has issued account bans for this usage.'
-    : 'Anthropic actively enforces this — validating request shape and has taken legal action against other projects.';
-  const compatibilityNote = isGoogle
-    ? undefined
-    : 'For compatibility, relay-ai may reproduce Claude Code-style request metadata and attribution so Anthropic classifies traffic as Claude Code.';
-
-  printPanel(pc.red(`⚠  Account Risk — ${providerLabel} OAuth`), [
-    `${pc.white('This extracts OAuth tokens from your')} ${pc.bold(service)}.`,
-    '',
-    `${pc.white('Routing subscription tokens through relay-ai to power other tools')}`,
-    `${pc.white('may violate the provider\'s Terms of Service.')}`,
-    '',
-    `${pc.yellow(enforcementNote)}`,
-    ...(compatibilityNote ? [`${pc.yellow(compatibilityNote)}`] : []),
-    '',
-    `${pc.white('Possible consequences:')}`,
-    `  ${pc.dim('•')} ${pc.white('Token revocation')}`,
-    `  ${pc.dim('•')} ${pc.white('Account suspension or permanent ban')}`,
-    ...(isGoogle ? [`  ${pc.dim('•')} ${pc.red(pc.bold('Loss of ALL services tied to this Google account'))}`] : []),
-    '',
-    ...(isGoogle ? [`${pc.red(pc.bold('Do not use your primary Google account.'))} ${pc.white('Use a throwaway account.')}`] : []),
-    `${pc.dim(`relay-ai is not affiliated with ${isGoogle ? 'Google' : 'Anthropic'} and cannot protect you.`)}`,
-  ]);
-
-  const answer = await p.text({
-    message: 'Type "yes" to accept the risk and proceed, or Ctrl+C to cancel:',
-    validate: (v) => v === 'yes' ? undefined : 'Type exactly "yes" to confirm',
-  });
-
-  return !p.isCancel(answer) && answer === 'yes';
 }
 
 export function printNetworkWarningPanel(): void {
@@ -311,6 +218,6 @@ export function printFavoritesOnlyPanel(): void {
   printPanel(pc.cyan('Favorites-only mode'), [
     `${pc.white('Limits ')}${pc.cyan('GET /anthropic/v1/models')}${pc.white(' to your curated favorites.')}`,
     `${pc.white('Registry models not in your favorites will not appear in the Desktop / Cowork picker.')}`,
-    `${pc.white('Edit with ')}${pc.cyan('relay-ai models')}${pc.white('.')}`,
+    `${pc.white('Edit with ')}${pc.cyan('clodex models')}${pc.white('.')}`,
   ]);
 }

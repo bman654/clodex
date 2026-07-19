@@ -5,6 +5,7 @@ import {
   globalFavoritePickKey,
   globalFavoriteSelectOption,
 } from '../src/favorites-picker.js';
+import { favoriteProviderDisplayName } from '../src/favorite-provider-display.js';
 import type { LocalProvider } from '../src/types.js';
 
 const providers: LocalProvider[] = [
@@ -172,41 +173,30 @@ describe('globalFavoriteSelectOption', () => {
 
   it('labels OAuth subscription providers explicitly in favorites search', () => {
     const oauthProviders: LocalProvider[] = [{
-      id: 'antigravity',
-      name: 'Antigravity (Google Cloud Code Assist)',
+      id: 'openai-oauth',
+      name: 'OpenAI (ChatGPT)',
       apiKey: 'tok',
       authType: 'oauth',
       models: [{
-        id: 'gemini-3.5-flash-low',
-        name: 'Gemini 3.5 Flash',
-        family: 'gemini',
-        brand: 'Google',
-        modelFormat: 'cloud-code',
-        upstreamModelId: 'gemini-3.5-flash-low',
-      }],
-    }, {
-      id: 'claude-code',
-      name: 'Claude Code (Anthropic subscription)',
-      apiKey: 'tok',
-      authType: 'oauth',
-      models: [{
-        id: 'claude-sonnet-4-6',
-        name: 'Claude Sonnet 4.6',
-        family: 'claude',
-        brand: 'Anthropic',
-        modelFormat: 'anthropic',
-        upstreamModelId: 'claude-sonnet-4-6',
+        id: 'gpt-5.6-sol',
+        name: 'GPT-5.6 Sol',
+        family: 'gpt',
+        brand: 'GPT',
+        modelFormat: 'openai',
+        upstreamModelId: 'gpt-5.6-sol',
+        npm: '@ai-sdk/openai',
       }],
     }];
 
-    const index = buildGlobalFavoriteIndex(oauthProviders);
+    const index = buildGlobalFavoriteIndex(oauthProviders.map(provider => ({
+      ...provider,
+      name: favoriteProviderDisplayName(provider),
+    })));
     expect(index.map(e => e.providerName)).toEqual([
-      'Claude Code OAuth (Anthropic subscription)',
-      'Antigravity OAuth (Google Cloud Code Assist)',
+      'OpenAI OAuth (ChatGPT)',
     ]);
     expect(filterGlobalFavoriteIndex(index, 'oauth').map(globalFavoritePickKey)).toEqual([
-      'claude-code::claude-sonnet-4-6',
-      'antigravity::gemini-3.5-flash-low',
+      'openai-oauth::gpt-5.6-sol',
     ]);
   });
 });

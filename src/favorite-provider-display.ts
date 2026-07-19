@@ -1,10 +1,7 @@
 import type { LocalProvider } from './types.js';
 
 const OAUTH_FAVORITE_NAMES: Record<string, string> = {
-  'claude-code': 'Claude Code OAuth (Anthropic subscription)',
-  antigravity: 'Antigravity OAuth (Google Cloud Code Assist)',
   'openai-oauth': 'OpenAI OAuth (ChatGPT)',
-  'xai-oauth': 'xAI OAuth (SuperGrok)',
 };
 
 export function favoriteProviderDisplayName(

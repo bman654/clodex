@@ -3,7 +3,7 @@
 import { getTemplateById, type ProviderTemplate } from '../provider-templates.js';
 import type { RegistryProvider } from './types.js';
 
-/** OpenCode provider ids that differ from relay-ai template ids */
+/** Legacy provider ids that differ from clodex template ids */
 const TEMPLATE_ID_ALIASES: Record<string, string> = {
   'google-vertex': 'vertex',
 };

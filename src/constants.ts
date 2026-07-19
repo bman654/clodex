@@ -2,24 +2,10 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import pkg from '../package.json' with { type: 'json' };
-import type { BackendConfig, ModelFormat } from './types.js';
-
-export const BACKENDS: Record<'zen' | 'go', BackendConfig> = {
-  zen: {
-    id: 'zen',
-    name: 'OpenCode Zen',
-    // No /v1 suffix — the Anthropic SDK appends /v1/messages automatically
-    baseUrl: 'https://opencode.ai/zen',
-  },
-  go: {
-    id: 'go',
-    name: 'OpenCode Go',
-    baseUrl: 'https://opencode.ai/zen/go',
-  },
-};
+import type { ModelFormat } from './types.js';
 
 // ChatGPT Codex WebSocket Responses transport. Models flagged prefer_websockets
-// require it; relay-ai also uses it for other OAuth Responses models so
+// require it; clodex also uses it for other OAuth Responses models so
 // connection-local previous_response_id continuation remains available.
 export const CODEX_RESPONSES_LITE_WS_URL = 'wss://chatgpt.com/backend-api/codex/responses';
 // `version` header the Codex backend expects on Responses-Lite requests. The
@@ -59,7 +45,7 @@ export const OPENCODE_CACHE_PATH = join(homedir(), '.cache', 'opencode', 'models
 /** Max models in favorites list and mid-session /model switch catalog. */
 export const MAX_MODEL_CATALOG = 20;
 
-/** Default TCP port for `relay-ai server` (gateway and --http-proxy modes). Override with --port. */
+/** Default TCP port for `clodex server` (endpoint and proxy modes). Override with --port. */
 export const DEFAULT_SERVER_PORT = 17645;
 
 /** Vercel AI SDK package for Anthropic Claude models on Google Vertex AI (ADC auth). */

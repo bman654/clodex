@@ -14,27 +14,25 @@ function stub(partial: Partial<RegistryProvider> & Pick<RegistryProvider, 'id' |
 }
 
 describe('resolveProviderTemplate', () => {
-  it('maps google-vertex to vertex template', () => {
-    const template = resolveProviderTemplate(stub({ id: 'google-vertex', templateId: 'google-vertex' }));
-    expect(template?.id).toBe('vertex');
-    expect(template?.modelSource).toBe('manual-only');
+  it('resolves the openai template by id', () => {
+    const template = resolveProviderTemplate(stub({ id: 'openai', templateId: 'openai' }));
+    expect(template?.defaultBaseUrl).toBe('https://api.openai.com/v1');
   });
 
-  it('resolves anthropic template by id', () => {
-    const template = resolveProviderTemplate(stub({ id: 'anthropic', templateId: 'anthropic' }));
-    expect(template?.defaultBaseUrl).toBe('https://api.anthropic.com');
+  it('returns undefined for unknown templates', () => {
+    expect(resolveProviderTemplate(stub({ id: 'groq', templateId: 'groq' }))).toBeUndefined();
   });
 });
 
 describe('effectiveProviderBaseUrl', () => {
   it('ignores empty url string and uses template default', () => {
     const provider = stub({
-      id: 'anthropic',
-      templateId: 'anthropic',
-      api: { npm: '@ai-sdk/anthropic', url: '' },
+      id: 'openai',
+      templateId: 'openai',
+      api: { npm: '@ai-sdk/openai', url: '' },
     });
     const template = resolveProviderTemplate(provider);
-    expect(effectiveProviderBaseUrl(provider, template)).toBe('https://api.anthropic.com');
+    expect(effectiveProviderBaseUrl(provider, template)).toBe('https://api.openai.com/v1');
   });
 
   it('uses npm fallback for anthropic without template', () => {

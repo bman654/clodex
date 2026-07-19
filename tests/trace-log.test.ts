@@ -32,7 +32,7 @@ describe('trace log redaction', () => {
 
 describe('inference request log', () => {
   it('logs diagnostic request envelopes while redacting credentials and hashing conversation content', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-ws-diagnostic-'));
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-ws-diagnostic-'));
     const path = join(dir, 'diagnostics.jsonl');
     try {
       writeWebSocketDiagnosticRequestLog(path, {
@@ -93,9 +93,9 @@ describe('inference request log', () => {
   });
 
   it('creates a separate private log path for each proxy session', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-session-log-'));
-    const previousHome = process.env['RELAY_AI_HOME'];
-    process.env['RELAY_AI_HOME'] = dir;
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-session-log-'));
+    const previousHome = process.env['CLODEX_HOME'];
+    process.env['CLODEX_HOME'] = dir;
     try {
       const first = getInferenceSessionLogPath('claude-http-proxy');
       const second = getInferenceSessionLogPath('claude-http-proxy');
@@ -120,26 +120,26 @@ describe('inference request log', () => {
         inheritedProxyPort: 58972,
       });
     } finally {
-      if (previousHome === undefined) delete process.env['RELAY_AI_HOME'];
-      else process.env['RELAY_AI_HOME'] = previousHome;
+      if (previousHome === undefined) delete process.env['CLODEX_HOME'];
+      else process.env['CLODEX_HOME'] = previousHome;
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it('writes only structured routing metadata', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-inference-log-'));
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-inference-log-'));
     const path = join(dir, 'requests.jsonl');
     try {
       writeInferenceRequestLog(path, {
         claudeSessionId: '927b8642-15d2-4535-ab27-1430ae54c4aa',
-        modelId: 'relay:openai:gpt-test[1m]',
+        modelId: 'clodex:openai:gpt-test[1m]',
         effort: 'high',
         provider: 'openai',
         route: 'translated',
       });
       const entry = JSON.parse(readFileSync(path, 'utf8').trim());
       expect(entry).toMatchObject({
-        modelId: 'relay:openai:gpt-test[1m]',
+        modelId: 'clodex:openai:gpt-test[1m]',
         claudeSessionId: '927b8642-15d2-4535-ab27-1430ae54c4aa',
         effort: 'high',
         provider: 'openai',
@@ -155,9 +155,9 @@ describe('inference request log', () => {
   });
 
   it('adds only the latest message text when request previews are enabled', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-inference-preview-'));
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-inference-preview-'));
     const path = join(dir, 'requests.jsonl');
-    const previous = process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
+    const previous = process.env['CLODEX_LOG_REQUEST_PREVIEW'];
     const requestPreview = getLatestMessagePreview([
       { role: 'user', content: 'older prompt' },
       {
@@ -171,14 +171,14 @@ describe('inference request log', () => {
     ]);
 
     try {
-      delete process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
+      delete process.env['CLODEX_LOG_REQUEST_PREVIEW'];
       writeInferenceRequestLog(path, {
         modelId: 'claude-sonnet-4-6',
         provider: 'anthropic',
         route: 'passthrough',
         requestPreview,
       });
-      process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = '1';
+      process.env['CLODEX_LOG_REQUEST_PREVIEW'] = '1';
       writeInferenceRequestLog(path, {
         modelId: 'claude-sonnet-4-6',
         provider: 'anthropic',
@@ -207,20 +207,20 @@ describe('inference request log', () => {
         { role: 'user', content: [{ type: 'tool_result', content: 'private tool result' }] },
       ])).toBe('user: [tool_result] | system: Classify this request for an OpenAI-compatible client.');
     } finally {
-      if (previous === undefined) delete process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
-      else process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = previous;
+      if (previous === undefined) delete process.env['CLODEX_LOG_REQUEST_PREVIEW'];
+      else process.env['CLODEX_LOG_REQUEST_PREVIEW'] = previous;
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it('logs upstream status always and redacted error content only when previews are enabled', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-inference-error-'));
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-inference-error-'));
     const path = join(dir, 'requests.jsonl');
-    const previous = process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
+    const previous = process.env['CLODEX_LOG_REQUEST_PREVIEW'];
     try {
-      delete process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
+      delete process.env['CLODEX_LOG_REQUEST_PREVIEW'];
       writeInferenceResponseErrorLog(path, {
-        modelId: 'relay:openai:gpt-test',
+        modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
         statusCode: 429,
@@ -228,9 +228,9 @@ describe('inference request log', () => {
         isRetryable: true,
         attemptCount: 3,
       });
-      process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = '1';
+      process.env['CLODEX_LOG_REQUEST_PREVIEW'] = '1';
       writeInferenceResponseErrorLog(path, {
-        modelId: 'relay:openai:gpt-test',
+        modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
         statusCode: 429,
@@ -260,20 +260,20 @@ describe('inference request log', () => {
       expect(entries[2].errorContent).toHaveLength(2_000);
       expect(entries[2].errorContent).toMatch(/ \[truncated\]$/);
     } finally {
-      if (previous === undefined) delete process.env['RELAY_AI_LOG_REQUEST_PREVIEW'];
-      else process.env['RELAY_AI_LOG_REQUEST_PREVIEW'] = previous;
+      if (previous === undefined) delete process.env['CLODEX_LOG_REQUEST_PREVIEW'];
+      else process.env['CLODEX_LOG_REQUEST_PREVIEW'] = previous;
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it('writes correlated response lifecycle metadata without response content', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'relay-ai-inference-lifecycle-'));
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-inference-lifecycle-'));
     const path = join(dir, 'requests.jsonl');
     try {
       writeInferenceResponseLifecycleLog(path, {
         event: 'translation_progress',
         requestId: 'req-123',
-        modelId: 'relay:openai:gpt-test',
+        modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
         phase: 'translating',
@@ -288,7 +288,7 @@ describe('inference request log', () => {
       writeInferenceResponseLifecycleLog(path, {
         event: 'translation_failed',
         requestId: 'req-123',
-        modelId: 'relay:openai:gpt-test',
+        modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
         errorType: 'Error',
@@ -299,7 +299,7 @@ describe('inference request log', () => {
       expect(entry).toMatchObject({
         event: 'translation_progress',
         requestId: 'req-123',
-        modelId: 'relay:openai:gpt-test',
+        modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
         phase: 'translating',

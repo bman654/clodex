@@ -75,7 +75,7 @@ describe('findBinaryOnPath', () => {
     // Regression: commit d887984 hardened detection to argv-based execFileSync;
     // the shared-helper refactor reintroduced shell-string execSync. A name with
     // shell metacharacters must not execute anything.
-    const marker = join(mkdtempSync(join(tmpdir(), 'relay-inj-')), 'pwned');
+    const marker = join(mkdtempSync(join(tmpdir(), 'clodex-inj-')), 'pwned');
     try {
       const result = findBinaryOnPath(`no-such-binary; touch ${marker}`, []);
       expect(result).toBeNull();
@@ -92,37 +92,37 @@ describe('findClaudeBinary app path override', () => {
   let previousClaudePath: string | undefined;
 
   beforeEach(() => {
-    tempHome = mkdtempSync(join(tmpdir(), 'relay-ai-launch-test-'));
-    previousRelayHome = process.env['RELAY_AI_HOME'];
-    previousClaudePath = process.env['RELAY_AI_CLAUDE_PATH'];
-    process.env['RELAY_AI_HOME'] = join(tempHome, 'relay-home');
-    delete process.env['RELAY_AI_CLAUDE_PATH'];
+    tempHome = mkdtempSync(join(tmpdir(), 'clodex-launch-test-'));
+    previousRelayHome = process.env['CLODEX_HOME'];
+    previousClaudePath = process.env['CLODEX_CLAUDE_PATH'];
+    process.env['CLODEX_HOME'] = join(tempHome, 'relay-home');
+    delete process.env['CLODEX_CLAUDE_PATH'];
   });
 
   afterEach(() => {
     rmSync(tempHome, { recursive: true, force: true });
-    if (previousRelayHome === undefined) delete process.env['RELAY_AI_HOME'];
-    else process.env['RELAY_AI_HOME'] = previousRelayHome;
-    if (previousClaudePath === undefined) delete process.env['RELAY_AI_CLAUDE_PATH'];
-    else process.env['RELAY_AI_CLAUDE_PATH'] = previousClaudePath;
+    if (previousRelayHome === undefined) delete process.env['CLODEX_HOME'];
+    else process.env['CLODEX_HOME'] = previousRelayHome;
+    if (previousClaudePath === undefined) delete process.env['CLODEX_CLAUDE_PATH'];
+    else process.env['CLODEX_CLAUDE_PATH'] = previousClaudePath;
   });
 
-  it('prefers RELAY_AI_CLAUDE_PATH over a saved app path override', () => {
+  it('prefers CLODEX_CLAUDE_PATH over a saved app path override', () => {
     const savedClaude = join(tempHome, 'saved-claude');
     const environmentClaude = join(tempHome, 'environment-claude');
     writeFileSync(savedClaude, '#!/bin/sh\n');
     writeFileSync(environmentClaude, '#!/bin/sh\n');
     setAppPathOverride('claude', savedClaude);
-    process.env['RELAY_AI_CLAUDE_PATH'] = environmentClaude;
+    process.env['CLODEX_CLAUDE_PATH'] = environmentClaude;
 
     expect(findClaudeBinary()).toBe(environmentClaude);
   });
 
-  it('does not fall back when RELAY_AI_CLAUDE_PATH points to a missing binary', () => {
+  it('does not fall back when CLODEX_CLAUDE_PATH points to a missing binary', () => {
     const savedClaude = join(tempHome, 'saved-claude');
     writeFileSync(savedClaude, '#!/bin/sh\n');
     setAppPathOverride('claude', savedClaude);
-    process.env['RELAY_AI_CLAUDE_PATH'] = join(tempHome, 'missing-claude');
+    process.env['CLODEX_CLAUDE_PATH'] = join(tempHome, 'missing-claude');
 
     expect(findClaudeBinary()).toBeNull();
   });

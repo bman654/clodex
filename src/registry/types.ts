@@ -4,7 +4,7 @@ import type { FreeStatus } from '../free-models.js';
 
 export const REGISTRY_SCHEMA_VERSION = 1;
 
-export type RegistrySubscriptionFilter = 'free' | 'zen' | 'go';
+export type RegistrySubscriptionFilter = 'free';
 
 export interface CachedModel {
   id: string;

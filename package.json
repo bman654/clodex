@@ -1,31 +1,31 @@
 {
-  "name": "@jacobbd/relay-ai",
-  "version": "0.4.3",
+  "name": "clodex",
+  "version": "0.1.0",
   "publishConfig": {
     "access": "public"
   },
-  "description": "Relay any model into any coding agent — launch Claude Code, Codex, and more with multi-provider gateways",
-  "author": "jacob-bd",
+  "description": "Bridge Claude Code to OpenAI models — OpenAI API key or ChatGPT/Codex-plan OAuth, with prompt caching, auto-compaction, model switching, and a Claude Code binary patcher",
+  "author": "Brandon Wallace",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jacob-bd/relay-ai.git"
   },
-  "homepage": "https://github.com/jacob-bd/relay-ai#readme",
   "keywords": [
     "claude",
     "claude-code",
+    "openai",
+    "chatgpt",
     "codex",
     "ai",
     "llm",
     "cli",
-    "gateway",
-    "relay",
-    "vertex"
+    "bridge",
+    "proxy"
   ],
   "type": "module",
   "bin": {
-    "relay-ai": "dist/cli.js"
+    "clodex": "dist/cli.js"
   },
   "files": [
     "dist",
@@ -35,7 +35,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "tsup && mkdir -p dist/ui/public && cp -r src/ui/public/. dist/ui/public/",
+    "build": "tsup",
     "dev": "tsup --watch",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -44,36 +44,17 @@
     "prepublishOnly": "node -e \"if (require('./package.json').version !== require('./package-lock.json').version) { console.error('Error: package.json and package-lock.json versions are out of sync! Run npm install to sync.'); process.exit(1); }\" && npm run build"
   },
   "dependencies": {
-    "@ai-sdk/alibaba": "^2.0.9",
-    "@ai-sdk/amazon-bedrock": "^5.0.17",
     "@ai-sdk/anthropic": "^4.0.12",
-    "@ai-sdk/azure": "^4.0.11",
-    "@ai-sdk/cerebras": "^3.0.7",
-    "@ai-sdk/cohere": "^4.0.7",
-    "@ai-sdk/deepinfra": "^3.0.7",
-    "@ai-sdk/gateway": "^4.0.16",
-    "@ai-sdk/google": "^4.0.12",
-    "@ai-sdk/google-vertex": "^5.0.16",
-    "@ai-sdk/groq": "^4.0.8",
-    "@ai-sdk/mistral": "^4.0.8",
     "@ai-sdk/openai": "^4.0.11",
     "@ai-sdk/openai-compatible": "^3.0.7",
-    "@ai-sdk/perplexity": "^4.0.8",
     "@ai-sdk/provider-utils": "^5.0.7",
-    "@ai-sdk/togetherai": "^3.0.8",
-    "@ai-sdk/vercel": "^3.0.7",
-    "@ai-sdk/xai": "^4.0.10",
     "@clack/prompts": "^0.9.1",
-    "@openrouter/ai-sdk-provider": "^3.0.0",
     "ai": "^7.0.22",
-    "gitlab-ai-provider": "^6.11.0",
     "ipaddr.js": "^2.4.0",
     "node-forge": "^1.4.0",
     "open": "^11.0.0",
     "picocolors": "^1.1.1",
-    "smol-toml": "^1.6.1",
-    "ws": "^8.21.0",
-    "zod": "^3.25.76"
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

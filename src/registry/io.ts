@@ -12,10 +12,10 @@ import {
   closeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
-import { getAppHome, getProvidersPath } from '../paths.js';
+import { ensureLegacyAppHomeMigrated, getAppHome, getProvidersPath } from '../paths.js';
 import type { ProviderRegistry, RegistryProvider } from './types.js';
 import { REGISTRY_SCHEMA_VERSION } from './types.js';
-import { migrateLegacyCloudProviders, migrateOAuthOpenAiProvider, migrateOAuthXaiProvider } from './migrate.js';
+import { migrateOAuthOpenAiProvider } from './migrate.js';
 import { isValidProviderId } from './validate.js';
 
 const DIR_MODE = 0o700;
@@ -69,7 +69,7 @@ function parseProvider(raw: unknown): RegistryProvider | null {
     addedAt: p.addedAt,
   };
 
-  if (p.subscriptionFilter === 'free' || p.subscriptionFilter === 'zen' || p.subscriptionFilter === 'go') {
+  if (p.subscriptionFilter === 'free') {
     provider.subscriptionFilter = p.subscriptionFilter;
   }
   if (p.authType === 'api' || p.authType === 'oauth' || p.authType === 'none') {
@@ -112,15 +112,14 @@ function parseRegistry(raw: unknown): ProviderRegistry {
 }
 
 export function loadRegistry(path = getProvidersPath()): ProviderRegistry {
+  ensureLegacyAppHomeMigrated();
   if (!existsSync(path)) {
     return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
   }
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8'));
     const registry = parseRegistry(raw);
-    let migrated = migrateLegacyCloudProviders(registry);
-    if (migrateOAuthOpenAiProvider(registry)) migrated = true;
-    if (migrateOAuthXaiProvider(registry)) migrated = true;
+    const migrated = migrateOAuthOpenAiProvider(registry);
     if (migrated) {
       try {
         saveRegistry(registry, path);

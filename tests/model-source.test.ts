@@ -14,13 +14,8 @@ function stub(partial: Partial<RegistryProvider> & Pick<RegistryProvider, 'id' |
 }
 
 describe('resolveModelSource', () => {
-  it('returns zen-go-api for zen and go', () => {
-    expect(resolveModelSource(stub({ id: 'zen', templateId: 'zen' }))).toBe('zen-go-api');
-    expect(resolveModelSource(stub({ id: 'go', templateId: 'go' }))).toBe('zen-go-api');
-  });
-
-  it('returns api-list for groq template', () => {
-    expect(resolveModelSource(stub({ id: 'groq', templateId: 'groq' }))).toBe('api-list');
+  it('returns api-list for the openai template', () => {
+    expect(resolveModelSource(stub({ id: 'openai', templateId: 'openai' }))).toBe('api-list');
   });
 
   it('returns manual-only for google-vertex import id', () => {

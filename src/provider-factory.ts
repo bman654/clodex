@@ -141,18 +141,6 @@ async function loadSdkProviderFactory(npm: string): Promise<SdkProviderFactory> 
 export async function createLanguageModel(spec: ProviderModelSpec): Promise<LanguageModel> {
   const { npm, modelId, apiKey, baseURL } = spec;
 
-  if (npm === VERTEX_ANTHROPIC_NPM) {
-    if (!spec.vertex?.project) {
-      throw new Error('Vertex project is required for @ai-sdk/google-vertex/anthropic');
-    }
-    const { createVertexAnthropic } = await import('@ai-sdk/google-vertex/anthropic');
-    const vertex = createVertexAnthropic({
-      project: spec.vertex.project,
-      location: spec.vertex.location,
-    });
-    return vertex(modelId);
-  }
-
   if (npm === '@ai-sdk/openai') {
     const { createOpenAI } = await import('@ai-sdk/openai');
     const useResponsesEndpoint = shouldUseOpenAiResponsesEndpoint(modelId);
@@ -165,7 +153,7 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
           baseURL: 'https://chatgpt.com/backend-api/codex',
           headers: {
             ...(accountId ? { 'ChatGPT-Account-Id': accountId } : {}),
-            originator: 'relay-ai',
+            originator: 'clodex',
             // Responses-Lite models (backend prefer_websockets/use_responses_lite,
             // e.g. gpt-5.6-luna) require these on the request.
             ...(spec.useResponsesLite
@@ -189,19 +177,6 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
       : { apiKey };
     const openai = createOpenAI(oauthOptions);
     return useResponsesEndpoint ? openai.responses(modelId) : openai.chat(modelId);
-  }
-  if (npm === '@ai-sdk/xai') {
-    const { createXai } = await import('@ai-sdk/xai');
-    const xai = createXai({ apiKey });
-    return modelPrefersResponsesApi(modelId) ? xai.responses(modelId) : xai.chat(modelId);
-  }
-  // @ai-sdk/google owns its native v1beta endpoint. Registry templates store the
-  // OpenAI-compatible URL only for GET /v1/models discovery — passing it here
-  // produces .../v1beta/openai/models/...:streamGenerateContent → 404.
-  if (npm === '@ai-sdk/google') {
-    const { createGoogle } = await import('@ai-sdk/google');
-    const google = createGoogle({ apiKey });
-    return google(modelId);
   }
   // Registry stores root URL (no /v1) for GET /v1/models discovery — passing it here
   // makes the SDK call https://api.anthropic.com/messages → 404.
@@ -248,9 +223,6 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
     model = createOpenAICompatible({
       ...options,
     })(modelId);
-  } else if (npm === '@openrouter/ai-sdk-provider') {
-    const { createOpenRouter } = await import('@openrouter/ai-sdk-provider');
-    model = createOpenRouter({ apiKey, baseURL, ...(spec.headers ? { headers: spec.headers } : {}) })(modelId);
   } else {
     const create = await loadSdkProviderFactory(npm);
     const provider = create({

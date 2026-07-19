@@ -13,9 +13,6 @@ const MANUAL_ONLY_NPMS = new Set([
 ]);
 
 export function resolveModelSource(provider: RegistryProvider): ProviderModelSource {
-  if (provider.id === 'zen' || provider.id === 'go' || provider.templateId === 'zen' || provider.templateId === 'go') {
-    return 'zen-go-api';
-  }
   if (
     MANUAL_ONLY_PROVIDER_IDS.has(provider.id) ||
     MANUAL_ONLY_PROVIDER_IDS.has(provider.templateId) ||

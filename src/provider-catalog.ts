@@ -25,7 +25,7 @@ export function providersForPicker(providers: LocalProvider[]): LocalProvider[] 
   return providers.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }));
 }
 
-/** Resolve API key when provider.apiKey is empty (registry authRef or global OpenCode key). */
+/** Resolve API key when provider.apiKey is empty (registry authRef or OAuth keyring). */
 export async function resolveLocalProviderApiKey(provider: LocalProvider): Promise<string | null> {
   const direct = provider.apiKey?.trim();
   if (direct) return direct;
@@ -38,8 +38,7 @@ export async function resolveLocalProviderApiKey(provider: LocalProvider): Promi
   }
 
   const reg = loadRegistry().providers.find(p => p.id === provider.id);
-  const authRef = reg?.authRef
-    ?? (provider.id === 'zen' || provider.id === 'go' ? 'keyring:global:opencode' : oauthAuthRef(provider.id));
+  const authRef = reg?.authRef ?? oauthAuthRef(provider.id);
   return resolveProviderCredential(provider.id, authRef);
 }
 
@@ -49,9 +48,6 @@ export function formatRegistryAuthLabel(
 ): string {
   if (provider.authType === 'oauth' || provider.authRef.includes('oauth:provider:')) {
     return 'keychain (OAuth)';
-  }
-  if (provider.authRef.startsWith('keyring:global:opencode')) {
-    return 'keychain (OpenCode API key)';
   }
   if (provider.authType === 'none') {
     return 'gcloud / manual credentials';

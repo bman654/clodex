@@ -26,70 +26,49 @@ const anthropicModel: LocalProviderModel = {
   npm: '@ai-sdk/anthropic',
 };
 
-const cloudCodeModel: LocalProviderModel = {
-  id: 'gemini-3.5-flash-low',
-  name: 'Gemini 3.5 Flash',
-  family: 'gemini',
-  brand: 'Google',
-  modelFormat: 'cloud-code',
-  upstreamModelId: 'gemini-3.5-flash-low',
+const openAiModelWithoutNpm: LocalProviderModel = {
+  ...openAiModel,
+  id: 'no-sdk-model',
+  npm: undefined,
 };
 
 describe('target compatibility matrix', () => {
-  it('keeps normal API-key OpenAI and Anthropic routes broadly compatible', () => {
-    expect(isTargetCompatibleModel({
-      target: 'codex',
-      providerId: 'openai',
-      authType: 'api',
-      model: openAiModel,
-    }).compatible).toBe(true);
-    expect(isTargetCompatibleModel({
-      target: 'claude-app',
-      providerId: 'anthropic',
-      authType: 'api',
-      model: anthropicModel,
-    }).compatible).toBe(true);
-  });
-
-  it('allows Claude OAuth for all targets', () => {
-    for (const target of ['claude', 'codex', 'codex-app', 'claude-app', 'gemini', 'server', 'antigravity'] as const) {
+  it('keeps OpenAI SDK and Anthropic passthrough routes compatible for both targets', () => {
+    for (const target of ['claude', 'server'] as const) {
       expect(isTargetCompatibleModel({
         target,
-        providerId: 'claude-code',
-        authType: 'oauth',
+        providerId: 'openai',
+        authType: 'api',
+        model: openAiModel,
+      }).compatible, target).toBe(true);
+      expect(isTargetCompatibleModel({
+        target,
+        providerId: 'anthropic',
+        authType: 'api',
         model: anthropicModel,
       }).compatible, target).toBe(true);
     }
   });
 
-  it('allows Antigravity OAuth Cloud Code for all targets except server', () => {
-    for (const target of ['claude', 'codex', 'codex-app', 'claude-app', 'gemini', 'antigravity'] as const) {
-      expect(isTargetCompatibleModel({
-        target,
-        providerId: 'antigravity',
-        authType: 'oauth',
-        model: cloudCodeModel,
-      }).compatible, target).toBe(true);
-    }
+  it('rejects OpenAI-format models without an SDK provider package', () => {
     expect(isTargetCompatibleModel({
-      target: 'server',
-      providerId: 'antigravity',
-      authType: 'oauth',
-      model: cloudCodeModel,
-    }).compatible).toBe(false);
+      target: 'claude',
+      providerId: 'openai',
+      authType: 'api',
+      model: openAiModelWithoutNpm,
+    })).toMatchObject({ compatible: false });
   });
 
   it('filters providers and models per target', () => {
     const providers: LocalProvider[] = [
       { id: 'openai', name: 'OpenAI', apiKey: 'k', authType: 'api', models: [openAiModel] },
-      { id: 'claude-code', name: 'Claude Code OAuth', apiKey: 'tok', authType: 'oauth', models: [anthropicModel] },
-      { id: 'antigravity', name: 'Antigravity OAuth', apiKey: 'tok', authType: 'oauth', models: [cloudCodeModel] },
+      { id: 'openai-oauth', name: 'OpenAI OAuth (ChatGPT)', apiKey: 'tok', authType: 'oauth', models: [openAiModel] },
+      { id: 'broken', name: 'Broken', apiKey: 'k', authType: 'api', models: [openAiModelWithoutNpm] },
     ];
 
-    const allThree = ['antigravity', 'claude-code', 'openai'];
-    for (const target of ['claude', 'codex', 'codex-app', 'claude-app', 'gemini'] as const) {
-      expect(providersForTarget(providers, target).map(p => p.id).sort(), target).toEqual(allThree);
+    for (const target of ['claude', 'server'] as const) {
+      expect(providersForTarget(providers, target).map(p => p.id).sort(), target).toEqual(['openai', 'openai-oauth']);
     }
-    expect(routableModelsForTarget(providers[2]!, 'antigravity').length).toBeGreaterThan(0);
+    expect(routableModelsForTarget(providers[2]!, 'claude')).toHaveLength(0);
   });
 });

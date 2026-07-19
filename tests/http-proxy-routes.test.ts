@@ -45,7 +45,7 @@ describe('HTTP proxy routes', () => {
 
     expect(result.routes).toHaveLength(1);
     expect(result.routes[0]).toMatchObject({
-      aliasId: 'relay:groq:llama-3.3-70b[1m]',
+      aliasId: 'clodex:groq:llama-3.3-70b[1m]',
       realModelId: 'llama-3.3-70b-versatile',
       npm: '@ai-sdk/groq',
       apiKey: 'groq-key',
@@ -62,7 +62,7 @@ describe('HTTP proxy routes', () => {
   });
 
   it('formats the exact freeform Claude model id', () => {
-    expect(httpProxyModelId('openrouter', 'deepseek/deepseek-v3')).toBe('relay:openrouter:deepseek/deepseek-v3');
+    expect(httpProxyModelId('openrouter', 'deepseek/deepseek-v3')).toBe('clodex:openrouter:deepseek/deepseek-v3');
   });
 
   it('resolves short aliases only when they target available HTTP-proxy favorites', () => {
@@ -78,7 +78,7 @@ describe('HTTP proxy routes', () => {
 
     expect(result.aliases).toEqual([{
       name: 'llama',
-      routeId: 'relay:groq:llama-3.3-70b[1m]',
+      routeId: 'clodex:groq:llama-3.3-70b[1m]',
       displayName: 'Llama 3.3 70B (Groq Cloud)',
     }]);
     expect(result.unavailableAliases).toEqual([

@@ -62,7 +62,7 @@ export async function fetchAnthropicModels(
     });
 
     let logTrace: ((msg: string) => void) | undefined;
-    if (process.env.RELAY_AI_TRACE === '1') {
+    if (process.env.CLODEX_TRACE === '1') {
       logTrace = makeTraceLogger(getProviderDebugLogPath());
     }
 

@@ -1,43 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-vi.mock('../src/opencode-serve.js', () => ({
-  findOpencodeBinary: vi.fn(() => '/usr/local/bin/opencode'),
-  fetchRawOpencodeProviders: vi.fn(async () => [{
-    id: 'gitlab',
-    name: 'GitLab',
-    models: {
-      claude: {
-        id: 'claude-sonnet-4-6',
-        name: 'Claude Sonnet 4.6',
-        api: { npm: 'gitlab-ai-provider', url: 'https://gitlab.example.com/v1' },
-      },
-    },
-  }]),
-}));
-vi.mock('../src/registry/auth-broker.js', () => ({
-  runOpencodeAuthBroker: vi.fn(async () => ({
-    type: 'oauth',
-    access: 'access-token',
-    refresh: 'refresh-token',
-    expires: Date.now() + 3600_000,
-  })),
-}));
 vi.mock('../src/ui.js', () => ({
   printOAuthStepsPanel: vi.fn(),
-  confirmSubscriptionOAuthRisk: vi.fn(async () => true),
 }));
-vi.mock('../src/oauth/antigravity-oauth.js', () => ({
-  runAntigravityOAuthFlow: vi.fn(async () => ({
-    tokens: { access_token: 'antigravity-access', refresh_token: 'antigravity-refresh' },
-    userInfo: { email: 'jacob@example.com' },
+vi.mock('../src/oauth/openai.js', () => ({
+  runOpenAiDeviceCodeFlow: vi.fn(async () => ({
+    tokens: { access_token: 'openai-access', refresh_token: 'openai-refresh', expires_in: 3600 },
+    accountId: 'acct-123',
   })),
-}));
-vi.mock('../src/oauth/claude-code.js', () => ({
-  runClaudeCodeOAuthFlow: vi.fn(async () => ({
-    tokens: { access_token: 'claude-access', refresh_token: 'claude-refresh' },
-    bootstrap: { accountId: 'acct-123' },
-  })),
-  generateCliUserID: vi.fn(() => 'cli-user-id'),
 }));
 vi.mock('../src/env.js', () => ({
   saveProviderCredential: vi.fn(async () => false),
@@ -59,43 +29,36 @@ vi.mock('@clack/prompts', () => ({
 import { saveProviderCredential } from '../src/env.js';
 import { saveRegistry } from '../src/registry/io.js';
 import { authenticateProvider } from '../src/registry/provider-auth.js';
-import { runOpencodeAuthBroker } from '../src/registry/auth-broker.js';
-import { runAntigravityOAuthFlow } from '../src/oauth/antigravity-oauth.js';
-import { runClaudeCodeOAuthFlow } from '../src/oauth/claude-code.js';
+import { runOpenAiDeviceCodeFlow } from '../src/oauth/openai.js';
 import * as prompts from '@clack/prompts';
 
 describe('authenticateProvider', () => {
   beforeEach(() => {
     vi.mocked(saveProviderCredential).mockClear();
     vi.mocked(saveRegistry).mockClear();
-    vi.mocked(runOpencodeAuthBroker).mockClear();
-    vi.mocked(runAntigravityOAuthFlow).mockClear();
-    vi.mocked(runClaudeCodeOAuthFlow).mockClear();
+    vi.mocked(runOpenAiDeviceCodeFlow).mockClear();
     vi.mocked(prompts.select).mockClear();
   });
 
+  it('runs the OpenAI device-code flow and stores the openai-oauth registry entry', async () => {
+    const result = await authenticateProvider('openai');
+
+    expect(prompts.select).not.toHaveBeenCalled();
+    expect(runOpenAiDeviceCodeFlow).toHaveBeenCalled();
+    expect(saveRegistry).toHaveBeenCalled();
+    expect(result.providerId).toBe('openai-oauth');
+    expect(result.credential.access).toBe('openai-access');
+    expect(result.registryProvider.name).toBe('OpenAI (ChatGPT)');
+  });
+
   it('warns and continues when token persistence fails (graceful degradation)', async () => {
-    const result = await authenticateProvider('gitlab');
+    const result = await authenticateProvider('openai');
     expect(saveProviderCredential).toHaveBeenCalled();
     expect(saveRegistry).toHaveBeenCalled();
-    expect(result.providerId).toBe('gitlab');
+    expect(result.providerId).toBe('openai-oauth');
   });
 
-  it('launches Antigravity OAuth directly without the OpenCode submenu', async () => {
-    const result = await authenticateProvider('antigravity');
-
-    expect(prompts.select).not.toHaveBeenCalled();
-    expect(runOpencodeAuthBroker).not.toHaveBeenCalled();
-    expect(runAntigravityOAuthFlow).toHaveBeenCalled();
-    expect(result.providerId).toBe('antigravity');
-  });
-
-  it('launches Claude Code OAuth directly without the OpenCode submenu', async () => {
-    const result = await authenticateProvider('claude-code');
-
-    expect(prompts.select).not.toHaveBeenCalled();
-    expect(runOpencodeAuthBroker).not.toHaveBeenCalled();
-    expect(runClaudeCodeOAuthFlow).toHaveBeenCalled();
-    expect(result.providerId).toBe('claude-code');
+  it('rejects non-OpenAI providers', async () => {
+    await expect(authenticateProvider('xai')).rejects.toThrow('only available for openai');
   });
 });

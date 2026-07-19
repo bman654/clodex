@@ -9,7 +9,7 @@ import { OPENCODE_CACHE_PATH } from './constants.js';
 
 export const DEFAULT_CONTEXT_WINDOW = 200_000;
 
-/** OpenCode cache file provider keys for Zen/Go (not relay-ai registry ids). */
+/** OpenCode cache file provider keys (metadata enrichment only, not clodex registry ids). */
 const CACHE_PROVIDER_PRIORITY = new Set(['opencode', 'opencode-go']);
 
 export interface OpencodeCacheModel {

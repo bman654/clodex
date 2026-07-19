@@ -35,16 +35,16 @@ describe('provider id validation', () => {
 
 describe('registry io', () => {
   let home: string;
-  const prev = process.env.RELAY_AI_HOME;
+  const prev = process.env.CLODEX_HOME;
 
   beforeEach(() => {
-    home = mkdtempSync(join(tmpdir(), 'relay-ai-registry-'));
-    process.env.RELAY_AI_HOME = home;
+    home = mkdtempSync(join(tmpdir(), 'clodex-registry-'));
+    process.env.CLODEX_HOME = home;
   });
 
   afterEach(() => {
-    if (prev === undefined) delete process.env.RELAY_AI_HOME;
-    else process.env.RELAY_AI_HOME = prev;
+    if (prev === undefined) delete process.env.CLODEX_HOME;
+    else process.env.CLODEX_HOME = prev;
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -108,58 +108,6 @@ describe('registry io', () => {
     expect(loaded.providers[0]?.id).toBe('groq');
   });
 
-  it('removes legacy OpenCode cloud duplicates on load and persists the cleanup', () => {
-    const path = join(home, 'providers.json');
-    const base = {
-      enabled: true,
-      authRef: 'keyring:global:opencode',
-      api: {},
-      addedAt: '2026-06-18T00:00:00.000Z',
-    };
-    mkdirSync(home, { recursive: true });
-    writeFileSync(path, JSON.stringify({
-      schemaVersion: 1,
-      providers: [
-        { ...base, id: 'zen', templateId: 'zen', name: 'OpenCode Zen' },
-        { ...base, id: 'opencode', templateId: 'opencode', name: 'OpenCode Zen' },
-        { ...base, id: 'go', templateId: 'go', name: 'OpenCode Go' },
-        { ...base, id: 'opencode-go', templateId: 'opencode-go', name: 'OpenCode Go' },
-      ],
-    }));
-
-    const loaded = loadRegistry(path);
-
-    expect(loaded.providers.map(provider => provider.id)).toEqual(['zen', 'go']);
-    expect(JSON.parse(readFileSync(path, 'utf8')).providers.map((provider: { id: string }) => provider.id))
-      .toEqual(['zen', 'go']);
-  });
-
-  it('renames a legacy OpenCode cloud provider when no canonical entry exists', () => {
-    const path = join(home, 'providers.json');
-    mkdirSync(home, { recursive: true });
-    writeFileSync(path, JSON.stringify({
-      schemaVersion: 1,
-      providers: [{
-        id: 'opencode',
-        templateId: 'opencode',
-        name: 'OpenCode',
-        enabled: true,
-        authRef: 'keyring:provider:opencode',
-        api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/v1' },
-        addedAt: '2026-06-18T00:00:00.000Z',
-      }],
-    }));
-
-    const loaded = loadRegistry(path);
-
-    expect(loaded.providers[0]).toMatchObject({
-      id: 'zen',
-      templateId: 'zen',
-      name: 'OpenCode Zen',
-      authRef: 'keyring:provider:opencode',
-      api: {},
-    });
-  });
 });
 
 describe('materializeRegistry', () => {
@@ -214,55 +162,6 @@ describe('materializeRegistry', () => {
       },
     });
     expect(materializeRegistry(registry, () => null)).toHaveLength(0);
-  });
-
-  it('allows anonymous Kilo but exposes only verified free models', () => {
-    const registry = emptyRegistry();
-    registry.providers.push({
-      id: 'kilo',
-      templateId: 'kilo',
-      name: 'Kilo Code',
-      enabled: true,
-      authRef: 'keyring:provider:kilo',
-      authType: 'api',
-      api: { npm: '@ai-sdk/openai-compatible', url: 'https://api.kilo.ai/api/gateway' },
-      addedAt: '2026-07-06T00:00:00.000Z',
-      modelsCache: {
-        fetchedAt: '2026-07-06T00:00:00.000Z',
-        models: [
-          {
-            id: 'tencent/hy3:free',
-            name: 'Tencent: Hy3 (free)',
-            upstreamModelId: 'tencent/hy3:free',
-            modelFormat: 'openai',
-            npm: '@ai-sdk/openai-compatible',
-            cost: { input: 0, output: 0 },
-            isFree: true,
-            freeStatus: 'verified_free',
-          },
-          {
-            id: 'anthropic/claude-sonnet-4.5',
-            name: 'Claude Sonnet 4.5',
-            upstreamModelId: 'anthropic/claude-sonnet-4.5',
-            modelFormat: 'openai',
-            npm: '@ai-sdk/openai-compatible',
-            cost: { input: 3, output: 15 },
-            isFree: false,
-            freeStatus: 'paid',
-          },
-        ],
-      },
-    });
-
-    const locals = materializeRegistry(registry, () => null);
-
-    expect(locals).toHaveLength(1);
-    expect(locals[0]?.apiKey).toBe('');
-    expect(locals[0]?.models.map(m => m.id)).toEqual(['tencent/hy3:free']);
-    expect(locals[0]?.models[0]).toMatchObject({
-      isFree: true,
-      freeStatus: 'verified_free',
-    });
   });
 
   it('marks NVIDIA imported models as free provider access', () => {
