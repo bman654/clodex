@@ -22,8 +22,6 @@ import {
   injectClaudeIdentity,
   selectBetaFlags,
 } from './oauth/claude-identity.js';
-import { anthropicToCloudCode } from './antigravity/anthropic-to-cloudcode.js';
-import { streamCloudCodeToAnthropic, collectCloudCodeToAnthropic } from './antigravity/cloudcode-to-anthropic.js';
 import { createLanguageModel, isSdkMigratedNpm, maxToolsForNpm } from './provider-factory.js';
 import { randomUUID } from 'node:crypto';
 import {
@@ -40,7 +38,7 @@ import {
   isContextLengthExceededError,
   sdkUpstreamErrorDetails,
   upstreamHttpStatus,
-} from './codex/upstream-error.js';
+} from './upstream-error.js';
 import {
   anthropicMessagesEndpoint,
   anthropicPromptTooLongMessage,
@@ -202,7 +200,7 @@ export interface ProxyRoute {
   displayName: string;
   upstreamUrl: string;
   apiKey: string;
-  modelFormat: 'anthropic' | 'openai' | 'cloud-code';
+  modelFormat: 'anthropic' | 'openai';
   contextWindow?: number;
   npm?: string;      // OpenCode api.npm — when SDK-migrated, routes via the adapter
   baseURL?: string;  // base URL for openai-compatible / openrouter SDK providers
@@ -617,65 +615,6 @@ export function startProxyCatalog(
         return;
       }
 
-      // ── Cloud Code Assist (Antigravity OAuth) ───────────────────────
-      if (route.modelFormat === 'cloud-code') {
-        const projectId = (route.providerData?.projectId as string | undefined) ?? '';
-        if (!projectId) {
-          anthropicError(res, 500, 'Antigravity provider missing projectId — re-authenticate with relay-ai providers auth antigravity');
-          return;
-        }
-        const envelope = anthropicToCloudCode(anthropicBody, route.realModelId, projectId);
-        const cloudContents = (envelope.request.contents as Array<{ role?: string; parts?: unknown[] }> | undefined) ?? [];
-        const cloudToolResults = cloudContents.reduce((count, msg) => (
-          count + ((msg.parts ?? []) as Array<Record<string, unknown>>).filter(p => p.functionResponse).length
-        ), 0);
-        const cloudToolCalls = cloudContents.reduce((count, msg) => (
-          count + ((msg.parts ?? []) as Array<Record<string, unknown>>).filter(p => p.functionCall).length
-        ), 0);
-        const cloudTools = (envelope.request.tools as unknown[] | undefined)?.length ?? 0;
-        const cloudMaxOutput = (envelope.request.generationConfig as Record<string, unknown> | undefined)?.maxOutputTokens;
-        const baseUrl = upstreamUrl.replace(/\/+$/, '');
-        const cloudCodeUrl = `${baseUrl}/v1internal:streamGenerateContent?alt=sse`;
-        plog(() => `cloud-code: model=${route.realModelId}, project=${projectId.slice(0, 8)}… msgs=${cloudContents.length} toolCalls=${cloudToolCalls} toolResults=${cloudToolResults} tools=${cloudTools} maxOutput=${cloudMaxOutput ?? 'unset'} stream=${clientWantsStream}`);
-        const fetchCloudCode = (token: string) =>
-          fetch(cloudCodeUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${token}`,
-              'User-Agent': 'vscode/1.X.X (Antigravity/4.2.0)',
-            },
-            body: JSON.stringify(envelope),
-            signal: clientAbort.signal,
-          });
-
-        try {
-          const retryResult = await fetchWithOAuthRetry(apiKey, fetchCloudCode, route.refreshToken);
-          const upstream = retryResult.response;
-          if (retryResult.refreshed) route.apiKey = retryResult.apiKey;
-
-          if (!upstream.ok) {
-            const errBody = await upstream.text();
-            plog(() => `cloud-code error ${upstream.status}: ${errBody}`);
-            anthropicError(res, upstream.status >= 500 ? 502 : upstream.status, errBody);
-            return;
-          }
-          if (clientWantsStream) {
-            await streamCloudCodeToAnthropic(res, upstream, route.realModelId, plog);
-          } else {
-            const response = await collectCloudCodeToAnthropic(upstream, route.realModelId, plog);
-            sendJson(res, 200, response);
-          }
-        } catch (err) {
-          if (clientAbort.signal.aborted) return;
-          const message = err instanceof Error ? err.message : String(err);
-          plog(() => `cloud-code fetch error: ${message}`);
-          if (!res.headersSent) anthropicError(res, 502, message);
-          else res.end();
-        }
-        return;
-      }
-
       // Non-anthropic route without a registered SDK npm — misconfigured route.
       anthropicError(res, 500, `No SDK provider configured for model ${originalModel} (npm=${route.npm ?? 'none'})`);
       return;
@@ -721,7 +660,7 @@ export function startProxy(
     authType?: 'api' | 'oauth' | 'none';
     oauthAccountId?: string;
     providerData?: Record<string, unknown>;
-    modelFormat?: 'anthropic' | 'openai' | 'cloud-code';
+    modelFormat?: 'anthropic' | 'openai';
     supportedParameters?: string[];
     reasoning?: boolean;
     interleavedReasoningField?: string;

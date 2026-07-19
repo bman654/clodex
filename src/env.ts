@@ -2,8 +2,8 @@
 import { CONFLICTING_ENV_VARS } from './constants.js';
 import { claudeCodeClientModelId, stripOneMContextSuffix } from './context-model-id.js';
 import { resolveContextWindow } from './context-window.js';
-import { oauthCredentialToKeychainJson } from './registry/opencode-auth.js';
 import {
+  oauthCredentialToKeychainJson,
   parseStoredOAuthCredential,
 } from './oauth/types.js';
 import { refreshStoredOAuthCredential, oauthCredentialShouldRefresh } from './oauth/refresh.js';

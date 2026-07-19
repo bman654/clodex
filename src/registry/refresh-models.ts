@@ -1,10 +1,7 @@
 // src/registry/refresh-models.ts — user-initiated model list refresh per modelSource
 
-import { BACKENDS } from '../constants.js';
-import { getModels } from '../models.js';
 import { fetchAnthropicModels } from './custom-endpoint.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
-import { fetchClaudeCodeModels } from '../oauth/claude-code.js';
 import { loadRegistry, saveRegistry } from './io.js';
 import { resolveModelSource } from './model-source.js';
 import { validateCustomEndpointUrl } from './url-security.js';
@@ -21,16 +18,12 @@ import {
   pricingPlatformForProvider,
 } from './pricing.js';
 import { cachedModelCount, isLikelyPlaceholderKey, resolveRefreshCredential, skipWithCachedModels } from './refresh-credentials.js';
-import { readGlobalOpencodeCredential } from '../env.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js';
 import { buildOpenAiOAuthModels, CHATGPT_CODEX_UNSUPPORTED_MODELS } from '../data/openai-oauth-models.js';
-import { buildXaiOAuthModels } from '../data/xai-oauth-models.js';
-import { ANTIGRAVITY_BASE_URLS } from '../oauth/antigravity-oauth.js';
 import { modelPrefersResponsesApi } from '../provider-factory.js';
 import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
 import { getInstalledClaudeVersion } from '../launch.js';
-import { shouldHideModel } from '../model-compatibility.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 
 export interface RefreshProviderResult {
@@ -47,141 +40,11 @@ export interface RefreshModelsResult {
   refreshed: RefreshProviderResult[];
 }
 
-function modelInfoToCached(
-  m: {
-    id: string;
-    name: string;
-    brand: string;
-    modelFormat: string;
-    isFree?: boolean;
-    contextWindow?: number;
-    cost?: CachedModel['cost'];
-    sourceBackend?: string;
-    freeStatus?: CachedModel['freeStatus'];
-  },
-  npm?: string,
-  apiUrl?: string,
-): CachedModel {
-  const freeStatus = classifyFreeStatus({ model: m });
-  return {
-    id: m.id,
-    name: m.name,
-    upstreamModelId: m.id,
-    family: m.brand,
-    brand: m.brand,
-    contextWindow: m.contextWindow,
-    cost: m.cost,
-    isFree: m.isFree,
-    freeStatus,
-    modelFormat: m.modelFormat === 'anthropic' ? 'anthropic' : 'openai',
-    sourceBackend: m.sourceBackend,
-    npm,
-    apiUrl,
-  };
-}
-
-async function refreshZenGoProvider(provider: RegistryProvider): Promise<CachedModel[]> {
-  const backendId = provider.id === 'go' || provider.templateId === 'go' ? 'go' : 'zen';
-  const result = await getModels(BACKENDS[backendId]);
-  return result.models
-    .filter(m => m.modelFormat !== 'unsupported')
-    .map(m => {
-      const isAnthropic = m.modelFormat === 'anthropic';
-      const npm = isAnthropic ? '@ai-sdk/anthropic' : '@ai-sdk/openai-compatible';
-      const apiUrl = isAnthropic ? BACKENDS[backendId].baseUrl : `${BACKENDS[backendId].baseUrl}/v1`;
-      return modelInfoToCached(m, npm, apiUrl);
-    });
-}
-
-async function refreshClaudeCodeOAuthModels(
-  accessToken: string,
-): Promise<{ models: CachedModel[]; source: 'live' }> {
-  const entries = await fetchClaudeCodeModels(accessToken);
-  const models: CachedModel[] = entries.map(entry => ({
-    id: entry.id,
-    name: entry.displayName,
-    upstreamModelId: entry.id,
-    family: 'claude',
-    brand: 'Anthropic',
-    contextWindow: entry.maxInputTokens ?? resolveContextWindow(entry.id),
-    modelFormat: 'anthropic' as const,
-    npm: '@ai-sdk/anthropic',
-    apiUrl: 'https://api.anthropic.com',
-  }));
-  return { models, source: 'live' };
-}
-
-async function refreshAntigravityOAuthModels(
-  accessToken: string,
-): Promise<{ models: CachedModel[]; source: 'live' }> {
-  // Try each base URL in order — first success wins.
-  for (const base of ANTIGRAVITY_BASE_URLS) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 10_000);
-      const res = await fetch(`${base}/v1internal:fetchAvailableModels`, {
-        method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          Authorization: `Bearer ${accessToken}`,
-          'User-Agent': 'vscode/1.X.X (Antigravity/4.2.0)',
-          'Content-Type': 'application/json',
-        },
-        signal: controller.signal,
-      }).finally(() => clearTimeout(timer));
-
-      if (!res.ok) continue;
-      const body = await res.json() as Record<string, unknown>;
-
-      // Response shape: { models: { [id]: { displayName, maxTokens, supportsThinking, ... } } }
-      const raw: Array<Record<string, unknown> & { id: string }> = body.models && typeof body.models === 'object' && !Array.isArray(body.models)
-        ? Object.entries(body.models as Record<string, Record<string, unknown>>).map(([id, model]) => ({ id, ...model }))
-        : Array.isArray(body.models)
-          ? (body.models as Array<Record<string, unknown>>).filter((m): m is Record<string, unknown> & { id: string } => typeof m.id === 'string' && m.id.length > 0)
-          : [];
-      if (raw.length === 0) continue;
-
-      const models: CachedModel[] = raw
-        .filter(m => typeof m.id === 'string' && m.id.length > 0)
-        .map(m => {
-          const id = m.id as string;
-          const name = (m.displayName ?? m.name ?? id) as string;
-          const isGemini = id.startsWith('gemini');
-          const isClaude = id.startsWith('claude');
-          const isOpenAi = id.startsWith('gpt') || id.startsWith('o');
-          const maxTokens = typeof m.maxTokens === 'number' ? m.maxTokens : undefined;
-          return {
-            id,
-            name,
-            upstreamModelId: id,
-            family: isGemini ? 'gemini' : id.split('-')[0] ?? id,
-            brand: isGemini ? 'Google' : isClaude ? 'Anthropic' : isOpenAi ? 'OpenAI' : 'Other',
-            contextWindow: maxTokens ?? resolveContextWindow(id),
-            modelFormat: 'cloud-code' as const,
-            reasoning: m.supportsThinking === true || id.includes('thinking') || id.includes('pro'),
-          };
-        });
-
-      if (models.length > 0) return { models, source: 'live' };
-    } catch {
-      // try next base URL
-    }
-  }
-
-  throw new Error('Antigravity live model refresh failed — Cloud Code returned no usable models');
-}
-
 /**
  * OAuth model refresh:
  * - OpenAI OAuth: Fetch from chatgpt.com/backend-api/models using the OAuth access token.
  *   Falls back to static seed on network failure or unexpected response format.
  *   Note: api.openai.com/v1/models rejects OAuth tokens — never call that endpoint here.
- * - xAI OAuth: SuperGrok JWT differs from xai-... API keys. Try the live api.x.ai/v1/models
- *   endpoint first; fall back to static seed on 401/403.
- * - claude-code OAuth: Live fetch from api.anthropic.com/v1/models using Bearer auth.
- *   No static fallback — throws on failure so the user sees a clear re-auth prompt.
- * - antigravity OAuth: Live fetch from Cloud Code fetchAvailableModels. No static fallback,
- *   because Antigravity slot IDs change and stale ids can 404 during inference.
  */
 async function refreshOAuthProvider(
   provider: RegistryProvider,
@@ -189,9 +52,6 @@ async function refreshOAuthProvider(
 ): Promise<{ models: CachedModel[]; baseUrl?: string; source: 'live' | 'seed'; failureReason?: string }> {
   const tpl = provider.templateId ?? provider.id;
   if (tpl === 'openai' || tpl === 'openai-oauth') return refreshOpenAiOAuthModels(accessToken);
-  if (tpl === 'xai' || tpl === 'xai-oauth') return refreshXaiOAuthModels(accessToken);
-  if (tpl === 'claude-code') return refreshClaudeCodeOAuthModels(accessToken);
-  if (tpl === 'antigravity') return refreshAntigravityOAuthModels(accessToken);
   throw new Error(`refreshOAuthProvider: unsupported template "${tpl}"`);
 }
 
@@ -356,34 +216,6 @@ async function refreshOpenAiOAuthModels(
   };
 }
 
-/**
- * Try fetching xAI models from api.x.ai/v1/models using the OAuth JWT.
- * Falls back to static seed if rejected (SuperGrok JWT ≠ xai-... API key format).
- */
-async function refreshXaiOAuthModels(
-  accessToken: string,
-): Promise<{ models: CachedModel[]; source: 'live' | 'seed'; failureReason?: string }> {
-  const seed = buildXaiOAuthModels();
-  const seedById = new Map(seed.map(m => [m.id, m]));
-
-  const result = await fetchJsonWithAuth('https://api.x.ai/v1/models', accessToken, 8_000);
-  if (result.body) {
-    const entries = ((result.body as { data?: Array<{ id?: string; context_length?: number }> }).data ?? [])
-      .filter((m): m is { id: string; context_length?: number } => !!m.id);
-    if (entries.length > 0) {
-      const live = entries.map(({ id, context_length }) => {
-        const cached = seedById.get(id);
-        if (cached) return cached;
-        const prefix = id.split('-')[0] ?? id;
-        return { id, name: id, upstreamModelId: id, family: prefix, brand: deriveBrand(prefix), contextWindow: resolveContextWindow(id, context_length), modelFormat: 'openai' as const, npm: '@ai-sdk/xai', reasoning: modelPrefersResponsesApi(id) } satisfies CachedModel;
-      });
-      return { models: live, source: 'live' };
-    }
-  }
-  return { models: seed, source: 'seed', failureReason: result.error };
-}
-
-
 async function refreshApiListProvider(
   provider: RegistryProvider,
   apiKey: string,
@@ -467,15 +299,6 @@ function updateProviderCache(
   };
 }
 
-function compatibleCachedModels(provider: RegistryProvider, models: CachedModel[]): CachedModel[] {
-  if (provider.id !== 'antigravity') return models;
-  return models.filter(model => !shouldHideModel({
-    providerId: provider.id,
-    modelId: model.id,
-    agent: 'claude',
-  }));
-}
-
 export async function refreshProviderModels(
   providerId: string,
   apiKey: string | null,
@@ -488,16 +311,12 @@ export async function refreshProviderModels(
 
   const source = resolveModelSource(provider);
   if (source === 'manual-only') {
-    const hint =
-      provider.templateId === 'google-vertex' || provider.id === 'google-vertex' || provider.api.npm === '@ai-sdk/google-vertex'
-        ? 'Vertex uses gcloud credentials — re-import from OpenCode or configure env auth.'
-        : 'Manual-only provider — model list is not refreshed automatically.';
     return {
       id: provider.id,
       name: provider.name,
       ok: true,
       skipped: true,
-      reason: hint,
+      reason: 'Manual-only provider — model list is not refreshed automatically.',
     };
   }
 
@@ -507,18 +326,15 @@ export async function refreshProviderModels(
     let baseUrl: string | undefined;
     let oauthFallbackReason: string | undefined;
 
-    if (source === 'zen-go-api') {
-      models = await refreshZenGoProvider(provider);
-    } else if (provider.authType === 'oauth' && (['openai', 'xai', 'xai-oauth', 'claude-code', 'antigravity'].includes(provider.templateId ?? provider.id) || provider.id === 'openai-oauth' || provider.id === 'xai-oauth')) {
+    if (provider.authType === 'oauth' && ((provider.templateId ?? provider.id) === 'openai' || provider.id === 'openai-oauth')) {
       // OAuth tokens are not valid API keys for the developer endpoints.
       // OpenAI: ChatGPT JWT rejected by api.openai.com; no /v1/models on ChatGPT backend.
-      // xAI: SuperGrok JWT rejected by api.x.ai; falls back to static seed.
       if (!apiKey) {
         return {
           id: provider.id,
           name: provider.name,
           ok: false,
-          reason: 'OAuth token not available — try signing in again with relay-ai providers auth.',
+          reason: 'OAuth token not available — try signing in again with clodex providers auth.',
         };
       }
       const oauthResult = await refreshOAuthProvider(provider, apiKey);
@@ -529,11 +345,11 @@ export async function refreshProviderModels(
         return skipWithCachedModels(
           provider,
           `Live model discovery failed${failureDetail} — kept your existing cached model list instead of `
-          + "overwriting it with relay-ai's built-in fallback list. Try refreshing again later.",
+          + "overwriting it with clodex's built-in fallback list. Try refreshing again later.",
         );
       }
       if (oauthResult.source === 'seed') {
-        oauthFallbackReason = `Live model discovery failed${failureDetail} — showing relay-ai's built-in fallback `
+        oauthFallbackReason = `Live model discovery failed${failureDetail} — showing clodex's built-in fallback `
           + 'model list, which may not include the newest models yet. Try refreshing again later.';
       }
       models = oauthResult.models;
@@ -553,15 +369,15 @@ export async function refreshProviderModels(
         if (cachedModelCount(provider) > 0) {
           return skipWithCachedModels(
             provider,
-            'OpenCode imported a placeholder API key — kept cached model list. '
-            + 'Add this provider again via relay-ai providers add with a real key to refresh live.',
+            'A placeholder API key is configured — kept cached model list. '
+            + 'Add this provider again via clodex providers add with a real key to refresh live.',
           );
         }
         return {
           id: provider.id,
           name: provider.name,
           ok: false,
-          reason: 'No usable API key — add the provider via relay-ai providers add with a real key.',
+          reason: 'No usable API key — add the provider via clodex providers add with a real key.',
         };
       }
       if (!keyOptional && !effectiveKey) {
@@ -581,7 +397,7 @@ export async function refreshProviderModels(
           return skipWithCachedModels(
             provider,
             `${fetched.error} Kept ${cachedModelCount(provider)} cached model${cachedModelCount(provider) === 1 ? '' : 's'} from import. `
-            + 'Update your API key via relay-ai providers add if you need a live refresh.',
+            + 'Update your API key via clodex providers add if you need a live refresh.',
           );
         }
         return { id: provider.id, name: provider.name, ok: false, reason: fetched.error };
@@ -592,18 +408,7 @@ export async function refreshProviderModels(
 
     const pricingCache = loadPricingCache();
     const platform = pricingPlatformForProvider(provider.templateId, provider.id);
-    const enriched = compatibleCachedModels(
-      provider,
-      enrichModelsWithPricing(models, buildPricingIndex(pricingCache), platform),
-    );
-    if (provider.id === 'antigravity' && enriched.length === 0) {
-      return {
-        id: provider.id,
-        name: provider.name,
-        ok: false,
-        reason: 'No validated Antigravity agent models were returned — kept the existing model cache.',
-      };
-    }
+    const enriched = enrichModelsWithPricing(models, buildPricingIndex(pricingCache), platform);
 
     updateProviderCache(registry, providerId, enriched, baseUrl);
     saveRegistry(registry);
@@ -632,43 +437,6 @@ export async function refreshAllProviderModels(
 ): Promise<RefreshModelsResult> {
   const refreshed: RefreshProviderResult[] = [];
   const registry = loadRegistry();
-
-  const opencodeKey = await readGlobalOpencodeCredential();
-
-  if (opencodeKey) {
-    let changed = false;
-    if (!registry.providers.some(p => p.id === 'zen')) {
-      registry.providers.push({
-        id: 'zen',
-        templateId: 'zen',
-        name: 'OpenCode Zen',
-        enabled: true,
-        authRef: 'keyring:global:opencode',
-        authType: 'none',
-        subscriptionFilter: 'free',
-        api: {},
-        addedAt: new Date().toISOString(),
-      });
-      changed = true;
-    }
-    if (!registry.providers.some(p => p.id === 'go')) {
-      registry.providers.push({
-        id: 'go',
-        templateId: 'go',
-        name: 'OpenCode Go',
-        enabled: true,
-        authRef: 'keyring:global:opencode',
-        authType: 'none',
-        subscriptionFilter: 'go',
-        api: {},
-        addedAt: new Date().toISOString(),
-      });
-      changed = true;
-    }
-    if (changed) {
-      saveRegistry(registry);
-    }
-  }
 
   const enabledProviders = registry.providers.filter(p => p.enabled);
 

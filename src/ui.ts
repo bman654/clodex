@@ -3,9 +3,29 @@
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import type { ConflictInfo, LocalProvider, LocalProviderModel } from './types.js';
-import { formatCodexModelLabel } from './codex/catalog.js';
 
-export { formatCodexModelLabel as formatModelLabel } from './codex/catalog.js';
+/** Human-readable label for a model (registry names are often raw ids). */
+export function formatModelLabel(model: LocalProviderModel): string {
+  const trimmed = model.name.trim();
+  if (trimmed && trimmed !== model.id) return trimmed;
+
+  const id = model.id;
+  const claude = id.match(/^claude-([\w-]+?)-(\d+)-(\d+)(?:-\d{8})?$/);
+  if (claude) {
+    const tier = claude[1]!.split('-').map(part =>
+      part.charAt(0).toUpperCase() + part.slice(1),
+    ).join(' ');
+    return `Claude ${tier} ${claude[2]}.${claude[3]}`;
+  }
+
+  const gpt = id.match(/^gpt-(\d+(?:\.\d+)?)(?:-([\w-]+))?$/i);
+  if (gpt) {
+    const suffix = gpt[2] ? ` ${gpt[2].split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}` : '';
+    return `GPT-${gpt[1]}${suffix}`;
+  }
+
+  return id;
+}
 
 const bar = pc.gray('│');
 const hline = pc.gray('─');
@@ -128,7 +148,7 @@ export function providerSelectOption(provider: Pick<LocalProvider, 'id' | 'name'
 }
 
 export function modelSelectOption(model: LocalProviderModel, hint?: string) {
-  const label = formatCodexModelLabel(model);
+  const label = formatModelLabel(model);
   const defaultHint = hint
     ?? (model.name !== model.id ? model.id : model.brand || model.family || '');
   return {

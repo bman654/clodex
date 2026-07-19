@@ -4,7 +4,7 @@ import type { FreeStatus } from './free-models.js';
 
 export type ModelFormat = 'anthropic' | 'openai' | 'unsupported';
 
-export type StarterCommand = 'root' | 'claude' | 'claude-app' | 'codex' | 'codex-app' | 'server' | 'models' | 'providers' | 'gemini' | 'agy' | 'antigravity' | 'antigravity-ide' | 'ui';
+export type StarterCommand = 'root' | 'claude' | 'server' | 'models' | 'providers' | 'patch';
 
 export interface BackendConfig {
   id: 'zen' | 'go';
@@ -40,7 +40,7 @@ export interface LocalProviderModel {
   name: string;
   family: string;
   brand: string;
-  modelFormat: 'anthropic' | 'openai' | 'cloud-code';
+  modelFormat: 'anthropic' | 'openai';
   /** Wire id sent to the upstream API (OpenCode api.id); may differ from catalog id, e.g. gpt-5.5-fast → gpt-5.5. */
   upstreamModelId: string;
   baseUrl?: string;        // set for anthropic-format models
@@ -87,34 +87,30 @@ export interface ModelAlias extends FavoriteModel {
   name: string;
 }
 
+export type BridgeMode = 'endpoint' | 'proxy';
+
 export interface UserPreferences {
-  lastBackend?: 'zen' | 'go';
   lastModel?: string;
   lastProvider?: string;
-  lastCodexProvider?: string;
-  lastCodexModel?: string;
-  lastGeminiProvider?: string;
-  lastGeminiModel?: string;
-  lastAntigravityProvider?: string;
-  lastAntigravityModel?: string;
   recentModelsByProvider?: Record<string, string[]>;
   favoriteModels?: FavoriteModel[];
   modelAliases?: ModelAlias[];
-  antigravityCliFavoriteModels?: FavoriteModel[];
-  antigravityCliFavoritesHintShown?: boolean;
+  /** Remembered bridge mode for `clodex claude` (set by --endpoint / --proxy). */
+  claudeBridgeMode?: BridgeMode;
+  /** Remembered bridge mode for `clodex server` (set by --endpoint / --proxy). */
+  serverBridgeMode?: BridgeMode;
+  /** Manual binary path overrides (e.g. the claude binary). */
   appPathOverrides?: Record<string, string>;
   recentLaunchFolders?: string[];
   server?: {
     savedPassword?: string;
-    /** Provider ids exposed by `relay-ai server` (zen, go, or local OpenCode provider ids). */
+    /** Provider ids exposed by `clodex server`. */
     exposedProviders?: string[];
-    /** Reverse gateway ids for Claude Desktop / Cowork model discovery. */
+    /** Reverse gateway ids for model discovery. */
     maskGatewayIds?: boolean;
-    /** Expose only models saved via `relay-ai models`. */
+    /** Expose only models saved via `clodex models`. */
     favoritesOnly?: boolean;
-    /** Expose only verified-free or free-provider-access models. */
-    freeModelsOnly?: boolean;
-    /** Saved listen mode for one-step `relay-ai server --quick` launches. */
+    /** Saved listen mode for one-step `clodex server --quick` launches. */
     listenMode?: 'local' | 'network';
   };
 }
@@ -124,48 +120,38 @@ export interface ParsedArgs {
   showHelp: boolean;
   showVersion: boolean;
   dryRun: boolean;
-  setup: boolean;
   trace: boolean;
-  vertex: boolean;
   claudeArgs: string[];
-  /** relay-ai boot provider (claude/codex); not passed to child CLI */
+  /** clodex boot provider (claude); not passed to child CLI */
   launchProvider?: string;
-  /** relay-ai boot model (claude/codex); not passed to child CLI */
+  /** clodex boot model (claude); not passed to child CLI */
   launchModel?: string;
-  /** Print comprehensive AI agent reference (relay-ai --ai) */
-  showAi?: boolean;
-  /** Install --ai SKILL.md to agent skill directories */
-  aiInstall?: boolean;
-  /** Reinstall skill even when version already matches */
-  aiInstallForce?: boolean;
-  /** Manage the AGY-specific favorites list instead of global favorites. */
-  favoritesAgy?: boolean;
-  /** Start `relay-ai server` from saved/default settings without prompts. */
+  /** Explicit bridge mode from --endpoint / --proxy (--http-proxy is an alias of --proxy). */
+  bridgeMode?: BridgeMode;
+  /** Start `clodex server` from saved/default settings without prompts. */
   serverQuick?: boolean;
-  /** One-run listen override for `relay-ai server`. */
+  /** One-run listen override for `clodex server`. */
   serverListenMode?: 'local' | 'network';
-  /** One-run provider exposure mode for `relay-ai server`. */
+  /** One-run provider exposure mode for `clodex server`. */
   serverProvidersMode?: 'all' | 'favorites' | 'specific';
   /** One-run provider ids when serverProvidersMode is `specific`. */
   serverProviderIds?: string[];
-  /** One-run free/free-access model filter override. */
-  serverFreeOnly?: boolean;
   /** One-run discovery id masking override. */
   serverMaskGatewayIds?: boolean;
-  /** One-run network password for `relay-ai server`. */
+  /** One-run network password for `clodex server`. */
   serverPassword?: string;
-  /** One-run TCP port override for `relay-ai server` (gateway and --http-proxy modes). */
+  /** One-run TCP port override for `clodex server` (endpoint and proxy modes). */
   serverPort?: number;
-  /** Run Claude/server through the selective api.anthropic.com HTTP proxy. */
-  httpProxy?: boolean;
   /** Opt-in server request-envelope and WebSocket head diagnostics. */
   serverWsDiagnostics?: boolean;
-  /** Print saved HTTP-proxy model names without opening the favorites manager. */
+  /** Print saved proxy-mode model names without opening the favorites manager. */
   favoritesList?: boolean;
-  /** Save a short HTTP-proxy model alias (`name=relay:provider:model`). */
+  /** Save a short proxy-mode model alias (`name=clodex:provider:model`). */
   favoritesAlias?: string;
-  /** Remove a saved short HTTP-proxy model alias. */
+  /** Remove a saved short proxy-mode model alias. */
   favoritesUnalias?: string;
+  /** clodex patch: restore the pristine Claude Code binary. */
+  patchRestore?: boolean;
   error?: string;
 }
 

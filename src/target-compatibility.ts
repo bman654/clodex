@@ -3,12 +3,7 @@ import type { LocalProvider, LocalProviderModel } from './types.js';
 
 export type RelayLaunchTarget =
   | 'claude'
-  | 'claude-app'
-  | 'codex'
-  | 'codex-app'
-  | 'gemini'
-  | 'server'
-  | 'antigravity';
+  | 'server';
 
 export interface TargetCompatibilityContext {
   target: RelayLaunchTarget;
@@ -23,7 +18,6 @@ export interface TargetCompatibilityResult {
 }
 
 function blacklistAgentForTarget(target: RelayLaunchTarget): CompatibilityAgent {
-  if (target === 'claude-app') return 'codex-app';
   return target;
 }
 
@@ -31,13 +25,6 @@ export function isTargetCompatibleModel(ctx: TargetCompatibilityContext): Target
   const blacklistAgent = blacklistAgentForTarget(ctx.target);
   if (shouldHideModel({ providerId: ctx.providerId, modelId: ctx.model.id, agent: blacklistAgent })) {
     return { compatible: false, reason: 'model is hidden by compatibility filters' };
-  }
-
-  if (ctx.model.modelFormat === 'cloud-code') {
-    if (ctx.target === 'server') {
-      return { compatible: false, reason: 'Cloud Code models are not supported for the server target yet' };
-    }
-    return { compatible: true };
   }
 
   if (ctx.model.modelFormat === 'anthropic') {

@@ -1,8 +1,19 @@
-// oauth/types.ts — stored OAuth credential shape (matches OpenCode auth.json)
+// oauth/types.ts — stored OAuth credential shape (keychain JSON)
 
-import type { OpencodeOAuthCredential } from '../registry/opencode-auth.js';
+export interface StoredOAuthCredential {
+  type: 'oauth';
+  access: string;
+  refresh: string;
+  /** Epoch millis when the access token expires. */
+  expires: number;
+  accountId?: string;
+  providerData?: Record<string, unknown>;
+}
 
-export type StoredOAuthCredential = OpencodeOAuthCredential;
+/** Serialize a stored OAuth credential for the keychain. */
+export function oauthCredentialToKeychainJson(cred: StoredOAuthCredential): string {
+  return JSON.stringify(cred);
+}
 
 export interface OAuthTokenResponse {
   access_token: string;
@@ -65,17 +76,9 @@ export function accessTokenIsExpiring(token: string | undefined, skewMs = OAUTH_
   }
 }
 
-export const NATIVE_OAUTH_PROVIDER_IDS = ['xai', 'xai-oauth', 'openai', 'openai-oauth', 'github-copilot', 'claude-code', 'antigravity'] as const;
+export const NATIVE_OAUTH_PROVIDER_IDS = ['openai', 'openai-oauth'] as const;
 export type NativeOAuthProviderId = typeof NATIVE_OAUTH_PROVIDER_IDS[number];
 
 export function supportsNativeOAuth(providerId: string): providerId is NativeOAuthProviderId {
   return (NATIVE_OAUTH_PROVIDER_IDS as readonly string[]).includes(providerId);
-}
-
-/** Providers that use Authorization Code + PKCE (browser redirect), not device code polling. */
-export const BROWSER_REDIRECT_OAUTH_IDS = ['claude-code', 'antigravity'] as const;
-export type BrowserRedirectOAuthId = typeof BROWSER_REDIRECT_OAUTH_IDS[number];
-
-export function isBrowserRedirectOAuth(id: string): id is BrowserRedirectOAuthId {
-  return (BROWSER_REDIRECT_OAUTH_IDS as readonly string[]).includes(id);
 }

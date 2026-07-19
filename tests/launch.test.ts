@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findBinaryOnPath } from '../src/binary-lookup.js';
 import { buildClaudeArgs, findClaudeBinary } from '../src/launch.js';
-import { buildGeminiChildEnv, prepareGeminiChildEnv } from '../src/gemini/launch.js';
 import { setAppPathOverride } from '../src/config.js';
 
 describe('buildClaudeArgs', () => {
@@ -134,69 +133,5 @@ describe('findClaudeBinary app path override', () => {
     setAppPathOverride('claude', customClaude);
 
     expect(findClaudeBinary()).toBe(customClaude);
-  });
-});
-
-describe('Gemini launch auth isolation', () => {
-  let previousGeminiCliHome: string | undefined;
-  let previousDefaultAuth: string | undefined;
-  let previousGeminiKey: string | undefined;
-  let previousGoogleKey: string | undefined;
-  let previousGoogleGenAiKey: string | undefined;
-  let previousGoogleGeminiBaseUrl: string | undefined;
-
-  beforeEach(() => {
-    previousGeminiCliHome = process.env['GEMINI_CLI_HOME'];
-    previousDefaultAuth = process.env['GEMINI_DEFAULT_AUTH_TYPE'];
-    previousGeminiKey = process.env['GEMINI_API_KEY'];
-    previousGoogleKey = process.env['GOOGLE_API_KEY'];
-    previousGoogleGenAiKey = process.env['GOOGLE_GENAI_API_KEY'];
-    previousGoogleGeminiBaseUrl = process.env['GOOGLE_GEMINI_BASE_URL'];
-  });
-
-  afterEach(() => {
-    if (previousGeminiCliHome === undefined) delete process.env['GEMINI_CLI_HOME'];
-    else process.env['GEMINI_CLI_HOME'] = previousGeminiCliHome;
-    if (previousDefaultAuth === undefined) delete process.env['GEMINI_DEFAULT_AUTH_TYPE'];
-    else process.env['GEMINI_DEFAULT_AUTH_TYPE'] = previousDefaultAuth;
-    if (previousGeminiKey === undefined) delete process.env['GEMINI_API_KEY'];
-    else process.env['GEMINI_API_KEY'] = previousGeminiKey;
-    if (previousGoogleKey === undefined) delete process.env['GOOGLE_API_KEY'];
-    else process.env['GOOGLE_API_KEY'] = previousGoogleKey;
-    if (previousGoogleGenAiKey === undefined) delete process.env['GOOGLE_GENAI_API_KEY'];
-    else process.env['GOOGLE_GENAI_API_KEY'] = previousGoogleGenAiKey;
-    if (previousGoogleGeminiBaseUrl === undefined) delete process.env['GOOGLE_GEMINI_BASE_URL'];
-    else process.env['GOOGLE_GEMINI_BASE_URL'] = previousGoogleGeminiBaseUrl;
-  });
-
-  it('forces Gemini CLI API-key auth in the child environment', () => {
-    process.env['GEMINI_DEFAULT_AUTH_TYPE'] = 'oauth-personal';
-    process.env['GEMINI_API_KEY'] = 'real-user-key';
-    process.env['GOOGLE_API_KEY'] = 'real-google-key';
-    process.env['GOOGLE_GENAI_API_KEY'] = 'real-genai-key';
-    process.env['GOOGLE_GEMINI_BASE_URL'] = 'https://example.invalid';
-
-    const env = buildGeminiChildEnv(4567, 'proxy-token');
-
-    expect(env['GOOGLE_GEMINI_BASE_URL']).toBe('http://127.0.0.1:4567');
-    expect(env['GEMINI_API_KEY']).toBe('proxy-token');
-    expect(env['GEMINI_DEFAULT_AUTH_TYPE']).toBe('gemini-api-key');
-    expect(env['GOOGLE_API_KEY']).toBeUndefined();
-    expect(env['GOOGLE_GENAI_API_KEY']).toBeUndefined();
-  });
-
-  it('uses a temporary Gemini CLI home with API-key auth selected', () => {
-    const prepared = prepareGeminiChildEnv(4567, 'proxy-token');
-    const cliHome = prepared.env['GEMINI_CLI_HOME'];
-
-    expect(cliHome).toBeTruthy();
-    expect(cliHome).toContain('relay-ai-gemini-');
-    // Gemini CLI treats GEMINI_CLI_HOME as its home directory, so the
-    // overlay settings must live at $GEMINI_CLI_HOME/.gemini/settings.json.
-    const settings = JSON.parse(readFileSync(join(cliHome!, '.gemini', 'settings.json'), 'utf8'));
-    expect(settings.security.auth.selectedType).toBe('gemini-api-key');
-
-    prepared.cleanup();
-    expect(existsSync(cliHome!)).toBe(false);
   });
 });

@@ -49,7 +49,7 @@ import {
   isContextLengthExceededError,
   sdkUpstreamErrorDetails,
   upstreamHttpStatus,
-} from '../codex/upstream-error.js';
+} from '../upstream-error.js';
 import { resolveContextWindow } from '../context-window.js';
 import {
   translateRequest as sdkTranslateRequest,

@@ -46,18 +46,6 @@ export async function askFavoritesOnly(initialValue: boolean): Promise<boolean |
   return Boolean(favoritesOnly);
 }
 
-export async function askFreeModelsOnly(initialValue: boolean): Promise<boolean | null> {
-  const freeOnly = await p.confirm({
-    message: 'Limit exposed models to free/free-access models?',
-    initialValue,
-  });
-  if (p.isCancel(freeOnly)) {
-    p.cancel('Cancelled.');
-    return null;
-  }
-  return Boolean(freeOnly);
-}
-
 export async function askListenMode(): Promise<ListenMode | null> {
   const mode = await p.select<ListenMode>({
     message: 'Where should the server listen?',

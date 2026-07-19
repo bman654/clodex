@@ -2,7 +2,6 @@
 
 import { shouldHideModel, type CompatibilityAgent } from '../model-compatibility.js';
 import { deriveBrand } from '../models.js';
-import { resolveEndpoint } from '../providers.js';
 import { resolveContextWindow } from '../context-window.js';
 import type { LocalProvider, LocalProviderModel } from '../types.js';
 import { normalizeGoogleDisplayName, normalizeGoogleModelId } from './google-model-id.js';
@@ -13,6 +12,29 @@ import { getTemplateById } from '../provider-templates.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 
 export type CredentialResolver = (provider: RegistryProvider) => string | null;
+
+/** Map an AI SDK npm package + API URL to the endpoint shape clodex should use. */
+export function resolveEndpoint(
+  npm: string,
+  apiUrl: string,
+): { format: 'anthropic' | 'openai'; baseUrl?: string; completionsUrl?: string } | null {
+  if (!npm) return null;
+  if (npm === '@ai-sdk/anthropic') {
+    return {
+      format: 'anthropic',
+      baseUrl: (apiUrl || 'https://api.anthropic.com').replace(/\/v1\/?$/, ''),
+    };
+  }
+  if (npm === '@ai-sdk/openai-compatible') {
+    if (!apiUrl) return null;
+    return {
+      format: 'openai',
+      completionsUrl: apiUrl.replace(/\/$/, '') + '/chat/completions',
+    };
+  }
+  // Any other npm — SDK adapter owns endpoints.
+  return { format: 'openai' };
+}
 
 export interface MaterializeOptions {
   agent?: CompatibilityAgent;
@@ -27,24 +49,6 @@ export function cachedModelToLocal(
     providerId: provider.id,
     templateId: provider.templateId,
   });
-
-  // Cloud Code models route through the cloud-code proxy — no SDK endpoint needed.
-  if (cached.modelFormat === 'cloud-code') {
-    const { id } = normalizeGoogleModelId(cached.id, '');
-    return {
-      id,
-      name: cached.name,
-      family: cached.family ?? '',
-      brand: cached.brand ?? deriveBrand(cached.family ?? ''),
-      modelFormat: 'cloud-code',
-      upstreamModelId: cached.upstreamModelId ?? cached.id,
-      contextWindow: cached.contextWindow ?? resolveContextWindow(id),
-      isFree: isFreeStatus(freeStatus),
-      freeStatus,
-      reasoning: cached.reasoning,
-      interleavedReasoningField: cached.interleavedReasoningField,
-    };
-  }
 
   const npm = cached.npm ?? provider.api.npm ?? '';
   const apiUrl = cached.apiUrl ?? provider.api.url ?? '';
@@ -61,7 +65,7 @@ export function cachedModelToLocal(
     name: npm === '@ai-sdk/google' ? normalizeGoogleDisplayName(cached.name, id) : cached.name,
     family,
     brand: npm === '@ai-sdk/google' ? deriveBrand(family) : (cached.brand ?? deriveBrand(cached.family ?? '')),
-    modelFormat: cached.modelFormat ?? endpoint.format,
+    modelFormat: (cached.modelFormat === 'anthropic' || cached.modelFormat === 'openai' ? cached.modelFormat : undefined) ?? endpoint.format,
     upstreamModelId: normalizedUpstream,
     baseUrl: endpoint.baseUrl,
     completionsUrl: endpoint.completionsUrl,

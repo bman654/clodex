@@ -3,12 +3,10 @@ import pc from 'picocolors';
 import { relayIntro, relayOutro, providerSelectOption, fmtModel, fmtEnabledStar, formatModelLabel } from './ui.js';
 import * as p from '@clack/prompts';
 import { realpathSync } from 'node:fs';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findClaudeBinary, launchClaude } from './launch.js';
-import { resolveApiKey, detectConflicts, buildChildEnv, buildHttpProxyChildEnv, readGlobalOpencodeCredential } from './env.js';
+import { detectConflicts, buildChildEnv, buildHttpProxyChildEnv } from './env.js';
 import { claudeCodeClientModelId } from './context-model-id.js';
-import { resolveOrCollectApiKey } from './key-setup.js';
 import { needsFirstRunSetup, runFirstRunWizard } from './first-run.js';
 import { MAX_MODEL_CATALOG } from './constants.js';
 import { startProxy, startProxyCatalog } from './proxy.js';
@@ -18,12 +16,11 @@ import {
   makeRouteResolver,
 } from './catalog.js';
 import { runServerCommand } from './server/index.js';
-import type { ModelFormat } from './types.js';
-import { loadPreferences, savePreferences, recordLaunchSelection } from './config.js';
-import { pickLocalModel, browseAllModels } from './prompts.js';
+import { loadPreferences, savePreferences, recordLaunchSelection, resolveBridgeMode } from './config.js';
+import { pickLocalModel } from './prompts.js';
 import { fetchProviderCatalog, providersForPicker, resolveLocalProviderApiKey } from './provider-catalog.js';
-import { BACKENDS, VERSION } from './constants.js';
-import type { ParsedArgs, ModelInfo, FavoriteModel, LocalProvider, LocalProviderModel } from './types.js';
+import { VERSION } from './constants.js';
+import type { ParsedArgs, FavoriteModel, LocalProvider, LocalProviderModel } from './types.js';
 import { addFavorite, removeFavorite, isFavorite } from './favorites.js';
 import { isValidModelAlias, modelAliasTarget, parseModelAliasAssignment } from './model-aliases.js';
 import {
@@ -32,13 +29,7 @@ import {
   pickGlobalFavoriteModel,
 } from './favorites-picker.js';
 import { favoriteProviderDisplayName } from './favorite-provider-display.js';
-import { resolveFirstAvailableFavorite } from './favorites-resolver.js';
 import { runProvidersCommand, providersHelpText } from './providers-command.js';
-import { runCodexCommand, codexHelpText } from './codex.js';
-import { runGeminiCommand, geminiHelpText } from './gemini.js';
-import { runAgyCommand, runAntigravityAppCommand, runAntigravityIdeCommand } from './antigravity.js';
-import { runCodexAppCommand } from './codex-app.js';
-import { runClaudeAppCommand } from './claude-app.js';
 import {
   getInferenceSessionLogPath,
   getSessionLogPath,
@@ -46,7 +37,6 @@ import {
   printTraceLog,
   writeProxyLifecycleLog,
 } from './trace-log.js';
-import { ANTIGRAVITY_BASE_URLS } from './oauth/antigravity-oauth.js';
 import { providersForTarget } from './target-compatibility.js';
 import { refreshModelsDevCacheAsync } from './registry/models-dev.js';
 import { setAgentStdoutMode, isAgentStdoutMode } from './agent-io.js';
@@ -56,17 +46,17 @@ import {
   planLaunchWizard,
   wantsCleanAgentStdout,
 } from './launch-target.js';
-import { generateAiDoc, installAiDoc, printAiInstallResult } from './ai-doc.js';
 import {
   loadHttpProxyRoutes,
   printHttpProxyModels,
   reportSkippedHttpProxyFavorites,
   startConfiguredHttpProxy,
 } from './http-proxy/index.js';
-const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--setup', '--trace', '--http-proxy', '--help', '-h', '--version', '-v']);
-const RELAY_LAUNCH_FLAGS = new Set(['--provider', '--model']);
+import { runPatchCommand, runLaunchPatchCheck } from './patcher.js';
+const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--trace', '--endpoint', '--proxy', '--http-proxy', '--help', '-h', '--version', '-v']);
+const CLODEX_LAUNCH_FLAGS = new Set(['--provider', '--model']);
 
-function parseRelayLaunchFlag(
+function parseClodexLaunchFlag(
   arg: string,
   rest: string[],
   index: number,
@@ -93,16 +83,16 @@ function parseRelayLaunchFlag(
   return index;
 }
 
-function tryConsumeRelayLaunchFlag(
+function tryConsumeClodexLaunchFlag(
   arg: string,
   rest: string[],
   index: number,
   parsed: ParsedArgs,
 ): { next: number } | { error: true } | null {
-  if (!RELAY_LAUNCH_FLAGS.has(arg) && !arg.startsWith('--provider=') && !arg.startsWith('--model=')) {
+  if (!CLODEX_LAUNCH_FLAGS.has(arg) && !arg.startsWith('--provider=') && !arg.startsWith('--model=')) {
     return null;
   }
-  const next = parseRelayLaunchFlag(arg, rest, index, parsed);
+  const next = parseClodexLaunchFlag(arg, rest, index, parsed);
   if (next === 'error') return { error: true };
   return { next };
 }
@@ -154,23 +144,24 @@ function emptyParsed(command: ParsedArgs['command']): ParsedArgs {
     showHelp: false,
     showVersion: false,
     dryRun: false,
-    setup: false,
     trace: false,
-    vertex: false,
     claudeArgs: [],
   };
 }
 
-export function parseArgs(args: string[]): ParsedArgs {
-  if (args.includes('--ai')) {
-    return {
-      ...emptyParsed('root'),
-      showAi: true,
-      aiInstall: args.includes('--install'),
-      aiInstallForce: args.includes('--force'),
-    };
+function consumeBridgeModeFlag(arg: string, parsed: ParsedArgs): boolean {
+  if (arg === '--endpoint') {
+    parsed.bridgeMode = 'endpoint';
+    return true;
   }
+  if (arg === '--proxy' || arg === '--http-proxy') {
+    parsed.bridgeMode = 'proxy';
+    return true;
+  }
+  return false;
+}
 
+export function parseArgs(args: string[]): ParsedArgs {
   if (args.length === 0) return { ...emptyParsed('root'), showHelp: true };
 
   const [first, ...rest] = args;
@@ -188,12 +179,9 @@ export function parseArgs(args: string[]): ParsedArgs {
       const arg = rest[i]!;
       if (arg === '--help' || arg === '-h') parsed.showHelp = true;
       else if (arg === '--version' || arg === '-v') parsed.showVersion = true;
-      else if (arg === '--vertex') parsed.vertex = true;
-      else if (arg === '--http-proxy') parsed.httpProxy = true;
+      else if (consumeBridgeModeFlag(arg, parsed)) continue;
       else if (arg === '--ws-diagnostics') parsed.serverWsDiagnostics = true;
       else if (arg === '--quick' || arg === '--saved') parsed.serverQuick = true;
-      else if (arg === '--free-only') parsed.serverFreeOnly = true;
-      else if (arg === '--no-free-only') parsed.serverFreeOnly = false;
       else if (arg === '--mask-gateway-ids') parsed.serverMaskGatewayIds = true;
       else if (arg === '--no-mask-gateway-ids') parsed.serverMaskGatewayIds = false;
       else if (arg === '--listen' || arg.startsWith('--listen=')) {
@@ -241,7 +229,6 @@ export function parseArgs(args: string[]): ParsedArgs {
       const arg = rest[i]!;
       if (arg === '--help' || arg === '-h') parsed.showHelp = true;
       else if (arg === '--version' || arg === '-v') parsed.showVersion = true;
-      else if (arg === '--agy') parsed.favoritesAgy = true;
       else if (arg === '--list') parsed.favoritesList = true;
       else if (arg === '--alias' || arg.startsWith('--alias=')) {
         const consumed = consumeServerOptionValue(arg, rest, i, '--alias', parsed);
@@ -272,168 +259,14 @@ export function parseArgs(args: string[]): ParsedArgs {
     return parsed;
   }
 
-  if (first === 'ui') {
-    const parsed = emptyParsed('ui');
+  if (first === 'patch') {
+    const parsed = emptyParsed('patch');
     for (const arg of rest) {
-      if (arg === '--trace') parsed.trace = true;
-      else if (arg === '--help' || arg === '-h') parsed.showHelp = true;
+      if (arg === '--help' || arg === '-h') parsed.showHelp = true;
       else if (arg === '--version' || arg === '-v') parsed.showVersion = true;
-      else if (!parsed.error) parsed.error = `Unknown ui option: ${arg}`;
-    }
-    return parsed;
-  }
-
-  if (first === 'codex-app' || first === 'chatgpt') {
-    const parsed = emptyParsed('codex-app');
-    for (let i = 0; i < rest.length; i += 1) {
-      const arg = rest[i]!;
-      if (arg === '--help' || arg === '-h') { parsed.showHelp = true; continue; }
-      if (arg === '--version' || arg === '-v') { parsed.showVersion = true; continue; }
-      if (arg === '--vertex') { parsed.vertex = true; continue; }
-      const consumed = tryConsumeRelayLaunchFlag(arg, rest, i, parsed);
-      if (consumed !== null) {
-        if ('error' in consumed) return parsed;
-        i = consumed.next;
-        continue;
-      }
-      parsed.claudeArgs.push(arg);
-    }
-    return parsed;
-  }
-
-  if (first === 'claude-app') {
-    const parsed = emptyParsed('claude-app');
-    for (let i = 0; i < rest.length; i += 1) {
-      const arg = rest[i]!;
-      if (arg === '--help' || arg === '-h') { parsed.showHelp = true; continue; }
-      if (arg === '--version' || arg === '-v') { parsed.showVersion = true; continue; }
-      const consumed = tryConsumeRelayLaunchFlag(arg, rest, i, parsed);
-      if (consumed !== null) {
-        if ('error' in consumed) return parsed;
-        i = consumed.next;
-        continue;
-      }
-      parsed.claudeArgs.push(arg);
-    }
-    return parsed;
-  }
-
-  if (first === 'codex') {
-    const parsed = emptyParsed('codex');
-    for (let i = 0; i < rest.length; i += 1) {
-      const arg = rest[i]!;
-      if (arg === '--trace') {
-        parsed.trace = true;
-        continue;
-      }
-      if (arg === '--vertex') {
-        parsed.vertex = true;
-        continue;
-      }
-      if (arg === '--help' || arg === '-h') {
-        parsed.showHelp = true;
-        continue;
-      }
-      if (arg === '--version' || arg === '-v') {
-        parsed.showVersion = true;
-        continue;
-      }
-      const consumed = tryConsumeRelayLaunchFlag(arg, rest, i, parsed);
-      if (consumed !== null) {
-        if ('error' in consumed) return parsed;
-        i = consumed.next;
-        continue;
-      }
-      parsed.claudeArgs.push(arg);
-    }
-    return parsed;
-  }
-
-  if (first === 'gemini') {
-    const parsed = emptyParsed('gemini');
-    for (let i = 0; i < rest.length; i += 1) {
-      const arg = rest[i]!;
-      if (arg === '--trace') {
-        parsed.trace = true;
-        continue;
-      }
-      if (arg === '--help' || arg === '-h') {
-        parsed.showHelp = true;
-        continue;
-      }
-      if (arg === '--version' || arg === '-v') {
-        parsed.showVersion = true;
-        continue;
-      }
-      const consumed = tryConsumeRelayLaunchFlag(arg, rest, i, parsed);
-      if (consumed !== null) {
-        if ('error' in consumed) return parsed;
-        i = consumed.next;
-        continue;
-      }
-      parsed.claudeArgs.push(arg);
-    }
-    return parsed;
-  }
-
-  if (first === 'agy') {
-    const parsed = emptyParsed('agy');
-    for (let i = 0; i < rest.length; i += 1) {
-      const arg = rest[i]!;
-      if (arg === '--') {
-        parsed.claudeArgs.push(...rest.slice(i + 1));
-        break;
-      }
-      if (arg === '--trace') {
-        parsed.trace = true;
-        continue;
-      }
-      if (arg === '--help' || arg === '-h') {
-        parsed.showHelp = true;
-        continue;
-      }
-      if (arg === '--version' || arg === '-v') {
-        parsed.showVersion = true;
-        continue;
-      }
-      const consumed = tryConsumeRelayLaunchFlag(arg, rest, i, parsed);
-      if (consumed !== null) {
-        if ('error' in consumed) return parsed;
-        i = consumed.next;
-        continue;
-      }
-      parsed.claudeArgs.push(arg);
-    }
-    return parsed;
-  }
-
-  if (first === 'antigravity' || first === 'antigravity-ide') {
-    const parsed = emptyParsed(first);
-    for (let i = 0; i < rest.length; i += 1) {
-      const arg = rest[i]!;
-      if (arg === '--') {
-        parsed.claudeArgs.push(...rest.slice(i + 1));
-        break;
-      }
-      if (arg === '--trace') {
-        parsed.trace = true;
-        continue;
-      }
-      if (arg === '--help' || arg === '-h') {
-        parsed.showHelp = true;
-        continue;
-      }
-      if (arg === '--version' || arg === '-v') {
-        parsed.showVersion = true;
-        continue;
-      }
-      const consumed = tryConsumeRelayLaunchFlag(arg, rest, i, parsed);
-      if (consumed !== null) {
-        if ('error' in consumed) return parsed;
-        i = consumed.next;
-        continue;
-      }
-      parsed.claudeArgs.push(arg);
+      else if (arg === '--restore') parsed.patchRestore = true;
+      else if (arg === '--trace') parsed.trace = true;
+      else if (!parsed.error) parsed.error = `Unknown patch option: ${arg}`;
     }
     return parsed;
   }
@@ -453,7 +286,7 @@ export function parseArgs(args: string[]): ParsedArgs {
       break;
     }
 
-    const consumed = tryConsumeRelayLaunchFlag(arg, rest, i, parsed);
+    const consumed = tryConsumeClodexLaunchFlag(arg, rest, i, parsed);
     if (consumed !== null) {
       if ('error' in consumed) return parsed;
       i = consumed.next;
@@ -466,9 +299,8 @@ export function parseArgs(args: string[]): ParsedArgs {
     }
 
     if (arg === '--dry-run') parsed.dryRun = true;
-    if (arg === '--setup') parsed.setup = true;
     if (arg === '--trace') parsed.trace = true;
-    if (arg === '--http-proxy') parsed.httpProxy = true;
+    consumeBridgeModeFlag(arg, parsed);
     if (arg === '--help' || arg === '-h') parsed.showHelp = true;
     if (arg === '--version' || arg === '-v') parsed.showVersion = true;
   }
@@ -477,313 +309,203 @@ export function parseArgs(args: string[]): ParsedArgs {
 }
 
 export function rootHelpText(): string {
-  return `${pc.bold('relay-ai')} v${VERSION}
-Launch AI coding tools with OpenCode Zen / Go or local providers (Groq, Mistral,
-OpenAI, Gemini, Ollama, and more).
+  return `${pc.bold('clodex')} v${VERSION}
+Bridge Claude Code to OpenAI models — OpenAI API key or ChatGPT/Codex-plan OAuth.
 
 ${pc.bold('Usage:')}
-  relay-ai claude [options] [claude-flags]
-  relay-ai claude-app [options]
-  relay-ai codex [options] [codex-flags]
-  relay-ai codex-app [options]
-  relay-ai chatgpt [options]
-  relay-ai gemini [options] [gemini-flags]
-  relay-ai agy [options] [agy-flags]
-  relay-ai antigravity [options]
-  relay-ai antigravity-ide [options]
-  relay-ai server [options]
-  relay-ai ui
-  relay-ai models
-  relay-ai favorites
-  relay-ai providers
-  relay-ai --help
-  relay-ai --version
-  relay-ai --ai              Full reference for AI agents (run this when unsure)
-  relay-ai --ai --install    Install or upgrade agent skill when version changed
-  relay-ai --ai --install --force  Reinstall skill even if already current
+  clodex claude [options] [claude-flags]
+  clodex server [options]
+  clodex patch [--restore]
+  clodex models
+  clodex favorites
+  clodex providers
+  clodex --help
+  clodex --version
 
 ${pc.bold('Root options:')}
   -h, --help       Show this help
   -v, --version    Show version
-  --ai             Print the full reference for AI agents
-  --ai --install   Install or upgrade the relay-ai agent skill
-  --force          Reinstall the agent skill when used with --ai --install
 
 ${pc.bold('Commands:')}
-  claude      Launch Claude Code — pick a provider from your registry
-  models      Manage favorite models for mid-session /model switching (max ${MAX_MODEL_CATALOG})
+  claude      Launch Claude Code bridged to OpenAI models
+  server      Run a foreground gateway (endpoint or proxy mode)
+  patch       Patch the Claude Code binary so clodex models are first-class
+  models      Manage favorite models and aliases (max ${MAX_MODEL_CATALOG})
   favorites   Alias for models
-  providers   Add, import, and manage your AI providers
-  server      Run a foreground API gateway (OpenCode Zen / Go and local providers)
-  codex       Launch OpenAI Codex CLI with registry providers
-  gemini      Launch Google Gemini CLI with registry providers
-  agy         Launch Antigravity CLI with registry providers
-  antigravity Launch Antigravity app with registry providers (macOS)
-  antigravity-ide  Launch Antigravity IDE with registry providers (macOS)
-  codex-app   Launch ChatGPT desktop app (Codex mode) with registry providers (macOS + Windows)
-  chatgpt     Alias for codex-app
-  claude-app  Launch Claude Desktop app with registry providers (macOS + Windows)
+  providers   Add or sign in to your OpenAI providers
 
-${pc.bold('Antigravity favorites:')}
-  agy, antigravity, and antigravity-ide share up to six Antigravity favorites
-  from relay-ai favorites --agy, plus the selected launch model.
-
-${pc.bold('Migration:')}
-  Bare relay-ai prints this help instead of launching Claude Code.
-  Use relay-ai claude for the wizard and launcher.
+${pc.bold('Bridge modes (claude and server):')}
+  --endpoint  Local Anthropic-format gateway; Claude Code launches with
+              ANTHROPIC_BASE_URL pointed at it (default on first run)
+  --proxy     Selective MITM of api.anthropic.com; Claude Code keeps its
+              normal Anthropic auth, clodex: models route to OpenAI
+              (--http-proxy is an alias)
+  Using either flag remembers it as that command's default.
 
 ${pc.bold('Examples:')}
-  relay-ai claude
-  relay-ai models
-  relay-ai providers
-  relay-ai codex
-  relay-ai gemini
-  relay-ai agy
-  relay-ai antigravity
-  relay-ai antigravity-ide
-  relay-ai codex-app
-  relay-ai claude-app
-  relay-ai server
-  relay-ai claude -c
-  relay-ai claude --resume abc-123
-  relay-ai claude -- --print "hello"`;
+  clodex claude
+  clodex claude --proxy
+  clodex models
+  clodex patch
+  clodex server
+  clodex claude -c
+  clodex claude -- --print "hello"`;
 }
 
 export function claudeHelpText(): string {
-  return `${pc.bold('relay-ai claude')} v${VERSION}
-Launch Claude Code with OpenCode Zen, Go, or local providers as the API backend.
+  return `${pc.bold('clodex claude')} v${VERSION}
+Launch Claude Code bridged to OpenAI models.
 
 ${pc.bold('Usage:')}
-  relay-ai claude [options] [claude-flags]
-  relay-ai claude --help
-  relay-ai claude --version
+  clodex claude [options] [claude-flags]
+  clodex claude --help
+  clodex claude --version
 
 ${pc.bold('Options:')}
+  --endpoint   Endpoint bridge mode: local gateway + ANTHROPIC_BASE_URL (persisted)
+  --proxy      Proxy bridge mode: keep Claude Code's Anthropic auth; route
+               clodex: models to OpenAI (--http-proxy is an alias; persisted)
   --dry-run    Run the wizard but show a preview instead of launching Claude Code
-  --http-proxy Preserve Claude Code's normal Anthropic auth; route favorite relay: models
-  --setup      Hint: use relay-ai providers to add or manage providers
-  --trace      Write debug logs to ~/.relay-ai/logs/ and show errors on exit
+  --trace      Write debug logs to ~/.clodex/logs/ and show errors on exit
   --provider   Boot provider id (skip wizard when paired with --model or in print mode)
   --model      Boot model id (skip wizard when paired with --provider or in print mode)
   --help       Show this command help
   --version    Show version
 
 ${pc.bold('Providers:')}
-  Cloud (Zen/Go)  Requires OPENCODE_API_KEY — get one at https://opencode.ai/auth
-  Registry        Configure with relay-ai providers add or import (Groq, Mistral,
-                  Nvidia, DeepSeek, OpenAI, custom endpoints, etc.).
+  openai         OpenAI API key (platform.openai.com)
+  openai-oauth   ChatGPT/Codex plan OAuth — sign in with clodex providers auth openai
 
 ${pc.bold('Model switching:')}
-  Run relay-ai models to save favorites (max ${MAX_MODEL_CATALOG}).
-  When favorites exist, launch starts a multi-route proxy and Claude Code /model
-  lists your starting model plus favorites for live switching.
-  With no favorites, launch uses a single model as before.
+  Run clodex models to save favorites (max ${MAX_MODEL_CATALOG}).
+  When favorites exist, endpoint mode starts a multi-route proxy and Claude
+  Code /model lists your starting model plus favorites for live switching.
+  With no favorites, launch uses a single model.
 
-${pc.bold('HTTP proxy mode:')}
-  relay-ai claude --http-proxy leaves ANTHROPIC_BASE_URL unset and launches
-  Claude Code with its normal Anthropic login. Favorite non-Anthropic AI SDK
-  models are available by typing /model relay:<provider-id>:<model-id>.
-  Save short names with relay-ai models --alias, and run --list to print them.
+${pc.bold('Proxy mode:')}
+  clodex claude --proxy leaves ANTHROPIC_BASE_URL unset and launches
+  Claude Code with its normal Anthropic login. Favorite OpenAI models are
+  available by typing /model clodex:<provider-id>:<model-id>.
+  Save short names with clodex models --alias, and run --list to print them.
+  Run clodex patch to make those names first-class inside Claude Code.
 
 ${pc.bold('Note:')}
   Claude Code may save the launched model to ~/.claude/settings.json.
   Bare claude later can still show that model — reset with claude --model sonnet.
 
 ${pc.bold('Examples:')}
-  relay-ai claude
-  relay-ai claude -c
-  relay-ai claude --resume abc-123
-  relay-ai claude abc-123
-  relay-ai claude --dry-run -c
-  relay-ai claude --setup
-  relay-ai claude --trace --resume abc-123
-  relay-ai claude --http-proxy
-  relay-ai claude --provider groq --model llama-3.3-70b-versatile
-  relay-ai claude --provider groq --model llama-3.3-70b-versatile -p "review this file"
-  relay-ai claude -- --print "hello"
-  relay-ai claude -- --dangerously-skip-permissions`;
+  clodex claude
+  clodex claude -c
+  clodex claude --resume abc-123
+  clodex claude --dry-run -c
+  clodex claude --trace --resume abc-123
+  clodex claude --proxy
+  clodex claude --provider openai-oauth --model gpt-5.6-sol
+  clodex claude -- --print "hello"
+  clodex claude -- --dangerously-skip-permissions`;
 }
 
 export function serverHelpText(): string {
-  return `${pc.bold('relay-ai server')} v${VERSION}
-Run a foreground API gateway for registry providers, Zen/Go, or Vertex AI.
+  return `${pc.bold('clodex server')} v${VERSION}
+Run a foreground gateway bridging Anthropic-format requests to OpenAI models.
 
 ${pc.bold('Usage:')}
-  relay-ai server
-  relay-ai server --quick
-  relay-ai server --listen network --password <password>
-  relay-ai server --http-proxy
-  relay-ai server --vertex
-  relay-ai server --help
-  relay-ai server --version
+  clodex server
+  clodex server --quick
+  clodex server --listen network --password <password>
+  clodex server --proxy
+  clodex server --help
+  clodex server --version
 
 ${pc.bold('Options:')}
+  --endpoint                   Endpoint mode: Anthropic-format HTTP gateway (persisted)
+  --proxy                      Proxy mode: selective api.anthropic.com MITM proxy
+                               (--http-proxy is an alias; persisted; local only)
   --quick, --saved             Start immediately from saved/default settings
   --listen local|network       One-run listen mode override
   --providers all|favorites|id1,id2
                                One-run provider catalog override
-  --free-only, --no-free-only  One-run free-model filter override
   --mask-gateway-ids           Mask provider names in Anthropic model ids
   --no-mask-gateway-ids        Keep provider names in Anthropic model ids
   --password <value>           One-run network-mode server password
-  --port <1-65535>             Listen port (default 17645); applies to all modes
-  --http-proxy                 Selective api.anthropic.com HTTP proxy (local only)
+  --port <1-65535>             Listen port (default 17645); applies to both modes
   --ws-diagnostics             Log sanitized request envelopes and WebSocket head decisions
-  --vertex                     Use Claude on Google Vertex AI
 
 ${pc.bold('Behavior:')}
-  Default: interactive wizard for exposed providers, discovery id masking (for
-  Claude Desktop / Cowork), optional favorites-only catalog, then listen mode.
-  Quick mode skips prompts and uses saved settings. Any one-run option also
-  starts without prompts. Non-interactive stdin uses quick mode automatically.
-  Network quick mode requires a saved password or --password.
-  --vertex: Anthropic-compatible gateway to Claude on Google Vertex AI using
-  local gcloud Application Default Credentials (no OpenCode API key).
-  Binds to port 17645 (override with --port). Network mode asks for a server password.
+  Endpoint default: interactive wizard for exposed providers, discovery id
+  masking, optional favorites-only catalog, then listen mode. Quick mode skips
+  prompts and uses saved settings. Any one-run option also starts without
+  prompts. Non-interactive stdin uses quick mode automatically. Network quick
+  mode requires a saved password or --password.
+  Binds to port 17645 (override with --port). Network mode asks for a password.
 
-${pc.bold('HTTP proxy env:')}
-  Start relay-ai server --http-proxy, then export the HTTPS_PROXY, HTTP_PROXY,
+${pc.bold('Proxy mode env:')}
+  Start clodex server --proxy, then export the HTTPS_PROXY, HTTP_PROXY,
   and NODE_EXTRA_CA_CERTS values it prints. Do not set ANTHROPIC_BASE_URL.
 
-${pc.bold('Vertex env:')}
-  ANTHROPIC_VERTEX_PROJECT_ID or GOOGLE_CLOUD_PROJECT — your GCP project
-  GOOGLE_CLOUD_LOCATION or CLOUD_ML_REGION — region (default: global)
-  Optional catalog: ~/.relay-ai/vertex-models.json (see assets/vertex-models.example.json)
-
-${pc.bold('Gateway endpoints (without --http-proxy):')}
+${pc.bold('Gateway endpoints (endpoint mode):')}
   Anthropic-compatible:  ANTHROPIC_BASE_URL=http://127.0.0.1:17645/anthropic
   OpenAI-compatible:     OPENAI_BASE_URL=http://127.0.0.1:17645/openai/v1
   API key: use anything locally; use the server password in network mode.`;
 }
 
 export function modelsHelpText(): string {
-  return `${pc.bold('relay-ai favorites')} v${VERSION}
+  return `${pc.bold('clodex favorites')} v${VERSION}
 Manage favorite models for mid-session switching.
 
 ${pc.bold('Usage:')}
-  relay-ai favorites
-  relay-ai models --list
-  relay-ai favorites --agy
-  relay-ai models --alias luna=relay:openai-oauth:gpt-5.6-luna
-  relay-ai models --unalias luna
-  relay-ai models
-  relay-ai favorites --help
-  relay-ai favorites --version
+  clodex favorites
+  clodex models --list
+  clodex models --alias sol=clodex:openai-oauth:gpt-5.6-sol
+  clodex models --unalias sol
+  clodex models
+  clodex favorites --help
+  clodex favorites --version
 
 ${pc.bold('Behavior:')}
   Opens an interactive manager to add or remove favorites.
   Search all providers at once (paginated results) or browse one provider at a time.
-  Pick from Zen, Go, or any provider in your registry.
-  Global favorites are saved to ~/.relay-ai/config.json (max ${MAX_MODEL_CATALOG}).
-  --agy manages Antigravity CLI favorites only (max 6).
-  --list prints the exact relay:<provider-id>:<model-id> names available in
-  HTTP proxy mode, without opening the interactive manager.
-  --alias <name=target> saves a short name for an HTTP-proxy favorite. The
-  target is relay:<provider-id>:<model-id> (the relay: prefix is optional).
+  Favorites are saved to ~/.clodex/config.json (max ${MAX_MODEL_CATALOG}).
+  --list prints the exact clodex:<provider-id>:<model-id> names available in
+  proxy mode, without opening the interactive manager.
+  --alias <name=target> saves a short name for a proxy-mode favorite. The
+  target is clodex:<provider-id>:<model-id> (the clodex: prefix is optional).
   --unalias <name> removes a saved short name.
 
 ${pc.bold('How it works:')}
-  Claude/Codex/Gemini/server use the global favorites list.
-  Favorites appear in supported /model switch menus.
-  relay-ai agy, antigravity, and antigravity-ide use the Antigravity favorites
-  list so the limited native switch slots stay predictable: one selected launch
-  model plus up to six Antigravity favorites.
+  claude and server use the global favorites list.
+  Favorites appear in the /model switch menu (endpoint mode) and are routable
+  by name in proxy mode. clodex patch bakes favorites + aliases into the
+  Claude Code binary so they pass model validation and report real context.
 
 ${pc.bold('Examples:')}
-  relay-ai favorites
-  relay-ai favorites --agy
-  relay-ai models --alias luna=relay:openai-oauth:gpt-5.6-luna
-  relay-ai claude    # switch menu active when favorites are set`;
+  clodex favorites
+  clodex models --alias sol=clodex:openai-oauth:gpt-5.6-sol
+  clodex claude    # switch menu active when favorites are set`;
 }
 
-
-export function antigravityCliHelpText(): string {
-  return `${pc.bold('relay-ai agy')} v${VERSION}
-Launch Antigravity CLI with Relay AI provider registry.
-
-${pc.bold('Usage:')}
-  relay-ai agy [options] [agy-flags]
-  relay-ai agy --help
-  relay-ai agy --version
-
-${pc.bold('Relay options:')}
-  --provider <id>    Use a specific provider (skip picker)
-  --model <id>       Use a specific model (skip picker)
-  --trace            Write debug log to /tmp/relay-ai-debug.log
-  -h, --help         Show this help
-  -v, --version      Show version
-
-${pc.bold('How it works:')}
-  Starts a local Cloud Code gateway, points agy at it via CLOUD_CODE_URL,
-  and injects Relay AI models into Antigravity's native model picker.
-  All Cloud Code traffic routes through Relay — no Google Cloud Code upstream.
-
-${pc.bold('Examples:')}
-  relay-ai agy
-  relay-ai agy --provider zen --model deepseek-v4-flash-free
-  relay-ai agy -p "fix this bug"`;
-}
-
-export function antigravityIdeHelpText(): string {
-  return `${pc.bold('relay-ai antigravity-ide')} v${VERSION}
-Launch Antigravity IDE with Relay AI provider registry.
+export function patchHelpText(): string {
+  return `${pc.bold('clodex patch')} v${VERSION}
+Patch the installed Claude Code binary so clodex favorites and aliases are
+first-class: accepted by the Agent tool, listed in /model, resolved to their
+real ids, and reporting the correct context window.
 
 ${pc.bold('Usage:')}
-  relay-ai antigravity-ide [options]
-  relay-ai antigravity-ide --help
-  relay-ai antigravity-ide --version
+  clodex patch
+  clodex patch --restore
+  clodex patch --help
 
-${pc.bold('Relay options:')}
-  --provider <id>    Use a specific provider (skip picker)
-  --model <id>       Use a specific model (skip picker)
-  --trace            Write debug log to /tmp/relay-ai-debug.log
-  -h, --help         Show this help
-  -v, --version      Show version
+${pc.bold('Options:')}
+  --restore    Restore the pristine (unpatched) Claude Code binary
+  --trace      Show the underlying tweakcc output
 
-${pc.bold('How it works:')}
-  Creates an isolated Relay-managed IDE profile, starts a local Cloud Code
-  gateway, and injects Relay AI models into Antigravity's native picker.
-  The normal IDE profile is never modified.
-
-${pc.bold('Platform:')}
-  macOS (Apple Silicon) — other platforms coming after testing.
-
-${pc.bold('Examples:')}
-  relay-ai antigravity-ide
-  relay-ai antigravity-ide --provider zen --model deepseek-v4-flash-free`;
-}
-
-export function antigravityAppHelpText(): string {
-  return `${pc.bold('relay-ai antigravity')} v${VERSION}
-Launch Antigravity with Relay AI provider registry.
-
-${pc.bold('Usage:')}
-  relay-ai antigravity [options]
-  relay-ai antigravity --help
-  relay-ai antigravity --version
-
-${pc.bold('Relay options:')}
-  --provider <id>    Use a specific provider (skip picker)
-  --model <id>       Use a specific model (skip picker)
-  --trace            Write debug log to /tmp/relay-ai-debug.log
-  -h, --help         Show this help
-  -v, --version      Show version
-
-${pc.bold('How it works:')}
-  Creates an isolated Relay-managed Antigravity profile, starts a local Cloud
-  Code gateway, and injects Relay AI models into Antigravity's native picker.
-  The normal Antigravity profile is never modified.
-
-${pc.bold('Favorites:')}
-  Uses the same Antigravity favorites list as relay-ai favorites --agy:
-  up to six saved favorites plus the selected launch model.
-
-${pc.bold('Platform:')}
-  macOS (Apple Silicon) — other platforms coming after testing.
-
-${pc.bold('Examples:')}
-  relay-ai antigravity
-  relay-ai antigravity --provider zen --model deepseek-v4-flash-free`;
+${pc.bold('Behavior:')}
+  The patch map is built automatically from your clodex favorites and aliases
+  (clodex models); context windows come from provider metadata. A pristine
+  per-version backup is kept, and a manifest (~/.clodex/patch-state.json)
+  makes re-runs no-ops until your config or Claude Code version changes —
+  then the binary is restored first and re-patched fresh.
+  Run clodex patch again after every claude update.`;
 }
 
 function printHelp(text: string): void {
@@ -832,72 +554,16 @@ async function launchClaudeViaCatalog(
   return exitCode;
 }
 
-function printDryRun(
-  backendName: string,
-  modelId: string,
-  baseUrl: string,
-  modelFormat: ModelFormat,
-  claudeArgs: string[],
-  conflicts: Array<{ name: string; value: string }>,
-  disableExperimentalBetas: boolean,
-  npm?: string,
-): void {
-  console.log('');
-  console.log(pc.bold(pc.cyan('  DRY RUN — would execute:')));
-  console.log('');
-
-  const claudeCmd = ['claude', '--model', modelId, ...claudeArgs].join(' ');
-  console.log(`  ${pc.bold('Command:')}  ${claudeCmd}`);
-  console.log(`  ${pc.bold('Backend:')}  ${backendName}`);
-  if (modelFormat === 'openai') {
-    console.log(`  ${pc.bold('Proxy:')}    would start local SDK adapter proxy ${pc.dim('(Vercel AI SDK)')}`);
-    if (npm) console.log(`             ${pc.dim(`npm: ${npm}`)}`);
-  }
-  console.log('');
-
-  console.log(`  ${pc.bold('Env vars SET:')}`);
-  if (modelFormat === 'openai') {
-    console.log(`    ANTHROPIC_BASE_URL=http://127.0.0.1:<port>  ${pc.dim('(local proxy)')}`);
-  } else {
-    console.log(`    ANTHROPIC_BASE_URL=${baseUrl}`);
-  }
-  console.log(`    ANTHROPIC_API_KEY=<your OPENCODE_API_KEY>`);
-  console.log(`    ANTHROPIC_MODEL=${modelId}`);
-  if (disableExperimentalBetas) {
-    console.log(`    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1  ${pc.dim('(direct upstream — strips beta headers)')}`);
-  } else {
-    console.log(`    ${pc.dim('(experimental betas enabled — tool search via local proxy)')}`);
-  }
-  console.log(`    ENABLE_TOOL_SEARCH=true  ${pc.dim('(defer MCP tools like native Claude Code)')}`);
-  console.log(`    CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT=0  ${pc.dim('(keep full system prompt on proxy routes)')}`);
-  console.log('');
-
-  if (conflicts.length > 0) {
-    console.log(`  ${pc.bold('Env vars REMOVED:')}`);
-    for (const c of conflicts) {
-      console.log(`    ${pc.dim(c.name)}=${pc.dim(c.value)}`);
-    }
-    console.log('');
-  }
-
-  console.log(pc.dim('  (dry run complete — Claude Code was NOT launched)'));
-  console.log('');
-}
-
-const AGY_CLI_FAVORITES_CAP = 6;
-
 interface FavoritesCommandOptions {
-  scope?: 'global' | 'agy';
   list?: boolean;
   alias?: string;
   unalias?: string;
 }
 
 export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Promise<number> {
-  const scope = opts.scope ?? 'global';
   const changesAlias = opts.alias !== undefined || opts.unalias !== undefined;
-  if (changesAlias && (scope === 'agy' || opts.list || (opts.alias !== undefined && opts.unalias !== undefined))) {
-    p.log.error('--alias/--unalias apply one at a time to global HTTP-proxy favorites.');
+  if (changesAlias && (opts.list || (opts.alias !== undefined && opts.unalias !== undefined))) {
+    p.log.error('--alias/--unalias apply one at a time to proxy-mode favorites.');
     return 1;
   }
   if (opts.alias !== undefined) {
@@ -912,7 +578,7 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
     );
     if (!isSavedFavorite) {
       p.log.error(`${modelAliasTarget(parsed)} is not a saved favorite.`);
-      p.log.info('Add it with `relay-ai models`, then save the alias.');
+      p.log.info('Add it with `clodex models`, then save the alias.');
       return 1;
     }
     const modelAliases = (prefs.modelAliases ?? []).filter(alias => alias.name !== parsed.name);
@@ -939,23 +605,18 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
     return 0;
   }
   if (opts.list) {
-    if (scope === 'agy') {
-      p.log.error('--list shows global favorites used by HTTP proxy mode; remove --agy.');
-      return 1;
-    }
     try {
       const loaded = await loadHttpProxyRoutes();
       printHttpProxyModels(loaded.routes, loaded.aliases);
       reportSkippedHttpProxyFavorites(loaded);
       return 0;
     } catch (err) {
-      p.log.error(`Could not load HTTP proxy models: ${err instanceof Error ? err.message : String(err)}`);
+      p.log.error(`Could not load proxy models: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
   }
-  const maxFavorites = scope === 'agy' ? AGY_CLI_FAVORITES_CAP : MAX_MODEL_CATALOG;
-  const scopeName = scope === 'agy' ? 'Antigravity CLI Favorites' : 'Favorite Models';
-  const configKey = scope === 'agy' ? 'antigravityCliFavoriteModels' : 'favoriteModels';
+  const maxFavorites = MAX_MODEL_CATALOG;
+  const scopeName = 'Favorite Models';
   relayIntro(scopeName);
 
   const spinner = p.spinner();
@@ -964,9 +625,7 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
   const catalog = await fetchProviderCatalog();
   spinner.stop('');
 
-  const allProviders = scope === 'agy'
-    ? providersForTarget(providersForPicker(catalog), 'antigravity')
-    : providersForPicker(catalog);
+  const allProviders = providersForPicker(catalog);
   const favoriteProviders = allProviders.map(provider => ({
     ...provider,
     name: favoriteProviderDisplayName(provider),
@@ -974,7 +633,7 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
 
   if (favoriteProviders.length === 0) {
     p.log.warn('No providers found.');
-    p.log.info(`${pc.dim('OpenCode Zen/Go is always available. Add providers with ')}${pc.cyan('relay-ai providers')}${pc.dim('.')}`);
+    p.log.info(`${pc.dim('Add a provider with ')}${pc.cyan('clodex providers')}${pc.dim('.')}`);
     relayOutro('Done');
     return 0;
   }
@@ -988,9 +647,7 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
   }
 
   const prefs = loadPreferences();
-  let favorites = scope === 'agy'
-    ? prefs.antigravityCliFavoriteModels ?? []
-    : prefs.favoriteModels ?? [];
+  let favorites = prefs.favoriteModels ?? [];
   let favoritesDirty = false;
 
   // eslint-disable-next-line no-constant-condition
@@ -1046,11 +703,6 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
                 hint: `${globalCount} models · ${favoriteProviders.length} provider${favoriteProviders.length !== 1 ? 's' : ''}`,
           },
           {
-            value: 'free',
-            label: pc.cyan('Search free models'),
-            hint: `${buildGlobalFavoriteIndex(favoriteProviders).filter(e => e.model.isFree || e.model.freeStatus === 'verified_free' || e.model.freeStatus === 'free_provider').length} free/free-access models`,
-          },
-          {
             value: 'provider',
             label: pc.cyan('Browse by provider →'),
             hint: 'Pick one provider first',
@@ -1070,14 +722,6 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
           browsedMultiple = [globalPick.model];
         }
       }
-      if (addPath === 'free') {
-        const globalPick = await pickGlobalFavoriteModel(favoriteProviders, favorites, { freeOnly: true });
-        if (globalPick === null) continue;
-        if (globalPick !== browseByProviderChoice) {
-          provider = favoriteProviders.find(ap => ap.id === globalPick.providerId);
-          browsedMultiple = [globalPick.model];
-        }
-      }
 
       if (browsedMultiple.length === 0) {
         let currentInitialProvider: string | undefined = undefined;
@@ -1091,7 +735,7 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
           if (p.isCancel(pickedProviderId)) break;
 
           provider = favoriteProviders.find(ap => ap.id === pickedProviderId)!;
-          
+
           const options = provider.models.map(m => {
             const favorited = isFavorite(favorites, { providerId: provider!.id, modelId: m.id });
             const label = formatModelLabel(m);
@@ -1173,14 +817,13 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
   }
 
   if (favoritesDirty) {
-    savePreferences({ [configKey]: favorites });
+    savePreferences({ favoriteModels: favorites });
   }
 
-  const favLabel = scope === 'agy' ? 'Antigravity CLI ' : '';
   relayOutro(
     favorites.length === 0
-      ? `No ${favLabel}favorites saved`
-      : `${favorites.length} ${favLabel}favorite${favorites.length !== 1 ? 's' : ''} saved`,
+      ? 'No favorites saved'
+      : `${favorites.length} favorite${favorites.length !== 1 ? 's' : ''} saved`,
     favorites.length === 0
       ? pc.dim('Launch uses single-model mode')
       : pc.cyan('/model menu ready on next launch'),
@@ -1194,28 +837,28 @@ async function runClaudeHttpProxyCommand(
   agentStdout: boolean,
 ): Promise<number> {
   if (parsed.launchProvider || parsed.launchModel) {
-    p.log.error('--provider/--model select Relay gateway routes and cannot be combined with --http-proxy.');
-    p.log.info('Use `-- --model relay:<provider-id>:<model-id>` to start on a listed HTTP-proxy favorite.');
+    p.log.error('--provider/--model select endpoint-mode routes and cannot be combined with --proxy.');
+    p.log.info('Use `-- --model clodex:<provider-id>:<model-id>` to start on a listed proxy-mode favorite.');
     return 1;
   }
 
-  if (!agentStdout) relayIntro('Claude Code — HTTP Proxy');
+  if (!agentStdout) relayIntro('Claude Code — Proxy Mode');
 
   if (parsed.dryRun) {
     try {
       const loaded = await loadHttpProxyRoutes();
       console.log('');
-      console.log(pc.bold(pc.cyan('  DRY RUN — HTTP proxy mode')));
-      console.log('  ANTHROPIC_BASE_URL is not set by Relay AI.');
+      console.log(pc.bold(pc.cyan('  DRY RUN — proxy bridge mode')));
+      console.log('  ANTHROPIC_BASE_URL is not set by clodex.');
       console.log('  HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:<random-port>');
-      console.log('  NODE_EXTRA_CA_CERTS=~/.relay-ai/http-proxy/relay-ai-ca.pem');
+      console.log('  NODE_EXTRA_CA_CERTS=~/.clodex/http-proxy/clodex-ca.pem');
       console.log('');
       printHttpProxyModels(loaded.routes, loaded.aliases);
       reportSkippedHttpProxyFavorites(loaded);
       console.log('');
       return 0;
     } catch (err) {
-      p.log.error(`Could not load HTTP proxy models: ${err instanceof Error ? err.message : String(err)}`);
+      p.log.error(`Could not load proxy models: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
   }
@@ -1226,7 +869,7 @@ async function runClaudeHttpProxyCommand(
   try {
     started = await startConfiguredHttpProxy(0, parsed.trace, inferenceLogPath, proxyDebugLogPath);
   } catch (err) {
-    p.log.error(`Failed to start HTTP proxy: ${err instanceof Error ? err.message : String(err)}`);
+    p.log.error(`Failed to start proxy: ${err instanceof Error ? err.message : String(err)}`);
     return 1;
   }
 
@@ -1266,7 +909,7 @@ async function runClaudeHttpProxyCommand(
   };
   process.once('exit', onProcessExit);
   if (!agentStdout) {
-    p.log.info(`HTTP proxy started on port ${handle.port}; Claude Code's Anthropic auth remains active.`);
+    p.log.info(`Proxy started on port ${handle.port}; Claude Code's Anthropic auth remains active.`);
     p.log.info(`Inference request log: ${handle.inferenceLogPath}`);
     printHttpProxyModels(loaded.routes, loaded.aliases);
     reportSkippedHttpProxyFavorites(loaded);
@@ -1310,7 +953,7 @@ async function runClaudeHttpProxyCommand(
 }
 
 export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
-  const { dryRun, setup, trace, launchProvider, launchModel } = parsed;
+  const { dryRun, trace, launchProvider, launchModel } = parsed;
   const claudeArgs = normalizeClaudeAgentArgs(parsed.claudeArgs);
   const agentStdout = wantsCleanAgentStdout('claude', claudeArgs);
   setAgentStdoutMode(agentStdout);
@@ -1324,7 +967,14 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     return 1;
   }
 
-  if (parsed.httpProxy) {
+  const bridgeMode = resolveBridgeMode('claude', parsed.bridgeMode, { persist: !dryRun });
+
+  // Launch-time patch check: prompt on TTY, notice otherwise. Never blocks the launch.
+  if (!dryRun) {
+    await runLaunchPatchCheck({ agentStdout });
+  }
+
+  if (bridgeMode === 'proxy') {
     return runClaudeHttpProxyCommand(parsed, claudeArgs, agentStdout);
   }
 
@@ -1345,10 +995,6 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   const switchMenuActive = favorites.length > 0 && !launchPlan.skip;
 
   if (!agentStdout) relayIntro('Claude Code');
-
-  if (setup && !dryRun && !agentStdout) {
-    p.log.info('Provider setup now lives in relay-ai providers — opening that next is recommended.');
-  }
 
   if (!dryRun && await needsFirstRunSetup()) {
     const firstRun = await runFirstRunWizard(trace);
@@ -1379,7 +1025,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   const allProviders = providersForTarget(providersForPicker(catalog), 'claude');
   if (allProviders.length === 0) {
     p.log.warn('No providers available.');
-    p.log.info(pc.dim('Run relay-ai providers add or import to get started.'));
+    p.log.info(pc.dim('Run clodex providers to get started.'));
     return 0;
   }
 
@@ -1543,7 +1189,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   const launchApiKey = await resolveLocalProviderApiKey(activeProvider);
   if (!launchApiKey?.trim()) {
     p.log.error(
-      `No credential found for ${activeProvider.name}. Add a key with relay-ai providers or set OPENCODE_API_KEY.`,
+      `No credential found for ${activeProvider.name}. Add a key or sign in with clodex providers.`,
     );
     return 1;
   }
@@ -1551,39 +1197,10 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   let proxyHandle: ProxyHandle | null = null;
   let childEnv: NodeJS.ProcessEnv;
 
-  const isAntigravityOAuth = activeProvider.id === 'antigravity' && activeProvider.authType === 'oauth';
-  const isOAuthAnthropic = selectedModel.modelFormat === 'anthropic' && activeProvider.authType === 'oauth' && !isAntigravityOAuth;
+  const isOAuthAnthropic = selectedModel.modelFormat === 'anthropic' && activeProvider.authType === 'oauth';
 
-  if (isAntigravityOAuth) {
-    // Antigravity OAuth — proxy translates Anthropic → Cloud Code Assist format.
-    try {
-      proxyHandle = await startProxy(
-        ANTIGRAVITY_BASE_URLS[0],
-        selectedModel.id,
-        trace,
-        selectedModel.contextWindow,
-        {
-          providerId: activeProvider.id,
-          authType: 'oauth',
-          providerData: activeProvider.providerData,
-          modelFormat: 'cloud-code',
-        },
-        launchApiKey,
-      );
-      if (!isAgentStdoutMode()) p.log.info(`Cloud Code proxy started on port ${proxyHandle.port}`);
-    } catch (err) {
-      p.log.error(`Failed to start Cloud Code proxy: ${err instanceof Error ? err.message : String(err)}`);
-      return 1;
-    }
-    childEnv = buildChildEnv(
-      `http://127.0.0.1:${proxyHandle.port}`,
-      selectedModel.id,
-      proxyHandle.token,
-      proxyHandle.port,
-      selectedModel.contextWindow,
-    );
-  } else if (isOAuthAnthropic) {
-    // Claude Code OAuth — proxy injects compatibility metadata and Bearer auth.
+  if (isOAuthAnthropic) {
+    // Anthropic OAuth passthrough — proxy injects compatibility metadata and Bearer auth.
     try {
       proxyHandle = await startProxy(
         selectedModel.baseUrl ?? 'https://api.anthropic.com',
@@ -1687,18 +1304,11 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
     return 1;
   }
 
-  if (!parsed.showVersion && !parsed.showAi) {
+  if (!parsed.showVersion) {
     refreshModelsDevCacheAsync();
   }
 
   if (parsed.command === 'root') {
-    if (parsed.showAi) {
-      if (parsed.aiInstall) {
-        return printAiInstallResult(installAiDoc({ force: parsed.aiInstallForce }));
-      }
-      console.log(generateAiDoc());
-      return 0;
-    }
     if (parsed.showVersion) {
       console.log(VERSION);
     } else {
@@ -1716,32 +1326,18 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       printHelp(serverHelpText());
       return 0;
     }
+    const bridgeMode = resolveBridgeMode('server', parsed.bridgeMode);
     return runServerCommand({
-      vertex: parsed.vertex,
-      httpProxy: parsed.httpProxy,
+      httpProxy: bridgeMode === 'proxy',
       quick: parsed.serverQuick,
       listenMode: parsed.serverListenMode,
       providersMode: parsed.serverProvidersMode,
       providerIds: parsed.serverProviderIds,
-      freeOnly: parsed.serverFreeOnly,
       maskGatewayIds: parsed.serverMaskGatewayIds,
       password: parsed.serverPassword,
       wsDiagnostics: parsed.serverWsDiagnostics,
       port: parsed.serverPort,
     });
-  }
-
-  if (parsed.command === 'ui') {
-    if (parsed.showVersion) {
-      console.log(VERSION);
-      return 0;
-    }
-    if (parsed.showHelp) {
-      console.log('Usage: relay-ai ui [--trace]\n\nOpen the settings UI in your browser.');
-      return 0;
-    }
-    const { runUiCommand } = await import('./ui-command.js');
-    return runUiCommand({ trace: parsed.trace });
   }
 
   if (parsed.command === 'models') {
@@ -1754,7 +1350,6 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       return 0;
     }
     return runModelsCommand({
-      scope: parsed.favoritesAgy ? 'agy' : 'global',
       list: parsed.favoritesList,
       alias: parsed.favoritesAlias,
       unalias: parsed.favoritesUnalias,
@@ -1771,101 +1366,21 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       return 0;
     }
     if (parsed.trace) {
-      process.env.RELAY_AI_TRACE = '1';
+      process.env.CLODEX_TRACE = '1';
     }
     return runProvidersCommand(parsed.claudeArgs);
   }
 
-  if (parsed.command === 'codex-app') {
-    if (parsed.showVersion) {
-      console.log(VERSION);
-      return 0;
-    }
-    return runCodexAppCommand(parsed.claudeArgs, { vertex: parsed.vertex, launchProvider: parsed.launchProvider, launchModel: parsed.launchModel });
-  }
-
-  if (parsed.command === 'claude-app') {
-    if (parsed.showVersion) {
-      console.log(VERSION);
-      return 0;
-    }
-    return runClaudeAppCommand(parsed.claudeArgs, { launchProvider: parsed.launchProvider, launchModel: parsed.launchModel });
-  }
-
-  if (parsed.command === 'codex') {
+  if (parsed.command === 'patch') {
     if (parsed.showVersion) {
       console.log(VERSION);
       return 0;
     }
     if (parsed.showHelp) {
-      console.log(codexHelpText());
+      printHelp(patchHelpText());
       return 0;
     }
-    return runCodexCommand(parsed.claudeArgs, parsed.trace, {
-      launchProvider: parsed.launchProvider,
-      launchModel: parsed.launchModel,
-      vertex: parsed.vertex,
-    });
-  }
-
-  if (parsed.command === 'gemini') {
-    if (parsed.showVersion) {
-      console.log(VERSION);
-      return 0;
-    }
-    if (parsed.showHelp) {
-      console.log(geminiHelpText());
-      return 0;
-    }
-    return runGeminiCommand(parsed.claudeArgs, parsed.trace, {
-      launchProvider: parsed.launchProvider,
-      launchModel: parsed.launchModel,
-    });
-  }
-
-  if (parsed.command === 'agy') {
-    if (parsed.showVersion) {
-      console.log(VERSION);
-      return 0;
-    }
-    if (parsed.showHelp) {
-      console.log(antigravityCliHelpText());
-      return 0;
-    }
-    return runAgyCommand(parsed.claudeArgs, parsed.trace, {
-      launchProvider: parsed.launchProvider,
-      launchModel: parsed.launchModel,
-    });
-  }
-
-  if (parsed.command === 'antigravity') {
-    if (parsed.showVersion) {
-      console.log(VERSION);
-      return 0;
-    }
-    if (parsed.showHelp) {
-      console.log(antigravityAppHelpText());
-      return 0;
-    }
-    return runAntigravityAppCommand(parsed.claudeArgs, parsed.trace, {
-      launchProvider: parsed.launchProvider,
-      launchModel: parsed.launchModel,
-    });
-  }
-
-  if (parsed.command === 'antigravity-ide') {
-    if (parsed.showVersion) {
-      console.log(VERSION);
-      return 0;
-    }
-    if (parsed.showHelp) {
-      console.log(antigravityIdeHelpText());
-      return 0;
-    }
-    return runAntigravityIdeCommand(parsed.claudeArgs, parsed.trace, {
-      launchProvider: parsed.launchProvider,
-      launchModel: parsed.launchModel,
-    });
+    return runPatchCommand({ restore: parsed.patchRestore, trace: parsed.trace });
   }
 
   if (parsed.showVersion) {

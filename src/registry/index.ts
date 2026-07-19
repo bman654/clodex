@@ -14,7 +14,6 @@ export {
   saveRegistry,
 } from './io.js';
 export { localProviderToRegistry } from './convert.js';
-export { importFromOpencode, type ImportOpencodeResult } from './import-opencode.js';
 export { loadRegistryProviders, loadRegistryProvidersSync } from './load.js';
 export {
   addGoRegistryStub,

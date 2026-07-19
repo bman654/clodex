@@ -19,7 +19,7 @@ import {
 } from './provider-factory.js';
 import { resolveUpstreamTools } from './tool-search.js';
 import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-types.js';
-import { anthropicErrorType, upstreamHttpStatus } from './codex/upstream-error.js';
+import { anthropicErrorType, upstreamHttpStatus } from './upstream-error.js';
 import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
 
 export { silenceSdkWarnings };

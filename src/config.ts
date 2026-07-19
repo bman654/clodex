@@ -64,45 +64,29 @@ function writeConfig(config: UserPreferences): void {
 
 export function loadPreferences(): UserPreferences {
   const config = readConfig();
-  const lastProvider =
-    config.lastProvider === 'opencode' ? 'zen' : config.lastProvider;
   return {
-    lastBackend: config.lastBackend,
     lastModel: config.lastModel,
-    lastProvider,
-    lastCodexProvider: config.lastCodexProvider,
-    lastCodexModel: config.lastCodexModel,
-    lastGeminiProvider: config.lastGeminiProvider,
-    lastGeminiModel: config.lastGeminiModel,
-    lastAntigravityProvider: config.lastAntigravityProvider,
-    lastAntigravityModel: config.lastAntigravityModel,
+    lastProvider: config.lastProvider,
     recentModelsByProvider: config.recentModelsByProvider,
     favoriteModels: config.favoriteModels,
     modelAliases: config.modelAliases,
-    antigravityCliFavoriteModels: config.antigravityCliFavoriteModels,
-    antigravityCliFavoritesHintShown: config.antigravityCliFavoritesHintShown,
+    claudeBridgeMode: config.claudeBridgeMode,
+    serverBridgeMode: config.serverBridgeMode,
     appPathOverrides: config.appPathOverrides,
     recentLaunchFolders: config.recentLaunchFolders,
     server: config.server,
   };
 }
 
-export function savePreferences(prefs: Partial<Pick<UserPreferences, 'lastBackend' | 'lastModel' | 'lastProvider' | 'lastCodexProvider' | 'lastCodexModel' | 'lastGeminiProvider' | 'lastGeminiModel' | 'lastAntigravityProvider' | 'lastAntigravityModel' | 'recentModelsByProvider' | 'favoriteModels' | 'modelAliases' | 'antigravityCliFavoriteModels' | 'antigravityCliFavoritesHintShown' | 'appPathOverrides' | 'recentLaunchFolders'>>): void {
+export function savePreferences(prefs: Partial<Pick<UserPreferences, 'lastModel' | 'lastProvider' | 'recentModelsByProvider' | 'favoriteModels' | 'modelAliases' | 'claudeBridgeMode' | 'serverBridgeMode' | 'appPathOverrides' | 'recentLaunchFolders'>>): void {
   const config = readConfig();
-  if (prefs.lastBackend !== undefined) config.lastBackend = prefs.lastBackend;
   if (prefs.lastModel !== undefined) config.lastModel = prefs.lastModel;
   if (prefs.lastProvider !== undefined) config.lastProvider = prefs.lastProvider;
-  if (prefs.lastCodexProvider !== undefined) config.lastCodexProvider = prefs.lastCodexProvider;
-  if (prefs.lastCodexModel !== undefined) config.lastCodexModel = prefs.lastCodexModel;
-  if (prefs.lastGeminiProvider !== undefined) config.lastGeminiProvider = prefs.lastGeminiProvider;
-  if (prefs.lastGeminiModel !== undefined) config.lastGeminiModel = prefs.lastGeminiModel;
-  if (prefs.lastAntigravityProvider !== undefined) config.lastAntigravityProvider = prefs.lastAntigravityProvider;
-  if (prefs.lastAntigravityModel !== undefined) config.lastAntigravityModel = prefs.lastAntigravityModel;
   if (prefs.recentModelsByProvider !== undefined) config.recentModelsByProvider = prefs.recentModelsByProvider;
   if (prefs.favoriteModels !== undefined) config.favoriteModels = prefs.favoriteModels;
   if (prefs.modelAliases !== undefined) config.modelAliases = prefs.modelAliases;
-  if (prefs.antigravityCliFavoriteModels !== undefined) config.antigravityCliFavoriteModels = prefs.antigravityCliFavoriteModels;
-  if (prefs.antigravityCliFavoritesHintShown !== undefined) config.antigravityCliFavoritesHintShown = prefs.antigravityCliFavoritesHintShown;
+  if (prefs.claudeBridgeMode !== undefined) config.claudeBridgeMode = prefs.claudeBridgeMode;
+  if (prefs.serverBridgeMode !== undefined) config.serverBridgeMode = prefs.serverBridgeMode;
   if (prefs.appPathOverrides !== undefined) config.appPathOverrides = prefs.appPathOverrides;
   if (prefs.recentLaunchFolders !== undefined) config.recentLaunchFolders = prefs.recentLaunchFolders;
   writeConfig(config);
@@ -125,6 +109,20 @@ export function setAppPathOverride(appId: string, path: string | null): Record<s
   return next;
 }
 
+/** Resolve the bridge mode for a command: explicit flag wins (and persists); else remembered; else endpoint. */
+export function resolveBridgeMode(
+  command: 'claude' | 'server',
+  explicit: import('./types.js').BridgeMode | undefined,
+  opts: { persist?: boolean } = {},
+): import('./types.js').BridgeMode {
+  const key = command === 'claude' ? 'claudeBridgeMode' : 'serverBridgeMode';
+  if (explicit) {
+    if (opts.persist !== false) savePreferences({ [key]: explicit });
+    return explicit;
+  }
+  return loadPreferences()[key] ?? 'endpoint';
+}
+
 const MAX_RECENT_MODELS = 3;
 const MAX_RECENT_LAUNCH_FOLDERS = 6;
 
@@ -140,7 +138,7 @@ export function recordLaunchFolder(folder: string): string[] {
 }
 
 export function recordLaunchSelection(
-  agent: 'claude' | 'codex' | 'gemini',
+  _agent: 'claude',
   providerId: string,
   modelId: string,
   prefs: UserPreferences,
@@ -148,11 +146,8 @@ export function recordLaunchSelection(
   const prevRecent = prefs.recentModelsByProvider?.[providerId] ?? [];
   const updatedRecent = [modelId, ...prevRecent.filter(id => id !== modelId)].slice(0, MAX_RECENT_MODELS);
   savePreferences({
-    ...(agent === 'claude'
-      ? { lastProvider: providerId, lastModel: modelId }
-      : agent === 'codex'
-      ? { lastCodexProvider: providerId, lastCodexModel: modelId }
-      : { lastGeminiProvider: providerId, lastGeminiModel: modelId }),
+    lastProvider: providerId,
+    lastModel: modelId,
     recentModelsByProvider: { ...prefs.recentModelsByProvider, [providerId]: updatedRecent },
   });
 }
@@ -268,19 +263,6 @@ export function setServerFavoritesOnly(favoritesOnly: boolean): void {
   config.server = {
     ...(config.server ?? {}),
     favoritesOnly,
-  };
-  writeConfig(config);
-}
-
-export function getServerFreeModelsOnly(): boolean {
-  return readConfig().server?.freeModelsOnly ?? false;
-}
-
-export function setServerFreeModelsOnly(freeModelsOnly: boolean): void {
-  const config = readConfig();
-  config.server = {
-    ...(config.server ?? {}),
-    freeModelsOnly,
   };
   writeConfig(config);
 }

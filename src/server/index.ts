@@ -8,14 +8,12 @@ import {
   getSavedServerPassword,
   getServerExposedProviders,
   getServerFavoritesOnly,
-  getServerFreeModelsOnly,
   getServerListenMode,
   getServerMaskGatewayIds,
   loadPreferences,
   setSavedServerPassword,
   setServerExposedProviders,
   setServerFavoritesOnly,
-  setServerFreeModelsOnly,
   setServerListenMode,
   setServerMaskGatewayIds,
 } from '../config.js';
@@ -36,7 +34,6 @@ import {
 import { getReasoningCapabilities } from '../provider-factory.js';
 import {
   askFavoritesOnly,
-  askFreeModelsOnly,
   askListenMode,
   askMaskGatewayIds,
   askSaveServerPassword,
@@ -48,17 +45,10 @@ import { createGatewayModelCatalog } from './models.js';
 import { startServer } from './router.js';
 import {
   filterServerModelsByFavorites,
-  filterServerModelsByFreeStatus,
   filterServerModelsByProviders,
   summarizeServerProviders,
 } from './catalog-filter.js';
 import { selectServerProviders, type ServerProviderOption } from './provider-select.js';
-import {
-  buildVertexRuntimeConfig,
-  createVertexModelCatalog,
-  hasApplicationDefaultCredentials,
-  vertexModelsToServerModels,
-} from './vertex-config.js';
 import { runHttpProxyServerCommand } from '../http-proxy/index.js';
 import { getInferenceRequestLogPath, getSessionLogPath } from '../trace-log.js';
 
@@ -66,22 +56,19 @@ export interface ServerRunConfig {
   exposedProviders: string[] | null;
   maskGatewayIds: boolean;
   favoritesOnly: boolean;
-  freeModelsOnly: boolean;
   listenMode: 'local' | 'network';
 }
 
 export interface ServerCommandOptions {
-  vertex?: boolean;
   httpProxy?: boolean;
   quick?: boolean;
   listenMode?: 'local' | 'network';
   providersMode?: 'all' | 'favorites' | 'specific';
   providerIds?: string[];
-  freeOnly?: boolean;
   maskGatewayIds?: boolean;
   password?: string;
   wsDiagnostics?: boolean;
-  /** TCP port override; defaults to DEFAULT_SERVER_PORT (17645). Applies to gateway, vertex, and http-proxy modes. */
+  /** TCP port override; defaults to DEFAULT_SERVER_PORT (17645). Applies to gateway and http-proxy modes. */
   port?: number;
 }
 
@@ -264,7 +251,6 @@ function savedServerRunConfig(): ServerRunConfig {
     exposedProviders: getServerExposedProviders(),
     maskGatewayIds: getServerMaskGatewayIds(),
     favoritesOnly: getServerFavoritesOnly(),
-    freeModelsOnly: getServerFreeModelsOnly(),
     listenMode: getServerListenMode(),
   };
 }
@@ -272,7 +258,6 @@ function savedServerRunConfig(): ServerRunConfig {
 function hasServerRunOverrides(options: ServerCommandOptions): boolean {
   return options.listenMode !== undefined
     || options.providersMode !== undefined
-    || options.freeOnly !== undefined
     || options.maskGatewayIds !== undefined
     || options.password !== undefined;
 }
@@ -281,7 +266,6 @@ function applyServerRunOverrides(config: ServerRunConfig, options: ServerCommand
   const next: ServerRunConfig = { ...config };
 
   if (options.listenMode) next.listenMode = options.listenMode;
-  if (options.freeOnly !== undefined) next.freeModelsOnly = options.freeOnly;
   if (options.maskGatewayIds !== undefined) next.maskGatewayIds = options.maskGatewayIds;
 
   if (options.providersMode === 'all') {
@@ -334,9 +318,6 @@ async function runServerWizard(): Promise<{ runConfig: ServerRunConfig; promptFo
     p.log.info('Manage favorites with `relay-ai models`.');
   }
 
-  const freeModelsOnly = await askFreeModelsOnly(getServerFreeModelsOnly());
-  if (freeModelsOnly === null) return undefined;
-  setServerFreeModelsOnly(freeModelsOnly);
 
   let exposedProviders: string[] | null | undefined = null;
   if (!favoritesOnly) {
@@ -353,76 +334,9 @@ async function runServerWizard(): Promise<{ runConfig: ServerRunConfig; promptFo
   setServerListenMode(listenMode);
 
   return {
-    runConfig: { exposedProviders, maskGatewayIds, favoritesOnly, freeModelsOnly, listenMode },
+    runConfig: { exposedProviders, maskGatewayIds, favoritesOnly, listenMode },
     promptForPassword: true,
   };
-}
-
-async function runVertexServerCommand(port?: number): Promise<number> {
-  relayIntro('Vertex Gateway');
-
-  const vertexConfig = buildVertexRuntimeConfig();
-  if (!vertexConfig) {
-    p.log.error('Set ANTHROPIC_VERTEX_PROJECT_ID or GOOGLE_CLOUD_PROJECT to your GCP project.');
-    return 1;
-  }
-
-  if (!hasApplicationDefaultCredentials()) {
-    p.log.error('Google Application Default Credentials not found.');
-    p.log.info('Run: gcloud auth application-default login');
-    return 1;
-  }
-
-  const mode = await askListenMode();
-  if (!mode) return 0;
-
-  const pwResult = await getServerPasswordForMode(mode);
-  if (pwResult === undefined) return 0;
-  const { password: serverPassword, wasSaved: passwordWasSaved } = pwResult;
-
-  const host = mode === 'network' ? '0.0.0.0' : '127.0.0.1';
-  const models = vertexModelsToServerModels(vertexConfig);
-  const inferenceLogPath = getInferenceRequestLogPath();
-
-  const server = await startServer({
-    host,
-    port: port ?? DEFAULT_SERVER_PORT,
-    apiKey: 'vertex-local',
-    serverPassword,
-    catalog: createVertexModelCatalog(models),
-    backends: BACKENDS,
-    inferenceLogPath,
-    vertex: {
-      project: vertexConfig.project,
-      location: vertexConfig.location,
-    },
-  });
-
-  console.log('');
-  console.log(pc.bold(pc.green('Vertex gateway running')));
-  console.log(`  Anthropic:  http://127.0.0.1:${server.port}/anthropic`);
-  console.log(`  Models:     ${models.map(model => model.id).join(', ')}`);
-  console.log(`  Request log: ${inferenceLogPath}`);
-  if (mode === 'network') {
-    for (const { name, address } of getLocalIps()) {
-      console.log(`  Network (${name}):  http://${address}:${server.port}/anthropic`);
-    }
-    if (passwordWasSaved) {
-      console.log('  API key:    saved, rotate with `relay-ai server --setup`');
-    } else {
-      console.log(`  API key:    ${serverPassword}`);
-    }
-  } else {
-    console.log('  API key:    any non-empty value');
-  }
-  console.log(pc.dim('  Auth:       gcloud Application Default Credentials'));
-  console.log('');
-  printModelCatalog(models);
-  console.log(pc.dim('Press Ctrl+C to stop.'));
-
-  await waitForShutdown();
-  await server.close();
-  return 0;
 }
 
 export async function resolveServerUpstreamApiKey(): Promise<string | null> {
@@ -450,11 +364,9 @@ export async function resolveServerUpstreamApiKey(): Promise<string | null> {
 
 export async function runServerCommand(options: ServerCommandOptions = {}): Promise<number> {
   if (options.httpProxy) {
-    const hasGatewayOptions = options.vertex
-      || options.quick
+    const hasGatewayOptions = options.quick
       || options.listenMode !== undefined
       || options.providersMode !== undefined
-      || options.freeOnly !== undefined
       || options.maskGatewayIds !== undefined
       || options.password !== undefined;
     if (hasGatewayOptions) {
@@ -463,10 +375,6 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     }
     return runHttpProxyServerCommand(false, options.wsDiagnostics, options.port);
   }
-  if (options.vertex) {
-    return runVertexServerCommand(options.port);
-  }
-
   const apiKey = await resolveServerUpstreamApiKey();
   if (!apiKey) {
     p.log.error('No providers configured. Run `relay-ai providers add` or import, or set OPENCODE_API_KEY for Zen/Go.');
@@ -514,14 +422,6 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
         return 1;
       }
     }
-    if (runConfig.freeModelsOnly) {
-      models = filterServerModelsByFreeStatus(models);
-      if (models.length === 0) {
-        spinner.stop(pc.red('No free models matched the current server filters'));
-        p.log.error('Turn off free-models-only mode or add a provider with free models.');
-        return 1;
-      }
-    }
     if (runConfig.favoritesOnly) {
       p.log.info(
         `Favorites-only mode active — GET /anthropic/v1/models returns ${models.length} favorites.`,
@@ -540,9 +440,8 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
       ? ` — ${runConfig.exposedProviders.length} provider${runConfig.exposedProviders.length !== 1 ? 's' : ''}`
       : '';
     const favoritesNote = runConfig.favoritesOnly ? ' — favorites only' : '';
-    const freeNote = runConfig.freeModelsOnly ? ' — free models only' : '';
     const maskNote = runConfig.maskGatewayIds ? ' — discovery ids masked' : '';
-    spinner.stop(`Loaded ${models.length} models (${localCount} from registry providers)${filterNote}${favoritesNote}${freeNote}${maskNote}`);
+    spinner.stop(`Loaded ${models.length} models (${localCount} from registry providers)${filterNote}${favoritesNote}${maskNote}`);
     if (summary) p.log.info(summary);
   } catch (err) {
     spinner.stop(pc.red('Failed to load models'));
@@ -595,9 +494,6 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   }
   if (runConfig.favoritesOnly) {
     console.log(pc.dim('  Catalog:    favorite models only'));
-  }
-  if (runConfig.freeModelsOnly) {
-    console.log(pc.dim('  Pricing:    free/free-access models only'));
   }
   if (runConfig.maskGatewayIds) {
     console.log(pc.dim('  Discovery:  gateway ids masked for Claude Desktop / Cowork'));
