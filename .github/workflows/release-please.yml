@@ -14,13 +14,37 @@ permissions:
   id-token: write
 
 jobs:
-  release:
+  # Gate the whole release on a green typecheck + test + build BEFORE anything is
+  # tagged. release-please (in the `release` job) creates the git tag + GitHub
+  # release as a side effect of running, so it must not run until tests pass —
+  # otherwise a red test leaves a dangling tag/release with nothing published
+  # (this happened once: v1.0.1 was tagged, its publish failed on a test, and npm
+  # skipped from 1.0.0 straight to 1.0.2).
+  test:
     # Disabled until clodex lives in its own dedicated repo. Repository variables
     # are unset by default, so nothing activates in the relay-ai repository.
     if: vars.CLODEX_PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-latest
     steps:
-      - name: Create or update release PR
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      # Corepack reads the pinned pnpm version from package.json's packageManager field.
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+  release:
+    # Only runs after `test` succeeds; a skipped/failed `test` job skips this one,
+    # so no tag is ever created on a red build.
+    needs: test
+    if: vars.CLODEX_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create or update release PR / tag
         id: release
         # v4.4.0, pinned to the immutable commit behind the documented major release.
         uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38
@@ -28,8 +52,9 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      # Publish here because tags created with the default GITHUB_TOKEN do not
-      # trigger other workflows; a separate tag-push workflow would never run.
+      # Publish here (rather than a tag-push workflow) because tags created with the
+      # default GITHUB_TOKEN do not trigger other workflows. Tests already passed in
+      # the `test` job above, so these steps only rebuild dist and stage the tarball.
       - name: Check out released revision
         if: steps.release.outputs.release_created == 'true'
         uses: actions/checkout@v4
@@ -42,7 +67,6 @@ jobs:
         with:
           node-version: '24'
 
-      # Corepack reads the pinned pnpm version from package.json's packageManager field.
       - name: Enable corepack
         if: steps.release.outputs.release_created == 'true'
         run: corepack enable
@@ -50,14 +74,6 @@ jobs:
       - name: Install dependencies
         if: steps.release.outputs.release_created == 'true'
         run: pnpm install --frozen-lockfile
-
-      - name: Typecheck
-        if: steps.release.outputs.release_created == 'true'
-        run: pnpm typecheck
-
-      - name: Test
-        if: steps.release.outputs.release_created == 'true'
-        run: pnpm test
 
       - name: Build
         if: steps.release.outputs.release_created == 'true'
