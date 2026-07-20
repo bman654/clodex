@@ -8,6 +8,7 @@ import type { ProxyRoute } from '../proxy.js';
 import { buildHttpProxyRoutes, type HttpProxyRouteResult } from './routes.js';
 import { startHttpProxy, type HttpProxyHandle } from './server.js';
 import { ensureHttpProxyCaBundle } from './ca.js';
+import { removeServerRuntimeState, writeServerRuntimeState } from '../server-runtime.js';
 import { getInferenceRequestLogPath, getSessionLogPath } from '../trace-log.js';
 
 export interface LoadedHttpProxyRoutes extends HttpProxyRouteResult {
@@ -162,7 +163,19 @@ export async function runHttpProxyServerCommand(debug = false, webSocketDiagnost
   console.log(pc.dim('Use `/model <listed-name>` for a favorite or saved alias.'));
   console.log(pc.dim('Press Ctrl+C to stop.'));
 
+  // Advertise the running server for discovery (e.g. the clodex-claude wrapper).
+  // Only the standalone `clodex server` command writes this — the per-session
+  // proxy spawned by `clodex claude --proxy` never does.
+  writeServerRuntimeState({
+    mode: 'proxy',
+    port: handle.port,
+    pid: process.pid,
+    caPath: handle.caCertPath,
+    startedAt: new Date().toISOString(),
+  });
+
   await waitForShutdown();
+  removeServerRuntimeState();
   await handle.close();
   return 0;
 }

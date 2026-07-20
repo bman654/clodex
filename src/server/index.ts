@@ -47,6 +47,7 @@ import {
 } from './catalog-filter.js';
 import { selectServerProviders, type ServerProviderOption } from './provider-select.js';
 import { runHttpProxyServerCommand } from '../http-proxy/index.js';
+import { removeServerRuntimeState, writeServerRuntimeState } from '../server-runtime.js';
 import { getInferenceRequestLogPath, getSessionLogPath } from '../trace-log.js';
 
 export interface ServerRunConfig {
@@ -484,7 +485,16 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   printModelCatalog(models, gateway);
   console.log(pc.dim('Press Ctrl+C to stop.'));
 
+  // Advertise the running server for discovery (e.g. the clodex-claude wrapper).
+  writeServerRuntimeState({
+    mode: 'endpoint',
+    port: server.port,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  });
+
   await waitForShutdown();
+  removeServerRuntimeState();
   await server.close();
   return 0;
 }
