@@ -178,8 +178,18 @@ describe('selective HTTP proxy', () => {
       expect(receivedPath).toBe('/v1/messages?beta=true');
       expect(receivedAuth).toBe('Bearer subscription-oauth-token');
       expect(receivedBody.equals(body)).toBe(true);
-      const inferenceLog = readFileSync(inferenceLogPath, 'utf8');
-      const entries = inferenceLog.trim().split('\n').map(line => JSON.parse(line));
+      // The proxy flushes response_usage/response_completed log lines as it drains
+      // the upstream SSE stream, which can lag slightly behind the client socket
+      // close (reliable locally, flaky in CI). Wait for the terminal event before
+      // asserting instead of reading the log once right after close.
+      const logDeadline = Date.now() + 5000;
+      let inferenceLog = readFileSync(inferenceLogPath, 'utf8');
+      let entries = inferenceLog.trim().split('\n').map(line => JSON.parse(line));
+      while (!entries.some(entry => entry.event === 'response_completed') && Date.now() < logDeadline) {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        inferenceLog = readFileSync(inferenceLogPath, 'utf8');
+        entries = inferenceLog.trim().split('\n').map(line => JSON.parse(line));
+      }
       expect(entries[0]).toMatchObject({
         modelId: 'claude-sonnet-4-6',
         effort: 'high',
