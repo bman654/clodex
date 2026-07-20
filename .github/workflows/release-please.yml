@@ -9,6 +9,9 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
+  # Required for npm trusted publishing (OIDC): GitHub mints a per-run token
+  # that npm exchanges for publish rights — no npm secret exists anywhere.
+  id-token: write
 
 jobs:
   release:
@@ -38,7 +41,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
 
       # Corepack reads the pinned pnpm version from package.json's packageManager field.
       - name: Enable corepack
@@ -61,9 +63,9 @@ jobs:
         if: steps.release.outputs.release_created == 'true'
         run: pnpm build
 
-      # npm publish keeps the proven NODE_AUTH_TOKEN + registry-url auth flow.
+      # Auth is npm trusted publishing (OIDC) — configure this repo + this workflow
+      # filename as the package's Trusted Publisher on npmjs.com. Requires npm >= 11.5.1
+      # (Node 24's bundled npm qualifies). Provenance attestation is automatic.
       - name: Publish to npm
         if: steps.release.outputs.release_created == 'true'
         run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.CLODEX_NPM_TOKEN }}
