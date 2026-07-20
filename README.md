@@ -27,6 +27,26 @@ Both `clodex claude` and `clodex server` support two bridge modes. A mode flag a
 - **`--proxy`** (the default): a selective man-in-the-middle proxy for `api.anthropic.com`. Claude Code keeps its normal Anthropic login — Anthropic models work untouched — while models named `clodex:<provider-id>:<model-id>` (or their saved aliases) route to OpenAI. Switch with `/model clodex:openai-oauth:gpt-5.6-sol` or `/model sol` after patching.
 - **`--endpoint`**: clodex runs a local Anthropic-format gateway and launches Claude Code with `ANTHROPIC_BASE_URL` pointed at it. All traffic goes through the gateway. With favorites saved, the gateway is multi-route and Claude Code's `/model` menu lists your starting model plus favorites for live switching.
 
+In proxy mode, Claude Code keeps its own Anthropic credentials and only requests naming a `clodex:` model or alias are rerouted:
+
+```mermaid
+flowchart LR
+    CC["Claude Code<br/>(own Anthropic login)"] -->|"HTTPS via HTTPS_PROXY,<br/>trusts the clodex CA"| MITM["clodex MITM proxy"]
+    MITM --> DEC{"model is clodex:...<br/>or a saved alias?"}
+    DEC -->|"yes — translated request,<br/>clodex-managed OpenAI credentials"| OAI["OpenAI<br/>(OAuth: Responses WebSocket /<br/>API key: HTTPS)"]
+    DEC -->|"no — passed through untouched,<br/>Claude Code's Anthropic credentials ride along"| ANT["api.anthropic.com"]
+```
+
+In endpoint mode, no Anthropic account is involved — Claude Code is launched pointing at the local gateway with a local API key, and its startup `/v1/models` fetch powers the `/model` menu:
+
+```mermaid
+flowchart LR
+    CC["Claude Code<br/>(ANTHROPIC_BASE_URL + local API key,<br/>no Anthropic account credentials)"] -->|"Anthropic-format /v1/messages<br/>+ local API key"| GW["clodex gateway<br/>(:17645/anthropic)"]
+    CC -->|"GET /v1/models at startup"| GW
+    GW -->|"model catalog with context windows<br/>(feeds the /model menu)"| CC
+    GW -->|"translated request,<br/>clodex-managed OpenAI credentials"| OAI["OpenAI"]
+```
+
 ## CLI reference
 
 ### `clodex claude [options] [claude-flags]`
