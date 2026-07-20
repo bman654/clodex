@@ -66,7 +66,8 @@ Both `clodex claude` and `clodex server` support two bridge modes. A mode flag a
 - **`--proxy`** (the default): a selective man-in-the-middle proxy for `api.anthropic.com`. Claude Code keeps its normal Anthropic login — Anthropic models work untouched — while models named `clodex:<provider-id>:<model-id>` (or their saved aliases) route to OpenAI. Switch with `/model clodex:openai-oauth:gpt-5.6-sol` or `/model sol` after patching.
 - **`--endpoint`**: clodex runs a local Anthropic-format gateway and launches Claude Code with `ANTHROPIC_BASE_URL` pointed at it. All traffic goes through the gateway. With favorites saved, the gateway is multi-route and Claude Code's `/model` menu lists your starting model plus favorites for live switching.
 
-In proxy mode, Claude Code keeps its own Anthropic credentials and only requests naming a `clodex:` model or alias are rerouted:
+> [!TIP]
+> Proxy mode allows you to continue using your Claude Code plan: login to claude code like normal and the proxy will intercept requests and leave requests for Anthropic models untouched, while requests for your favorite OpenAI models will be re-routed to OpenAI.
 
 ```mermaid
 flowchart LR
@@ -86,7 +87,8 @@ flowchart LR
     GW -->|"translated request,<br/>clodex-managed OpenAI credentials"| OAI["OpenAI"]
 ```
 
-Using Claude Code's agents view or background agents? Ask your Claude Code agent to read [docs/background-agents.md](docs/background-agents.md) and set it up for you — one global `clodex server --proxy` plus the `clodex-claude` wrapper bin bridges every claude process automatically.
+> [!TIP]
+> Using Claude Code's agents view or background agents? Ask your Claude Code agent to read [docs/background-agents.md](docs/background-agents.md) and set it up for you — one global `clodex server --proxy` plus the `clodex-claude` wrapper bin bridges every claude process automatically.
 
 ## CLI reference
 
