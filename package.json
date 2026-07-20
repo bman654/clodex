@@ -70,5 +70,13 @@
   },
   "optionalDependencies": {
     "@napi-rs/keyring": "1.3.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bman654/clodex.git"
+  },
+  "homepage": "https://github.com/bman654/clodex#readme",
+  "bugs": {
+    "url": "https://github.com/bman654/clodex/issues"
   }
 }

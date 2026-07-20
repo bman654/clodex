@@ -63,9 +63,16 @@ jobs:
         if: steps.release.outputs.release_created == 'true'
         run: pnpm build
 
-      # Auth is npm trusted publishing (OIDC) — configure this repo + this workflow
-      # filename as the package's Trusted Publisher on npmjs.com. Requires npm >= 11.5.1
-      # (Node 24's bundled npm qualifies). Provenance attestation is automatic.
-      - name: Publish to npm
+      # Staged publishing: CI can only STAGE the release — nothing goes live until a
+      # maintainer approves it with 2FA (npmjs.com "Staged Packages" tab, or
+      # `npm stage approve <stage-id>`). This blocks any publish-straight-from-CI
+      # compromise. Auth is npm trusted publishing (OIDC) — configure this repo +
+      # this workflow filename as the package's Trusted Publisher on npmjs.com.
+      # `npm stage` requires npm >= 11.15.0, newer than Node 24's bundled npm.
+      - name: Upgrade npm for staged publishing
         if: steps.release.outputs.release_created == 'true'
-        run: npm publish
+        run: npm install -g npm@latest && npm --version
+
+      - name: Stage publish to npm
+        if: steps.release.outputs.release_created == 'true'
+        run: npm stage publish
