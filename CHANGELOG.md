@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.3](https://github.com/bman654/clodex/compare/v1.0.2...v1.0.3) (2026-07-20)
+
+
+### Bug Fixes
+
+* **adapter:** strip null/empty-array filler from optional tool params ([105dde5](https://github.com/bman654/clodex/commit/105dde5ef6b62e72bdddaffcf2109fa1ab13c1ab))
+
 ## [1.0.2](https://github.com/bman654/clodex/compare/v1.0.1...v1.0.2) (2026-07-20)
 
 
