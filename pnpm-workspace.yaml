@@ -1,0 +1,4 @@
+# pnpm settings (single-package repo — this file is pnpm 10's config location).
+# Supply-chain guard: refuse to install any direct or transitive dependency
+# version published less than 10 days ago (value is in MINUTES: 10d = 14400).
+minimumReleaseAge: 14400

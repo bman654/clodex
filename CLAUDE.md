@@ -6,11 +6,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Release workflow
 
-Publishing is automated by GitHub Actions (`.github/workflows/publish.yml`): **pushing a `v*` tag** runs typecheck + tests + build, then `npm publish` (auth via the `CLODEX_NPM_TOKEN` repo secret) and creates a GitHub Release from the matching `CHANGELOG.md` section. **Do NOT run `npm publish` locally.**
+Publishing is automated by GitHub Actions (`.github/workflows/publish.yml`): **pushing a `v*` tag** runs pnpm-driven typecheck + tests + build on Node 24, then `npm publish` (auth via the `CLODEX_NPM_TOKEN` repo secret) and creates a GitHub Release from the matching `CHANGELOG.md` section. **Do NOT run `npm publish` locally.**
+
+The publish job is guarded by `if: vars.CLODEX_PUBLISH_ENABLED == 'true'` and is therefore **skipped everywhere by default** — this branch still lives in the relay-ai repo, and a `v*` tag must not publish from here. After migrating clodex to its own dedicated repo, enable publishing there: set repository variable `CLODEX_PUBLISH_ENABLED=true` and add the `CLODEX_NPM_TOKEN` secret in the new repo's settings.
 
 ```bash
 # 1. Land all code changes and a CHANGELOG.md "## [x.y.z]" section first (committed).
-npm version patch --no-git-tag-version   # bump package.json + package-lock
+npm version patch --no-git-tag-version   # bump package.json (only file carrying the version)
 git add -A && git commit -m "release: vX.Y.Z"
 git tag vX.Y.Z
 git push --follow-tags
@@ -18,17 +20,21 @@ git push --follow-tags
 
 `package.json` is the single source of truth for the version (`src/constants.ts::VERSION` reads `pkg.version`). Never hardcode a version string anywhere. `dist/` is gitignored — `prepublishOnly` and the publish CI rebuild it; never commit build output.
 
+## Toolchain
+
+Dev package manager is **pnpm**, pinned via `packageManager: "pnpm@10.34.5"` in package.json and activated with corepack (`corepack enable`). Dependencies are **exact-pinned** (no `^`/`~`). `pnpm-workspace.yaml` (pnpm 10's settings file) sets `minimumReleaseAge: 14400` — no direct or transitive dependency version younger than 10 days (value in minutes) can be resolved; already-locked versions install fine, but fresh resolution of a too-new version fails with `ERR_PNPM_NO_MATURE_MATCHING_VERSION`. End users still install with `npm install -g clodex` — the dev PM does not affect consumers.
+
 ## Commands
 
 ```bash
-npm run build       # compile TypeScript → dist/cli.js (tsup, ESM, shebang injected)
-npm test            # vitest
-npm run typecheck   # tsc --noEmit
-npm run dev         # watch mode
+pnpm build          # compile TypeScript → dist/cli.js (tsup, ESM, shebang injected)
+pnpm test           # vitest
+pnpm typecheck      # tsc --noEmit
+pnpm dev            # watch mode
 
-npx vitest run tests/patcher.test.ts    # single test file
+pnpm vitest run tests/patcher.test.ts   # single test file
 
-# Manual testing (after npm run build; npm link once)
+# Manual testing (after pnpm build; npm link once)
 clodex --help
 clodex claude --dry-run     # full wizard, preview instead of launch, no writes
 clodex claude --trace       # debug logs to ~/.clodex/logs/

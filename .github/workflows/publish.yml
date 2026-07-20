@@ -7,6 +7,10 @@ on:
 
 jobs:
   publish:
+    # Disabled until clodex lives in its own dedicated repo: repository variables are
+    # unset by default, so this job is skipped everywhere until CLODEX_PUBLISH_ENABLED
+    # is set to 'true' in the new repo's Settings → Variables.
+    if: vars.CLODEX_PUBLISH_ENABLED == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write # required to create the GitHub Release
@@ -15,16 +19,20 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - run: npm ci
+      # corepack reads the pinned pnpm version from package.json's packageManager field
+      - run: corepack enable
+
+      - run: pnpm install --frozen-lockfile
 
       # Gate the release on a green test + type-check + build before anything is published.
-      - run: npm run typecheck
-      - run: npm test
-      - run: npm run build
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
 
+      # npm publish (not pnpm) keeps the proven NODE_AUTH_TOKEN + registry-url auth flow.
       - run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.CLODEX_NPM_TOKEN }}

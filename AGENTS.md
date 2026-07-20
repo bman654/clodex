@@ -9,10 +9,10 @@ The complete architecture guide, hard-won constraints, release workflow, and tes
 ## Quick reference
 
 ```bash
-npm run build       # compile TypeScript → dist/cli.js (tsup, ESM)
-npm test            # vitest
-npm run typecheck   # tsc --noEmit
-npx vitest run tests/patcher.test.ts   # single test file
+pnpm build          # compile TypeScript → dist/cli.js (tsup, ESM)
+pnpm test           # vitest
+pnpm typecheck      # tsc --noEmit
+pnpm vitest run tests/patcher.test.ts   # single test file
 ```
 
 ## Non-negotiables (details in CLAUDE.md)

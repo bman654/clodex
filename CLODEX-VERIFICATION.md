@@ -10,7 +10,7 @@ real commands (including `claude -p`) but NEVER add them to the automated test s
 
 - A1. `package.json` name is `clodex` (unscoped), version `0.1.0`, bin exposes only
   `clodex`.
-- A2. `node dist/cli.js --help` (fresh `npm run build`) shows clodex branding; no
+- A2. `node dist/cli.js --help` (fresh `pnpm build`) shows clodex branding; no
   occurrence of `relay-ai`/`relay:` in any user-visible help/banner output.
 - A3. Config home is `~/.clodex/` with `CLODEX_HOME` override; no `RELAY_AI_*` env
   vars remain in src (grep clean, excluding migration code reading legacy paths).
@@ -53,7 +53,7 @@ real commands (including `claude -p`) but NEVER add them to the automated test s
 
 ## C. Preserved functionality
 
-- C1. `npm run typecheck`, `npm test`, and `npm run build` all pass cleanly.
+- C1. `pnpm typecheck`, `pnpm test`, and `pnpm build` all pass cleanly (pnpm via corepack).
 - C2. `clodex claude --dry-run` completes a simulated launch (endpoint mode) without
   writing state.
 - C3. Endpoint mode: `clodex server` starts; `GET /v1/models` (or `/models`) lists the
