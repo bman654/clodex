@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.4](https://github.com/bman654/clodex/compare/v1.0.3...v1.0.4) (2026-07-20)
+
+
+### Bug Fixes
+
+* **proxy:** keepalive pings while buffering tool-call args to survive client idle abort ([ede161e](https://github.com/bman654/clodex/commit/ede161e9ecbb9e11a01c713bdd5ceafd51203ebf))
+
 ## [1.0.3](https://github.com/bman654/clodex/compare/v1.0.2...v1.0.3) (2026-07-20)
 
 
