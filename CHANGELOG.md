@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.1](https://github.com/bman654/clodex/compare/v0.1.0...v0.1.1) (2026-07-20)
+
+
+### Features
+
+* **patch:** make short aliases the model identity and use real model labels ([1eda5f1](https://github.com/bman654/clodex/commit/1eda5f17468b9d71018c39e30f309f12e9faa444))
+* **server:** multi-server discovery, --no-discovery opt-out, endpoint alias resolution ([cfe91f5](https://github.com/bman654/clodex/commit/cfe91f5ed08af0ebc36d150e2d8d67d44309d549))
+
 ## [0.1.0] - 2026-07-19
 
 Initial release of **clodex**, a fork of the original relay-ai project, heavily modified and streamlined to do one thing: bridge Claude Code to OpenAI models (OpenAI API key and ChatGPT/Codex-plan OAuth). The full relay-ai commit history is preserved in this repository.
