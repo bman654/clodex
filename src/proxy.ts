@@ -49,6 +49,18 @@ import { resolveContextWindow } from './context-window.js';
 
 type ProxyLog = (message: string | (() => string)) => void;
 
+// Claude Code aborts a streaming response after ~180s without a single SSE byte.
+// When an OpenAI model streams a large tool-call argument, the SDK delivers
+// thousands of `tool-input-delta` parts that Relay must buffer (they are only
+// flushed as one `input_json_delta` once the call completes so the input can be
+// sanitized) — so the client sees dead air and disconnects mid-argument. While
+// upstream is still actively delivering parts but no real output has been
+// written, emit an Anthropic `ping` SSE event to keep the client's read-idle
+// timer warm. Gated on recent upstream activity so a genuine upstream stall is
+// still surfaced by the SDK idle watchdog rather than masked by pings forever.
+const STREAM_KEEPALIVE_INTERVAL_MS = 20_000;
+const STREAM_KEEPALIVE_PING = 'event: ping\ndata: {"type":"ping"}\n\n';
+
 function createTranslationLifecycle(
   logPath: string | undefined,
   requestId: string | undefined,
@@ -512,6 +524,11 @@ export function startProxyCatalog(
           });
           translationLifecycle?.dispatched();
           if (clientWantsStream) {
+            // Internal override (primarily a test seam / operational tuning knob).
+            const keepAliveMs =
+              Number(process.env.CLODEX_STREAM_KEEPALIVE_INTERVAL_MS) || STREAM_KEEPALIVE_INTERVAL_MS;
+            let lastDownstreamWriteAt = Date.now();
+            let lastUpstreamPartAt = Date.now();
             const writeStreamChunk = (chunk: string) => {
               translationLifecycle?.onOutput(chunk);
               if (!res.headersSent) {
@@ -521,23 +538,49 @@ export function startProxyCatalog(
                   'Connection': 'keep-alive',
                 });
               }
+              lastDownstreamWriteAt = Date.now();
               res.write(chunk);
             };
-            await withResponsesWebSocketDiagnosticContext(
-              { requestId: relayRequestId, claudeSessionId },
-              () => streamAnthropicResponse(
-                model,
-                params,
-                originalModel,
-                writeStreamChunk,
-                plog,
-                {
-                  onPart: partType => translationLifecycle?.onPart(partType),
-                  initialInputTokens: estimateAnthropicInputTokens(anthropicBody),
-                  abortSignal: clientAbort.signal,
-                },
-              ),
-            );
+            // Heartbeat: while upstream keeps delivering parts but nothing has
+            // been written downstream for a full interval (a large tool-call
+            // argument being buffered), emit a ping so Claude Code's ~180s
+            // read-idle timeout does not fire mid-argument. Deliberately does
+            // NOT go through translationLifecycle.onOutput so diagnostic
+            // outputIdleMs still reflects the real buffering gap.
+            const keepAlive = setInterval(() => {
+              if (res.writableEnded || !res.headersSent) return;
+              const now = Date.now();
+              const outputIdleMs = now - lastDownstreamWriteAt;
+              const upstreamIdleMs = now - lastUpstreamPartAt;
+              if (outputIdleMs >= keepAliveMs && upstreamIdleMs < keepAliveMs) {
+                lastDownstreamWriteAt = now;
+                res.write(STREAM_KEEPALIVE_PING);
+                plog(() => `stream keepalive ping: output idle ${outputIdleMs}ms, upstream active (${upstreamIdleMs}ms since last part)`);
+              }
+            }, keepAliveMs);
+            keepAlive.unref();
+            try {
+              await withResponsesWebSocketDiagnosticContext(
+                { requestId: relayRequestId, claudeSessionId },
+                () => streamAnthropicResponse(
+                  model,
+                  params,
+                  originalModel,
+                  writeStreamChunk,
+                  plog,
+                  {
+                    onPart: partType => {
+                      lastUpstreamPartAt = Date.now();
+                      translationLifecycle?.onPart(partType);
+                    },
+                    initialInputTokens: estimateAnthropicInputTokens(anthropicBody),
+                    abortSignal: clientAbort.signal,
+                  },
+                ),
+              );
+            } finally {
+              clearInterval(keepAlive);
+            }
             translationLifecycle?.complete();
             if (!res.headersSent) writeStreamChunk('');
             res.end();

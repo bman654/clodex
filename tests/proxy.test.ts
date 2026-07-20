@@ -621,6 +621,99 @@ describe('SDK translated error logging', () => {
     }
   }, 20_000);
 
+  it('emits keepalive pings while a tool-call argument is buffered with no downstream output', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-sdk-keepalive-'));
+    const inferenceLogPath = join(dir, 'inference.jsonl');
+    // A tool call whose arguments stream as many small deltas over ~800ms. The
+    // adapter buffers every tool-input-delta and only flushes input_json_delta at
+    // completion, so nothing is written downstream during that window — the exact
+    // shape that tripped Claude Code's ~180s read-idle abort in production.
+    const chunk = (delta: unknown, finish: string | null) =>
+      `data: ${JSON.stringify({
+        id: 'c', object: 'chat.completion.chunk', created: 1, model: 'translated-model',
+        choices: [{ index: 0, delta, finish_reason: finish }],
+      })}\n\n`;
+    const upstream = http.createServer((req, res) => {
+      req.resume();
+      req.once('end', () => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.flushHeaders();
+        res.write(chunk(
+          { role: 'assistant', tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'myTool', arguments: '{"v":"' } }] },
+          null,
+        ));
+        let emitted = 0;
+        const argTimer = setInterval(() => {
+          emitted += 1;
+          if (emitted <= 32) {
+            res.write(chunk({ tool_calls: [{ index: 0, function: { arguments: 'a' } }] }, null));
+            return;
+          }
+          clearInterval(argTimer);
+          res.write(chunk({ tool_calls: [{ index: 0, function: { arguments: '"}' } }] }, null));
+          res.write(chunk({}, 'tool_calls'));
+          res.write('data: [DONE]\n\n');
+          res.end();
+        }, 25);
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstream.once('error', reject);
+      upstream.listen(0, '127.0.0.1', () => resolve());
+    });
+    const address = upstream.address();
+    if (!address || typeof address === 'string') throw new Error('test upstream did not bind');
+
+    const route: ProxyRoute = {
+      aliasId: 'clodex:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: `http://127.0.0.1:${address.port}/v1`,
+      providerId: 'test-provider',
+    };
+    const prevKeepAlive = process.env.CLODEX_STREAM_KEEPALIVE_INTERVAL_MS;
+    process.env.CLODEX_STREAM_KEEPALIVE_INTERVAL_MS = '100';
+    const handle = await startProxyCatalog([route], route.aliasId, false, inferenceLogPath);
+
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'call a tool with a big argument' }],
+        stream: true,
+      }, 'req-keepalive-1');
+
+      expect(res.status).toBe(200);
+      // At least one ping must have been injected during the buffering window.
+      const pingCount = res.body.split('event: ping').length - 1;
+      expect(pingCount).toBeGreaterThanOrEqual(1);
+      // The real tool input must still flush intact once the call completes, and
+      // pings must not corrupt the surrounding SSE framing.
+      expect(res.body).toContain('input_json_delta');
+      expect(res.body).toContain('event: message_stop');
+      // Pings are written to the wire but deliberately bypass onOutput, so they
+      // are NOT counted in translation accounting: every real SSE frame carries
+      // one `event:` line, and the surplus over translatedChunks is exactly the
+      // pings — keeping diagnostic outputIdleMs honest about real buffering.
+      const totalEventFrames = res.body.split('event: ').length - 1;
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const completed = entries.find(entry => entry.event === 'translation_completed');
+      expect(completed?.lastPartType).toBe('finish');
+      expect(totalEventFrames - completed.translatedChunks).toBe(pingCount);
+    } finally {
+      if (prevKeepAlive === undefined) delete process.env.CLODEX_STREAM_KEEPALIVE_INTERVAL_MS;
+      else process.env.CLODEX_STREAM_KEEPALIVE_INTERVAL_MS = prevKeepAlive;
+      handle.close();
+      upstream.closeAllConnections();
+      await new Promise<void>(resolve => upstream.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it('logs dispatch and completion for a non-streaming translated request', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-sdk-nonstream-'));
     const inferenceLogPath = join(dir, 'inference.jsonl');
