@@ -46,16 +46,7 @@ describe('parseArgs', () => {
       command: 'claude',
       bridgeMode: 'endpoint',
     });
-    // --http-proxy stays as an alias for --proxy
-    expect(parseArgs(['claude', '--http-proxy'])).toMatchObject({
-      command: 'claude',
-      bridgeMode: 'proxy',
-    });
     expect(parseArgs(['server', '--proxy'])).toMatchObject({
-      command: 'server',
-      bridgeMode: 'proxy',
-    });
-    expect(parseArgs(['server', '--http-proxy'])).toMatchObject({
       command: 'server',
       bridgeMode: 'proxy',
     });
@@ -63,9 +54,42 @@ describe('parseArgs', () => {
       command: 'server',
       bridgeMode: 'endpoint',
     });
-    // bare commands leave bridgeMode undefined so the remembered mode applies
+    // bare commands leave bridgeMode undefined so the saved default applies
     expect(parseArgs(['claude']).bridgeMode).toBeUndefined();
     expect(parseArgs(['server']).bridgeMode).toBeUndefined();
+  });
+
+  it('rejects the removed --http-proxy alias', () => {
+    // claude passes unknown flags through to Claude Code rather than erroring
+    expect(parseArgs(['claude', '--http-proxy'])).toMatchObject({
+      command: 'claude',
+      claudeArgs: ['--http-proxy'],
+    });
+    expect(parseArgs(['claude', '--http-proxy']).bridgeMode).toBeUndefined();
+    expect(parseArgs(['server', '--http-proxy'])).toMatchObject({
+      error: 'Unknown server option: --http-proxy',
+    });
+  });
+
+  it('parses --save-mode only together with a bridge-mode flag', () => {
+    expect(parseArgs(['claude', '--proxy', '--save-mode'])).toMatchObject({
+      command: 'claude',
+      bridgeMode: 'proxy',
+      saveBridgeMode: true,
+    });
+    expect(parseArgs(['server', '--endpoint', '--save-mode'])).toMatchObject({
+      command: 'server',
+      bridgeMode: 'endpoint',
+      saveBridgeMode: true,
+    });
+    // order does not matter
+    expect(parseArgs(['server', '--save-mode', '--proxy'])).toMatchObject({
+      bridgeMode: 'proxy',
+      saveBridgeMode: true,
+    });
+    // --save-mode without a mode flag is an error with guidance
+    expect(parseArgs(['claude', '--save-mode']).error).toContain('--endpoint or --proxy');
+    expect(parseArgs(['server', '--save-mode']).error).toContain('--endpoint or --proxy');
   });
 
   it('parses claude dry-run, trace, and passthrough flags', () => {
@@ -178,8 +202,17 @@ describe('help text', () => {
     expect(root).toContain('clodex providers');
     expect(root).toContain('--endpoint');
     expect(root).toContain('--proxy');
+    expect(root).toContain('--save-mode');
+    expect(claudeHelpText()).toContain('--save-mode');
+    expect(serverHelpText()).toContain('--save-mode');
     expect(claudeHelpText()).toContain('clodex:<provider-id>:<model-id>');
     expect(patchHelpText()).toContain('--restore');
+  });
+
+  it('no longer mentions the removed --http-proxy alias', () => {
+    for (const help of helps) {
+      expect(help).not.toContain('--http-proxy');
+    }
   });
 });
 

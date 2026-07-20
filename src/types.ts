@@ -105,8 +105,10 @@ export interface ParsedArgs {
   launchProvider?: string;
   /** clodex boot model (claude); not passed to child CLI */
   launchModel?: string;
-  /** Explicit bridge mode from --endpoint / --proxy (--http-proxy is an alias of --proxy). */
+  /** Explicit bridge mode from --endpoint / --proxy — applies to this run only. */
   bridgeMode?: BridgeMode;
+  /** --save-mode: persist the explicit bridge mode as this command's default. */
+  saveBridgeMode?: boolean;
   /** Start `clodex server` from saved/default settings without prompts. */
   serverQuick?: boolean;
   /** One-run listen override for `clodex server`. */

@@ -53,7 +53,7 @@ import {
   startConfiguredHttpProxy,
 } from './http-proxy/index.js';
 import { runPatchCommand, runLaunchPatchCheck } from './patcher.js';
-const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--trace', '--endpoint', '--proxy', '--http-proxy', '--help', '-h', '--version', '-v']);
+const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--trace', '--endpoint', '--proxy', '--save-mode', '--help', '-h', '--version', '-v']);
 const CLODEX_LAUNCH_FLAGS = new Set(['--provider', '--model']);
 
 function parseClodexLaunchFlag(
@@ -154,11 +154,18 @@ function consumeBridgeModeFlag(arg: string, parsed: ParsedArgs): boolean {
     parsed.bridgeMode = 'endpoint';
     return true;
   }
-  if (arg === '--proxy' || arg === '--http-proxy') {
+  if (arg === '--proxy') {
     parsed.bridgeMode = 'proxy';
     return true;
   }
   return false;
+}
+
+/** --save-mode is only meaningful together with an explicit --endpoint/--proxy. */
+function validateSaveModeFlag(parsed: ParsedArgs): void {
+  if (parsed.saveBridgeMode && !parsed.bridgeMode && !parsed.error) {
+    parsed.error = '--save-mode saves a bridge mode as this command\'s default — combine it with --endpoint or --proxy (e.g. `clodex claude --proxy --save-mode`)';
+  }
 }
 
 export function parseArgs(args: string[]): ParsedArgs {
@@ -180,6 +187,7 @@ export function parseArgs(args: string[]): ParsedArgs {
       if (arg === '--help' || arg === '-h') parsed.showHelp = true;
       else if (arg === '--version' || arg === '-v') parsed.showVersion = true;
       else if (consumeBridgeModeFlag(arg, parsed)) continue;
+      else if (arg === '--save-mode') parsed.saveBridgeMode = true;
       else if (arg === '--ws-diagnostics') parsed.serverWsDiagnostics = true;
       else if (arg === '--quick' || arg === '--saved') parsed.serverQuick = true;
       else if (arg === '--mask-gateway-ids') parsed.serverMaskGatewayIds = true;
@@ -220,6 +228,7 @@ export function parseArgs(args: string[]): ParsedArgs {
       }
       else if (!parsed.error) parsed.error = `Unknown server option: ${arg}`;
     }
+    validateSaveModeFlag(parsed);
     return parsed;
   }
 
@@ -301,10 +310,12 @@ export function parseArgs(args: string[]): ParsedArgs {
     if (arg === '--dry-run') parsed.dryRun = true;
     if (arg === '--trace') parsed.trace = true;
     consumeBridgeModeFlag(arg, parsed);
+    if (arg === '--save-mode') parsed.saveBridgeMode = true;
     if (arg === '--help' || arg === '-h') parsed.showHelp = true;
     if (arg === '--version' || arg === '-v') parsed.showVersion = true;
   }
 
+  validateSaveModeFlag(parsed);
   return parsed;
 }
 
@@ -335,12 +346,14 @@ ${pc.bold('Commands:')}
   providers   Add or sign in to your OpenAI providers
 
 ${pc.bold('Bridge modes (claude and server):')}
-  --endpoint  Local Anthropic-format gateway; Claude Code launches with
-              ANTHROPIC_BASE_URL pointed at it (default on first run)
-  --proxy     Selective MITM of api.anthropic.com; Claude Code keeps its
-              normal Anthropic auth, clodex: models route to OpenAI
-              (--http-proxy is an alias)
-  Using either flag remembers it as that command's default.
+  --endpoint   Local Anthropic-format gateway; Claude Code launches with
+               ANTHROPIC_BASE_URL pointed at it
+  --proxy      Selective MITM of api.anthropic.com; Claude Code keeps its
+               normal Anthropic auth, clodex: models route to OpenAI
+               (default when nothing is saved)
+  --save-mode  Persist the mode given by --endpoint/--proxy as that
+               command's default. Without --save-mode a mode flag applies
+               to that run only.
 
 ${pc.bold('Examples:')}
   clodex claude
@@ -362,9 +375,10 @@ ${pc.bold('Usage:')}
   clodex claude --version
 
 ${pc.bold('Options:')}
-  --endpoint   Endpoint bridge mode: local gateway + ANTHROPIC_BASE_URL (persisted)
-  --proxy      Proxy bridge mode: keep Claude Code's Anthropic auth; route
-               clodex: models to OpenAI (--http-proxy is an alias; persisted)
+  --endpoint   Endpoint bridge mode for this run: local gateway + ANTHROPIC_BASE_URL
+  --proxy      Proxy bridge mode for this run: keep Claude Code's Anthropic auth;
+               route clodex: models to OpenAI (default when nothing is saved)
+  --save-mode  With --endpoint/--proxy: save that mode as the claude default
   --dry-run    Run the wizard but show a preview instead of launching Claude Code
   --trace      Write debug logs to ~/.clodex/logs/ and show errors on exit
   --provider   Boot provider id (skip wizard when paired with --model or in print mode)
@@ -399,7 +413,8 @@ ${pc.bold('Examples:')}
   clodex claude --resume abc-123
   clodex claude --dry-run -c
   clodex claude --trace --resume abc-123
-  clodex claude --proxy
+  clodex claude --endpoint
+  clodex claude --endpoint --save-mode
   clodex claude --provider openai-oauth --model gpt-5.6-sol
   clodex claude -- --print "hello"
   clodex claude -- --dangerously-skip-permissions`;
@@ -418,9 +433,10 @@ ${pc.bold('Usage:')}
   clodex server --version
 
 ${pc.bold('Options:')}
-  --endpoint                   Endpoint mode: Anthropic-format HTTP gateway (persisted)
-  --proxy                      Proxy mode: selective api.anthropic.com MITM proxy
-                               (--http-proxy is an alias; persisted; local only)
+  --endpoint                   Endpoint mode for this run: Anthropic-format HTTP gateway
+  --proxy                      Proxy mode for this run: selective api.anthropic.com
+                               MITM proxy (default when nothing is saved; local only)
+  --save-mode                  With --endpoint/--proxy: save that mode as the server default
   --quick, --saved             Start immediately from saved/default settings
   --listen local|network       One-run listen mode override
   --providers all|favorites|id1,id2
@@ -967,7 +983,9 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     return 1;
   }
 
-  const bridgeMode = resolveBridgeMode('claude', parsed.bridgeMode, { persist: !dryRun });
+  const bridgeMode = resolveBridgeMode('claude', parsed.bridgeMode, {
+    persist: Boolean(parsed.saveBridgeMode) && !dryRun,
+  });
 
   // Launch-time patch check: prompt on TTY, notice otherwise. Never blocks the launch.
   await runLaunchPatchCheck({ agentStdout, dryRun });
@@ -1336,7 +1354,9 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       printHelp(serverHelpText());
       return 0;
     }
-    const bridgeMode = resolveBridgeMode('server', parsed.bridgeMode);
+    const bridgeMode = resolveBridgeMode('server', parsed.bridgeMode, {
+      persist: Boolean(parsed.saveBridgeMode),
+    });
     return runServerCommand({
       httpProxy: bridgeMode === 'proxy',
       quick: parsed.serverQuick,

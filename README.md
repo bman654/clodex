@@ -22,10 +22,10 @@ clodex claude                  # 5. launch Claude Code on an OpenAI model
 
 ## Bridge modes
 
-Both `clodex claude` and `clodex server` support two bridge modes. Using `--endpoint` or `--proxy` once is remembered as that command's default (per command).
+Both `clodex claude` and `clodex server` support two bridge modes. A mode flag applies to **that run only**; to change a command's default, add `--save-mode` (e.g. `clodex claude --endpoint --save-mode`). With no flag and nothing saved, both commands default to **proxy** mode, which works with your existing Claude auth.
 
-- **`--endpoint`** (default on first run): clodex runs a local Anthropic-format gateway and launches Claude Code with `ANTHROPIC_BASE_URL` pointed at it. All traffic goes through the gateway. With favorites saved, the gateway is multi-route and Claude Code's `/model` menu lists your starting model plus favorites for live switching.
-- **`--proxy`** (`--http-proxy` is an alias): a selective man-in-the-middle proxy for `api.anthropic.com`. Claude Code keeps its normal Anthropic login — Anthropic models work untouched — while models named `clodex:<provider-id>:<model-id>` (or their saved aliases) route to OpenAI. Switch with `/model clodex:openai-oauth:gpt-5.6-sol` or `/model sol` after patching.
+- **`--proxy`** (the default): a selective man-in-the-middle proxy for `api.anthropic.com`. Claude Code keeps its normal Anthropic login — Anthropic models work untouched — while models named `clodex:<provider-id>:<model-id>` (or their saved aliases) route to OpenAI. Switch with `/model clodex:openai-oauth:gpt-5.6-sol` or `/model sol` after patching.
+- **`--endpoint`**: clodex runs a local Anthropic-format gateway and launches Claude Code with `ANTHROPIC_BASE_URL` pointed at it. All traffic goes through the gateway. With favorites saved, the gateway is multi-route and Claude Code's `/model` menu lists your starting model plus favorites for live switching.
 
 ## CLI reference
 
@@ -35,9 +35,10 @@ Launch Claude Code bridged to OpenAI models. Unrecognized flags (and everything 
 
 | Flag | Effect |
 | --- | --- |
-| `--endpoint` | Endpoint bridge mode: local gateway + `ANTHROPIC_BASE_URL` (persisted as default) |
-| `--proxy` / `--http-proxy` | Proxy bridge mode: keep Claude Code's Anthropic auth; `clodex:` models route to OpenAI (persisted as default) |
-| `--dry-run` | Run the wizard but print a launch preview instead of launching |
+| `--endpoint` | Endpoint bridge mode for this run: local gateway + `ANTHROPIC_BASE_URL` |
+| `--proxy` | Proxy bridge mode for this run: keep Claude Code's Anthropic auth; `clodex:` models route to OpenAI (default when nothing is saved) |
+| `--save-mode` | With `--endpoint`/`--proxy`: save that mode as the `claude` default |
+| `--dry-run` | Run the wizard but print a launch preview instead of launching (never persists anything) |
 | `--trace` | Write debug logs to `~/.clodex/logs/` and show errors on exit |
 | `--provider <id>` | Boot provider id (`openai` or `openai-oauth`); with `--model`, skips the wizard |
 | `--model <id>` | Boot model id; with `--provider`, skips the wizard |
@@ -54,8 +55,9 @@ Foreground gateway, same two bridge modes, no Claude Code launch — point any A
 
 | Flag | Effect |
 | --- | --- |
-| `--endpoint` | Endpoint mode: Anthropic-format HTTP gateway (persisted as default) |
-| `--proxy` / `--http-proxy` | Proxy mode: selective `api.anthropic.com` MITM proxy (persisted; local only) |
+| `--endpoint` | Endpoint mode for this run: Anthropic-format HTTP gateway |
+| `--proxy` | Proxy mode for this run: selective `api.anthropic.com` MITM proxy (default when nothing is saved; local only) |
+| `--save-mode` | With `--endpoint`/`--proxy`: save that mode as the `server` default |
 | `--quick`, `--saved` | Start immediately from saved/default settings, no prompts |
 | `--listen local\|network` | One-run listen mode override |
 | `--providers all\|favorites\|id1,id2` | One-run provider catalog override |

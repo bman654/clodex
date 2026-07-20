@@ -140,28 +140,36 @@ describe('dotfolder config', () => {
 });
 
 describe('bridge-mode memory', () => {
-  it('defaults both commands to endpoint mode', () => {
-    expect(resolveBridgeMode('claude', undefined)).toBe('endpoint');
-    expect(resolveBridgeMode('server', undefined)).toBe('endpoint');
-  });
-
-  it('persists an explicit mode as the new default per command', () => {
-    expect(resolveBridgeMode('claude', 'proxy')).toBe('proxy');
+  it('defaults both commands to proxy mode when nothing is saved', () => {
     expect(resolveBridgeMode('claude', undefined)).toBe('proxy');
-    // server is remembered independently
-    expect(resolveBridgeMode('server', undefined)).toBe('endpoint');
-
-    expect(resolveBridgeMode('server', 'proxy')).toBe('proxy');
-    expect(resolveBridgeMode('server', undefined)).toBe('proxy');
-
-    expect(resolveBridgeMode('claude', 'endpoint')).toBe('endpoint');
-    expect(resolveBridgeMode('claude', undefined)).toBe('endpoint');
     expect(resolveBridgeMode('server', undefined)).toBe('proxy');
   });
 
-  it('does not persist when persist is false', () => {
-    expect(resolveBridgeMode('claude', 'proxy', { persist: false })).toBe('proxy');
+  it('never auto-persists an explicit mode flag', () => {
+    expect(resolveBridgeMode('claude', 'endpoint')).toBe('endpoint');
+    expect(resolveBridgeMode('claude', undefined)).toBe('proxy');
+
+    expect(resolveBridgeMode('server', 'endpoint', { persist: false })).toBe('endpoint');
+    expect(resolveBridgeMode('server', undefined)).toBe('proxy');
+  });
+
+  it('persists only with an explicit save gesture (--save-mode), per command', () => {
+    expect(resolveBridgeMode('claude', 'endpoint', { persist: true })).toBe('endpoint');
     expect(resolveBridgeMode('claude', undefined)).toBe('endpoint');
+    // server is remembered independently — still the proxy default
+    expect(resolveBridgeMode('server', undefined)).toBe('proxy');
+
+    expect(resolveBridgeMode('server', 'endpoint', { persist: true })).toBe('endpoint');
+    expect(resolveBridgeMode('server', undefined)).toBe('endpoint');
+
+    // saved default is overridable for one run without losing the saved value
+    expect(resolveBridgeMode('claude', 'proxy')).toBe('proxy');
+    expect(resolveBridgeMode('claude', undefined)).toBe('endpoint');
+
+    // and replaceable with another --save-mode
+    expect(resolveBridgeMode('claude', 'proxy', { persist: true })).toBe('proxy');
+    expect(resolveBridgeMode('claude', undefined)).toBe('proxy');
+    expect(resolveBridgeMode('server', undefined)).toBe('endpoint');
   });
 });
 

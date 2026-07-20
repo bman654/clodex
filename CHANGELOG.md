@@ -17,7 +17,7 @@ Initial release of **clodex**, a fork of the original relay-ai project, heavily 
 - Rebrand: `clodex` binary/package, `~/.clodex` config home (`CLODEX_HOME` override), `clodex:` model-id prefix, `clodex` keychain service — with silent one-time migration from legacy `~/.relay-ai` config and `relay-ai` keychain entries (legacy data is never modified).
 - `clodex patch` — first-class Claude Code binary patcher built on tweakcc: bakes favorites + aliases into the binary (model validation, `/model` listing, alias resolution, real context windows), with a pristine per-version backup, a staleness manifest, a concurrency lock, and `--restore`.
 - Launch-time patch freshness check in `clodex claude` (interactive y/N offer; non-blocking notice when non-interactive).
-- Per-command bridge-mode memory: `--endpoint`/`--proxy` (alias `--http-proxy`) are persisted per command as the new default.
+- Per-command bridge-mode defaults: `--endpoint`/`--proxy` select the mode for one run; `--save-mode` persists it as that command's default; bare runs default to proxy mode.
 
 ### Removed relative to relay-ai
 

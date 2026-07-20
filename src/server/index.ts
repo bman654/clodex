@@ -353,7 +353,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
       || options.maskGatewayIds !== undefined
       || options.password !== undefined;
     if (hasGatewayOptions) {
-      p.log.error('--http-proxy is a local-only server mode and cannot be combined with gateway server options.');
+      p.log.error('--proxy is a local-only server mode and cannot be combined with endpoint-mode server options.');
       return 1;
     }
     return runHttpProxyServerCommand(false, options.wsDiagnostics, options.port);

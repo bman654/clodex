@@ -46,9 +46,9 @@ clodex server               # foreground gateway
 **Two bridge modes** (both `clodex claude` and `clodex server`):
 
 - **endpoint** — local Anthropic-format gateway (`src/proxy.ts` for the claude launch path, `src/server/` for the standalone gateway); the child gets `ANTHROPIC_BASE_URL` via `buildChildEnv()` (`src/env.ts`). With favorites, `startProxyCatalog()` serves a multi-route catalog and Claude Code's `/model` menu lists starting model + favorites.
-- **proxy** — selective MITM of `api.anthropic.com` (`src/http-proxy/`): Claude Code keeps its normal Anthropic auth; request model ids matching `clodex:{provider}:{model}` (prefix constant `HTTP_PROXY_MODEL_PREFIX` in `src/http-proxy/routes.ts`) or saved aliases (`src/model-aliases.ts`) route to OpenAI; everything else passes through untouched. `--http-proxy` is a kept alias of `--proxy`.
+- **proxy** — selective MITM of `api.anthropic.com` (`src/http-proxy/`): Claude Code keeps its normal Anthropic auth; request model ids matching `clodex:{provider}:{model}` (prefix constant `HTTP_PROXY_MODEL_PREFIX` in `src/http-proxy/routes.ts`) or saved aliases (`src/model-aliases.ts`) route to OpenAI; everything else passes through untouched.
 
-**Bridge-mode memory:** `resolveBridgeMode(command, explicit, {persist})` in `src/config.ts` — `claudeBridgeMode`/`serverBridgeMode` prefs; an explicit `--endpoint`/`--proxy` is persisted per command (claude skips persisting on `--dry-run`).
+**Bridge-mode defaults:** `resolveBridgeMode(command, explicit, {persist})` in `src/config.ts` — `claudeBridgeMode`/`serverBridgeMode` prefs. An explicit `--endpoint`/`--proxy` applies to that run only and is **never auto-persisted**; persisting requires the explicit `--save-mode` flag alongside a mode flag (`--save-mode` alone is an arg-parse error). With no flag and nothing saved, both commands default to **proxy** (works with the user's existing Claude auth; non-TTY gets the same default without prompting). `--dry-run` never persists. The former `--http-proxy` alias is removed — `--proxy` is the only spelling.
 
 **Translation layer** (`src/sdk-adapter.ts` + `src/provider-factory.ts`): Anthropic `/v1/messages` ↔ Vercel AI SDK, one turn per request (Claude Code owns the tool loop). This is the **single** translation path — no hand-rolled per-provider translation. Preserved hard-won behavior:
 

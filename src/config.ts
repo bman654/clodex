@@ -70,7 +70,11 @@ export function setAppPathOverride(appId: string, path: string | null): Record<s
   return next;
 }
 
-/** Resolve the bridge mode for a command: explicit flag wins (and persists); else remembered; else endpoint. */
+/**
+ * Resolve the bridge mode for a command. An explicit flag applies to that run only —
+ * it is persisted as the command's default ONLY when the caller opts in (--save-mode).
+ * With no flag, the saved per-command default applies; with no saved default, proxy.
+ */
 export function resolveBridgeMode(
   command: 'claude' | 'server',
   explicit: import('./types.js').BridgeMode | undefined,
@@ -78,10 +82,10 @@ export function resolveBridgeMode(
 ): import('./types.js').BridgeMode {
   const key = command === 'claude' ? 'claudeBridgeMode' : 'serverBridgeMode';
   if (explicit) {
-    if (opts.persist !== false) savePreferences({ [key]: explicit });
+    if (opts.persist === true) savePreferences({ [key]: explicit });
     return explicit;
   }
-  return loadPreferences()[key] ?? 'endpoint';
+  return loadPreferences()[key] ?? 'proxy';
 }
 
 const MAX_RECENT_MODELS = 3;

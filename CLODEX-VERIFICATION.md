@@ -58,7 +58,7 @@ real commands (including `claude -p`) but NEVER add them to the automated test s
   writing state.
 - C3. Endpoint mode: `clodex server` starts; `GET /v1/models` (or `/models`) lists the
   configured OpenAI models with context windows.
-- C4. Proxy mode: `clodex server --proxy` (and `--http-proxy` alias) starts the MITM
+- C4. Proxy mode: `clodex server --proxy` starts the MITM
   proxy; CA cert + env instructions printed as before.
 - C5. `clodex models` favorites/alias management works against the OpenAI catalog.
 - C6. OAuth WebSocket continuation, prompt-cache key handling, and cache-token mapping
@@ -76,14 +76,19 @@ real commands (including `claude -p`) but NEVER add them to the automated test s
 
 ## D. New features
 
-### Bridge-mode memory
-- D1. `--endpoint` / `--proxy` flags exist on both `claude` and `server`
-  (`--http-proxy` kept as alias); using one persists it as that command's default.
-- D2. Bare `clodex server` / `clodex claude` reuses the remembered mode (verify:
-  run with `--proxy` once with `CLODEX_HOME` temp dir, then bare run selects proxy —
-  observable via startup output or `--dry-run`).
-- D3. First run with no saved mode + non-TTY does not hang; defaults to endpoint.
-- D4. Modes are remembered independently for `claude` vs `server`.
+### Bridge-mode defaults
+- D1. `--endpoint` / `--proxy` flags exist on both `claude` and `server` and select
+  the mode for that run only — they are never auto-persisted (`--http-proxy` is
+  removed entirely; `--proxy` is the only spelling).
+- D2. Persisting requires the explicit `--save-mode` flag together with a mode flag
+  (e.g. `clodex claude --endpoint --save-mode` saves endpoint as the claude default,
+  keys `claudeBridgeMode`/`serverBridgeMode`); `--save-mode` without a mode flag is
+  an error with guidance; `--dry-run` never persists anything. Verify with a temp
+  `CLODEX_HOME`: a bare run after `--endpoint` alone still selects proxy, after
+  `--endpoint --save-mode` selects endpoint.
+- D3. No flag and no saved mode → defaults to **proxy** for both commands; non-TTY
+  does not prompt or hang and gets the same proxy default.
+- D4. Modes are saved independently for `claude` vs `server`.
 
 ### `clodex patch`
 - D5. `clodex patch` exists as a first-class command (in help, with its own section).
