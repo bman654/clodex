@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/bman654/clodex/compare/v1.0.0...v1.0.1) (2026-07-20)
+
+
+### Bug Fixes
+
+* **patcher:** replace unpinned npx tweakcc with pinned programmatic API ([bfb626f](https://github.com/bman654/clodex/commit/bfb626fd0afeeeec4e6715d2fd9a8fd85cb4ae5f))
+
 ## [1.0.0](https://github.com/bman654/clodex/compare/v0.1.1...v1.0.0) (2026-07-20)
 
 
