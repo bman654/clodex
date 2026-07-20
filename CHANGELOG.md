@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.0](https://github.com/bman654/clodex/compare/v0.1.1...v1.0.0) (2026-07-20)
+
+
+### Documentation
+
+* refine README wording and add proxy/agents tips ([614ea7d](https://github.com/bman654/clodex/commit/614ea7d7daf7e0a58eaa5c7341ad5e42c86751ef))
+
 ## [0.1.1](https://github.com/bman654/clodex/compare/v0.1.0...v0.1.1) (2026-07-20)
 
 
