@@ -53,19 +53,32 @@ Notes:
 
 Foreground gateway, same two bridge modes, no Claude Code launch — point any Anthropic-format (or OpenAI-format) client at it.
 
+Common options (both modes):
+
 | Flag | Effect |
 | --- | --- |
 | `--endpoint` | Endpoint mode for this run: Anthropic-format HTTP gateway |
 | `--proxy` | Proxy mode for this run: selective `api.anthropic.com` MITM proxy (default when nothing is saved; local only) |
 | `--save-mode` | With `--endpoint`/`--proxy`: save that mode as the `server` default |
-| `--quick`, `--saved` | Start immediately from saved/default settings, no prompts |
-| `--listen local\|network` | One-run listen mode override |
-| `--providers all\|favorites\|id1,id2` | One-run provider catalog override |
-| `--mask-gateway-ids` / `--no-mask-gateway-ids` | Mask or keep provider names in Anthropic model ids |
-| `--password <value>` | One-run network-mode server password |
-| `--port <1-65535>` | Listen port (default 17645); applies to both modes |
+| `--port <1-65535>` | Listen port (default 17645) |
 | `--ws-diagnostics` | Log sanitized request envelopes and WebSocket head decisions |
 | `--help`, `--version` | Help / version |
+
+Endpoint mode only (an error if combined with `--proxy`):
+
+| Flag | Effect |
+| --- | --- |
+| `--quick`, `--saved` | Start immediately from saved/default settings, skipping the wizard |
+| `--listen local\|network` | One-run listen mode override |
+| `--providers all\|favorites\|id1,id2` | One-run provider catalog override |
+| `--mask-gateway-ids` / `--no-mask-gateway-ids` | Mask or expose vendor names in discovery model ids (see below) |
+| `--password <value>` | One-run network-mode server password |
+
+Proxy mode has no extra options — it takes only the common options.
+
+Bare `clodex server` uses the saved default mode (proxy if none saved). Proxy mode starts immediately. Endpoint mode on a TTY opens a short wizard — start from saved settings, or configure: favorites-only catalog?, which providers to expose, discovery-id masking, and listen local/network (network asks for a password). Without a TTY (or with `--quick`/any endpoint-mode option) it skips all prompts and starts from saved settings; network mode then needs a saved password or `--password`.
+
+**`--mask-gateway-ids`:** endpoint-mode discovery ids look like `anthropic-openai-oauth__gpt-5.6`. Some Claude clients validate model names (Claude Desktop / Cowork pickers, Claude Code skill/agent `model:` frontmatter) and reject or filter ids containing non-Anthropic vendor names. Masking reverses the provider and model segments (`anthropic-htuao-ianepo__6.5-tpg`) so vendor strings never appear literally; display names stay readable (`GPT 5.6 (OpenAI)`), and the gateway accepts both masked and unmasked ids in chat requests. Tradeoff: masked ids are unreadable — copy them exactly from the printed catalog. Masking is on by default; use `--no-mask-gateway-ids` for clients that don't need it.
 
 Endpoint-mode endpoints (default port 17645):
 
@@ -75,6 +88,16 @@ OPENAI_BASE_URL=http://127.0.0.1:17645/openai/v1
 ```
 
 Use any API key locally; network mode requires the server password. Proxy mode prints `HTTPS_PROXY`, `HTTP_PROXY`, and `NODE_EXTRA_CA_CERTS` values to export — do **not** set `ANTHROPIC_BASE_URL` in that mode.
+
+Examples:
+
+```bash
+# Endpoint gateway serving only your favorites, no prompts, for a local client
+clodex server --endpoint --quick --providers favorites
+
+# Proxy mode for an existing-auth Claude Code (export the env it prints)
+clodex server --proxy
+```
 
 ### `clodex patch [--restore]`
 

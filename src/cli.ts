@@ -424,37 +424,58 @@ ${pc.bold('Examples:')}
 export function serverHelpText(): string {
   return `${pc.bold('clodex server')} v${VERSION}
 Run a foreground gateway bridging Anthropic-format requests to OpenAI models.
+Two modes: ${pc.bold('endpoint')} (an Anthropic-format HTTP gateway you point clients at) and
+${pc.bold('proxy')} (a selective api.anthropic.com MITM proxy; clients keep their Anthropic
+auth while clodex: models route to OpenAI).
 
 ${pc.bold('Usage:')}
-  clodex server
-  clodex server --quick
-  clodex server --listen network --password <password>
-  clodex server --proxy
+  clodex server [--endpoint | --proxy] [options]
   clodex server --help
   clodex server --version
 
-${pc.bold('Options:')}
-  --endpoint                   Endpoint mode for this run: Anthropic-format HTTP gateway
-  --proxy                      Proxy mode for this run: selective api.anthropic.com
-                               MITM proxy (default when nothing is saved; local only)
-  --save-mode                  With --endpoint/--proxy: save that mode as the server default
-  --quick, --saved             Start immediately from saved/default settings
+${pc.bold('Common options (both modes):')}
+  --endpoint                   Endpoint mode for this run
+  --proxy                      Proxy mode for this run (default when nothing is
+                               saved; local only)
+  --save-mode                  With --endpoint/--proxy: save that mode as the
+                               server default
+  --port <1-65535>             Listen port (default 17645)
+  --ws-diagnostics             Log sanitized request envelopes and WebSocket
+                               head decisions
+  --help, --version            Help / version
+
+${pc.bold('Endpoint mode only')} ${pc.dim('(error if combined with --proxy)')}:
+  --quick, --saved             Start immediately from saved/default settings,
+                               skipping the wizard
   --listen local|network       One-run listen mode override
   --providers all|favorites|id1,id2
                                One-run provider catalog override
-  --mask-gateway-ids           Mask provider names in Anthropic model ids
-  --no-mask-gateway-ids        Keep provider names in Anthropic model ids
+  --mask-gateway-ids           Mask vendor names in discovery model ids (see below)
+  --no-mask-gateway-ids        Expose unmasked discovery model ids
   --password <value>           One-run network-mode server password
-  --port <1-65535>             Listen port (default 17645); applies to both modes
-  --ws-diagnostics             Log sanitized request envelopes and WebSocket head decisions
 
-${pc.bold('Behavior:')}
-  Endpoint default: interactive wizard for exposed providers, discovery id
-  masking, optional favorites-only catalog, then listen mode. Quick mode skips
-  prompts and uses saved settings. Any one-run option also starts without
-  prompts. Non-interactive stdin uses quick mode automatically. Network quick
-  mode requires a saved password or --password.
-  Binds to port 17645 (override with --port). Network mode asks for a password.
+${pc.bold('Proxy mode only:')}
+  (no extra options — proxy mode takes only the common options above)
+
+${pc.bold('Bare clodex server:')}
+  Uses the saved default mode (proxy if none saved). Proxy mode starts
+  immediately. Endpoint mode on a TTY opens a short wizard: start from saved
+  settings, or configure — favorites-only catalog?, which providers to expose,
+  discovery-id masking, listen local/network (network asks for a password).
+  Without a TTY (or with --quick / any endpoint-mode option) it skips all
+  prompts and starts from saved settings; network mode then needs a saved
+  password or --password.
+
+${pc.bold('--mask-gateway-ids explained:')}
+  Endpoint-mode discovery ids look like anthropic-openai-oauth__gpt-5.6.
+  Some Claude clients validate model names (Claude Desktop / Cowork pickers,
+  Claude Code skill/agent "model:" frontmatter) and reject or filter ids that
+  contain non-Anthropic vendor names. Masking reverses the provider and model
+  segments (anthropic-htuao-ianepo__6.5-tpg) so vendor strings never appear
+  literally; display names stay readable ("GPT 5.6 (OpenAI)"), and the
+  gateway accepts both masked and unmasked ids in requests. Tradeoff: the ids
+  are unreadable, so copy them exactly from the printed catalog. Masking is on
+  by default; use --no-mask-gateway-ids for clients that don't need it.
 
 ${pc.bold('Proxy mode env:')}
   Start clodex server --proxy, then export the HTTPS_PROXY, HTTP_PROXY,
@@ -463,7 +484,14 @@ ${pc.bold('Proxy mode env:')}
 ${pc.bold('Gateway endpoints (endpoint mode):')}
   Anthropic-compatible:  ANTHROPIC_BASE_URL=http://127.0.0.1:17645/anthropic
   OpenAI-compatible:     OPENAI_BASE_URL=http://127.0.0.1:17645/openai/v1
-  API key: use anything locally; use the server password in network mode.`;
+  API key: use anything locally; use the server password in network mode.
+
+${pc.bold('Examples:')}
+  # Endpoint gateway serving only your favorites, no prompts, for a local client
+  clodex server --endpoint --quick --providers favorites
+
+  # Proxy mode for an existing-auth Claude Code (export the env it prints)
+  clodex server --proxy`;
 }
 
 export function modelsHelpText(): string {
