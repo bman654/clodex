@@ -634,10 +634,11 @@ async function collect(
   parts: any[],
   model = 'm',
   observer?: Parameters<typeof writeAnthropicStream>[4],
+  tools?: Parameters<typeof writeAnthropicStream>[5],
 ): Promise<{ events: Array<{ event: string; data: any }>; raw: string }> {
   let raw = '';
   async function* gen() { for (const p of parts) yield p; }
-  await writeAnthropicStream(gen() as any, model, (c) => { raw += c; }, undefined, observer);
+  await writeAnthropicStream(gen() as any, model, (c) => { raw += c; }, undefined, observer, tools);
   const events = raw.split('\n\n').filter(Boolean).map(block => {
     const [evLine, dataLine] = block.split('\n');
     return { event: evLine.replace('event: ', ''), data: JSON.parse(dataLine.replace('data: ', '')) };
@@ -794,6 +795,91 @@ describe('writeAnthropicStream', () => {
     expect(start.data.content_block.type).toBe('tool_use');
     expect(start.data.content_block.id).toBe('call_9__ts__U0lHOQ');
     expect(events.find(e => e.event === 'message_delta')!.data.delta.stop_reason).toBe('tool_use');
+  });
+
+  // GPT-family models fill optional tool params with filler (`null`, `[]`)
+  // instead of omitting them; Claude Code forwards e.g. WebSearch domain lists
+  // verbatim into the server-side web_search config, where an empty list is a
+  // 400. The adapter must strip that filler from the tool_use blocks it emits.
+  const webSearchTools = translateTools([{
+    name: 'WebSearch',
+    description: 'Search the web',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+        allowed_domains: { type: 'array', items: { type: 'string' } },
+        blocked_domains: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['query'],
+    },
+  }]);
+
+  function toolInputFromEvents(events: Array<{ event: string; data: any }>): any {
+    const start = events.find(e => e.event === 'content_block_start' && e.data.content_block.type === 'tool_use')!;
+    const json = events
+      .filter(e => e.event === 'content_block_delta' && e.data.index === start.data.index && e.data.delta.type === 'input_json_delta')
+      .map(e => e.data.delta.partial_json)
+      .join('');
+    return JSON.parse(json || '{}');
+  }
+
+  it('strips null and empty-array filler for optional params from streamed tool input', async () => {
+    const input = { query: 'who won', allowed_domains: ['fifa.com'], blocked_domains: [], max_uses: null };
+    const { events } = await collect([
+      { type: 'start' },
+      { type: 'tool-input-start', id: 'call_1', toolName: 'WebSearch' },
+      { type: 'tool-input-delta', id: 'call_1', delta: JSON.stringify(input).slice(0, 20) },
+      { type: 'tool-input-delta', id: 'call_1', delta: JSON.stringify(input).slice(20) },
+      { type: 'tool-input-end', id: 'call_1' },
+      { type: 'tool-call', toolCallId: 'call_1', toolName: 'WebSearch', input },
+      { type: 'finish', finishReason: 'tool-calls' },
+    ], 'm', undefined, webSearchTools);
+    expect(toolInputFromEvents(events)).toEqual({ query: 'who won', allowed_domains: ['fifa.com'] });
+  });
+
+  it('strips the same filler from a non-streamed tool call', async () => {
+    const { events } = await collect([
+      { type: 'start' },
+      { type: 'tool-call', toolCallId: 'call_1', toolName: 'WebSearch', input: { query: 'who won', blocked_domains: [], allowed_domains: null } },
+      { type: 'finish', finishReason: 'tool-calls' },
+    ], 'm', undefined, webSearchTools);
+    expect(toolInputFromEvents(events)).toEqual({ query: 'who won' });
+  });
+
+  it('preserves an intentional empty array for a schema-required property', async () => {
+    const todoTools = translateTools([{
+      name: 'TodoWrite',
+      description: 'Update the todo list',
+      input_schema: {
+        type: 'object',
+        properties: { todos: { type: 'array' } },
+        required: ['todos'],
+      },
+    }]);
+    const { events } = await collect([
+      { type: 'start' },
+      { type: 'tool-input-start', id: 'call_1', toolName: 'TodoWrite' },
+      { type: 'tool-input-delta', id: 'call_1', delta: '{"todos":[]}' },
+      { type: 'tool-input-end', id: 'call_1' },
+      { type: 'tool-call', toolCallId: 'call_1', toolName: 'TodoWrite', input: { todos: [] } },
+      { type: 'finish', finishReason: 'tool-calls' },
+    ], 'm', undefined, todoTools);
+    expect(toolInputFromEvents(events)).toEqual({ todos: [] });
+  });
+
+  it('emits the buffered raw tool input when the stream ends without a tool-call part', async () => {
+    const { events } = await collect([
+      { type: 'start' },
+      { type: 'tool-input-start', id: 'call_1', toolName: 'Read' },
+      { type: 'tool-input-delta', id: 'call_1', delta: '{"path":' },
+      { type: 'tool-input-delta', id: 'call_1', delta: '"x"}' },
+      { type: 'finish', finishReason: 'stop' },
+    ]);
+    expect(toolInputFromEvents(events)).toEqual({ path: 'x' });
+    // The block must still be closed after the late flush.
+    const start = events.find(e => e.event === 'content_block_start')!;
+    expect(events.some(e => e.event === 'content_block_stop' && e.data.index === start.data.index)).toBe(true);
   });
 
   it('emits thinking block with a signature_delta close (Google SDK)', async () => {

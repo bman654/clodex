@@ -376,13 +376,37 @@ export function translateMessages(
   return out;
 }
 
-/** Strip top-level null values so models that emit `null` for optional params don't fail schema validation. */
-function stripNullInputs(input: Record<string, unknown>): Record<string, unknown> {
+/**
+ * Strip filler values GPT-family models emit for optional params instead of
+ * omitting them: top-level `null` always, and empty arrays for properties the
+ * tool's schema does not require. Claude Code forwards some tool inputs
+ * verbatim into server-side API calls (e.g. WebSearch domain lists become the
+ * `web_search` tool config, where an empty list is a 400), so filler must be
+ * removed here. Required properties keep their empty arrays — there an empty
+ * array is an intentional value (e.g. TodoWrite's `todos: []` clears the list).
+ */
+function sanitizeToolInput(
+  input: Record<string, unknown>,
+  requiredProps?: ReadonlySet<string>,
+): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(input)) {
-    if (v !== null) out[k] = v;
+    if (v === null) continue;
+    if (Array.isArray(v) && v.length === 0 && !requiredProps?.has(k)) continue;
+    out[k] = v;
   }
   return out;
+}
+
+/** Per-tool `required` property sets, read back out of the translated tool schemas. */
+function toolRequiredProps(tools?: SdkCallParams['tools']): Map<string, ReadonlySet<string>> {
+  const map = new Map<string, ReadonlySet<string>>();
+  for (const [name, t] of Object.entries(tools ?? {})) {
+    const schema = (t as { inputSchema?: { jsonSchema?: { required?: unknown } } }).inputSchema?.jsonSchema;
+    const required = Array.isArray(schema?.required) ? schema.required : [];
+    map.set(name, new Set(required.filter((r): r is string => typeof r === 'string')));
+  }
+  return map;
 }
 
 export function translateTools(anthropicTools?: AnthropicTool[]): Record<string, ReturnType<typeof tool>> | undefined {
@@ -596,13 +620,20 @@ export async function writeAnthropicStream(
   write: WriteFn,
   log?: LogFn,
   observer?: AnthropicStreamObserver,
+  tools?: SdkCallParams['tools'],
 ): Promise<void> {
   const messageId = 'msg_' + Date.now();
+  const requiredProps = toolRequiredProps(tools);
   let blockIndex = -1;
   let started = false;
   let openType: 'text' | 'thinking' | 'tool' | null = null;
   let pendingThinkingSig: string | undefined;
   const idToBlock = new Map<string, number>();
+  // Tool input deltas are buffered (not forwarded raw) so the complete input
+  // can be sanitized once the SDK's parsed `tool-call` part arrives.
+  const toolJsonBuffer = new Map<string, string>();
+  const flushedTools = new Set<string>();
+  let openToolId: string | null = null;
   let finishReason = 'end_turn';
   let usage: AnthropicUsage = {
     input_tokens: 0,
@@ -637,8 +668,21 @@ export async function writeAnthropicStream(
       });
       pendingThinkingSig = undefined;
     }
+    // Stream ended (or moved on) without a tool-call part for this block: emit
+    // the buffered raw JSON so the deltas that did arrive are not lost.
+    if (openType === 'tool' && openToolId !== null && !flushedTools.has(openToolId)) {
+      const buffered = toolJsonBuffer.get(openToolId);
+      if (buffered) {
+        emit('content_block_delta', {
+          type: 'content_block_delta', index: blockIndex,
+          delta: { type: 'input_json_delta', partial_json: buffered },
+        });
+      }
+      flushedTools.add(openToolId);
+    }
     if (openType) emit('content_block_stop', { type: 'content_block_stop', index: blockIndex });
     openType = null;
+    openToolId = null;
   };
   const openBlock = (type: 'text' | 'thinking' | 'tool', contentBlock: unknown) => {
     ensureStart(); closeOpen(); blockIndex++; openType = type;
@@ -695,28 +739,45 @@ export async function writeAnthropicStream(
           type: 'tool_use', id: encodeToolUseId(part.id ?? '', sig), name: part.toolName, input: {},
         });
         idToBlock.set(part.id ?? '', blockIndex);
+        openToolId = part.id ?? '';
         break;
       }
-      case 'tool-input-delta':
-        emit('content_block_delta', {
-          type: 'content_block_delta', index: idToBlock.get(part.id ?? '') ?? blockIndex,
-          delta: { type: 'input_json_delta', partial_json: part.delta ?? part.text ?? '' },
-        });
+      case 'tool-input-delta': {
+        const id = part.id ?? '';
+        toolJsonBuffer.set(id, (toolJsonBuffer.get(id) ?? '') + (part.delta ?? part.text ?? ''));
         break;
+      }
       case 'tool-input-end': break;
 
       case 'tool-call': {
         finishReason = 'tool_use';
-        // Non-streamed tool call (no input-start/delta arrived): emit a full block.
-        if (!idToBlock.has(part.toolCallId ?? '') && openType !== 'tool') {
+        const id = part.toolCallId ?? '';
+        if (idToBlock.has(id)) {
+          // Streamed input: emit the sanitized complete input as one delta,
+          // falling back to the buffered raw JSON if the SDK gave no parsed input.
+          if (!flushedTools.has(id)) {
+            const json = part.input !== undefined && part.input !== null
+              ? JSON.stringify(sanitizeToolInput(part.input as Record<string, unknown>, requiredProps.get(part.toolName ?? '')))
+              : (toolJsonBuffer.get(id) ?? '');
+            if (json) {
+              emit('content_block_delta', {
+                type: 'content_block_delta', index: idToBlock.get(id) ?? blockIndex,
+                delta: { type: 'input_json_delta', partial_json: json },
+              });
+            }
+            flushedTools.add(id);
+          }
+        } else if (openType !== 'tool') {
+          // Non-streamed tool call (no input-start/delta arrived): emit a full block.
           const sig = grabRoundTripSignature(part);
           openBlock('tool', {
-            type: 'tool_use', id: encodeToolUseId(part.toolCallId ?? '', sig), name: part.toolName, input: {},
+            type: 'tool_use', id: encodeToolUseId(id, sig), name: part.toolName, input: {},
           });
           emit('content_block_delta', {
             type: 'content_block_delta', index: blockIndex,
-            delta: { type: 'input_json_delta', partial_json: JSON.stringify(stripNullInputs(part.input as Record<string, unknown> ?? {})) },
+            delta: { type: 'input_json_delta', partial_json: JSON.stringify(sanitizeToolInput(part.input as Record<string, unknown> ?? {}, requiredProps.get(part.toolName ?? ''))) },
           });
+          flushedTools.add(id);
         }
         break;
       }
@@ -802,7 +863,7 @@ export async function streamAnthropicResponse(
   })();
 
   try {
-    await writeAnthropicStream(watchedStream, modelId, write, log, { ...observer, abortSignal });
+    await writeAnthropicStream(watchedStream, modelId, write, log, { ...observer, abortSignal }, params.tools);
   } finally {
     stopForwardingAbort();
     clearTimeout(idleTimer);
@@ -915,6 +976,7 @@ export async function generateAnthropicResponse(
     }
   }
 
+  const requiredProps = toolRequiredProps(params.tools);
   return {
     id: 'msg_' + Date.now(), type: 'message', role: 'assistant', model: modelId,
     content: [
@@ -923,7 +985,7 @@ export async function generateAnthropicResponse(
         type: 'tool_use',
         id: encodeToolUseId(tc.toolCallId, grabRoundTripSignature(tc as FullStreamPart)),
         name: tc.toolName,
-        input: stripNullInputs(tc.input as Record<string, unknown>),
+        input: sanitizeToolInput(tc.input as Record<string, unknown> ?? {}, requiredProps.get(tc.toolName)),
       })),
     ],
     stop_reason: finishReason === 'tool-calls' ? 'tool_use' : 'end_turn',
