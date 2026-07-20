@@ -1,24 +1,63 @@
 # clodex
 
-**clodex** bridges [Claude Code](https://docs.anthropic.com/en/docs/claude-code) to OpenAI models — with an OpenAI API key or a ChatGPT/Codex-plan OAuth login. It translates Claude Code's Anthropic wire format to the OpenAI API through the Vercel AI SDK, with working prompt caching, accurate context windows and auto-compaction, live mid-session model switching, and an optional Claude Code binary patcher that makes your OpenAI models first-class citizens inside Claude Code (validated names, `/model` entries, correct context reporting).
+[![npm version](https://img.shields.io/npm/v/%40bman654%2Fclodex.svg)](https://www.npmjs.com/package/@bman654/clodex)
+
+**clodex** lets you use your ChatGPT/Codex plan or OpenAI models with Claude Code as if they were Anthropic models.
+You can use them anywhere you use Anthropic models like Opus and Sonnet — as the main session model, and in subagents, workflows, and agent teams. Clodex integrates them directly into Claude Code, using Claude Code's system prompt.
+It works with your existing Claude Code plan as well as your Codex plans WITHOUT violating Anthropic's ToS.
+No messing with CMUX or child codex processes or any of that stuff.
+You can finally have Fable and Sol work together to solve the hardest problems.
+
+![Model picker](./docs/model-picker.png)
+
+You can also run clodex as a local OpenAI-compatible endpoint in front of your Codex plan, so any OpenAI-compatible client can use it.
 
 > clodex is derived from the original [relay-ai](https://github.com/jacob-bd/relay-ai) project, heavily modified and streamlined for this one use case, with the full commit history preserved.
 
-## Get started (ChatGPT/Codex plan)
+## Quick Start (ChatGPT/Codex plan)
 
 ```bash
 npm install -g @bman654/clodex          # 1. install the CLI (Node 22+)
 clodex providers auth openai   # 2. sign in with your ChatGPT/Codex plan (device-code OAuth)
-clodex models                  # 3. pick favorite models and short aliases
+clodex models                  # 3. pick favorite models and aliases
+clodex models --alias sol=clodex:openai-oauth:gpt-5.6-sol
+clodex models --alias luna=clodex:openai-oauth:gpt-5.6-luna
+clodex models --alias terra=clodex:openai-oauth:gpt-5.6-terra
 clodex patch                   # 4. (optional) patch Claude Code so those models are first-class
 clodex claude                  # 5. launch Claude Code on an OpenAI model
 ```
 
 1. **Install** — puts the `clodex` command on your PATH.
 2. **Sign in** — opens a device-code OAuth flow for your ChatGPT/Codex plan; the token is stored in your OS credential store. (API-key users: `clodex providers add` instead.)
-3. **Pick models** — an interactive manager for favorites (max 20) and short aliases like `sol`. Favorites drive the `/model` switch menu, proxy-mode routing, and the patcher.
-4. **Patch** *(optional but recommended for proxy mode)* — bakes your favorites and aliases into the Claude Code binary so they pass model validation, appear in `/model`, and report their real context windows. Re-run after each `claude` update; `clodex patch --restore` undoes it.
+3. **Pick models** — an interactive manager for favorites (max 20) and short aliases like `sol` so you do not need to type the long names. Favorites drive the `/model` switch menu, proxy-mode routing, and the patcher.
+4. **Patch** *(optional but recommended for proxy mode)* — bakes your favorites and aliases into the Claude Code binary so they pass model validation, appear in `/model`, and report their real context windows. Re-run after each `claude` update; `clodex patch --restore` undoes it. This step is required if you want to use your OpenAI models as subagents via the Agent tool.
 5. **Launch** — starts Claude Code bridged to the model you choose.
+
+## Difference between Clodex and other solutions
+
+| Feature | Clodex | relay-ai | CLIProxyAPI | Various process-based solutions |
+|--------|--------|----------|-------------|----|
+| url       | https://github.com/bman654/clodex |  https://github.com/jacob-bd/relay-ai | https://help.router-for.me/ |    |
+| Works with Claude Code Plans without violating Anthropic TOS | ✅ | ✅ | ❌ | ✅ |
+| Can use all claude models + All Codex models together? | ✅ | ✅ | ❌ | ✅ |
+| Claude Code aware of true model context window size | ✅ | ❌ | ❌ | n/a |
+| Supports Agent tool | ✅ | ❌ | ✅ | ❌ |
+| Supports use in Dynamic Workflows | ✅ | ✅ | ✅ | ❌ |
+| OpenAI models use Claude Code skills/tools | ✅ | ✅ | ✅ | ❌ |
+| OpenAI models use Claude Code system prompt | ✅ | ✅ | ✅ | ❌ |
+| Supports use in skill/agent frontmatter | ✅ | ❌ | ✅ | ❌ |
+| Supports OpenAI prompt caching | ✅ | ❌ | ? | ✅ |
+| Uses Websockets to talk to OpenAI API | ✅ | ❌ | ? | ✅ |
+
+### Claude Code Plans and ToS
+
+It's important to understand that any tool that duplicates Claude Code's OAuth login flow violates Anthropic's Terms of Service
+and risks getting your account banned.  Any tool that initiates a Claude Code OAuth flow from outside of the Claude Code app falls
+into this category.
+
+Another way to tell: if a tool needs you to set `ANTHROPIC_BASE_URL` to a custom value, Claude Code can't run on your plan credentials — so the only way that tool can use your plan is by duplicating Claude Code's OAuth flow, which is against the ToS.
+
+Clodex avoids this. In proxy mode it uses an HTTP proxy to intercept requests bound for `api.anthropic.com`: requests for an Anthropic model pass through unmodified, still carrying Claude Code's own auth token untouched — your plan credentials are never duplicated or replaced.
 
 ## Bridge modes
 
@@ -83,6 +122,7 @@ Common options (both modes):
 | `--proxy` | Proxy mode for this run: selective `api.anthropic.com` MITM proxy (default when nothing is saved; local only) |
 | `--save-mode` | With `--endpoint`/`--proxy`: save that mode as the `server` default |
 | `--port <1-65535>` | Listen port (default 17645) |
+| `--no-discovery` | Don't advertise this server in `~/.clodex/server-runtime.json` (`CLODEX_NO_DISCOVERY=1` also works). Use it for a standalone endpoint the `clodex-claude` wrapper should ignore. |
 | `--ws-diagnostics` | Log sanitized request envelopes and WebSocket head decisions |
 | `--help`, `--version` | Help / version |
 
@@ -100,7 +140,7 @@ Proxy mode has no extra options — it takes only the common options.
 
 Bare `clodex server` uses the saved default mode (proxy if none saved). Proxy mode starts immediately. Endpoint mode on a TTY opens a short wizard — start from saved settings, or configure: favorites-only catalog?, which providers to expose, discovery-id masking, and listen local/network (network asks for a password). Without a TTY (or with `--quick`/any endpoint-mode option) it skips all prompts and starts from saved settings; network mode then needs a saved password or `--password`.
 
-**`--mask-gateway-ids`:** endpoint-mode discovery ids look like `anthropic-openai-oauth__gpt-5.6`. Some Claude clients validate model names (Claude Desktop / Cowork pickers, Claude Code skill/agent `model:` frontmatter) and reject or filter ids containing non-Anthropic vendor names. Masking reverses the provider and model segments (`anthropic-htuao-ianepo__6.5-tpg`) so vendor strings never appear literally; display names stay readable (`GPT 5.6 (OpenAI)`), and the gateway accepts both masked and unmasked ids in chat requests. Tradeoff: masked ids are unreadable — copy them exactly from the printed catalog. Masking is on by default; use `--no-mask-gateway-ids` for clients that don't need it.
+**`--mask-gateway-ids`:** endpoint-mode discovery ids look like `anthropic-openai-oauth__gpt-5.6`. Some Claude clients validate model names (Claude Desktop / Cowork pickers, Claude Code skill/agent `model:` frontmatter) and reject or filter ids containing non-Anthropic vendor names. Masking reverses the provider and model segments (`anthropic-htuao-ianepo__6.5-tpg`) so vendor strings never appear literally; display names stay readable (`GPT 5.6 (OpenAI)`). As the request `model`, the gateway accepts the masked id, the unmasked id, the canonical `clodex:<provider>:<model>` id, or a saved alias (e.g. `luna`) — and the response echoes back whichever id you sent. Tradeoff: masked ids are unreadable — copy them exactly from the printed catalog. Masking is on by default; use `--no-mask-gateway-ids` for clients that don't need it.
 
 Endpoint-mode endpoints (default port 17645):
 
@@ -110,6 +150,8 @@ OPENAI_BASE_URL=http://127.0.0.1:17645/openai/v1
 ```
 
 Use any API key locally; network mode requires the server password. Proxy mode prints `HTTPS_PROXY`, `HTTP_PROXY`, and `NODE_EXTRA_CA_CERTS` values to export — do **not** set `ANTHROPIC_BASE_URL` in that mode.
+
+Several `clodex server` instances can run at once — each advertises itself in `~/.clodex/server-runtime.json`, and `clodex-claude` prefers a proxy-mode server (newest first) when bridging (see [docs/background-agents.md](docs/background-agents.md)). Pass `--no-discovery` to keep a server out of that file, e.g. a dedicated endpoint you point another tool at.
 
 Examples:
 
