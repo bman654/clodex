@@ -133,10 +133,24 @@ real commands (including `claude -p`) but NEVER add them to the automated test s
   order, each with a one-liner.
 - E4. Full CLI reference covers every kept command/flag; no stripped feature is
   mentioned anywhere in README, docs/, or help text.
-- E5. CHANGELOG reset to `## [0.1.0]` fork entry. CLAUDE.md/AGENTS.md updated to the
-  trimmed architecture while preserving hard-won constraint notes for kept subsystems.
+- E5. CHANGELOG retains the hand-written `## [0.1.0]` fork entry; release-please's
+  updater recognizes the existing format and prepends its generated release entry
+  without clobbering the hand-written content. CLAUDE.md/AGENTS.md describe the
+  trimmed architecture while preserving hard-won constraint notes.
 - E6. `npm pack --dry-run` succeeds and the tarball contains only what's needed
   (dist, README, LICENSE, package.json — no stripped assets/ui files).
+- E7. Manifest-mode release-please config records the fork boundary's full
+  `bootstrap-sha`, starts `.` at `0.0.0`, and the sole post-boundary bootstrap commit
+  has `Release-As: 0.1.0`; therefore the first release is exactly 0.1.0 without
+  scanning inherited relay-ai history or leaving a persistent `release-as` override.
+- E8. `.github/workflows/release-please.yml` runs only on pushes to `main`, is gated
+  by `CLODEX_PUBLISH_ENABLED`, and publishes inside the release-created path after
+  Node 24/pnpm frozen install, typecheck, test, and build. release-please itself
+  creates the tag and GitHub Release.
+- E9. Exact-pinned commitlint conventional config and a Husky v9 `commit-msg` hook
+  reject invalid local commits; gated CI checks every pushed/PR commit range.
+- E10. The old tag-triggered `.github/workflows/publish.yml` is absent. Manually
+  pushing a `v*` tag cannot publish; there is exactly one release/publish path.
 
 ## G. Server discovery & `clodex-claude` wrapper
 
@@ -182,4 +196,8 @@ real commands (including `claude -p`) but NEVER add them to the automated test s
 - F2. CLODEX-BRIEF.md's "Prime directive" was honored — the verifier's spot-check
   diffs (B8) found no gratuitous rewrites.
 - F3. All work is committed on `worktree-clodex` with a clean `git status`. `dist/`
-  is NOT tracked (gitignored); it is rebuilt by `prepublishOnly` and the publish CI.
+  is NOT tracked (gitignored); it is rebuilt by `prepublishOnly` and the
+  release-please workflow's publish path.
+- F4. `release-please-config.json`, `.release-please-manifest.json`, and both workflow
+  YAML files parse successfully; release and commitlint jobs remain inert until the
+  dedicated repo sets `CLODEX_PUBLISH_ENABLED=true`.

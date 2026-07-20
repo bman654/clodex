@@ -1,0 +1,38 @@
+name: Commitlint
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  commitlint:
+    # Keep this inert in relay-ai; enable it with the rest of the release system
+    # after migration by setting CLODEX_PUBLISH_ENABLED=true.
+    if: vars.CLODEX_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+
+      - name: Lint commit messages
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]]; then
+            BASE_SHA="$(git rev-list --max-parents=0 "$HEAD_SHA")"
+          fi
+          pnpm exec commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose

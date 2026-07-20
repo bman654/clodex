@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    # Disabled until clodex lives in its own dedicated repo. Repository variables
+    # are unset by default, so nothing activates in the relay-ai repository.
+    if: vars.CLODEX_PUBLISH_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create or update release PR
+        id: release
+        # v4.4.0, pinned to the immutable commit behind the documented major release.
+        uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # Publish here because tags created with the default GITHUB_TOKEN do not
+      # trigger other workflows; a separate tag-push workflow would never run.
+      - name: Check out released revision
+        if: steps.release.outputs.release_created == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release.outputs.tag_name }}
+
+      - name: Set up Node.js
+        if: steps.release.outputs.release_created == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      # Corepack reads the pinned pnpm version from package.json's packageManager field.
+      - name: Enable corepack
+        if: steps.release.outputs.release_created == 'true'
+        run: corepack enable
+
+      - name: Install dependencies
+        if: steps.release.outputs.release_created == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        if: steps.release.outputs.release_created == 'true'
+        run: pnpm typecheck
+
+      - name: Test
+        if: steps.release.outputs.release_created == 'true'
+        run: pnpm test
+
+      - name: Build
+        if: steps.release.outputs.release_created == 'true'
+        run: pnpm build
+
+      # npm publish keeps the proven NODE_AUTH_TOKEN + registry-url auth flow.
+      - name: Publish to npm
+        if: steps.release.outputs.release_created == 'true'
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.CLODEX_NPM_TOKEN }}

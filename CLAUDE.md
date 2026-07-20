@@ -6,19 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Release workflow
 
-Publishing is automated by GitHub Actions (`.github/workflows/publish.yml`): **pushing a `v*` tag** runs pnpm-driven typecheck + tests + build on Node 24, then `npm publish` (auth via the `CLODEX_NPM_TOKEN` repo secret) and creates a GitHub Release from the matching `CHANGELOG.md` section. **Do NOT run `npm publish` locally.**
+Releases are managed by release-please from conventional commits. Write conventional commits, then push or merge them to `main`; release-please maintains a release PR that accumulates the generated changelog and `package.json` version bump. Merging that release PR creates the `vX.Y.Z` tag and GitHub Release, then the same workflow installs with pnpm on Node 24, runs typecheck + tests + build, and publishes to npm with `CLODEX_NPM_TOKEN`. **Do NOT run `npm publish` locally.** Manually pushing a `v*` tag no longer publishes anything; `.github/workflows/release-please.yml` is the only release path.
 
-The publish job is guarded by `if: vars.CLODEX_PUBLISH_ENABLED == 'true'` and is therefore **skipped everywhere by default** — this branch still lives in the relay-ai repo, and a `v*` tag must not publish from here. After migrating clodex to its own dedicated repo, enable publishing there: set repository variable `CLODEX_PUBLISH_ENABLED=true` and add the `CLODEX_NPM_TOKEN` secret in the new repo's settings.
+The release and commitlint CI jobs are guarded by `if: vars.CLODEX_PUBLISH_ENABLED == 'true'` and therefore remain inert while this branch lives in relay-ai. After migrating clodex to its dedicated repo, set repository variable `CLODEX_PUBLISH_ENABLED=true` and add the `CLODEX_NPM_TOKEN` secret. The release workflow deliberately publishes in the release-please job because a tag created by the default `GITHUB_TOKEN` does not trigger another workflow.
 
-```bash
-# 1. Land all code changes and a CHANGELOG.md "## [x.y.z]" section first (committed).
-npm version patch --no-git-tag-version   # bump package.json (only file carrying the version)
-git add -A && git commit -m "release: vX.Y.Z"
-git tag vX.Y.Z
-git push --follow-tags
-```
+**Commit cheat sheet:** `feat:` adds a feature, `fix:` fixes behavior, and `build:`, `ci:`, `docs:`, or `chore:` cover non-feature maintenance. Add `!` after the type/scope (for example `feat!:`) or a `BREAKING CHANGE:` footer for an incompatible change. Commitlint enforces this locally through Husky's `commit-msg` hook and in CI for pull-request/push commit ranges. Husky v9 was chosen for its small, standard `prepare`-based pnpm integration; setup exits successfully when `.git` is unavailable, so CI/non-git installs are not broken.
 
-`package.json` is the single source of truth for the version (`src/constants.ts::VERSION` reads `pkg.version`). Never hardcode a version string anywhere. `dist/` is gitignored — `prepublishOnly` and the publish CI rebuild it; never commit build output.
+The first release is bootstrapped exactly as **0.1.0**: `.release-please-manifest.json` starts at `0.0.0`, `bootstrap-sha` excludes the inherited relay-ai/fork history, and the single conventional bootstrap commit after that boundary carries a one-shot `Release-As: 0.1.0` footer. This avoids a persistent `release-as` config and therefore needs no cleanup; `bootstrap-sha` is ignored after the first release PR merges. `package.json` remains at 0.1.0 until release-please takes over subsequent bumps. Release-please's changelog updater prepends its generated 0.1.0 entry above the existing hand-written 0.1.0 fork entry, preserving that content rather than replacing it.
+
+Before 1.0, `bump-patch-for-minor-pre-major` makes `feat:` bump patch, ordinary `fix:` also bumps patch, and `bump-minor-pre-major` makes `!`/`BREAKING CHANGE` bump minor (for example 0.1.x → 0.2.0). Once local testing is satisfactory, land a commit on `main` whose body contains `Release-As: 1.0.0` on its own line; the next release PR proposes exactly 1.0.0, then normal conventional-commit bumping resumes.
+
+`package.json` is the single source of truth for the version (`src/constants.ts::VERSION` reads `pkg.version`). Never hardcode a version string anywhere. `dist/` is gitignored — `prepublishOnly` and release CI rebuild it; never commit build output.
 
 ## Toolchain
 
