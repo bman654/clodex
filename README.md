@@ -47,6 +47,8 @@ flowchart LR
     GW -->|"translated request,<br/>clodex-managed OpenAI credentials"| OAI["OpenAI"]
 ```
 
+Using Claude Code's agents view or background agents? Ask your Claude Code agent to read [docs/background-agents.md](docs/background-agents.md) and set it up for you — one global `clodex server --proxy` plus the `clodex-claude` wrapper bin bridges every claude process automatically.
+
 ## CLI reference
 
 ### `clodex claude [options] [claude-flags]`
