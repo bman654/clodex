@@ -8,8 +8,8 @@ real commands (including `claude -p`) but NEVER add them to the automated test s
 
 ## A. Branding & packaging
 
-- A1. `package.json` name is `clodex` (unscoped), version `0.1.0`, bin exposes only
-  `clodex`.
+- A1. `package.json` name is `clodex` (unscoped), version `0.1.0`, bin exposes
+  exactly `clodex` and `clodex-claude` (see section G).
 - A2. `node dist/cli.js --help` (fresh `pnpm build`) shows clodex branding; no
   occurrence of `relay-ai`/`relay:` in any user-visible help/banner output.
 - A3. Config home is `~/.clodex/` with `CLODEX_HOME` override; no `RELAY_AI_*` env
@@ -137,6 +137,44 @@ real commands (including `claude -p`) but NEVER add them to the automated test s
   trimmed architecture while preserving hard-won constraint notes for kept subsystems.
 - E6. `npm pack --dry-run` succeeds and the tarball contains only what's needed
   (dist, README, LICENSE, package.json — no stripped assets/ui files).
+
+## G. Server discovery & `clodex-claude` wrapper
+
+- G1. Runtime state file lifecycle: the standalone `clodex server` command in BOTH
+  modes writes `<CLODEX_HOME>/server-runtime.json` with `{mode, port, pid, caPath
+  (proxy mode only, absolute), startedAt}` after a successful start, and removes it
+  on graceful SIGINT/SIGTERM shutdown. The per-session MITM spawned by
+  `clodex claude --proxy` never writes it.
+- G2. Stale detection is reader-side and unit-tested as pure functions:
+  `parseServerRuntimeState` rejects malformed payloads (including proxy-mode state
+  without a caPath); `readLiveServerRuntimeState` returns null for missing files and
+  dead pids (`kill(pid,0)` probe, EPERM counts as alive). A crashed server's leftover
+  file wedges nothing.
+- G3. Wrapper env cases (pure `computeWrapperEnv`, unit-tested): live proxy-mode
+  server → `HTTPS_PROXY`/`HTTP_PROXY` (+ lowercase variants) set to
+  `http://127.0.0.1:<port>`, `NODE_EXTRA_CA_CERTS` = advertised caPath,
+  `ANTHROPIC_BASE_URL` removed; live endpoint-mode server → `ANTHROPIC_BASE_URL` =
+  `http://127.0.0.1:<port>/anthropic` plus a non-empty local `ANTHROPIC_API_KEY`,
+  proxy vars removed; no live server → env returned untouched (clean fallback:
+  claude always launches).
+- G4. Wrapper arg contract: an executable-file first arg is treated as the claude
+  binary path (the `CLAUDE_CODE_PROCESS_WRAPPER` shape) with remaining args passed
+  through; otherwise the binary is discovered like `clodex claude` does
+  (`CLODEX_CLAUDE_PATH` honored) and all args pass through. Child exit code is
+  preserved; stdio is inherited.
+- G5. Packaging: `package.json` bin maps `clodex-claude` → `dist/claude-wrapper.js`;
+  tsup builds both entries; `npm pack --dry-run` shows `dist/claude-wrapper.js` and
+  `docs/background-agents.md` in the tarball.
+- G6. README Bridge modes section contains two mermaid diagrams matching the code
+  (proxy: clodex:/alias decision, OpenAI via OAuth WebSocket or API-key HTTPS with
+  clodex-managed credentials, passthrough carrying Claude Code's own Anthropic
+  credentials; endpoint: `ANTHROPIC_BASE_URL` + local API key, `/v1/models` catalog
+  fetch feeding the `/model` menu) and ends with the pointer to
+  `docs/background-agents.md`.
+- G7. **[E2E]** With a temp `CLODEX_HOME`: start `clodex server --proxy` — the
+  runtime file appears with the real port and caPath and disappears on SIGINT.
+  Run `clodex-claude` against a fake env-dumping claude script in both invocation
+  shapes and verify all three env cases of G3 plus the stale-pid fallback.
 
 ## F. Meta
 

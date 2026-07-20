@@ -41,13 +41,14 @@ clodex claude --trace       # debug logs to ~/.clodex/logs/
 clodex models --list        # print clodex:<provider>:<model> names + aliases
 clodex patch                # patch the Claude Code binary (see Patcher below)
 clodex server               # foreground gateway
+clodex-claude [args...]     # second bin: launch claude bridged to a running clodex server
 ```
 
 **`claude -p` end-to-end tests are manual only — NEVER add them to the automated test suite.**
 
 ## Architecture
 
-**Entry point:** `src/cli.ts` — arg parsing (`parseArgs`, `consumeBridgeModeFlag`), help texts, and dispatch for `claude`, `server`, `models`/`favorites`, `providers`, `patch`. Every other module is a focused unit with no side effects at import time.
+**Entry points:** `src/cli.ts` — arg parsing (`parseArgs`, `consumeBridgeModeFlag`), help texts, and dispatch for `claude`, `server`, `models`/`favorites`, `providers`, `patch` — and `src/claude-wrapper.ts` (the `clodex-claude` bin, see below). Every other module is a focused unit with no side effects at import time.
 
 **Two bridge modes** (both `clodex claude` and `clodex server`):
 
@@ -55,6 +56,8 @@ clodex server               # foreground gateway
 - **proxy** — selective MITM of `api.anthropic.com` (`src/http-proxy/`): Claude Code keeps its normal Anthropic auth; request model ids matching `clodex:{provider}:{model}` (prefix constant `HTTP_PROXY_MODEL_PREFIX` in `src/http-proxy/routes.ts`) or saved aliases (`src/model-aliases.ts`) route to OpenAI; everything else passes through untouched.
 
 **Bridge-mode defaults:** `resolveBridgeMode(command, explicit, {persist})` in `src/config.ts` — `claudeBridgeMode`/`serverBridgeMode` prefs. An explicit `--endpoint`/`--proxy` applies to that run only and is **never auto-persisted**; persisting requires the explicit `--save-mode` flag alongside a mode flag (`--save-mode` alone is an arg-parse error). With no flag and nothing saved, both commands default to **proxy** (works with the user's existing Claude auth; non-TTY gets the same default without prompting). `--dry-run` never persists. The former `--http-proxy` alias is removed — `--proxy` is the only spelling.
+
+**Server discovery + `clodex-claude` wrapper** (`src/server-runtime.ts`, `src/wrapper-env.ts`, `src/claude-wrapper.ts`): the standalone `clodex server` command (both modes) writes `~/.clodex/server-runtime.json` — `{mode, port, pid, caPath (proxy only), startedAt}` — after a successful start and removes it on SIGINT/SIGTERM; the per-session MITM spawned by `clodex claude --proxy` never writes it. Stale detection is the READER's job: `readLiveServerRuntimeState` rejects malformed files and dead pids (`kill(pid,0)`, EPERM counts as alive). The second bin `clodex-claude` (`dist/claude-wrapper.js`) serves both the `CLAUDE_CODE_PROCESS_WRAPPER` contract (executable first arg = claude binary path, rest passed through) and direct terminal use (binary discovered like `clodex claude`, honoring `CLODEX_CLAUDE_PATH`); after a pid + <100ms TCP liveness check it launches claude with proxy env + CA (proxy-mode server), `ANTHROPIC_BASE_URL` + local API key (endpoint-mode server), or an untouched env when no live server is found — a down server must never break launching claude. Env computation is the pure `computeWrapperEnv`. **Keep the wrapper tiny and its imports minimal — it runs for every spawned agent process.** Setup doc: `docs/background-agents.md` (shipped in the npm tarball via the `docs` entry in package.json `files`).
 
 **Translation layer** (`src/sdk-adapter.ts` + `src/provider-factory.ts`): Anthropic `/v1/messages` ↔ Vercel AI SDK, one turn per request (Claude Code owns the tool loop). This is the **single** translation path — no hand-rolled per-provider translation. Preserved hard-won behavior:
 
