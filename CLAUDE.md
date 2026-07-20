@@ -22,7 +22,7 @@ git push --follow-tags
 
 ## Toolchain
 
-Dev package manager is **pnpm**, pinned via `packageManager: "pnpm@10.34.5"` in package.json and activated with corepack (`corepack enable`). Dependencies are **exact-pinned** (no `^`/`~`). `pnpm-workspace.yaml` (pnpm 10's settings file) sets `minimumReleaseAge: 14400` — no direct or transitive dependency version younger than 10 days (value in minutes) can be resolved; already-locked versions install fine, but fresh resolution of a too-new version fails with `ERR_PNPM_NO_MATURE_MATCHING_VERSION`. End users still install with `npm install -g clodex` — the dev PM does not affect consumers.
+Development targets **Node 24** (`.nvmrc` pins v24.14.1; CI runs Node 24) while the published package still supports **Node >= 22** (`engines.node`) — don't use APIs newer than Node 22 in `src/`. Dev package manager is **pnpm**, pinned via `packageManager: "pnpm@10.34.5"` in package.json and activated with corepack (`corepack enable`). Dependencies are **exact-pinned** (no `^`/`~`). `pnpm-workspace.yaml` (pnpm 10's settings file) sets `minimumReleaseAge: 14400` — no direct or transitive dependency version younger than 10 days (value in minutes) can be resolved; already-locked versions install fine, but fresh resolution of a too-new version fails with `ERR_PNPM_NO_MATURE_MATCHING_VERSION`. End users still install with `npm install -g clodex` — the dev PM does not affect consumers.
 
 ## Commands
 
