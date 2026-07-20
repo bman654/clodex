@@ -1,6 +1,9 @@
 // src/patcher.ts — clodex patch: first-class Claude Code binary patcher.
 //
-// Wraps tweakcc's adhoc-patch mode (see patch-script-template.ts) with:
+// Uses tweakcc's programmatic API (readContent/writeContent — an exact-pinned,
+// declared dependency; no npx, no network) to extract the bundled JS from the
+// Claude Code binary, applies the clodex patch sites in-process
+// (see patch-transforms.ts), and repacks. Adds:
 //  - auto-config: the patch map is built from clodex favorites + aliases,
 //    context windows resolved from registry model metadata (never asked),
 //  - auto-apply: no confirmation, concise summary,
@@ -11,14 +14,12 @@
 //    with `tweakcc --restore`,
 //  - a pid lock (~/.clodex/patch.lock) so concurrent launches cannot race.
 
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
-  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -26,7 +27,7 @@ import {
   closeSync,
   realpathSync,
 } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { basename, join } from 'node:path';
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
@@ -36,7 +37,13 @@ import { loadRegistry } from './registry/io.js';
 import { findClaudeBinary, getInstalledClaudeVersion } from './launch.js';
 import { httpProxyDisplayName, httpProxyModelId } from './http-proxy/routes.js';
 import { stripOneMContextSuffix } from './context-model-id.js';
-import { renderPatchScript, type PatchScriptModelConfig } from './patch-script-template.js';
+import {
+  applyClodexPatches,
+  formatPatchSiteLine,
+  PatchApplyError,
+  type PatchSiteResult,
+  type PatchScriptModelConfig,
+} from './patch-transforms.js';
 
 // ── Manifest ────────────────────────────────────────────────────────────────
 
@@ -286,36 +293,19 @@ function pristineBackupPath(version: string, binaryPath: string): string {
   return join(backupDir(), `claude-${tag}.orig`);
 }
 
-// ── tweakcc invocation ──────────────────────────────────────────────────────
+// ── Patch reporting ─────────────────────────────────────────────────────────
 
-interface TweakccResult {
-  code: number;
-  output: string;
-}
-
-function runTweakcc(binaryPath: string, scriptPath: string): Promise<TweakccResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      'npx',
-      ['-y', 'tweakcc', 'adhoc-patch', '--path', binaryPath, '--script', `@${scriptPath}`, '--confirm-possible-dangerous-patch'],
-      {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, TWEAKCC_CC_INSTALLATION_PATH: binaryPath },
-      },
-    );
-    let output = '';
-    child.stdout.on('data', chunk => { output += String(chunk); });
-    child.stderr.on('data', chunk => { output += String(chunk); });
-    child.on('error', reject);
-    child.on('close', code => resolve({ code: code ?? 1, output }));
-  });
-}
-
-function summarizePatchOutput(output: string): string[] {
-  return output
-    .split(/\r?\n/)
-    .filter(line => /^\s*(OK|SKIP|FAIL)\s{2,}/.test(line) || /^clodex patch:/.test(line.trim()))
-    .map(line => line.trimEnd());
+/** Per-site report lines + summary, same shape the old tweakcc output showed. */
+export function summarizePatchResults(results: PatchSiteResult[]): string[] {
+  const lines = results.map(formatPatchSiteLine);
+  const ok = results.filter(r => r.status === 'OK').length;
+  const skip = results.filter(r => r.status === 'SKIP').length;
+  const failed = results.filter(r => r.status === 'FAIL');
+  lines.push(`clodex patch: ${ok} applied, ${skip} skipped, ${failed.length} failed`);
+  if (failed.length) {
+    lines.push(`clodex patch: FAILED patches: ${failed.map(f => f.name).join('; ')}`);
+  }
+  return lines;
 }
 
 // ── Apply / restore ─────────────────────────────────────────────────────────
@@ -348,45 +338,52 @@ async function applyPatch(
   // backup, never the live binary — so it stays pristine even after patching).
   copyFileSync(backup, join(backupDir(), 'native-binary.backup'));
 
-  const scriptPath = join(tmpdir(), `clodex-patch-${process.pid}-${Date.now()}.js`);
-  writeFileSync(scriptPath, renderPatchScript(desired.config), { encoding: 'utf8', mode: 0o600 });
+  // tweakcc's lib entry pulls in its interactive-picker deps (ink/react), so
+  // load it lazily — only when a patch is actually applied.
+  const { tryDetectInstallation, readContent, writeContent } = await import('tweakcc');
 
+  let results: PatchSiteResult[];
   try {
-    const result = await runTweakcc(binaryPath, scriptPath);
-    if (opts.trace) {
-      process.stderr.write(result.output);
+    const installation = await tryDetectInstallation({ path: binaryPath });
+    const source = await readContent(installation);
+    const patched = applyClodexPatches(source, desired.config);
+    results = patched.results;
+    await writeContent(installation, patched.content);
+  } catch (err) {
+    const detailLines = err instanceof PatchApplyError ? summarizePatchResults(err.results) : [];
+    if (opts.trace && detailLines.length) {
+      process.stderr.write(`${detailLines.join('\n')}\n`);
     }
-    if (result.code !== 0) {
-      return {
-        ok: false,
-        message: `tweakcc adhoc-patch failed (exit ${result.code}). Re-run with --trace for full output.`,
-        detailLines: summarizePatchOutput(result.output),
-      };
-    }
-
-    const manifest: PatchManifest = {
-      binaryPath,
-      claudeVersion: version,
-      configHash,
-      patchedSize: statSync(binaryPath).size,
-      patchedSha256: sha256File(binaryPath),
-      backupPath: backup,
-      patchedAt: new Date().toISOString(),
-    };
-    writePatchManifest(manifest);
-
-    const modelCount = Object.keys(desired.config).length;
-    const aliasCount = Object.values(desired.config).filter(entry => entry.alias).length;
-    const windowCount = Object.values(desired.config).filter(entry => entry.context).length;
     return {
-      ok: true,
-      message: `Patched claude ${version}: ${modelCount} model${modelCount === 1 ? '' : 's'}, `
-        + `${aliasCount} alias${aliasCount === 1 ? '' : 'es'}, ${windowCount} context window${windowCount === 1 ? '' : 's'}.`,
-      detailLines: summarizePatchOutput(result.output),
+      ok: false,
+      message: `Patch failed: ${err instanceof Error ? err.message : String(err)}`,
+      detailLines,
     };
-  } finally {
-    rmSync(scriptPath, { force: true });
   }
+  if (opts.trace) {
+    process.stderr.write(`${summarizePatchResults(results).join('\n')}\n`);
+  }
+
+  const manifest: PatchManifest = {
+    binaryPath,
+    claudeVersion: version,
+    configHash,
+    patchedSize: statSync(binaryPath).size,
+    patchedSha256: sha256File(binaryPath),
+    backupPath: backup,
+    patchedAt: new Date().toISOString(),
+  };
+  writePatchManifest(manifest);
+
+  const modelCount = Object.keys(desired.config).length;
+  const aliasCount = Object.values(desired.config).filter(entry => entry.alias).length;
+  const windowCount = Object.values(desired.config).filter(entry => entry.context).length;
+  return {
+    ok: true,
+    message: `Patched claude ${version}: ${modelCount} model${modelCount === 1 ? '' : 's'}, `
+      + `${aliasCount} alias${aliasCount === 1 ? '' : 'es'}, ${windowCount} context window${windowCount === 1 ? '' : 's'}.`,
+    detailLines: summarizePatchResults(results),
+  };
 }
 
 export async function runPatchCommand(opts: { restore?: boolean; trace?: boolean } = {}): Promise<number> {

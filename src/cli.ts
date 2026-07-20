@@ -547,7 +547,7 @@ ${pc.bold('Usage:')}
 
 ${pc.bold('Options:')}
   --restore    Restore the pristine (unpatched) Claude Code binary
-  --trace      Show the underlying tweakcc output
+  --trace      Show per-patch-site results (OK/SKIP/FAIL)
 
 ${pc.bold('Behavior:')}
   The patch map is built automatically from your clodex favorites and aliases

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,10 +6,11 @@ import {
   buildPatchModelConfig,
   computePatchConfigHash,
   evaluatePatchState,
+  summarizePatchResults,
   tryAcquirePatchLock,
   type PatchManifest,
 } from '../src/patcher.js';
-import { renderPatchScript } from '../src/patch-script-template.js';
+import { applyClodexPatches, PatchApplyError } from '../src/patch-transforms.js';
 
 describe('buildPatchModelConfig', () => {
   const favorites = [
@@ -191,30 +192,56 @@ describe('tryAcquirePatchLock', () => {
   });
 });
 
-describe('renderPatchScript', () => {
-  it('bakes the model config in and produces parseable JavaScript', () => {
-    const script = renderPatchScript({
-      'clodex:openai-oauth:gpt-5.6-sol': { alias: 'sol', context: 272_000 },
-      'clodex:openai-oauth:gpt-5.6-terra': { context: 272_000 },
-      'clodex:openai:mystery': {},
-    });
-    expect(script).toContain('"clodex:openai-oauth:gpt-5.6-sol"');
-    expect(script).toContain('"alias": "sol"');
-    // The script runs in tweakcc's sandbox with `js` as a global and returns the
-    // patched source — wrap it as a function body to validate the syntax.
-    expect(() => new Function('js', script)).not.toThrow();
+describe('applyClodexPatches input validation', () => {
+  it('rejects an empty model config', () => {
+    expect(() => applyClodexPatches('var x = 1;', {})).toThrow(/MODEL_CONFIG is empty/);
   });
 
-  it('rejects unsafe aliases at patch-script runtime', () => {
-    const script = renderPatchScript({
+  it('rejects unsafe aliases', () => {
+    expect(() => applyClodexPatches('var x = 1;', {
       'clodex:openai:model': { alias: 'Bad Alias!' },
-    });
-    expect(() => new Function('js', script)('var x = 1;')).toThrow(/not a safe lowercase alias/);
+    })).toThrow(/not a safe lowercase alias/);
+  });
+
+  it('rejects an explicit context on a [1m]-suffixed id (the suffix already forces 1M)', () => {
+    expect(() => applyClodexPatches('var x = 1;', {
+      'clodex:openai:model[1m]': { context: 1_000_000 },
+    })).toThrow(/keeps the \[1m\] suffix/);
+  });
+
+  it('throws PatchApplyError carrying per-site results when a required anchor is missing', () => {
+    let caught: unknown;
+    try {
+      applyClodexPatches('var x = 1;', { 'clodex:openai:model': { alias: 'mm' } });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(PatchApplyError);
+    expect((caught as Error).message).toContain('required patch failed: PATCH 1');
+    expect((caught as PatchApplyError).results).toEqual([
+      { status: 'FAIL', name: 'PATCH 1: Agent tool model enum', extra: 'anchor not found' },
+    ]);
+  });
+});
+
+describe('summarizePatchResults', () => {
+  it('formats per-site lines plus the applied/skipped/failed summary', () => {
+    expect(summarizePatchResults([
+      { status: 'OK', name: 'PATCH 1: Agent tool model enum' },
+      { status: 'SKIP', name: 'PATCH 6: alias resolver switch', extra: 'no aliases configured' },
+      { status: 'FAIL', name: 'PATCH 5: model picker options', extra: 'anchor not found' },
+    ])).toEqual([
+      '  OK   PATCH 1: Agent tool model enum',
+      '  SKIP PATCH 6: alias resolver switch — no aliases configured',
+      '  FAIL PATCH 5: model picker options — anchor not found',
+      'clodex patch: 1 applied, 1 skipped, 1 failed',
+      'clodex patch: FAILED patches: PATCH 5: model picker options',
+    ]);
   });
 });
 
 // A minified stand-in for the Claude Code bundle carrying every anchor the
-// patch script keys on, so the rendered script can be executed end to end.
+// patch transforms key on, so they can be executed end to end.
 const CLAUDE_FIXTURE = [
   '.enum(["sonnet","opus","haiku","fable"]).optional().describe(`Optional model override for this agent. Defaults to inherit.`)',
   'var KNOWN=["sonnet","opus","haiku","fable","opusplan"];',
@@ -223,13 +250,8 @@ const CLAUDE_FIXTURE = [
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
 ].join('\n');
 
-function runPatchScript(config: Parameters<typeof renderPatchScript>[0], source = CLAUDE_FIXTURE): string {
-  const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
-  try {
-    return new Function('js', renderPatchScript(config))(source) as string;
-  } finally {
-    errors.mockRestore();
-  }
+function runPatchScript(config: Parameters<typeof applyClodexPatches>[1], source = CLAUDE_FIXTURE): string {
+  return applyClodexPatches(source, config).content;
 }
 
 describe('patch script identity naming', () => {
@@ -300,5 +322,40 @@ describe('patch script identity naming', () => {
   it('is idempotent — re-running the same patch changes nothing', () => {
     const once = runPatchScript(config);
     expect(runPatchScript(config, once)).toBe(once);
+  });
+
+  it('reports OK per site on a fresh run and SKIP/refresh on a re-run', () => {
+    const fresh = applyClodexPatches(CLAUDE_FIXTURE, config);
+    expect(fresh.results.map(r => [r.name, r.status])).toEqual([
+      ['PATCH 1: Agent tool model enum', 'OK'],
+      ['PATCH 3: known-alias validator list', 'OK'],
+      ['PATCH 6: alias resolver switch', 'OK'],
+      ['PATCH 5: model picker options', 'OK'],
+      ['PATCH 4: Agent tool model description', 'OK'],
+      ['PATCH 7: per-model context window', 'OK'],
+    ]);
+    const rerun = applyClodexPatches(fresh.content, config);
+    expect(rerun.results.map(r => [r.name, r.status])).toEqual([
+      ['PATCH 1: Agent tool model enum', 'SKIP'],
+      ['PATCH 3: known-alias validator list', 'SKIP'],
+      ['PATCH 6: alias resolver switch', 'SKIP'],
+      ['PATCH 5: model picker options', 'SKIP'],
+      ['PATCH 4: Agent tool model description', 'SKIP'],
+      // PATCH 7 re-runs through the in-place refresh path; an unchanged config
+      // rewrites the identical table, which reports as already patched.
+      ['PATCH 7: per-model context window (refresh)', 'SKIP'],
+    ]);
+  });
+
+  it('refreshes the baked context table in place when only the window changes', () => {
+    const once = runPatchScript(config);
+    const updated = runPatchScript(
+      { ...config, 'clodex:openai:mystery': { context: 131_072, display: 'Mystery (OpenAI)' } },
+      once,
+    );
+    const table = updated.match(/\/\*ccpatch:ctx\*\/var _ccw=\((\{[^}]*\})\)/)?.[1];
+    const parsed = JSON.parse(table!) as Record<string, number>;
+    expect(parsed['clodex:openai:mystery']).toBe(131_072);
+    expect(parsed['sol']).toBe(272_000);
   });
 });

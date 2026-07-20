@@ -17,5 +17,6 @@ export default defineConfig({
     'open',
     'undici',
     'https-proxy-agent',
+    'tweakcc',
   ],
 });

@@ -54,6 +54,7 @@
     "node-forge": "1.4.0",
     "open": "11.0.0",
     "picocolors": "1.1.1",
+    "tweakcc": "4.3.0",
     "undici": "7.28.0",
     "ws": "8.21.0"
   },
