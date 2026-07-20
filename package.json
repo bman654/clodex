@@ -22,7 +22,8 @@
   "type": "module",
   "packageManager": "pnpm@10.34.5",
   "bin": {
-    "clodex": "dist/cli.js"
+    "clodex": "dist/cli.js",
+    "clodex-claude": "dist/claude-wrapper.js"
   },
   "files": [
     "dist",
