@@ -34,7 +34,7 @@ import { getAppHome } from './paths.js';
 import { loadPreferences } from './config.js';
 import { loadRegistry } from './registry/io.js';
 import { findClaudeBinary, getInstalledClaudeVersion } from './launch.js';
-import { httpProxyModelId } from './http-proxy/routes.js';
+import { httpProxyDisplayName, httpProxyModelId } from './http-proxy/routes.js';
 import { stripOneMContextSuffix } from './context-model-id.js';
 import { renderPatchScript, type PatchScriptModelConfig } from './patch-script-template.js';
 
@@ -89,15 +89,23 @@ export interface DesiredPatchConfig {
   unknownWindows: string[];
 }
 
+/** Model metadata the patch bakes in, resolved from the registry models cache. */
+export interface PatchModelMeta {
+  contextWindow?: number;
+  /** Canonical label, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. */
+  displayName?: string;
+}
+
 /**
  * Build the patch model config from favorites + aliases.
  * Keys are the bare `clodex:<provider>:<model>` ids (no [1m] suffix — the
- * context patch and the suffix are mutually exclusive).
+ * context patch and the suffix are mutually exclusive). When an entry has an
+ * alias, that alias becomes the model's identity inside the patched binary.
  */
 export function buildPatchModelConfig(
   favorites: Array<{ providerId: string; modelId: string }>,
   aliases: Array<{ name: string; providerId: string; modelId: string }>,
-  contextWindowFor: (providerId: string, modelId: string) => number | undefined,
+  modelMetaFor: (providerId: string, modelId: string) => PatchModelMeta | undefined,
 ): DesiredPatchConfig {
   const config: PatchScriptModelConfig = {};
   const unknownWindows: string[] = [];
@@ -106,14 +114,16 @@ export function buildPatchModelConfig(
   for (const favorite of favorites) {
     const id = stripOneMContextSuffix(httpProxyModelId(favorite.providerId, favorite.modelId));
     if (config[id]) continue;
-    const context = contextWindowFor(favorite.providerId, favorite.modelId);
+    const meta = modelMetaFor(favorite.providerId, favorite.modelId);
+    const context = meta?.contextWindow;
     const alias = aliasByFavorite.get(`${favorite.providerId}:${favorite.modelId}`);
-    if (context === undefined || context <= 0 || context === 200_000) {
-      if (context === undefined || context <= 0) unknownWindows.push(id);
-      config[id] = alias ? { alias } : {};
-    } else {
-      config[id] = alias ? { alias, context } : { context };
-    }
+    const entry: PatchScriptModelConfig[string] = {};
+    if (alias) entry.alias = alias;
+    if (context === undefined || context <= 0) unknownWindows.push(id);
+    else if (context !== 200_000) entry.context = context;
+    const display = meta?.displayName?.trim();
+    if (display) entry.display = display;
+    config[id] = entry;
   }
   return { config, unknownWindows };
 }
@@ -122,7 +132,7 @@ export function buildPatchModelConfig(
 export function computePatchConfigHash(config: PatchScriptModelConfig): string {
   const canonical = Object.keys(config).sort().map(key => {
     const entry = config[key]!;
-    return [key, entry.alias ?? null, entry.context ?? null];
+    return [key, entry.alias ?? null, entry.context ?? null, entry.display ?? null];
   });
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
@@ -134,19 +144,21 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
   const aliases = prefs.modelAliases ?? [];
   const registry = loadRegistry();
 
-  const windows = new Map<string, number>();
+  const meta = new Map<string, PatchModelMeta>();
   for (const provider of registry.providers) {
     for (const model of provider.modelsCache?.models ?? []) {
-      if (model.contextWindow && model.contextWindow > 0) {
-        windows.set(`${provider.id}:${model.id}`, model.contextWindow);
-      }
+      meta.set(`${provider.id}:${model.id}`, {
+        contextWindow: model.contextWindow && model.contextWindow > 0 ? model.contextWindow : undefined,
+        // Same label `clodex server` prints at startup and `models --list` shows.
+        displayName: httpProxyDisplayName(model, provider.name),
+      });
     }
   }
 
   return buildPatchModelConfig(
     favorites,
     aliases,
-    (providerId, modelId) => windows.get(`${providerId}:${modelId}`),
+    (providerId, modelId) => meta.get(`${providerId}:${modelId}`),
   );
 }
 

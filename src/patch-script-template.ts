@@ -10,9 +10,13 @@
 // mode with a different patch mechanism and an added per-model context window
 // patch.
 //
-// Entries may omit `alias` — id-only entries still join the Agent-tool enum,
-// the known-alias validator, and the context-window table, but skip the alias
-// resolver and /model picker patches.
+// The ALIAS is the model's identity inside the binary: for any entry that
+// defines one, the alias (not the canonical `clodex:<provider>:<model>` id) is
+// what lands in the Agent-tool enum, the known-alias validator, the /model
+// picker, and the context-window table — so `model: sol` in agent/skill
+// frontmatter validates. Entries with no alias fall back to their canonical id
+// as the identity (they still join the enum, validator, and context table, but
+// skip the resolver and /model picker patches).
 
 const CLODEX_CONFIG_START = '// clodex:config:start';
 const CLODEX_CONFIG_END = '// clodex:config:end';
@@ -20,6 +24,8 @@ const CLODEX_CONFIG_END = '// clodex:config:end';
 export interface PatchScriptModelEntry {
   alias?: string;
   context?: number;
+  /** Human label for the /model picker, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. */
+  display?: string;
 }
 
 /** Real model id (e.g. `clodex:openai-oauth:gpt-5.6-sol`) → alias/context. */
@@ -37,6 +43,14 @@ const MODEL_CONFIG = {};
 // ---- derive helpers --------------------------------------------------------
 // alias -> model id (only for entries that define an alias)
 const ALIAS_TO_ID = {};
+// The name Claude Code knows a model by: its alias when it has one, else its
+// canonical id. This single value is used for the Agent-tool enum, the
+// known-alias validator, the /model picker value, and the context-window table,
+// so the name the binary validates == the name it sends upstream == the name
+// the proxy echoes back == the key its context window is stored under.
+const IDENTITIES = [];
+// identity -> human label for the /model picker (falls back at use site)
+const DISPLAY_BY_IDENTITY = {};
 // lowercased alias AND id -> context-window tokens (only for models that set it)
 const CONTEXT_BY_KEY = {};
 for (const [id, value] of Object.entries(MODEL_CONFIG)) {
@@ -47,6 +61,11 @@ for (const [id, value] of Object.entries(MODEL_CONFIG)) {
       throw new Error('clodex patch: alias "' + spec.alias + '" is not a safe lowercase alias');
     }
     ALIAS_TO_ID[a] = String(id);
+    IDENTITIES.push(a);
+    if (spec.display) DISPLAY_BY_IDENTITY[a] = String(spec.display);
+  } else {
+    IDENTITIES.push(String(id));
+    if (spec.display) DISPLAY_BY_IDENTITY[String(id)] = String(spec.display);
   }
 
   if (spec.context !== undefined) {
@@ -69,6 +88,11 @@ for (const [id, value] of Object.entries(MODEL_CONFIG)) {
 const ALIASES = Object.keys(ALIAS_TO_ID);
 const MODELS = Object.keys(MODEL_CONFIG);
 if (MODELS.length === 0) throw new Error("clodex patch: MODEL_CONFIG is empty");
+
+/** Picker/description label for an identity; falls back to the old wording. */
+function displayFor(identity, fallbackId) {
+  return DISPLAY_BY_IDENTITY[identity] || "Custom model (" + fallbackId + ")";
+}
 
 const reEsc = (s) => s.replace(/[.*+?^$\{\}()|[\]\\]/g, "\\$&");
 const q = (s) => JSON.stringify(s); // safe JS string literal
@@ -118,22 +142,24 @@ function applyOnce(name, regex, fn, { marker, required, noopIsSkip } = {}) {
   log("OK", name);
 }
 
-/** Insert missing ids just before the closing bracket of a JS array literal string. */
+/** Insert missing identities just before the closing bracket of a JS array literal string. */
 function extendAliasArray(arrLiteral) {
-  const toAdd = MODELS.filter((a) => !new RegExp('"' + reEsc(a) + '"').test(arrLiteral));
+  const toAdd = IDENTITIES.filter((a) => !new RegExp('"' + reEsc(a) + '"').test(arrLiteral));
   if (toAdd.length === 0) return arrLiteral; // idempotent
   return arrLiteral.replace(/\]\s*$/, "," + toAdd.map(q).join(",") + "]");
 }
 
-console.error("clodex patch: injecting models [" + MODELS.join(", ") + "]"
-  + (ALIASES.length ? " aliases [" + ALIASES.join(", ") + "]" : ""));
+console.error("clodex patch: injecting model names [" + IDENTITIES.join(", ") + "]");
 
 // ---------------------------------------------------------------------------
 // PATCH 1 — Agent/subagent tool 'model' zod enum.
 // Anchor: .enum([ "sonnet",...,"fable" ]).optional().describe( — the array
 // begins with the built-in aliases and is immediately followed by
-// .optional().describe(. We append our ids inside the enum so the tool
-// accepts them. (This same .describe( is patched by PATCH 4 below.)
+// .optional().describe(. We append our identities (alias when defined, else
+// the canonical id) inside the enum so the tool accepts them — this is the same
+// enum subagent/skill 'model:' frontmatter is validated against, which is why
+// the short alias has to be the value that lands here.
+// (This same .describe( is patched by PATCH 4 below.)
 // ---------------------------------------------------------------------------
 applyOnce(
   "PATCH 1: Agent tool model enum",
@@ -146,7 +172,7 @@ applyOnce(
 // PATCH 3 — known-alias validator list (drives "is this a known alias?").
 // Anchor: the master list literal, matched loosely as
 // ["sonnet","opus","haiku","fable", ...anything... ,"opusplan"] so it
-// tolerates new built-ins being added in the middle. Appending our ids
+// tolerates new built-ins being added in the middle. Appending our identities
 // makes them recognized as first-class aliases everywhere the gate runs.
 // ---------------------------------------------------------------------------
 applyOnce(
@@ -157,16 +183,26 @@ applyOnce(
 );
 
 // ---------------------------------------------------------------------------
-// PATCH 6 — alias -> model-id resolver switch.
+// PATCH 6 — alias resolver switch (IDENTITY mapping).
 // Anchor: case"best":{ ... } (the case"best":{ is unique). We inject
-// case"<alias>":return"<model-id>"; right after it (before the switch's
-// default:return null) so each alias resolves to its concrete model id.
+// case"<alias>":return"<alias>"; right after it (before the switch's
+// default:return null).
+//
+// The mapping is deliberately an identity, NOT alias -> canonical id: the alias
+// IS the model's identity everywhere else in the patched binary (enum,
+// validator, picker, context table), and the MITM proxy resolves short alias
+// names as request model ids and echoes request bodies unrewritten. Resolving
+// to the canonical id here would make Claude Code send one name and look its
+// context window up under another — the exact mismatch that stopped auto-compact
+// from firing and killed agents with "Prompt is too long". The case still has to
+// EXIST (rather than be skipped) so the resolver returns the name instead of
+// falling through to default:return null.
 // Only aliases not already present are inserted, so a rerun (or a config
 // edit) tops up cleanly rather than duplicating cases.
 // ---------------------------------------------------------------------------
 {
   const missing = ALIASES.filter((a) => !new RegExp("case" + reEsc(q(a)) + ":return").test(js));
-  const cases = missing.map((a) => "case" + q(a) + ":return " + q(ALIAS_TO_ID[a]) + ";").join("");
+  const cases = missing.map((a) => "case" + q(a) + ":return " + q(a) + ";").join("");
   if (ALIASES.length === 0) {
     log("SKIP", "PATCH 6: alias resolver switch", "no aliases configured");
   } else {
@@ -193,7 +229,9 @@ applyOnce(
     .map(
       // ASCII only: tweakcc's script->JSON->repack path double-encodes any
       // non-ASCII byte.
-      (a) => "{value:" + q(a) + ",label:" + q(a.charAt(0).toUpperCase() + a.slice(1)) + ",description:" + q("Custom model (" + ALIAS_TO_ID[a] + ")") + "}"
+      // value = the alias (the name the user types and the binary sends);
+      // description = the real model label, e.g. "GPT-5.6 Sol (OpenAI (ChatGPT))".
+      (a) => "{value:" + q(a) + ",label:" + q(a.charAt(0).toUpperCase() + a.slice(1)) + ",description:" + q(displayFor(a, ALIAS_TO_ID[a])) + "}"
     )
     .join(",");
   const inject = missing.length
@@ -213,18 +251,24 @@ applyOnce(
 
 // ---------------------------------------------------------------------------
 // PATCH 4 — Agent tool 'model' parameter description text.
-// Append the available model names before the closing backtick so the model
-// knows the aliases exist and can request them. Best-effort (cosmetic).
+// Append the available model names (with their real labels) before the closing
+// backtick so the model knows which extra names it may request and what they
+// actually are. Best-effort (cosmetic). The text is spliced into a backtick
+// template literal, so backticks and interpolation openers are stripped.
 // ---------------------------------------------------------------------------
 {
-  const listing = MODELS.join(", ");
+  const safe = (s) => String(s).replace(/\`/g, "'").replace(/\$\{/g, "(");
+  const listing = IDENTITIES.map(function (i) {
+    const d = DISPLAY_BY_IDENTITY[i];
+    return d ? safe(i) + " = " + safe(d) : safe(i);
+  }).join("; ");
   applyOnce(
     "PATCH 4: Agent tool model description",
     /(describe\(\`Optional model override for this agent[^\`]*?)(\`\))/,
     (_m, body, close) =>
-      body.includes("custom aliases")
+      body.includes("Additional custom models")
         ? body + close
-        : body + " Additional custom aliases: " + listing + "." + close,
+        : body + " Additional custom models: " + listing + "." + close,
     { required: false, noopIsSkip: true }
   );
 }

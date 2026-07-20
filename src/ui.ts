@@ -5,7 +5,7 @@ import * as p from '@clack/prompts';
 import type { ConflictInfo, LocalProvider, LocalProviderModel } from './types.js';
 
 /** Human-readable label for a model (registry names are often raw ids). */
-export function formatModelLabel(model: LocalProviderModel): string {
+export function formatModelLabel(model: Pick<LocalProviderModel, 'id' | 'name'>): string {
   const trimmed = model.name.trim();
   if (trimmed && trimmed !== model.id) return trimmed;
 

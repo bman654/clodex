@@ -4,12 +4,26 @@ import { isSdkMigratedNpm } from '../provider-factory.js';
 import { claudeCodeClientModelId } from '../context-model-id.js';
 import type { ProxyRoute } from '../proxy.js';
 import { isValidModelAlias } from '../model-aliases.js';
-import type { FavoriteModel, LocalProvider, ModelAlias } from '../types.js';
+import { formatModelLabel } from '../ui.js';
+import type { FavoriteModel, LocalProvider, LocalProviderModel, ModelAlias } from '../types.js';
 
 export const HTTP_PROXY_MODEL_PREFIX = 'clodex:';
 
 export function httpProxyModelId(providerId: string, modelId: string): string {
   return `${HTTP_PROXY_MODEL_PREFIX}${providerId}:${modelId}`;
+}
+
+/**
+ * Canonical human-readable model label — `GPT-5.6 Sol (OpenAI (ChatGPT))`.
+ * This is what `clodex server` prints at startup and what `clodex models --list`
+ * shows; `clodex patch` bakes the same string into the /model picker so every
+ * surface names a model identically.
+ */
+export function httpProxyDisplayName(
+  model: Pick<LocalProviderModel, 'id' | 'name'>,
+  providerName: string,
+): string {
+  return `${formatModelLabel(model)} (${providerName})`;
 }
 
 export interface HttpProxyRouteResult {
@@ -65,7 +79,7 @@ export function buildHttpProxyRoutes(
     const proxyRoute = {
       ...route,
       aliasId,
-      displayName: `${model.name || model.id} (${provider.name})`,
+      displayName: httpProxyDisplayName(model, provider.name),
     };
     routes.push(proxyRoute);
     routesByFavorite.set(`${favorite.providerId}:${favorite.modelId}`, proxyRoute);
