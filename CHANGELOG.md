@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.2](https://github.com/bman654/clodex/compare/v1.0.1...v1.0.2) (2026-07-20)
+
+
+### Bug Fixes
+
+* **test:** wait for terminal log event in http-proxy passthrough test to fix CI flake ([b683631](https://github.com/bman654/clodex/commit/b68363166b92a805f468760bec4a92d215122829))
+
 ## [1.0.1](https://github.com/bman654/clodex/compare/v1.0.0...v1.0.1) (2026-07-20)
 
 
