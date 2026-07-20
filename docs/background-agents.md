@@ -18,7 +18,7 @@ This page explains how to bridge **every** Claude Code process on your machine â
 1. **Install clodex globally** (puts both `clodex` and `clodex-claude` on your PATH):
 
    ```bash
-   npm install -g clodex
+   npm install -g @bman654/clodex
    ```
 
 2. **Start the server and keep it running** (a terminal tab, tmux pane, or your service manager of choice):

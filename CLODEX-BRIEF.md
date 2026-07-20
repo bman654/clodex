@@ -153,7 +153,7 @@ Replace README.md entirely:
   from the original relay-ai project, heavily modified and streamlined for this one
   use case, with the full commit history preserved. No other attribution content.
 - "Get started" section assuming a ChatGPT/Codex plan (OAuth) user:
-  `npm install -g clodex`, the OAuth login step, `clodex models` (pick favorites/
+  `npm install -g @bman654/clodex`, the OAuth login step, `clodex models` (pick favorites/
   aliases), `clodex patch`, `clodex claude`. Each with a one-line explanation.
 - Then a full CLI reference for every kept command and flag.
 - No references to stripped features (ui, gemini, codex client, antigravity, vertex,

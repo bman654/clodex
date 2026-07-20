@@ -8,7 +8,8 @@ real commands (including `claude -p`) but NEVER add them to the automated test s
 
 ## A. Branding & packaging
 
-- A1. `package.json` name is `clodex` (unscoped), version `0.1.0`, bin exposes
+- A1. `package.json` name is `@bman654/clodex` (scoped — npm's name-similarity
+  guard rejected unscoped `clodex`; `publishConfig.access: public`), bin exposes
   exactly `clodex` and `clodex-claude` (see section G).
 - A2. `node dist/cli.js --help` (fresh `pnpm build`) shows clodex branding; no
   occurrence of `relay-ai`/`relay:` in any user-visible help/banner output.

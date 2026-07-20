@@ -7,7 +7,7 @@
 ## Get started (ChatGPT/Codex plan)
 
 ```bash
-npm install -g clodex          # 1. install the CLI (Node 22+)
+npm install -g @bman654/clodex          # 1. install the CLI (Node 22+)
 clodex providers auth openai   # 2. sign in with your ChatGPT/Codex plan (device-code OAuth)
 clodex models                  # 3. pick favorite models and short aliases
 clodex patch                   # 4. (optional) patch Claude Code so those models are first-class
