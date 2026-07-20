@@ -232,3 +232,21 @@ describe('buildHttpProxyChildEnv', () => {
     }
   });
 });
+
+describe('child-env builders never mutate clodex process.env', () => {
+  // Guard for the outbound-proxy dispatcher: proxy bridge mode points the CHILD
+  // at clodex's MITM listener via env copies only. If these builders leaked
+  // HTTPS_PROXY into process.env, the global EnvHttpProxyAgent could route
+  // clodex's own upstream calls back through its own listener (self-loop).
+  it('buildChildEnv and buildHttpProxyChildEnv work on copies of process.env', () => {
+    const before = { ...process.env };
+
+    buildChildEnv(UPSTREAM_URL, 'gpt-5.5', 'key', 12345, 200000, true);
+    buildHttpProxyChildEnv(54321, '/tmp/ca.pem');
+
+    expect({ ...process.env }).toEqual(before);
+    expect(process.env['HTTPS_PROXY']).toBe(before['HTTPS_PROXY']);
+    expect(process.env['HTTP_PROXY']).toBe(before['HTTP_PROXY']);
+    expect(process.env['ANTHROPIC_BASE_URL']).toBe(before['ANTHROPIC_BASE_URL']);
+  });
+});

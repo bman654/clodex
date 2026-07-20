@@ -125,6 +125,7 @@ clodex --version    # version
 - Config home: `~/.clodex` (override with `CLODEX_HOME`). On first run, config is migrated automatically from a legacy `~/.relay-ai` directory if present; the legacy directory is never modified.
 - Credentials live in the OS credential store (Keychain / Windows Credential Manager / Secret Service) under the `clodex` service.
 - `CLODEX_CLAUDE_PATH` overrides Claude Code binary discovery.
+- **Outbound proxy:** when `HTTP_PROXY`/`HTTPS_PROXY` (and optionally `NO_PROXY`) are set in clodex's environment, all clodex-originated network calls honor them — OAuth sign-in and token refresh, model-list and models.dev refreshes, upstream OpenAI API calls, and the ChatGPT/Codex OAuth WebSocket transport (tunneled via HTTP CONNECT).
 
 ## Known limitations
 

@@ -11,6 +11,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { FetchFunction } from '@ai-sdk/provider-utils';
 import type { RawData, WebSocket as WsWebSocket } from 'ws';
 import { CODEX_RESPONSES_WEBSOCKETS_BETA } from '../constants.js';
+import { outboundWsProxyAgent } from '../outbound-proxy.js';
 
 const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite';
 const TERMINAL_EVENT_TYPES = new Set(['response.completed', 'response.failed', 'response.incomplete']);
@@ -875,7 +876,7 @@ function outgoingPayload(payload: JsonObject): string {
 
 type WebSocketConstructor = new (
   url: string,
-  options: { headers: Record<string, string> },
+  options: { headers: Record<string, string>; agent?: import('node:http').Agent },
 ) => WsWebSocket;
 
 function sendContext(entry: ConnectionEntry, ctx: RequestContext): void {
@@ -1005,9 +1006,11 @@ function createConnection(
   key: string | undefined,
   options: ConnectionEntry['options'],
   debug: ConnectionEntry['debug'],
+  /** Optional HTTP(S)_PROXY CONNECT-tunnel agent (see src/outbound-proxy.ts). */
+  agent?: import('node:http').Agent,
 ): ConnectionEntry {
   const now = options.now();
-  const socket = new WebSocket(wsUrl, { headers });
+  const socket = new WebSocket(wsUrl, agent ? { headers, agent } : { headers });
   const entry: ConnectionEntry = {
     debugId: nextConnectionDebugId++,
     key: persistent ? key : undefined,
@@ -1096,6 +1099,9 @@ export function createResponsesWebSocketFetch(
 
   return async (_input, init): Promise<Response> => {
     const { WebSocket } = await import('ws');
+    // ws does not honor HTTP(S)_PROXY env vars itself; tunnel through the
+    // configured outbound proxy when one applies to this wss URL.
+    const proxyAgent = await outboundWsProxyAgent(wsUrl);
     const headers = toHeaderRecord(init?.headers);
     headers['OpenAI-Beta'] = CODEX_RESPONSES_WEBSOCKETS_BETA;
 
@@ -1276,6 +1282,7 @@ export function createResponsesWebSocketFetch(
             partitionKey,
             resolvedOptions,
             debug,
+            proxyAgent,
           ),
         };
         activeContext = ctx;
@@ -1288,6 +1295,7 @@ export function createResponsesWebSocketFetch(
           partitionKey,
           resolvedOptions,
           debug,
+          proxyAgent,
         );
         dispatchContext(entry, ctx);
 

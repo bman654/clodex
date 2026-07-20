@@ -15,5 +15,7 @@ export default defineConfig({
     'ws',
     /^@ai-sdk\//,
     'open',
+    'undici',
+    'https-proxy-agent',
   ],
 });

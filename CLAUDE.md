@@ -93,6 +93,8 @@ clodex server               # foreground gateway
 
 **Env isolation** (`src/env.ts`): `buildChildEnv()` copies `process.env`, deletes conflicting `ANTHROPIC_*`/related vars, sets `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL` for the child only. Claude Code may persist the model to `~/.claude/settings.json` itself; outside clodex's control (reset with `claude --model sonnet`).
 
+**Outbound proxy** (`src/outbound-proxy.ts`): when `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` are set in clodex's environment, `installOutboundProxyDispatcher()` (called at the top of `main()`) installs undici's `EnvHttpProxyAgent` as the global fetch dispatcher, so every fetch-based call (OAuth device flow/refresh, model-list + models.dev refresh, AI-SDK upstream calls) honors them; without proxy env vars it is a no-op and nothing changes. The `ws`-based OAuth Responses WebSocket doesn't use the undici dispatcher — `outboundWsProxyAgent()` gives it an `https-proxy-agent` CONNECT-tunnel agent instead (passed through `createConnection`). Self-loop guard: clodex never sets proxy vars in its own `process.env`; proxy bridge mode points only the CHILD at the MITM listener via env copies (`buildChildEnv`/`buildHttpProxyChildEnv` never mutate `process.env` — covered by a test), so the dispatcher can never route clodex's upstream calls through clodex's own listener.
+
 **Tests** (`tests/`): pure functions only — adapter, provider factory, proxy, http-proxy routes, registry, config/migration, bridge-mode persistence, patcher (config building, hash stability, manifest staleness, lock behavior, patch-script rendering/syntax), help text. Interactive launch flow and real-provider behavior are verified manually.
 
 ## Key constraints
