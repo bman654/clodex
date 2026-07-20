@@ -125,6 +125,8 @@ export interface ParsedArgs {
   serverPort?: number;
   /** Opt-in server request-envelope and WebSocket head diagnostics. */
   serverWsDiagnostics?: boolean;
+  /** Skip registering this `clodex server` in ~/.clodex/server-runtime.json discovery. */
+  serverNoDiscovery?: boolean;
   /** Print saved proxy-mode model names without opening the favorites manager. */
   favoritesList?: boolean;
   /** Save a short proxy-mode model alias (`name=clodex:provider:model`). */

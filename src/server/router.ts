@@ -68,6 +68,13 @@ export interface ServerOptions {
   serverPassword: string | null;
   catalog: ModelCatalog;
   gateway?: GatewayModelOptions;
+  /**
+   * Saved short alias names (clodex models --alias) accepted as request model
+   * ids. Used only to preserve the response `model` echo: an aliased request
+   * must be echoed back with the exact id the client sent (see CLAUDE.md's
+   * auto-compaction/context-window echo invariant).
+   */
+  aliasNames?: ReadonlySet<string>;
   /** When set, append structured debug lines to this file path. */
   debugLogPath?: string;
   /** When set, append privacy-minimal inference routing records as JSONL. */
@@ -463,6 +470,9 @@ async function handleOpenAIChatCompletions(
     }
     const completionsUrl = model.completionsUrl;
     const apiKey = model.apiKey ?? options.apiKey;
+    // The client may have addressed the model via a gateway alias or saved
+    // short alias — the upstream API only knows its own wire id.
+    const forwardBody = body.model === upstreamModelId(model) ? body : { ...body, model: upstreamModelId(model) };
     auditInference(options, {
       modelId: body.model,
       effort: openAiEffort(body),
@@ -470,7 +480,7 @@ async function handleOpenAIChatCompletions(
       route: 'passthrough',
       requestPreview: getLatestMessagePreview(body.messages, body.system),
     });
-    await relayAnthropicMessages(res, completionsUrl, body, apiKey, Boolean(body.stream), {
+    await relayAnthropicMessages(res, completionsUrl, forwardBody, apiKey, Boolean(body.stream), {
       onUpstreamError: options.inferenceLogPath
         ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
             modelId: body.model,
@@ -596,6 +606,11 @@ async function getOrInitLanguageModel(
 }
 
 function getResponseModelId(bodyModel: unknown, model: ServerModelInfo, options: ServerOptions): string {
+  // Echo invariant: a saved short alias is echoed back verbatim even when
+  // masking is on — Claude Code resolves context windows from the response
+  // `model` field but preflights with the request alias, so rewriting it here
+  // would break auto-compaction (see CLAUDE.md).
+  if (typeof bodyModel === 'string' && options.aliasNames?.has(bodyModel)) return bodyModel;
   return options.gateway?.maskGatewayIds
     ? gatewayDisplayName(model, options.gateway)
     : (typeof bodyModel === 'string' ? bodyModel : model.id);

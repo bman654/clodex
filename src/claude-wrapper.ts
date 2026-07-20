@@ -25,7 +25,11 @@ import { spawn } from 'node:child_process';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { connect } from 'node:net';
 import { constants as osConstants } from 'node:os';
-import { readLiveServerRuntimeState } from './server-runtime.js';
+import {
+  orderWrapperServerCandidates,
+  readLiveServerRuntimeStates,
+  type ServerRuntimeState,
+} from './server-runtime.js';
 import { computeWrapperEnv } from './wrapper-env.js';
 import { findClaudeBinary } from './launch.js';
 
@@ -74,8 +78,18 @@ async function main(): Promise<void> {
     process.exit(127);
   }
 
-  let state = readLiveServerRuntimeState();
-  if (state && !(await portIsOpen(state.port))) state = null;
+  // Selection policy (see orderWrapperServerCandidates): proxy-mode servers
+  // are preferred over endpoint-mode ones — bridging keeps Claude Code's own
+  // Anthropic auth — with newest startedAt breaking ties within a mode. The
+  // first candidate whose port answers the TCP probe wins; if only an
+  // endpoint server is live it is used; with none, claude launches untouched.
+  let state: ServerRuntimeState | null = null;
+  for (const candidate of orderWrapperServerCandidates(readLiveServerRuntimeStates())) {
+    if (await portIsOpen(candidate.port)) {
+      state = candidate;
+      break;
+    }
+  }
   const env = computeWrapperEnv(process.env, state);
 
   const child = spawn(claudePath, claudeArgs, {

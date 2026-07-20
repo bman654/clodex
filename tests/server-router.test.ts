@@ -576,4 +576,94 @@ describe('server router', () => {
       error: { message: expect.stringContaining('Unsupported model format') },
     });
   });
+
+  describe('saved alias and masked-id request resolution', () => {
+    const lunaModel: ServerModelInfo = {
+      id: 'gpt-5.6-luna',
+      name: 'GPT-5.6 Luna',
+      isFree: false,
+      brand: 'OpenAI',
+      providerId: 'openai-oauth',
+      providerLabel: 'OpenAI (ChatGPT)',
+      sourceBackend: 'openai-oauth',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      apiKey: 'oauth-token',
+    };
+    const gateway = { maskGatewayIds: true as const };
+    const aliases = [{ name: 'luna', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' }];
+
+    async function startAliasServer(): Promise<ServerHandle> {
+      return startTestServer({
+        catalog: createGatewayModelCatalog([lunaModel], gateway, aliases),
+        gateway,
+        aliasNames: new Set(aliases.map(alias => alias.name)),
+      });
+    }
+
+    it('resolves a bare saved alias and echoes it back verbatim in the response model', async () => {
+      const server = await startAliasServer();
+
+      const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'luna', messages: [{ role: 'user', content: 'hi' }] }),
+      });
+
+      expect(response.status).toBe(200);
+      // Echo invariant: the alias the client sent, not the canonical/display id.
+      expect(await response.json()).toMatchObject({ id: 'msg-test', model: 'luna' });
+    });
+
+    it('resolves masked and canonical clodex ids when masking is on', async () => {
+      const server = await startAliasServer();
+
+      for (const requestId of [
+        'anthropic-htuao-ianepo__anul-6.5-tpg', // masked form of anthropic-openai-oauth__gpt-5.6-luna
+        'clodex:openai-oauth:gpt-5.6-luna',
+      ]) {
+        const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: requestId, messages: [{ role: 'user', content: 'hi' }] }),
+        });
+        expect(response.status, requestId).toBe(200);
+      }
+    });
+
+    it('resolves a saved alias on the OpenAI chat completions endpoint too', async () => {
+      const server = await startAliasServer();
+
+      const response = await fetch(`${server.url}/openai/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'luna', messages: [{ role: 'user', content: 'hi' }] }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ id: 'chatcmpl-test', model: 'luna' });
+    });
+
+    it('still rejects unknown model ids with 400', async () => {
+      const server = await startAliasServer();
+
+      const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'nova', messages: [] }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({ error: { message: 'Unknown model: nova' } });
+    });
+
+    it('does not advertise alias names in the discovery model list', async () => {
+      const server = await startAliasServer();
+
+      const listing = await fetch(`${server.url}/anthropic/v1/models`);
+      expect(listing.status).toBe(200);
+      const payload = await listing.json() as { data: Array<{ id: string }> };
+      expect(payload.data.map(entry => entry.id)).toEqual(['anthropic-htuao-ianepo__anul-6.5-tpg']);
+    });
+  });
 });

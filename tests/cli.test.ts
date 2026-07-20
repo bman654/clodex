@@ -137,6 +137,10 @@ describe('parseArgs', () => {
     expect(parseArgs(['server', '--password', 'pw'])).toMatchObject({ serverPassword: 'pw' });
     expect(parseArgs(['server', '--port', '8080'])).toMatchObject({ serverPort: 8080 });
     expect(parseArgs(['server', '--port', '99999'])).toMatchObject({ error: '--port must be an integer between 1 and 65535' });
+    expect(parseArgs(['server', '--no-discovery'])).toMatchObject({ command: 'server', serverNoDiscovery: true });
+    const proxyNoDiscovery = parseArgs(['server', '--proxy', '--no-discovery']);
+    expect(proxyNoDiscovery).toMatchObject({ bridgeMode: 'proxy', serverNoDiscovery: true });
+    expect(proxyNoDiscovery.error).toBeUndefined();
     expect(parseArgs(['server', '--bogus'])).toMatchObject({ error: 'Unknown server option: --bogus' });
   });
 
@@ -206,6 +210,7 @@ describe('help text', () => {
     expect(claudeHelpText()).toContain('--save-mode');
     expect(serverHelpText()).toContain('--save-mode');
     expect(claudeHelpText()).toContain('clodex:<provider-id>:<model-id>');
+    expect(serverHelpText()).toContain('--no-discovery');
     expect(patchHelpText()).toContain('--restore');
   });
 

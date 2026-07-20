@@ -8,7 +8,7 @@ import type { ProxyRoute } from '../proxy.js';
 import { buildHttpProxyRoutes, type HttpProxyRouteResult } from './routes.js';
 import { startHttpProxy, type HttpProxyHandle } from './server.js';
 import { ensureHttpProxyCaBundle } from './ca.js';
-import { removeServerRuntimeState, writeServerRuntimeState } from '../server-runtime.js';
+import { registerServerRuntimeState, unregisterServerRuntimeState } from '../server-runtime.js';
 import { getInferenceRequestLogPath, getSessionLogPath } from '../trace-log.js';
 
 export interface LoadedHttpProxyRoutes extends HttpProxyRouteResult {
@@ -126,7 +126,12 @@ function waitForShutdown(): Promise<void> {
   });
 }
 
-export async function runHttpProxyServerCommand(debug = false, webSocketDiagnostics = false, port?: number): Promise<number> {
+export async function runHttpProxyServerCommand(
+  debug = false,
+  webSocketDiagnostics = false,
+  port?: number,
+  noDiscovery = false,
+): Promise<number> {
   const webSocketDiagnosticsLogPath = webSocketDiagnostics
     ? getSessionLogPath('server-websocket-diagnostics', 'jsonl')
     : undefined;
@@ -165,17 +170,20 @@ export async function runHttpProxyServerCommand(debug = false, webSocketDiagnost
 
   // Advertise the running server for discovery (e.g. the clodex-claude wrapper).
   // Only the standalone `clodex server` command writes this — the per-session
-  // proxy spawned by `clodex claude --proxy` never does.
-  writeServerRuntimeState({
-    mode: 'proxy',
-    port: handle.port,
-    pid: process.pid,
-    caPath: handle.caCertPath,
-    startedAt: new Date().toISOString(),
-  });
+  // proxy spawned by `clodex claude --proxy` never does, and --no-discovery /
+  // CLODEX_NO_DISCOVERY opts a standalone server out too.
+  if (!noDiscovery) {
+    registerServerRuntimeState({
+      mode: 'proxy',
+      port: handle.port,
+      pid: process.pid,
+      caPath: handle.caCertPath,
+      startedAt: new Date().toISOString(),
+    });
+  }
 
   await waitForShutdown();
-  removeServerRuntimeState();
+  if (!noDiscovery) unregisterServerRuntimeState();
   await handle.close();
   return 0;
 }

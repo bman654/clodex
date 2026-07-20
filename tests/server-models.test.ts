@@ -114,6 +114,29 @@ describe('server model catalog', () => {
     expect(catalog.get('anthropic-go__deepseek-test')).toMatchObject({ id: 'deepseek-test' });
   });
 
+  it('resolves canonical clodex ids and saved short aliases without advertising them', () => {
+    const catalog = createGatewayModelCatalog(models, undefined, [
+      { name: 'deep', providerId: 'go', modelId: 'deepseek-test' },
+      { name: 'ghost', providerId: 'go', modelId: 'not-in-catalog' },
+    ]);
+
+    expect(catalog.get('clodex:go:deepseek-test')).toMatchObject({ id: 'deepseek-test' });
+    expect(catalog.get('clodex:openai:gpt-5')).toMatchObject({ id: 'gpt-5' });
+    expect(catalog.get('deep')).toMatchObject({ id: 'deepseek-test' });
+    // An alias whose target is not in the (possibly filtered) catalog stays unknown.
+    expect(catalog.get('ghost')).toBeUndefined();
+    // Accepted input forms never leak into the advertised catalog.
+    expect(catalog.list().map(model => model.id)).toEqual(['claude-sonnet-test', 'deepseek-test', 'gpt-5']);
+  });
+
+  it('an exact catalog id always wins over a colliding saved alias', () => {
+    const catalog = createGatewayModelCatalog(models, undefined, [
+      { name: 'gpt-5', providerId: 'go', modelId: 'deepseek-test' },
+    ]);
+
+    expect(catalog.get('gpt-5')).toMatchObject({ id: 'gpt-5', providerId: 'openai' });
+  });
+
   it('formats OpenAI model list responses', () => {
     expect(formatOpenAIModels(models)).toEqual({
       object: 'list',

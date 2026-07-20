@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { computeWrapperEnv, LOCAL_GATEWAY_API_KEY } from '../src/wrapper-env.js';
 import {
   readLiveServerRuntimeState,
-  writeServerRuntimeState,
+  registerServerRuntimeState,
   type ServerRuntimeState,
 } from '../src/server-runtime.js';
 
@@ -66,13 +66,13 @@ describe('computeWrapperEnv', () => {
     const tempHome = mkdtempSync(join(tmpdir(), 'clodex-wrapper-test-'));
     try {
       const homeEnv = { CLODEX_HOME: join(tempHome, 'app-home') };
-      writeServerRuntimeState({
+      registerServerRuntimeState({
         mode: 'proxy',
         port: 17645,
         pid: 999999,
         caPath: '/tmp/ca.pem',
         startedAt: '2026-07-20T00:00:00.000Z',
-      }, homeEnv);
+      }, homeEnv, { isAlive: () => true });
 
       const state = readLiveServerRuntimeState(homeEnv, { isAlive: () => false });
       const env = computeWrapperEnv(baseEnv, state);

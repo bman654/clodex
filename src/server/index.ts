@@ -47,7 +47,11 @@ import {
 } from './catalog-filter.js';
 import { selectServerProviders, type ServerProviderOption } from './provider-select.js';
 import { runHttpProxyServerCommand } from '../http-proxy/index.js';
-import { removeServerRuntimeState, writeServerRuntimeState } from '../server-runtime.js';
+import {
+  isDiscoveryDisabled,
+  registerServerRuntimeState,
+  unregisterServerRuntimeState,
+} from '../server-runtime.js';
 import { getInferenceRequestLogPath, getSessionLogPath } from '../trace-log.js';
 
 export interface ServerRunConfig {
@@ -68,6 +72,8 @@ export interface ServerCommandOptions {
   wsDiagnostics?: boolean;
   /** TCP port override; defaults to DEFAULT_SERVER_PORT (17645). Applies to gateway and http-proxy modes. */
   port?: number;
+  /** Skip server-runtime.json discovery registration (--no-discovery / CLODEX_NO_DISCOVERY=1). Both modes. */
+  noDiscovery?: boolean;
 }
 
 export function getLocalIps(): Array<{ name: string; address: string }> {
@@ -347,6 +353,7 @@ export async function resolveServerUpstreamApiKey(): Promise<string | null> {
 }
 
 export async function runServerCommand(options: ServerCommandOptions = {}): Promise<number> {
+  const noDiscovery = isDiscoveryDisabled(options.noDiscovery);
   if (options.httpProxy) {
     const hasGatewayOptions = options.quick
       || options.listenMode !== undefined
@@ -357,7 +364,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
       p.log.error('--proxy is a local-only server mode and cannot be combined with endpoint-mode server options.');
       return 1;
     }
-    return runHttpProxyServerCommand(false, options.wsDiagnostics, options.port);
+    return runHttpProxyServerCommand(false, options.wsDiagnostics, options.port, noDiscovery);
   }
   const apiKey = await resolveServerUpstreamApiKey();
   if (!apiKey) {
@@ -434,6 +441,11 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   }
 
   const gateway = runConfig.maskGatewayIds ? { maskGatewayIds: true as const } : undefined;
+  // Saved short aliases (clodex models --alias) are accepted as request model
+  // ids — the same alias table the proxy-mode MITM resolves — so a patched
+  // Claude Code or a direct API client can send e.g. "luna". They are never
+  // advertised in /models listings; see createGatewayModelCatalog.
+  const modelAliases = loadPreferences().modelAliases ?? [];
   const inferenceLogPath = getInferenceRequestLogPath();
   const webSocketDiagnosticsLogPath = options.wsDiagnostics
     ? getSessionLogPath('server-websocket-diagnostics', 'jsonl')
@@ -443,8 +455,9 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     port: options.port ?? DEFAULT_SERVER_PORT,
     apiKey,
     serverPassword,
-    catalog: createGatewayModelCatalog(models, gateway),
+    catalog: createGatewayModelCatalog(models, gateway, modelAliases),
     gateway,
+    aliasNames: new Set(modelAliases.map(alias => alias.name)),
     inferenceLogPath,
     webSocketDiagnosticsLogPath,
   });
@@ -485,16 +498,19 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   printModelCatalog(models, gateway);
   console.log(pc.dim('Press Ctrl+C to stop.'));
 
-  // Advertise the running server for discovery (e.g. the clodex-claude wrapper).
-  writeServerRuntimeState({
-    mode: 'endpoint',
-    port: server.port,
-    pid: process.pid,
-    startedAt: new Date().toISOString(),
-  });
+  // Advertise the running server for discovery (e.g. the clodex-claude
+  // wrapper) unless --no-discovery / CLODEX_NO_DISCOVERY opted out.
+  if (!noDiscovery) {
+    registerServerRuntimeState({
+      mode: 'endpoint',
+      port: server.port,
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+    });
+  }
 
   await waitForShutdown();
-  removeServerRuntimeState();
+  if (!noDiscovery) unregisterServerRuntimeState();
   await server.close();
   return 0;
 }

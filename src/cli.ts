@@ -190,6 +190,7 @@ export function parseArgs(args: string[]): ParsedArgs {
       else if (consumeBridgeModeFlag(arg, parsed)) continue;
       else if (arg === '--save-mode') parsed.saveBridgeMode = true;
       else if (arg === '--ws-diagnostics') parsed.serverWsDiagnostics = true;
+      else if (arg === '--no-discovery') parsed.serverNoDiscovery = true;
       else if (arg === '--quick' || arg === '--saved') parsed.serverQuick = true;
       else if (arg === '--mask-gateway-ids') parsed.serverMaskGatewayIds = true;
       else if (arg === '--no-mask-gateway-ids') parsed.serverMaskGatewayIds = false;
@@ -440,6 +441,10 @@ ${pc.bold('Common options (both modes):')}
   --save-mode                  With --endpoint/--proxy: save that mode as the
                                server default
   --port <1-65535>             Listen port (default 17645)
+  --no-discovery               Do not advertise this server in
+                               ~/.clodex/server-runtime.json, so the
+                               clodex-claude wrapper never bridges to it
+                               (CLODEX_NO_DISCOVERY=1 works too)
   --ws-diagnostics             Log sanitized request envelopes and WebSocket
                                head decisions
   --help, --version            Help / version
@@ -1400,6 +1405,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       password: parsed.serverPassword,
       wsDiagnostics: parsed.serverWsDiagnostics,
       port: parsed.serverPort,
+      noDiscovery: parsed.serverNoDiscovery,
     });
   }
 

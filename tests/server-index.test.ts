@@ -105,6 +105,22 @@ vi.mock('../src/server/provider-select.js', () => ({
   selectServerProviders: vi.fn(async () => []),
 }));
 
+// Keep runServerCommand's discovery registration away from the real
+// ~/.clodex/server-runtime.json (a live server may be advertised there).
+const discovery = vi.hoisted(() => ({
+  register: vi.fn(),
+  unregister: vi.fn(),
+}));
+
+vi.mock('../src/server-runtime.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/server-runtime.js')>();
+  return {
+    ...actual,
+    registerServerRuntimeState: discovery.register,
+    unregisterServerRuntimeState: discovery.unregister,
+  };
+});
+
 vi.mock('../src/server/router.js', () => ({
   startServer: vi.fn(async (options: any) => {
     state.startServerOptions = options;
@@ -147,9 +163,13 @@ describe('runServerCommand', () => {
     state.askUseSavedServerPassword.mockImplementation(async () => state.savedChoice);
     state.askSaveServerPassword.mockClear();
     state.askSaveServerPassword.mockImplementation(async () => state.savePassword);
+    discovery.register.mockClear();
+    discovery.unregister.mockClear();
+    delete process.env['CLODEX_NO_DISCOVERY'];
   });
 
   afterEach(() => {
+    delete process.env['CLODEX_NO_DISCOVERY'];
     if (originalStdinIsTTY) {
       Object.defineProperty(process.stdin, 'isTTY', originalStdinIsTTY);
     } else {
@@ -176,6 +196,34 @@ describe('runServerCommand', () => {
       serverPassword: null,
     });
     expect(state.close).toHaveBeenCalledOnce();
+    expect(discovery.register).toHaveBeenCalledWith(expect.objectContaining({
+      mode: 'endpoint',
+      port: 17645,
+      pid: process.pid,
+    }));
+    expect(discovery.unregister).toHaveBeenCalledOnce();
+  });
+
+  it('--no-discovery starts the server without registering it for wrapper discovery', async () => {
+    const { runServerCommand } = await import('../src/server/index.js');
+    const result = runServerCommand({ noDiscovery: true });
+    await vi.waitFor(() => expect(state.startServerOptions).not.toBeNull());
+    process.emit('SIGINT');
+
+    await expect(result).resolves.toBe(0);
+    expect(discovery.register).not.toHaveBeenCalled();
+    expect(discovery.unregister).not.toHaveBeenCalled();
+  });
+
+  it('CLODEX_NO_DISCOVERY=1 also skips discovery registration', async () => {
+    process.env['CLODEX_NO_DISCOVERY'] = '1';
+    const { runServerCommand } = await import('../src/server/index.js');
+    const result = runServerCommand();
+    await vi.waitFor(() => expect(state.startServerOptions).not.toBeNull());
+    process.emit('SIGINT');
+
+    await expect(result).resolves.toBe(0);
+    expect(discovery.register).not.toHaveBeenCalled();
   });
 
   it('starts network mode on 0.0.0.0 and saves a typed password only when requested', async () => {

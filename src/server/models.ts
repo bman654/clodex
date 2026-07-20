@@ -1,8 +1,10 @@
 // src/server/models.ts
 import { resolveContextWindow } from '../context-window.js';
 import { aliasModelId } from '../proxy.js';
+import { httpProxyModelId } from '../http-proxy/routes.js';
 import { maskGatewayModelId } from './vendor-mask.js';
 import type { FreeStatus } from '../free-models.js';
+import type { ModelAlias } from '../types.js';
 
 export interface GatewayModelOptions {
   maskGatewayIds?: boolean;
@@ -143,8 +145,25 @@ export function formatGatewayAnthropicModels(models: ServerModelInfo[], opts?: G
   );
 }
 
-/** Catalog with alias → model lookup for gateway clients (Claude Desktop, Claude Code). */
-export function createGatewayModelCatalog(models: ServerModelInfo[], opts?: GatewayModelOptions): ModelCatalog {
+/**
+ * Catalog with alias → model lookup for gateway clients (Claude Desktop, Claude Code).
+ *
+ * Accepted request-model forms, in precedence order (later forms never
+ * override earlier keys):
+ *   1. exact catalog id (and its gateway-discovery alias);
+ *   2. the unmasked gateway id when --mask-gateway-ids is on;
+ *   3. the canonical `clodex:{provider}:{model}` id (same spelling the
+ *      proxy-mode MITM routes on);
+ *   4. saved short aliases from `clodex models --alias` (same alias table the
+ *      proxy resolves) — anything else is a 400.
+ * Forms 3-4 are accepted INPUT only: `list()` (and every /models listing built
+ * from it) still advertises exactly the canonical/masked ids it always did.
+ */
+export function createGatewayModelCatalog(
+  models: ServerModelInfo[],
+  opts?: GatewayModelOptions,
+  modelAliases?: ModelAlias[],
+): ModelCatalog {
   const byId = new Map<string, ServerModelInfo>();
   for (const model of models) {
     byId.set(model.id, model);
@@ -154,6 +173,17 @@ export function createGatewayModelCatalog(models: ServerModelInfo[], opts?: Gate
       const rawAlias = gatewayAliasId(model);
       if (rawAlias !== alias) byId.set(rawAlias, model);
     }
+  }
+  for (const model of models) {
+    const canonicalId = httpProxyModelId(gatewayProviderId(model), model.id);
+    if (!byId.has(canonicalId)) byId.set(canonicalId, model);
+  }
+  for (const alias of modelAliases ?? []) {
+    if (byId.has(alias.name)) continue;
+    const target = models.find(
+      model => gatewayProviderId(model) === alias.providerId && model.id === alias.modelId,
+    );
+    if (target) byId.set(alias.name, target);
   }
 
   return {
