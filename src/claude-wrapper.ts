@@ -30,7 +30,7 @@ import {
   readLiveServerRuntimeStates,
   type ServerRuntimeState,
 } from './server-runtime.js';
-import { computeWrapperEnv } from './wrapper-env.js';
+import { computeWrapperEnv, wrapperRequiresServer } from './wrapper-env.js';
 import { findClaudeBinary } from './launch.js';
 
 const isWindows = process.platform === 'win32';
@@ -61,10 +61,13 @@ function portIsOpen(port: number, timeoutMs = 100): Promise<boolean> {
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+  const checkOnly = argv[0] === '--check';
 
-  let claudePath: string | null;
-  let claudeArgs: string[];
-  if (argv[0] && isExecutableFile(argv[0])) {
+  let claudePath: string | null = null;
+  let claudeArgs: string[] = [];
+  if (checkOnly) {
+    // Readiness checks validate discovery and TCP state without launching Claude.
+  } else if (argv[0] && isExecutableFile(argv[0])) {
     // CLAUDE_CODE_PROCESS_WRAPPER shape: first arg is the claude binary path.
     claudePath = argv[0];
     claudeArgs = argv.slice(1);
@@ -73,7 +76,7 @@ async function main(): Promise<void> {
     claudeArgs = argv;
   }
 
-  if (!claudePath) {
+  if (!checkOnly && !claudePath) {
     process.stderr.write('clodex-claude: could not find the claude binary (set CLODEX_CLAUDE_PATH)\n');
     process.exit(127);
   }
@@ -90,9 +93,14 @@ async function main(): Promise<void> {
       break;
     }
   }
+  if (checkOnly) process.exit(state ? 0 : 1);
+  if (!state && wrapperRequiresServer(process.env)) {
+    process.stderr.write('clodex-claude: no live clodex server is available\n');
+    process.exit(1);
+  }
   const env = computeWrapperEnv(process.env, state);
 
-  const child = spawn(claudePath, claudeArgs, {
+  const child = spawn(claudePath!, claudeArgs, {
     stdio: 'inherit',
     env,
     shell: isWindows,

@@ -12,6 +12,7 @@ This page explains how to bridge **every** Claude Code process on your machine �
   - **no live server: env untouched** — `claude` always launches normally, a stopped server never breaks anything.
 - Setting **`CLAUDE_CODE_PROCESS_WRAPPER`** to `clodex-claude` makes Claude Code invoke it as `clodex-claude <claude-binary-path> <args...>` for every process it spawns — agents view sessions and background agents are bridged automatically.
 - For your own terminal sessions, run **`clodex-claude`** instead of `claude` — same auto-discovery, no port or CA path to hardcode anywhere.
+- Set **`CLODEX_REQUIRE_SERVER=1`** in an isolated routed profile when bypassing Clodex must be impossible. `clodex-claude` then exits with an error if no advertised server passes its process and TCP checks. The default remains fail-open for ordinary installations.
 
 ## Setup steps
 
@@ -79,10 +80,14 @@ This page explains how to bridge **every** Claude Code process on your machine �
 
 Port and CA discovery are automatic via `~/.clodex/server-runtime.json` — do not hardcode `HTTPS_PROXY`, ports, or certificate paths in your profile.
 
+For service-manager readiness checks, `clodex-claude --check` exits `0` when an
+advertised server passes the process and TCP checks, and exits `1` otherwise.
+It does not launch Claude.
+
 ## Troubleshooting
 
 - **Is my session bridged?** In a session started via `clodex-claude` (or spawned by Claude Code with the wrapper set), `/model` accepts your `clodex:` model names and aliases (run `clodex models --list` to see them). If those models are rejected and you haven't run `clodex patch`, that's expected for unpatched binaries — but a bridged session still routes them; an unbridged one errors at the API instead.
-- **Server not running:** `clodex-claude` silently launches plain `claude`. Check `cat ~/.clodex/server-runtime.json` — a missing file (or records whose `pid` is no longer alive) means no server is advertised; start `clodex server --proxy`. If a server is running but absent from the file, make sure it was not started with `--no-discovery` / `CLODEX_NO_DISCOVERY=1`.
+- **Server not running:** `clodex-claude` launches plain `claude` by default. With `CLODEX_REQUIRE_SERVER=1`, it exits instead. Check `cat ~/.clodex/server-runtime.json` — a missing file (or records whose `pid` is no longer alive) means no server is advertised; start `clodex server --proxy`. If a server is running but absent from the file, make sure it was not started with `--no-discovery` / `CLODEX_NO_DISCOVERY=1`.
 - **Wrapper variable empty or stale:** run `echo "$CLAUDE_CODE_PROCESS_WRAPPER"` in a **new login shell**. If it is empty, a `$(command -v ...)` in your profile ran before your Node version manager initialized (see the warning in step 3) — switch to a literal path. If it points at a path that no longer exists (a Node upgrade moved the global bin, an fnm/nvm shim directory expired, or it still names an old hand-written script), spawned processes fail to start or silently skip bridging. Verify with `[ -x "$CLAUDE_CODE_PROCESS_WRAPPER" ] && echo OK`.
 - **Agents fail to spawn / `env: node: No such file or directory`:** the wrapper's `#!/usr/bin/env node` shebang could not find Node, typically because Claude Code was launched from a GUI (Spotlight, Raycast, an IDE) with a minimal PATH. Use the launcher script from step 3, which resolves Node by absolute path, and test it with `env -i HOME="$HOME" PATH=/usr/bin:/bin "$CLAUDE_CODE_PROCESS_WRAPPER" --version`.
 - **Port conflicts:** the server default is 17645; `clodex server --proxy --port <n>` picks another. `clodex-claude` reads the actual port from the runtime file, so no other change is needed.

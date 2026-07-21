@@ -8,12 +8,17 @@
 import type { ServerRuntimeState } from './server-runtime.js';
 
 const PROXY_ENV_VARS = ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'] as const;
+export const REQUIRE_SERVER_ENV = 'CLODEX_REQUIRE_SERVER';
 
 /**
  * Any non-empty key satisfies the local endpoint gateway (`isAuthorized`
  * accepts everything when no server password is set, i.e. local listen mode).
  */
 export const LOCAL_GATEWAY_API_KEY = 'clodex-local';
+
+export function wrapperRequiresServer(env: NodeJS.ProcessEnv): boolean {
+  return env[REQUIRE_SERVER_ENV] === '1';
+}
 
 export function computeWrapperEnv(
   baseEnv: NodeJS.ProcessEnv,
