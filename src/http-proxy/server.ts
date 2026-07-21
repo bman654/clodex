@@ -143,6 +143,8 @@ export interface HttpProxyOptions {
   routes: ProxyRoute[];
   /** Short incoming model names mapped to canonical adapter route ids. */
   modelAliases?: ResolvedHttpProxyAlias[];
+  /** Configured local model ids that must never fall through to Anthropic. */
+  reservedModelIds?: string[];
   debug?: boolean;
   /** Per-process translated-adapter debug log used when debug is enabled. */
   debugLogPath?: string;
@@ -661,13 +663,18 @@ function forwardPlainHttp(req: http.IncomingMessage, res: http.ServerResponse): 
 export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpProxyHandle> {
   const certificates = ensureHttpProxyCertificates();
   const routesById = new Map<string, ProxyRoute>();
+  const reservedModelIds = new Set<string>();
   for (const route of options.routes) {
     for (const id of routeLookupIds(route.aliasId)) routesById.set(id, route);
   }
   for (const alias of options.modelAliases ?? []) {
+    for (const id of routeLookupIds(alias.name)) reservedModelIds.add(id);
     const route = routesById.get(alias.routeId);
     if (!route) continue;
     for (const id of routeLookupIds(alias.name)) routesById.set(id, route);
+  }
+  for (const modelId of options.reservedModelIds ?? []) {
+    for (const id of routeLookupIds(modelId)) reservedModelIds.add(id);
   }
   const anthropicOrigin = new URL(options.anthropicOrigin ?? 'https://api.anthropic.com');
   let adapter: ProxyHandle | null = options.adapterHandle ?? null;
@@ -714,18 +721,25 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       const claudeSessionId = parsed
         ? extractClaudeSessionId(parsed, claudeSessionIdHeader)
         : undefined;
+      const requestedModel = typeof parsed?.model === 'string' ? parsed.model : undefined;
+      const unresolvedRoutedModel = !route && requestedModel !== undefined && (
+        requestedModel.startsWith('clodex:') || reservedModelIds.has(requestedModel)
+      );
+      const requestedProvider = unresolvedRoutedModel
+        ? (requestedModel?.startsWith('clodex:') ? requestedModel.split(':')[1] || 'unknown' : 'unknown')
+        : 'anthropic';
 
       if (messagesEndpoint === 'messages' && options.inferenceLogPath) {
         const provider = route
           ? (route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown')
-          : 'anthropic';
+          : requestedProvider;
         writeInferenceRequestLog(options.inferenceLogPath, {
           requestId,
           claudeSessionId,
           modelId: typeof parsed?.model === 'string' ? parsed.model : 'unknown',
           effort: parsed ? anthropicEffortFromRequest(parsed) : undefined,
           provider,
-          route: route ? 'translated' : 'passthrough',
+          route: route || unresolvedRoutedModel ? 'translated' : 'passthrough',
           stream: Boolean(parsed?.stream),
           requestPreview: getLatestMessagePreview(parsed?.messages, parsed?.system),
         });
@@ -734,15 +748,35 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       if (messagesEndpoint === 'messages' && options.webSocketDiagnosticsLogPath) {
         const provider = route
           ? (route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown')
-          : 'anthropic';
+          : requestedProvider;
         writeWebSocketDiagnosticRequestLog(options.webSocketDiagnosticsLogPath, {
           requestId,
           claudeSessionId,
           provider,
-          route: route ? 'translated' : 'passthrough',
+          route: route || unresolvedRoutedModel ? 'translated' : 'passthrough',
           headers: req.headers,
           body: parsed ? parsed as unknown as Record<string, unknown> : {},
         });
+      }
+
+      if (unresolvedRoutedModel) {
+        const message = `Clodex model route is unavailable: ${requestedModel}`;
+        if (messagesEndpoint === 'messages' && options.inferenceLogPath) {
+          writeInferenceResponseErrorLog(options.inferenceLogPath, {
+            requestId,
+            modelId: requestedModel!,
+            provider: requestedProvider,
+            route: 'translated',
+            statusCode: 400,
+            errorContent: message,
+          });
+        }
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          type: 'error',
+          error: { type: 'invalid_request_error', message },
+        }));
+        return;
       }
 
       if (route && adapter) {

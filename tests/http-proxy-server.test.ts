@@ -530,6 +530,7 @@ describe('selective HTTP proxy', () => {
         routeId: 'clodex:groq:llama-3.3-70b',
         displayName: 'Llama 3.3 70B (Groq)',
       }],
+      reservedModelIds: ['missing-route'],
       adapterHandle: {
         port: adapterPort,
         token: 'adapter-local-token',
@@ -641,7 +642,8 @@ describe('selective HTTP proxy', () => {
 
       const typoBody = JSON.stringify({ model: 'clodex:groq:typo', messages: [] });
       const typoSocket = await connectMitm(proxy.port, certificates.caCert);
-      typoSocket.resume();
+      let typoResponse = '';
+      typoSocket.on('data', chunk => { typoResponse += chunk.toString(); });
       typoSocket.write([
         'POST /v1/messages HTTP/1.1',
         'Host: api.anthropic.com',
@@ -653,14 +655,58 @@ describe('selective HTTP proxy', () => {
         '',
       ].join('\r\n') + typoBody);
       await once(typoSocket, 'close');
-      expect(anthropicRequests).toBe(1);
-      expect(fallbackAuth).toBe('Bearer subscription-oauth-token');
+      expect(typoResponse).toContain('400 Bad Request');
+      expect(typoResponse).toContain('Clodex model route is unavailable');
+      expect(anthropicRequests).toBe(0);
+      expect(fallbackAuth).toBeUndefined();
       const inferenceEntries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       expect(inferenceEntries.find(entry => !entry.event && entry.modelId === 'clodex:groq:typo')).toMatchObject({
         modelId: 'clodex:groq:typo',
-        provider: 'anthropic',
-        route: 'passthrough',
+        provider: 'groq',
+        route: 'translated',
       });
+      expect(inferenceEntries).toContainEqual(expect.objectContaining({
+        event: 'upstream_error',
+        modelId: 'clodex:groq:typo',
+        provider: 'groq',
+        route: 'translated',
+        statusCode: 400,
+      }));
+
+      const unavailableAliasBody = JSON.stringify({ model: 'missing-route', messages: [] });
+      const unavailableAliasSocket = await connectMitm(proxy.port, certificates.caCert);
+      let unavailableAliasResponse = '';
+      unavailableAliasSocket.on('data', chunk => { unavailableAliasResponse += chunk.toString(); });
+      unavailableAliasSocket.write([
+        'POST /v1/messages HTTP/1.1',
+        'Host: api.anthropic.com',
+        'Authorization: Bearer subscription-oauth-token',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(unavailableAliasBody)}`,
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n') + unavailableAliasBody);
+      await once(unavailableAliasSocket, 'close');
+      expect(unavailableAliasResponse).toContain('400 Bad Request');
+      expect(unavailableAliasResponse).toContain('Clodex model route is unavailable');
+      expect(anthropicRequests).toBe(0);
+      expect(fallbackAuth).toBeUndefined();
+      const unavailableAliasEntries = readFileSync(inferenceLogPath, 'utf8')
+        .trim()
+        .split('\n')
+        .map(line => JSON.parse(line));
+      expect(unavailableAliasEntries.find(entry => !entry.event && entry.modelId === 'missing-route')).toMatchObject({
+        provider: 'unknown',
+        route: 'translated',
+      });
+      expect(unavailableAliasEntries).toContainEqual(expect.objectContaining({
+        event: 'upstream_error',
+        modelId: 'missing-route',
+        provider: 'unknown',
+        route: 'translated',
+        statusCode: 400,
+      }));
     } finally {
       await proxy.close();
       await new Promise<void>(resolve => origin.close(() => resolve()));

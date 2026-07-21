@@ -284,6 +284,9 @@ export async function startProxyCatalog(
   }
 
   const byAlias = new Map(routes.map(r => [r.aliasId, r]));
+  const configuredAliasNames = new Set(
+    (modelAliases ?? []).flatMap(alias => routeLookupIds(alias.name)),
+  );
   for (const alias of modelAliases ?? []) {
     const route = byAlias.get(alias.routeId);
     if (route && !byAlias.has(alias.name)) byAlias.set(alias.name, route);
@@ -371,7 +374,14 @@ export async function startProxyCatalog(
       const relayRequestId = Array.isArray(relayRequestIdRaw) ? relayRequestIdRaw[0] : relayRequestIdRaw;
 
       // Per-request route resolution: look up the alias, fall back to default
-      const route = lookupRoute(byAlias, originalModel) ?? defaultRoute;
+      const resolvedRoute = lookupRoute(byAlias, originalModel);
+      const configuredModelUnavailable = typeof originalModel === 'string'
+        && (originalModel.startsWith('clodex:') || configuredAliasNames.has(originalModel));
+      if (!resolvedRoute && configuredModelUnavailable) {
+        anthropicError(res, 400, `Model '${originalModel}' is unavailable`);
+        return;
+      }
+      const route = resolvedRoute ?? defaultRoute;
       if (messagesEndpoint === 'count_tokens' && route.modelFormat !== 'anthropic') {
         const inputTokens = estimateAnthropicInputTokens(anthropicBody);
         plog(() => `token-count: local estimate model=${originalModel} input_tokens=${inputTokens}`);

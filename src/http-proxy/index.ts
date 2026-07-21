@@ -106,6 +106,7 @@ export async function startConfiguredHttpProxy(
     port,
     routes: loaded.routes,
     modelAliases: loaded.aliases,
+    reservedModelIds: loaded.unavailableAliases.map(alias => alias.name),
     debug,
     debugLogPath,
     inferenceLogPath,

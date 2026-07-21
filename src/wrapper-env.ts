@@ -10,6 +10,34 @@ import type { ServerRuntimeState } from './server-runtime.js';
 const PROXY_ENV_VARS = ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'] as const;
 export const REQUIRE_SERVER_ENV = 'CLODEX_REQUIRE_SERVER';
 
+export function removeAnthropicProxyBypass(env: NodeJS.ProcessEnv): void {
+  const noProxy = env['NO_PROXY'] ?? env['no_proxy'];
+  if (noProxy === undefined) return;
+
+  const filtered = noProxy
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean)
+    .filter(value => {
+      const entry = value.toLowerCase().replace(/^https?:\/\//, '');
+      const host = entry.replace(/:\d+$/, '');
+      if (host === '*') return false;
+      const suffix = host.startsWith('*.') ? host.slice(1) : host;
+      const bypassesAnthropic = suffix.startsWith('.')
+        ? 'api.anthropic.com'.endsWith(suffix)
+        : 'api.anthropic.com' === suffix || 'api.anthropic.com'.endsWith(`.${suffix}`);
+      return !bypassesAnthropic;
+    })
+    .join(',');
+  if (filtered) {
+    env['NO_PROXY'] = filtered;
+    env['no_proxy'] = filtered;
+  } else {
+    delete env['NO_PROXY'];
+    delete env['no_proxy'];
+  }
+}
+
 /**
  * Any non-empty key satisfies the local endpoint gateway (`isAuthorized`
  * accepts everything when no server password is set, i.e. local listen mode).
@@ -36,6 +64,7 @@ export function computeWrapperEnv(
     delete env['ANTHROPIC_BASE_URL'];
     for (const name of PROXY_ENV_VARS) env[name] = proxyUrl;
     if (state.caPath) env['NODE_EXTRA_CA_CERTS'] = state.caPath;
+    removeAnthropicProxyBypass(env);
     return env;
   }
 
