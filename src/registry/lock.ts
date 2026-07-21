@@ -14,6 +14,7 @@ import { getProvidersPath } from '../paths.js';
 
 const DEFAULT_WAIT_MS = 30_000;
 const DEFAULT_RETRY_MS = 25;
+const LOCK_MAX_HOLD_MS = 10 * 60 * 1000;
 const INVALID_LOCK_STALE_MS = 10 * 60 * 1000;
 
 interface RegistryLockOwner {
@@ -91,7 +92,10 @@ function getStaleLockSnapshot(
     modifiedAt: stats.mtimeMs,
   };
   const owner = parseLockOwner(raw);
-  if (owner) return alive(owner.pid) ? null : snapshot;
+  if (owner) {
+    const expired = now - owner.startedAt >= LOCK_MAX_HOLD_MS;
+    return alive(owner.pid) && !expired ? null : snapshot;
+  }
 
   // A process can be between exclusive creation and writing its owner record.
   // Only reap malformed locks after a long grace period.

@@ -1,6 +1,6 @@
 // src/registry/crud.ts — add/remove providers in the native registry
 
-import { parseAuthRef, deleteProviderCredential } from '../env.js';
+import { deleteProviderCredential } from '../env.js';
 import { loadRegistry, saveRegistry } from './io.js';
 import { withRegistryWriteLock, withRegistryWriteLockSync } from './lock.js';
 import type { RegistryProvider } from './types.js';
@@ -34,9 +34,8 @@ export async function removeProviderFromRegistry(
 
     let credentialDeleted = false;
     if (opts?.deleteCredential !== false) {
-      const parsed = parseAuthRef(removedProvider.authRef);
       const shouldDelete = !credentialStillReferenced(removedProvider.authRef, registry.providers);
-      if (shouldDelete && parsed?.kind === 'keyring') {
+      if (shouldDelete) {
         credentialDeleted = await deleteProviderCredential(removedProvider.authRef);
       }
     }

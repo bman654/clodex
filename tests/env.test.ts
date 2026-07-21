@@ -97,6 +97,7 @@ describe('provider credentials', () => {
     });
     expect(parseAuthRef('helper:oauth:provider:openai-oauth')).toBeNull();
     expect(parseAuthRef('env:OPENAI_API_KEY')).toEqual({ kind: 'env', varName: 'OPENAI_API_KEY' });
+    expect(parseAuthRef('none:anonymous')).toEqual({ kind: 'none' });
     expect(parseAuthRef('bad')).toBeNull();
   });
 
@@ -109,6 +110,12 @@ describe('provider credentials', () => {
     process.env[clodexKeyEnvVar('openai')] = 'env-openai-key';
     const key = await resolveProviderCredential('openai', 'keyring:provider:openai');
     expect(key).toBe('env-openai-key');
+    delete process.env[clodexKeyEnvVar('openai')];
+  });
+
+  it('keeps explicit anonymous access authoritative over provider environment keys', async () => {
+    process.env[clodexKeyEnvVar('openai')] = 'stale-provider-key';
+    await expect(resolveProviderCredential('openai', 'none:anonymous')).resolves.toBeNull();
     delete process.env[clodexKeyEnvVar('openai')];
   });
 

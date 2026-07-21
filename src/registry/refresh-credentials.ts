@@ -1,5 +1,6 @@
 // src/registry/refresh-credentials.ts — keys for refresh-models (OpenCode placeholders, env fallbacks)
 
+import { isAnonymousProvider } from './materialize.js';
 import type { RegistryProvider } from './types.js';
 
 /** OpenCode uses these when OAuth/env supplies the real credential at runtime. */
@@ -55,6 +56,8 @@ export async function resolveRefreshCredential(
   provider: RegistryProvider,
   resolveKey: (provider: RegistryProvider) => Promise<string | null>,
 ): Promise<string | null> {
+  if (isAnonymousProvider(provider)) return null;
+
   // OAuth token refresh (e.g. an expired/revoked refresh token returning 401) throws
   // rather than resolving to null. Treat that the same as "no key" so callers fall
   // through to refreshProviderModels' existing friendly "sign in again" messaging

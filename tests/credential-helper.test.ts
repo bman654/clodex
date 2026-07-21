@@ -18,8 +18,11 @@ import {
   resolveProviderCredential,
   saveProviderCredential,
 } from '../src/env.js';
+import { removeProviderFromRegistry } from '../src/registry/crud.js';
+import { emptyRegistry, loadRegistry, saveRegistry } from '../src/registry/io.js';
 
 const helperPath = fileURLToPath(new URL('./fixtures/credential-helper.mjs', import.meta.url));
+const previousClodexHome = process.env.CLODEX_HOME;
 
 async function waitForPath(path: string): Promise<void> {
   const deadline = Date.now() + 5_000;
@@ -34,12 +37,15 @@ describe('external credential helper', () => {
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'clodex-credential-helper-'));
+    process.env.CLODEX_HOME = tempDir;
     process.env[CREDENTIAL_HELPER_ENV] = helperPath;
     process.env.CLODEX_TEST_CREDENTIAL_HELPER_STORE = join(tempDir, 'credentials.json');
     delete process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE;
   });
 
   afterEach(() => {
+    if (previousClodexHome === undefined) delete process.env.CLODEX_HOME;
+    else process.env.CLODEX_HOME = previousClodexHome;
     delete process.env[CREDENTIAL_HELPER_ENV];
     delete process.env.CLODEX_TEST_CREDENTIAL_HELPER_STORE;
     delete process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE;
@@ -89,6 +95,32 @@ describe('external credential helper', () => {
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe('secret-value');
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
     await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+  });
+
+  it('removes a helper-backed credential with its provider', async () => {
+    const authRef = credentialAuthRef('provider:openai');
+    await expect(saveProviderCredential(authRef, 'secret-value')).resolves.toBe(true);
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'openai',
+      templateId: 'openai',
+      name: 'OpenAI',
+      enabled: true,
+      authRef,
+      authType: 'api',
+      api: { npm: '@ai-sdk/openai', url: 'https://api.openai.com/v1' },
+      addedAt: '2026-07-21T00:00:00.000Z',
+    });
+    saveRegistry(registry);
+
+    const result = await removeProviderFromRegistry('openai');
+
+    expect(result).toMatchObject({
+      removed: true,
+      credentialDeleted: true,
+    });
+    expect(loadRegistry().providers).toHaveLength(0);
+    await expect(readCredentialHelperAccount('provider:openai')).resolves.toBeNull();
   });
 
   it('probes the helper with a disposable round trip', async () => {

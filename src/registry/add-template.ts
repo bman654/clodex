@@ -118,7 +118,9 @@ export async function addProviderFromTemplate(
       };
     }
 
-    const authRef = credentialAuthRef(`provider:${template.id}`);
+    const authRef = trimmedKey
+      ? credentialAuthRef(`provider:${template.id}`)
+      : 'none:anonymous';
     const saved = trimmedKey ? await saveProviderCredential(authRef, trimmedKey) : true;
     if (!saved) {
       return {
@@ -135,7 +137,10 @@ export async function addProviderFromTemplate(
       name: template.name,
       enabled: true,
       authRef,
-      authType: template.authType,
+      authType: trimmedKey ? template.authType : 'none',
+      ...(!trimmedKey && template.anonymousFreeModels
+        ? { subscriptionFilter: 'free' as const }
+        : {}),
       api: {
         npm: template.npm,
         url: fetched.baseUrl,

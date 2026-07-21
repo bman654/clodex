@@ -154,10 +154,12 @@ const oauthRefreshInflight = new Map<string, Promise<string | null>>();
 export type ParsedAuthRef =
   | { kind: 'keyring'; account: string }
   | { kind: 'helper'; helperId: string; account: string }
-  | { kind: 'env'; varName: string };
+  | { kind: 'env'; varName: string }
+  | { kind: 'none' };
 
 /** Parse registry credential references. */
 export function parseAuthRef(authRef: string): ParsedAuthRef | null {
+  if (authRef === 'none:anonymous') return { kind: 'none' };
   if (authRef.startsWith('keyring:')) {
     const account = authRef.slice('keyring:'.length);
     return account ? { kind: 'keyring', account } : null;
@@ -319,10 +321,12 @@ export async function resolveProviderCredential(
   authRef: string,
   diag?: (msg: string) => void,
 ): Promise<string | null> {
+  const parsed = parseAuthRef(authRef);
+  if (parsed?.kind === 'none') return null;
+
   const namespaced = readEnvCredential(clodexKeyEnvVar(providerId));
   if (namespaced) return namespaced;
 
-  const parsed = parseAuthRef(authRef);
   if (!parsed) return null;
 
   if (parsed.kind === 'env') {
@@ -338,7 +342,12 @@ export async function resolveProviderOAuthAccountId(
   diag?: (msg: string) => void,
 ): Promise<string | undefined> {
   const parsed = parseAuthRef(authRef);
-  if (!parsed || parsed.kind === 'env' || !oauthProviderIdFromAccount(parsed.account)) return undefined;
+  if (
+    !parsed
+    || parsed.kind === 'env'
+    || parsed.kind === 'none'
+    || !oauthProviderIdFromAccount(parsed.account)
+  ) return undefined;
   const raw = await readStoredCredential(parsed, diag);
   return parseStoredOAuthCredential(raw)?.accountId;
 }
@@ -348,7 +357,12 @@ export async function resolveProviderOAuthProviderData(
   diag?: (msg: string) => void,
 ): Promise<Record<string, unknown> | undefined> {
   const parsed = parseAuthRef(authRef);
-  if (!parsed || parsed.kind === 'env' || !oauthProviderIdFromAccount(parsed.account)) return undefined;
+  if (
+    !parsed
+    || parsed.kind === 'env'
+    || parsed.kind === 'none'
+    || !oauthProviderIdFromAccount(parsed.account)
+  ) return undefined;
   const raw = await readStoredCredential(parsed, diag);
   return parseStoredOAuthCredential(raw)?.providerData;
 }
@@ -422,7 +436,7 @@ export async function saveProviderCredential(
   diag?: (msg: string) => void,
 ): Promise<boolean> {
   const parsed = parseAuthRef(authRef);
-  if (!parsed || parsed.kind === 'env') return false;
+  if (!parsed || parsed.kind === 'env' || parsed.kind === 'none') return false;
   const written = await writeStoredCredential(parsed, key, diag);
   if (!written) return false;
   const readBack = await readStoredCredential(parsed, diag);
@@ -437,7 +451,7 @@ export async function probeProviderCredentialStore(
   diag?: (msg: string) => void,
 ): Promise<boolean> {
   const parsed = parseAuthRef(authRef);
-  if (!parsed || parsed.kind === 'env') return false;
+  if (!parsed || parsed.kind === 'env' || parsed.kind === 'none') return false;
   const probeAccount = `${parsed.account}::probe::${randomUUID()}`;
   const probeRef: StoredCredentialRef = parsed.kind === 'helper'
     ? { kind: 'helper', helperId: parsed.helperId, account: probeAccount }
@@ -469,7 +483,6 @@ export async function deleteProviderCredential(
   diag?: (msg: string) => void,
 ): Promise<boolean> {
   const parsed = parseAuthRef(authRef);
-  if (!parsed || parsed.kind === 'env') return false;
+  if (!parsed || parsed.kind === 'env' || parsed.kind === 'none') return false;
   return deleteStoredCredential(parsed, diag);
 }
-

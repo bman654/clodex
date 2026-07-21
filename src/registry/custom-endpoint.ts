@@ -54,7 +54,7 @@ export async function fetchAnthropicModels(
     const response = await fetch(modelsUrl, {
       method: 'GET',
       headers: {
-        'x-api-key': apiKey,
+        ...(apiKey ? { 'x-api-key': apiKey } : {}),
         'anthropic-version': '2023-06-01',
         Accept: 'application/json',
         ...extraHeaders,
@@ -152,7 +152,8 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
   const displayName = input.displayName.trim();
   const probeProviderId = uniqueProviderId(displayName, { providers: [] });
   const npm = npmForKind(input.kind);
-  const apiKey = input.apiKey.trim() || 'local';
+  const apiKey = input.apiKey.trim();
+  const anonymous = apiKey.length === 0;
 
   const headers = input.headers && Object.keys(input.headers).length > 0 ? input.headers : undefined;
 
@@ -164,7 +165,7 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
       {
         id: probeProviderId,
         name: displayName,
-        authType: apiKey === 'local' ? 'none' : 'api',
+        authType: anonymous ? 'none' : 'api',
         npm,
         defaultBaseUrl: normalizedUrl,
         modelSource: 'api-list',
@@ -183,8 +184,10 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
   return withRegistryWriteLock(async () => {
     const registry = loadRegistry();
     const providerId = uniqueProviderId(displayName, registry);
-    const authRef = credentialAuthRef(`provider:${providerId}`);
-    if (apiKey !== 'local') {
+    const authRef = anonymous
+      ? 'none:anonymous'
+      : credentialAuthRef(`provider:${providerId}`);
+    if (!anonymous) {
       const saved = await saveProviderCredential(authRef, apiKey);
       if (!saved) {
         return { added: false, error: 'Could not save API key to the credential store.', hint: 'Check credential-store access and try again.' };
@@ -198,6 +201,7 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
       name: displayName,
       enabled: true,
       authRef,
+      authType: anonymous ? 'none' : 'api',
       api: { npm, url: fetched.baseUrl, ...(headers ? { headers } : {}) },
       addedAt: now,
       refreshedAt: now,
@@ -211,10 +215,6 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
         })),
       },
     };
-
-    if (apiKey === 'local') {
-      await saveProviderCredential(entry.authRef, 'local');
-    }
 
     registry.providers.push(entry);
     saveRegistry(registry);

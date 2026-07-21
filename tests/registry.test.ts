@@ -180,6 +180,7 @@ describe('materializeRegistry', () => {
       name: 'Groq',
       enabled: true,
       authRef: 'keyring:provider:groq',
+      authType: 'api',
       api: { npm: '@ai-sdk/groq' },
       addedAt: '2026-06-09T00:00:00.000Z',
       modelsCache: {
@@ -194,6 +195,73 @@ describe('materializeRegistry', () => {
       },
     });
     expect(materializeRegistry(registry, () => null)).toHaveLength(0);
+  });
+
+  it('materializes explicit anonymous access without consulting a credential resolver', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'anonymous-provider',
+      templateId: 'anonymous-provider',
+      name: 'Anonymous Provider',
+      enabled: true,
+      authRef: 'none:anonymous',
+      authType: 'none',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://anonymous.example/v1' },
+      addedAt: '2026-06-09T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-06-09T00:00:00.000Z',
+        models: [{
+          id: 'free-model',
+          name: 'Free Model',
+          upstreamModelId: 'free-model',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    });
+
+    const locals = materializeRegistry(registry, () => {
+      throw new Error('anonymous access must not resolve a credential');
+    });
+
+    expect(locals).toHaveLength(1);
+    expect(locals[0]?.apiKey).toBe('');
+    expect(locals[0]?.authRef).toBe('none:anonymous');
+  });
+
+  it('normalizes the unambiguous legacy no-auth representation', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'legacy-anonymous',
+      templateId: 'custom-openai',
+      name: 'Legacy Anonymous',
+      enabled: true,
+      authRef: 'keyring:provider:legacy-anonymous',
+      authType: 'none',
+      api: {
+        npm: '@ai-sdk/openai-compatible',
+        url: 'https://legacy-anonymous.example/v1',
+      },
+      addedAt: '2026-06-09T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-06-09T00:00:00.000Z',
+        models: [{
+          id: 'local-model',
+          name: 'Local Model',
+          upstreamModelId: 'local-model',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    });
+
+    const locals = materializeRegistry(registry, () => {
+      throw new Error('legacy no-auth access must not resolve a credential');
+    });
+
+    expect(locals).toHaveLength(1);
+    expect(locals[0]?.apiKey).toBe('');
+    expect(locals[0]?.authRef).toBe('none:anonymous');
   });
 
   it('marks NVIDIA imported models as free provider access', () => {

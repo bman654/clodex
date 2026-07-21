@@ -3,6 +3,7 @@ import type { CompatibilityAgent } from './model-compatibility.js';
 import { oauthAuthRef } from './registry/import-build.js';
 import { loadRegistry } from './registry/io.js';
 import { loadRegistryProviders } from './registry/load.js';
+import { isAnonymousProvider } from './registry/materialize.js';
 import { getTemplateById } from './provider-templates.js';
 import type { LocalProvider } from './types.js';
 import type { ServerModelInfo } from './server/models.js';
@@ -27,6 +28,8 @@ export function providersForPicker(providers: LocalProvider[]): LocalProvider[] 
 
 /** Resolve API key when provider.apiKey is empty (registry authRef or OAuth credential store). */
 export async function resolveLocalProviderApiKey(provider: LocalProvider): Promise<string | null> {
+  if (provider.authRef === 'none:anonymous') return 'anonymous';
+
   const direct = provider.apiKey?.trim();
   if (direct) return direct;
   
@@ -49,6 +52,7 @@ export function formatRegistryAuthLabel(
   if (provider.authType === 'oauth' || provider.authRef.includes('oauth:provider:')) {
     return provider.authRef.startsWith('helper:') ? 'helper (OAuth)' : 'keychain (OAuth)';
   }
+  if (isAnonymousProvider(provider)) return 'anonymous';
   if (provider.authType === 'none') {
     return 'gcloud / manual credentials';
   }

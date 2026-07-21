@@ -46,10 +46,17 @@ describe('resolveRefreshCredential', () => {
   });
 
   it('swallows an exception from resolveKey (e.g. OAuth refresh 401) instead of throwing', async () => {
-    const key = await resolveRefreshCredential(makeProvider(), async () => {
-      throw new Error('OpenAI token refresh failed (401)');
-    });
-    expect(key).toBeNull();
+    const previous = process.env['OPENAI_API_KEY'];
+    delete process.env['OPENAI_API_KEY'];
+    try {
+      const key = await resolveRefreshCredential(makeProvider(), async () => {
+        throw new Error('OpenAI token refresh failed (401)');
+      });
+      expect(key).toBeNull();
+    } finally {
+      if (previous === undefined) delete process.env['OPENAI_API_KEY'];
+      else process.env['OPENAI_API_KEY'] = previous;
+    }
   });
 
   it('falls through to env fallback when resolveKey throws and an env var is set', async () => {
@@ -63,6 +70,31 @@ describe('resolveRefreshCredential', () => {
     } finally {
       if (prev === undefined) delete process.env['OPENAI_API_KEY'];
       else process.env['OPENAI_API_KEY'] = prev;
+    }
+  });
+
+  it('does not resolve credentials or environment fallbacks for anonymous access', async () => {
+    const previous = process.env['OPENAI_API_KEY'];
+    process.env['OPENAI_API_KEY'] = 'sk-from-env';
+    try {
+      for (const authRef of [
+        'none:anonymous',
+        'keyring:provider:openai',
+      ]) {
+        let called = false;
+        const key = await resolveRefreshCredential(
+          makeProvider({ authRef, authType: 'none' }),
+          async () => {
+            called = true;
+            return 'stale-key';
+          },
+        );
+        expect(key).toBeNull();
+        expect(called).toBe(false);
+      }
+    } finally {
+      if (previous === undefined) delete process.env['OPENAI_API_KEY'];
+      else process.env['OPENAI_API_KEY'] = previous;
     }
   });
 });

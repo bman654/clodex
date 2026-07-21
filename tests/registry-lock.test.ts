@@ -34,21 +34,48 @@ describe('provider registry lock', () => {
     nextRelease?.();
   });
 
-  it('reaps a lock owned by a dead process but not an old live owner', () => {
+  it('retains a fresh lock owned by a live process and reaps a dead owner', () => {
     const lockPath = temporaryLockPath();
-    const old = Date.now() - 24 * 60 * 60 * 1000;
+    const now = Date.now();
     writeFileSync(
       lockPath,
-      JSON.stringify({ pid: 1234, startedAt: old, token: 'old-owner' }),
+      JSON.stringify({ pid: 1234, startedAt: now, token: 'first-owner' }),
     );
 
     expect(
-      tryAcquireRegistryLock(lockPath, { isAlive: () => true }),
+      tryAcquireRegistryLock(lockPath, { now: () => now, isAlive: () => true }),
     ).toBeNull();
-    const release = tryAcquireRegistryLock(lockPath, { isAlive: () => false });
+    const release = tryAcquireRegistryLock(lockPath, {
+      now: () => now,
+      isAlive: () => false,
+    });
     expect(release).toBeTypeOf('function');
     expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).not.toBe(
-      'old-owner',
+      'first-owner',
+    );
+    release?.();
+  });
+
+  it('reaps an expired lock even when its owner process is still alive', () => {
+    const lockPath = temporaryLockPath();
+    const now = Date.now();
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: 1234,
+        startedAt: now - 10 * 60 * 1000,
+        token: 'expired-owner',
+      }),
+    );
+
+    const release = tryAcquireRegistryLock(lockPath, {
+      now: () => now,
+      isAlive: () => true,
+    });
+
+    expect(release).toBeTypeOf('function');
+    expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).not.toBe(
+      'expired-owner',
     );
     release?.();
   });

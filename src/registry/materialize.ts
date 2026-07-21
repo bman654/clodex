@@ -8,7 +8,6 @@ import { normalizeGoogleDisplayName, normalizeGoogleModelId } from './google-mod
 import { findModelsDevModel } from './models-dev.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js';
 import { isValidProviderId } from './validate.js';
-import { getTemplateById } from '../provider-templates.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 
 export type CredentialResolver = (provider: RegistryProvider) => string | null;
@@ -83,9 +82,14 @@ export function cachedModelToLocal(
   };
 }
 
-function providerAllowsAnonymousFreeModels(provider: RegistryProvider): boolean {
-  const template = getTemplateById(provider.templateId) ?? getTemplateById(provider.id);
-  return template?.anonymousFreeModels === true;
+export function isAnonymousProvider(
+  provider: Pick<RegistryProvider, 'authRef' | 'authType'>
+    & Partial<Pick<RegistryProvider, 'id'>>,
+): boolean {
+  if (provider.authType !== 'none') return false;
+  if (provider.authRef === 'none:anonymous') return true;
+  return provider.id !== undefined
+    && provider.authRef === `keyring:provider:${provider.id}`;
 }
 
 function materializeOne(
@@ -97,8 +101,8 @@ function materializeOne(
   if (!isValidProviderId(provider.id)) return null;
 
   const freeOnly = provider.subscriptionFilter === 'free';
-  const apiKey = resolveCredential(provider) ?? '';
-  const anonymousFreeOnly = !apiKey.trim() && providerAllowsAnonymousFreeModels(provider);
+  const anonymous = isAnonymousProvider(provider);
+  const apiKey = anonymous ? '' : resolveCredential(provider) ?? '';
   const models: LocalProviderModel[] = [];
   for (const cached of provider.modelsCache?.models ?? []) {
     const freeStatus = classifyFreeStatus({
@@ -106,7 +110,7 @@ function materializeOne(
       providerId: provider.id,
       templateId: provider.templateId,
     });
-    if ((freeOnly || anonymousFreeOnly) && !isFreeStatus(freeStatus)) continue;
+    if (freeOnly && !isFreeStatus(freeStatus)) continue;
     const model = cachedModelToLocal(cached, provider);
     if (!model) continue;
     if (shouldHideModel({ providerId: provider.id, modelId: model.id, agent })) continue;
@@ -114,13 +118,13 @@ function materializeOne(
   }
   if (models.length === 0) return null;
 
-  if (!apiKey.trim() && !anonymousFreeOnly) return null;
+  if (!apiKey.trim() && !anonymous) return null;
 
   return {
     id: provider.id,
     name: provider.name,
     apiKey,
-    authRef: provider.authRef,
+    authRef: anonymous ? 'none:anonymous' : provider.authRef,
     authType: provider.authType,
     headers: provider.api.headers,
     models,

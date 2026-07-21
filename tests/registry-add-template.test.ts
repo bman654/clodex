@@ -175,6 +175,51 @@ describe('registry/add-template', () => {
     expect(io.saveRegistry).toHaveBeenCalled();
   });
 
+  it('represents optional no-key access without a stored credential reference', async () => {
+    const anonymousTemplate = { ...dummyTemplate, apiKeyOptional: true };
+
+    const res = await addProviderFromTemplate(anonymousTemplate, '');
+
+    expect(res.added).toBe(true);
+    expect(res.provider).toMatchObject({
+      authRef: 'none:anonymous',
+      authType: 'none',
+    });
+    expect(env.saveProviderCredential).not.toHaveBeenCalled();
+    const savedRegistry = vi.mocked(io.saveRegistry).mock.calls.at(-1)?.[0] as ProviderRegistry;
+    expect(savedRegistry.providers[0]?.authRef).toBe('none:anonymous');
+  });
+
+  it('persists free-only filtering for anonymous free-model access', async () => {
+    const anonymousTemplate = {
+      ...dummyTemplate,
+      apiKeyOptional: true,
+      anonymousFreeModels: true,
+    };
+    vi.mocked(fetchTemplate.fetchTemplateModels).mockResolvedValue({
+      models: [{
+        id: 'free-model',
+        name: 'Free Model',
+        upstreamModelId: 'free-model',
+        family: 'fam',
+        brand: 'brand',
+        modelFormat: 'openai',
+        isFree: true,
+      }],
+      baseUrl: 'https://api.example.com',
+    });
+
+    const res = await addProviderFromTemplate(anonymousTemplate, '');
+
+    expect(res.added).toBe(true);
+    expect(res.provider).toMatchObject({
+      authRef: 'none:anonymous',
+      authType: 'none',
+      subscriptionFilter: 'free',
+    });
+    expect(res.modelCount).toBe(1);
+  });
+
   it('replaces existing provider if replaceExisting is true', async () => {
     vi.mocked(io.loadRegistry).mockReturnValue({
       version: 1,
