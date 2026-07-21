@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { computeWrapperEnv, LOCAL_GATEWAY_API_KEY } from '../src/wrapper-env.js';
+import {
+  computeWrapperEnv,
+  LOCAL_GATEWAY_API_KEY,
+  wrapperRequiresServer,
+} from '../src/wrapper-env.js';
 import {
   readLiveServerRuntimeState,
   registerServerRuntimeState,
@@ -82,5 +86,11 @@ describe('computeWrapperEnv', () => {
     } finally {
       rmSync(tempHome, { recursive: true, force: true });
     }
+  });
+
+  it('requires a live server only when explicitly enabled', () => {
+    expect(wrapperRequiresServer({})).toBe(false);
+    expect(wrapperRequiresServer({ CLODEX_REQUIRE_SERVER: '0' })).toBe(false);
+    expect(wrapperRequiresServer({ CLODEX_REQUIRE_SERVER: '1' })).toBe(true);
   });
 });
