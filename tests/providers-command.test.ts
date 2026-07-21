@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -9,6 +9,7 @@ import {
   runProvidersAdd,
   runProvidersAuth,
   runProvidersRemove,
+  runProvidersCommand,
 } from '../src/providers-command.js';
 import {
   removeProviderFromRegistry,
@@ -24,6 +25,9 @@ const selectMock = vi.hoisted(() => vi.fn());
 const logErrorMock = vi.hoisted(() => vi.fn());
 const logSuccessMock = vi.hoisted(() => vi.fn());
 const authenticateProviderMock = vi.hoisted(() => vi.fn());
+const warnMock = vi.hoisted(() => vi.fn());
+const TEST_HELPER_ID = 'a'.repeat(64);
+const helperRef = (account: string): string => `helper:v1:${TEST_HELPER_ID}:${account}`;
 
 vi.mock('@clack/prompts', async importOriginal => {
   const actual = await importOriginal<typeof import('@clack/prompts')>();
@@ -34,6 +38,7 @@ vi.mock('@clack/prompts', async importOriginal => {
       ...actual.log,
       error: logErrorMock,
       success: logSuccessMock,
+      warn: warnMock,
     },
   };
 });
@@ -132,6 +137,7 @@ describe('registry crud', () => {
     process.env.CLODEX_HOME = home;
     logErrorMock.mockReset();
     logSuccessMock.mockReset();
+    warnMock.mockReset();
   });
 
   afterEach(() => {
@@ -163,7 +169,7 @@ describe('registry crud', () => {
     expect(deleteSpy).toHaveBeenCalledWith('keyring:provider:openai');
   });
 
-  it('returns failure and avoids success output when credential cleanup fails', async () => {
+  it('keeps uncertain credential cleanup queued without failing provider removal', async () => {
     const authRef = 'keyring:provider:openai';
     const registry = emptyRegistry();
     registry.providers.push(openaiEntry({ authRef }));
@@ -172,17 +178,15 @@ describe('registry crud', () => {
     const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(false);
     const code = await runProvidersRemove('openai');
 
-    expect(code).toBe(1);
+    expect(code).toBe(0);
     expect(loadRegistry().providers).toHaveLength(0);
     expect(deleteSpy).toHaveBeenCalledWith(authRef);
-    expect(logErrorMock).toHaveBeenCalledWith(expect.stringContaining(authRef));
-    expect(logErrorMock.mock.calls[0]?.[0]).toMatch(
-      /credential.*(?:cleanup|deletion).*failed/i,
+    expect(loadRegistry().pendingCredentialDeletes).toEqual([authRef]);
+    expect(logErrorMock).not.toHaveBeenCalled();
+    expect(logSuccessMock).toHaveBeenCalledWith('Removed OpenAI.');
+    expect(warnMock).toHaveBeenCalledWith(
+      'Provider credential cleanup is queued for retry.',
     );
-    expect(logErrorMock.mock.calls[0]?.[0]).toContain(
-      'must be removed manually',
-    );
-    expect(logSuccessMock).not.toHaveBeenCalled();
   });
 
   it('keeps a shared credential when another provider still references it', async () => {
@@ -238,6 +242,76 @@ describe('providers auth command', () => {
       'Could not save OAuth tokens to the credential store: credential write failed',
     );
     expect(logSuccessMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('provider removal cleanup', () => {
+  it('removes the provider and queues cleanup when deletion has an unknown outcome', async () => {
+    const registry = emptyRegistry();
+    registry.providers.push(openaiEntry({ authRef: helperRef('provider:openai') }));
+    withRegistryWriteLockSync(() => saveRegistry(registry));
+
+    const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockImplementation(async () => {
+      const duringDelete = loadRegistry();
+      expect(duringDelete.providers).toHaveLength(0);
+      expect(duringDelete.pendingCredentialDeletes).toEqual([helperRef('provider:openai')]);
+      return false;
+    });
+    const result = await removeProviderFromRegistry('openai');
+
+    expect(result.removed).toBe(true);
+    expect(result.credentialCleanupPending).toBe(true);
+    expect(result.error).toBeUndefined();
+    expect(deleteSpy).toHaveBeenCalledWith(helperRef('provider:openai'));
+    expect(loadRegistry().providers).toHaveLength(0);
+    expect(loadRegistry().pendingCredentialDeletes).toEqual([helperRef('provider:openai')]);
+  });
+});
+
+describe('provider command cleanup reconciliation', () => {
+  let home: string;
+  const prevHome = process.env.CLODEX_HOME;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'clodex-provider-cleanup-'));
+    process.env.CLODEX_HOME = home;
+    warnMock.mockReset();
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.CLODEX_HOME;
+    else process.env.CLODEX_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('persists uncertain cleanup for retry after a process restart', async () => {
+    const authRef = helperRef('provider:stale');
+    const registry = emptyRegistry();
+    registry.pendingCredentialDeletes = [authRef];
+    withRegistryWriteLockSync(() => saveRegistry(registry));
+    const deleteSpy = vi.spyOn(env, 'deleteProviderCredential')
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await runProvidersCommand(['auth']);
+
+    expect(deleteSpy).toHaveBeenNthCalledWith(1, authRef);
+    expect(loadRegistry().pendingCredentialDeletes).toEqual([authRef]);
+    expect(warnMock).toHaveBeenCalledWith(
+      'Some credential cleanup is still pending and will be retried later.',
+    );
+    const persisted = JSON.parse(
+      readFileSync(join(home, 'providers.json'), 'utf8'),
+    ) as { pendingCredentialDeletes?: string[] };
+    expect(persisted.pendingCredentialDeletes).toEqual([authRef]);
+
+    await runProvidersCommand(['auth']);
+
+    expect(deleteSpy).toHaveBeenNthCalledWith(2, authRef);
+    expect(loadRegistry().pendingCredentialDeletes).toBeUndefined();
+    expect(warnMock).toHaveBeenCalledTimes(1);
   });
 });
 

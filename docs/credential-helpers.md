@@ -32,6 +32,15 @@ diagnostic in the error instead of continuing with tokens that cannot be
 durably stored. Set `CLODEX_CREDENTIAL_HELPER` to the absolute path of an
 external helper, then run the authorization command again.
 
+Provider creation, replacement, and removal use a durable cleanup journal in
+`providers.json`. A new unreferenced credential is journaled before it is
+written, provider changes are saved before superseded credentials are deleted,
+and uncertain deletion outcomes remain queued. Per-credential cross-process
+locks serialize writes, activation, removal, and reconciliation for the same
+reference without blocking unrelated credentials. The next `clodex providers`
+command retries queued deletions idempotently and never deletes a credential
+that is referenced by an active provider.
+
 ## Protocol
 
 The helper receives one of these invocations:

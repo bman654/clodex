@@ -141,6 +141,36 @@ describe('registry io', () => {
     expect(existsSync(lockPath)).toBe(false);
   });
 
+  it('round-trips and sanitizes pending credential cleanup references', () => {
+    const path = join(home, 'providers.json');
+    const helperRef = `helper:v1:${'a'.repeat(64)}:provider:stale`;
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 1,
+      providers: [],
+      pendingCredentialDeletes: [
+        helperRef,
+        'keyring:provider:stale',
+        helperRef,
+        'env:OPENAI_API_KEY',
+        'helper:',
+        'helper:provider:stale',
+        42,
+      ],
+    }));
+
+    const loaded = loadRegistry(path);
+    expect(loaded.pendingCredentialDeletes).toEqual([
+      helperRef,
+      'keyring:provider:stale',
+    ]);
+    withRegistryWriteLockSync(
+      () => saveRegistry(loaded, path),
+      { lockPath: `${path}.lock` },
+    );
+    expect(loadRegistry(path).pendingCredentialDeletes).toEqual(loaded.pendingCredentialDeletes);
+  });
+
 });
 
 describe('materializeRegistry', () => {

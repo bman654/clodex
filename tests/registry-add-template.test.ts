@@ -10,11 +10,20 @@ import type { ProviderRegistry } from '../src/registry/types.js';
 
 const lockState = vi.hoisted(() => ({
   active: false,
+  registryTail: Promise.resolve(),
   credentialActive: false,
   credentialTails: new Map<string, Promise<void>>(),
 }));
+let registryState: ProviderRegistry;
 
-vi.mock('../src/env.js', () => ({ saveProviderCredential: vi.fn() }));
+vi.mock('../src/env.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/env.js')>();
+  return {
+    ...actual,
+    deleteProviderCredential: vi.fn(),
+    saveProviderCredential: vi.fn(),
+  };
+});
 vi.mock('../src/provider-factory.js', () => ({ isSdkMigratedNpm: vi.fn() }));
 vi.mock('../src/registry/fetch-template-models.js', () => ({ fetchTemplateModels: vi.fn() }));
 vi.mock('../src/registry/io.js', () => ({ loadRegistry: vi.fn(), saveRegistry: vi.fn() }));
@@ -27,12 +36,17 @@ vi.mock('../src/registry/pricing.js', () => ({
 }));
 vi.mock('../src/registry/lock.js', () => ({
   withRegistryWriteLock: vi.fn(async (operation: () => unknown) => {
-    if (lockState.active) return operation();
+    const previous = lockState.registryTail;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    lockState.registryTail = previous.then(() => gate);
+    await previous;
     lockState.active = true;
     try {
       return await operation();
     } finally {
       lockState.active = false;
+      release();
     }
   }),
   withCredentialMutationLock: vi.fn(async (
@@ -73,15 +87,22 @@ describe('registry/add-template', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     lockState.active = false;
+    lockState.registryTail = Promise.resolve();
     lockState.credentialActive = false;
     lockState.credentialTails.clear();
 
     vi.mocked(providerFactory.isSdkMigratedNpm).mockReturnValue(true);
+    vi.mocked(env.deleteProviderCredential).mockResolvedValue(true);
     vi.mocked(env.saveProviderCredential).mockResolvedValue(true);
-    
-    vi.mocked(io.loadRegistry).mockReturnValue({
-      version: 1,
+    registryState = {
+      schemaVersion: 1,
       providers: [],
+    };
+    vi.mocked(io.loadRegistry).mockReset().mockImplementation(() =>
+      structuredClone(registryState));
+    vi.mocked(io.saveRegistry).mockReset().mockImplementation((registry) => {
+      if (!lockState.active) throw new Error('registry write escaped its lock');
+      registryState = structuredClone(registry);
     });
     
     vi.mocked(fetchTemplate.fetchTemplateModels).mockResolvedValue({
@@ -118,8 +139,17 @@ describe('registry/add-template', () => {
 
   it('fails if provider already exists and replaceExisting is not set', async () => {
     vi.mocked(io.loadRegistry).mockReturnValue({
-      version: 1,
-      providers: [{ id: 'test-template', templateId: 'test-template', name: 'Existing', enabled: true, authType: 'keyring', authRef: 'k', api: {} }],
+      schemaVersion: 1,
+      providers: [{
+        id: 'test-template',
+        templateId: 'test-template',
+        name: 'Existing',
+        enabled: true,
+        authType: 'api',
+        authRef: 'keyring:provider:test-template',
+        api: {},
+        addedAt: '2026-01-01T00:00:00.000Z',
+      }],
     });
 
     const res = await addProviderFromTemplate(dummyTemplate, 'key');
@@ -211,11 +241,21 @@ describe('registry/add-template', () => {
   });
 
   it('fails if credential cannot be saved', async () => {
+    const persisted: ProviderRegistry[] = [];
+    vi.mocked(io.saveRegistry).mockImplementation(registry => {
+      registryState = structuredClone(registry);
+      persisted.push(structuredClone(registry));
+    });
     vi.mocked(env.saveProviderCredential).mockResolvedValue(false);
 
     const res = await addProviderFromTemplate(dummyTemplate, 'key');
     expect(res.added).toBe(false);
     expect(res.error).toContain('Could not save API key');
+    expect(persisted[0]?.pendingCredentialDeletes).toEqual([
+      'keyring:provider:test-template',
+    ]);
+    expect(env.deleteProviderCredential).toHaveBeenCalledWith('keyring:provider:test-template');
+    expect(persisted.at(-1)?.pendingCredentialDeletes).toBeUndefined();
   });
 
   it('successfully adds provider', async () => {
@@ -244,6 +284,16 @@ describe('registry/add-template', () => {
     expect(env.saveProviderCredential).not.toHaveBeenCalled();
     const savedRegistry = vi.mocked(io.saveRegistry).mock.calls.at(-1)?.[0] as ProviderRegistry;
     expect(savedRegistry.providers[0]?.authRef).toBe('none:anonymous');
+  });
+
+  it('never sends an anonymous reference to credential deletion', async () => {
+    const anonymousTemplate = { ...dummyTemplate, apiKeyOptional: true };
+
+    const res = await addProviderFromTemplate(anonymousTemplate, '');
+
+    expect(res.added).toBe(true);
+    expect(res.provider?.authRef).toBe('none:anonymous');
+    expect(env.deleteProviderCredential).not.toHaveBeenCalled();
   });
 
   it('persists free-only filtering for anonymous free-model access', async () => {
@@ -278,16 +328,65 @@ describe('registry/add-template', () => {
 
   it('replaces existing provider if replaceExisting is true', async () => {
     vi.mocked(io.loadRegistry).mockReturnValue({
-      version: 1,
-      providers: [{ id: 'test-template', templateId: 'test-template', name: 'Existing', enabled: true, authType: 'keyring', authRef: 'k', api: {} }],
+      schemaVersion: 1,
+      providers: [{
+        id: 'test-template',
+        templateId: 'test-template',
+        name: 'Existing',
+        enabled: true,
+        authType: 'api',
+        authRef: 'keyring:provider:test-template',
+        api: {},
+        addedAt: '2026-01-01T00:00:00.000Z',
+      }],
     });
 
     const res = await addProviderFromTemplate(dummyTemplate, 'key_123', { replaceExisting: true });
 
     expect(res.added).toBe(true);
     
-    const savedRegistry = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+    const savedRegistry = vi.mocked(io.saveRegistry).mock.calls.at(-1)?.[0] as ProviderRegistry;
     expect(savedRegistry.providers).toHaveLength(1); // Replaced, not duplicated
     expect(savedRegistry.providers[0]?.name).toBe('Test Provider');
+    expect(savedRegistry.providers[0]?.authRef).toMatch(
+      /^keyring:provider:test-template:replacement:/,
+    );
+    expect(env.deleteProviderCredential).toHaveBeenCalledWith('keyring:provider:test-template');
+  });
+
+  it('keeps a failed replacement journaled without changing the active provider', async () => {
+    vi.mocked(io.loadRegistry).mockReturnValue({
+      schemaVersion: 1,
+      providers: [{
+        id: 'test-template',
+        templateId: 'test-template',
+        name: 'Existing',
+        enabled: true,
+        authType: 'api',
+        authRef: 'keyring:provider:test-template',
+        api: {},
+        addedAt: '2026-01-01T00:00:00.000Z',
+      }],
+    });
+    let durableJournal: ProviderRegistry | undefined;
+    vi.mocked(io.saveRegistry)
+      .mockImplementationOnce(registry => {
+        durableJournal = structuredClone(registry);
+      })
+      .mockImplementationOnce(() => {
+        throw new Error('activation failed');
+      });
+
+    await expect(
+      addProviderFromTemplate(dummyTemplate, 'replacement-key', {
+        replaceExisting: true,
+      }),
+    ).rejects.toThrow('activation failed');
+
+    expect(durableJournal?.providers[0]?.authRef).toBe('keyring:provider:test-template');
+    expect(durableJournal?.pendingCredentialDeletes?.[0]).toMatch(
+      /^keyring:provider:test-template:replacement:/,
+    );
+    expect(env.deleteProviderCredential).not.toHaveBeenCalled();
   });
 });

@@ -18,6 +18,7 @@ import {
   removeProviderFromRegistry,
   toggleProviderEnabled,
 } from './registry/crud.js';
+import { reconcilePendingCredentialDeletes } from './registry/credential-lifecycle.js';
 import { loadRegistry } from './registry/io.js';
 import { refreshAllProviderModels, refreshProviderModels } from './registry/refresh-models.js';
 import { resolveRefreshCredential } from './registry/refresh-credentials.js';
@@ -115,6 +116,9 @@ export async function runProvidersAuth(providerId: string, method?: ProviderAuth
   try {
     const result = await authenticateProvider(providerId, { method });
     p.log.success(`Signed in to ${result.registryProvider.name} — credential saved to the credential store.`);
+    if (result.credentialCleanupPending) {
+      p.log.warn('A previous credential is queued for cleanup and will be retried by the next provider command.');
+    }
     return 0;
   } catch (err) {
     if (err instanceof Error && err.message === 'Cancelled') {
@@ -321,6 +325,9 @@ export async function runProvidersRemove(id: string, interactive = false): Promi
   if (result.credentialDeleted) {
     p.log.info('Provider API key removed from the credential store.');
   }
+  if (result.credentialCleanupPending) {
+    p.log.warn('Provider credential cleanup is queued for retry.');
+  }
   return 0;
 }
 
@@ -472,6 +479,11 @@ export async function runProvidersCommand(args: string[]): Promise<number> {
   if (parsed.showHelp && parsed.subcommand !== 'auth') {
     console.log(providersHelpText());
     return 0;
+  }
+
+  const cleanup = await reconcilePendingCredentialDeletes();
+  if (cleanup.pending.length > 0 || cleanup.persistenceError) {
+    p.log.warn('Some credential cleanup is still pending and will be retried later.');
   }
 
   if (parsed.subcommand === 'list') return runProvidersList();

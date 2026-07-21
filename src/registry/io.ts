@@ -27,6 +27,11 @@ import { isValidProviderId } from './validate.js';
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 
+function isStoredCredentialRef(value: string): boolean {
+  if (value.startsWith('keyring:')) return value.length > 'keyring:'.length;
+  return /^helper:v1:[0-9a-f]{64}:.+$/s.test(value);
+}
+
 export function ensureSecureAppHome(): void {
   const home = getAppHome();
   mkdirSync(home, { recursive: true, mode: DIR_MODE });
@@ -112,6 +117,16 @@ function parseRegistry(raw: unknown): ProviderRegistry {
       typeof data.schemaVersion === 'number' ? data.schemaVersion : REGISTRY_SCHEMA_VERSION,
     providers,
   };
+  if (Array.isArray(data.pendingCredentialDeletes)) {
+    const pendingCredentialDeletes = data.pendingCredentialDeletes.filter(
+      (value): value is string => {
+        return typeof value === 'string' && isStoredCredentialRef(value);
+      },
+    );
+    if (pendingCredentialDeletes.length > 0) {
+      registry.pendingCredentialDeletes = [...new Set(pendingCredentialDeletes)];
+    }
+  }
   if (typeof data.importedAt === 'string') registry.importedAt = data.importedAt;
   if (typeof data.pricingCacheAt === 'string') registry.pricingCacheAt = data.pricingCacheAt;
   return registry;

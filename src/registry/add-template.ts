@@ -1,10 +1,17 @@
 // src/registry/add-template.ts — add a provider from a builtin template
 
+import { randomUUID } from 'node:crypto';
 import { saveProviderCredential } from '../env.js';
 import { credentialAuthRef } from '../credential-helper.js';
 import { isSdkMigratedNpm } from '../provider-factory.js';
 import type { ProviderTemplate } from '../provider-templates.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
+import {
+  cancelCredentialDelete,
+  journalCredentialWriteLocked,
+  queueCredentialDelete,
+  reconcilePendingCredentialDeletes,
+} from './credential-lifecycle.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
 import { loadRegistry, saveRegistry } from './io.js';
 import {
@@ -26,6 +33,7 @@ export interface AddTemplateResult {
   modelCount?: number;
   error?: string;
   hint?: string;
+  credentialCleanupPending?: boolean;
 }
 
 async function probeTemplatePackage(template: ProviderTemplate): Promise<string | null> {
@@ -70,19 +78,22 @@ export async function addProviderFromTemplate(
     return { added: false, error: 'API key cannot be empty.' };
   }
 
-  const existingError = await withRegistryWriteLock(() => {
+  const existingState = await withRegistryWriteLock(() => {
     const registry = loadRegistry();
     const existing = registry.providers.find(p => p.id === template.id);
     if (existing && !opts?.replaceExisting) {
       return {
-        added: false,
-        error: `${template.name} is already configured.`,
-        hint: `Remove it first with: clodex providers remove ${template.id}`,
+        existing: false,
+        error: {
+          added: false as const,
+          error: `${template.name} is already configured.`,
+          hint: `Remove it first with: clodex providers remove ${template.id}`,
+        },
       };
     }
-    return null;
+    return { existing: existing !== undefined, error: null };
   });
-  if (existingError) return existingError;
+  if (existingState.error) return existingState.error;
 
   const fetched = await fetchTemplateModels(template, trimmedKey, opts?.baseUrl);
   if (fetched.error || fetched.models.length === 0) {
@@ -111,7 +122,11 @@ export async function addProviderFromTemplate(
     platform,
   );
   const authRef = trimmedKey
-    ? credentialAuthRef(`provider:${template.id}`)
+    ? credentialAuthRef(
+      existingState.existing
+        ? `provider:${template.id}:replacement:${randomUUID()}`
+        : `provider:${template.id}`,
+    )
     : 'none:anonymous';
   const commitProvider = () => withRegistryWriteLock(() => {
     const registry = loadRegistry();
@@ -153,13 +168,21 @@ export async function addProviderFromTemplate(
     } else {
       registry.providers.push(entry);
     }
+    if (trimmedKey) cancelCredentialDelete(registry, authRef);
+    if (existing?.authRef && existing.authRef !== authRef) {
+      queueCredentialDelete(registry, existing.authRef);
+    }
     saveRegistry(registry);
-    return { added: true, provider: entry, modelCount: pricedModels.length };
+    return {
+      added: true,
+      provider: entry,
+      modelCount: pricedModels.length,
+    };
   });
 
-  const result = trimmedKey
+  const result: AddTemplateResult = trimmedKey
     ? await withCredentialMutationLock(authRef, async () => {
-      const commitError = await withRegistryWriteLock(() => {
+      const prepareError = await withRegistryWriteLock(() => {
         const registry = loadRegistry();
         const existing = registry.providers.find(p => p.id === template.id);
         if (existing && !opts?.replaceExisting) {
@@ -169,9 +192,10 @@ export async function addProviderFromTemplate(
             hint: `Remove it first with: clodex providers remove ${template.id}`,
           };
         }
+        journalCredentialWriteLocked(registry, authRef);
         return null;
       });
-      if (commitError) return commitError;
+      if (prepareError) return prepareError;
 
       const saved = await saveProviderCredential(authRef, trimmedKey);
       if (!saved) {
@@ -184,6 +208,12 @@ export async function addProviderFromTemplate(
       return commitProvider();
     })
     : await commitProvider();
+
+  const cleanup = await reconcilePendingCredentialDeletes();
+  if (result.added) {
+    result.credentialCleanupPending =
+      cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
+  }
 
   if (result.added) enrichPricingAsync();
   return result;

@@ -6,11 +6,13 @@ const registryState = vi.hoisted(() => ({
 }));
 const lockState = vi.hoisted(() => ({
   active: false,
+  registryTail: Promise.resolve(),
   credentialActive: false,
   credentialTails: new Map<string, Promise<void>>(),
 }));
 
-vi.mock('../src/env.js', () => ({
+vi.mock('../src/env.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/env.js')>(),
   deleteProviderCredential: vi.fn(),
 }));
 vi.mock('../src/registry/io.js', () => ({
@@ -23,12 +25,17 @@ vi.mock('../src/registry/io.js', () => ({
 vi.mock('../src/registry/lock.js', () => ({
   withRegistryWriteLock: vi.fn(
     async <T>(operation: () => Promise<T> | T): Promise<T> => {
-      if (lockState.active) throw new Error('registry lock re-entered');
+      const previous = lockState.registryTail;
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      lockState.registryTail = previous.then(() => gate);
+      await previous;
       lockState.active = true;
       try {
         return await operation();
       } finally {
         lockState.active = false;
+        release();
       }
     },
   ),
@@ -68,6 +75,7 @@ import {
 describe('registry provider removal', () => {
   beforeEach(() => {
     lockState.active = false;
+    lockState.registryTail = Promise.resolve();
     lockState.credentialActive = false;
     lockState.credentialTails.clear();
     registryState.current = {
@@ -108,7 +116,7 @@ describe('registry provider removal', () => {
     expect(lockState.active).toBe(false);
   });
 
-  it('reports a credential cleanup failure with the credential reference', async () => {
+  it('keeps a failed credential deletion queued for retry', async () => {
     vi.mocked(deleteProviderCredential).mockImplementation(async () => {
       expect(lockState.active).toBe(false);
       expect(lockState.credentialActive).toBe(true);
@@ -120,11 +128,13 @@ describe('registry provider removal', () => {
     expect(result).toMatchObject({
       removed: true,
       credentialDeleted: false,
-      error: expect.stringContaining('keyring:provider:openai'),
+      credentialCleanupPending: true,
     });
-    expect(result.error).toMatch(/credential.*(?:cleanup|deletion).*failed/i);
-    expect(result.error).toContain('must be removed manually');
+    expect(result.error).toBeUndefined();
     expect(registryState.current.providers).toHaveLength(0);
+    expect(registryState.current.pendingCredentialDeletes).toEqual([
+      'keyring:provider:openai',
+    ]);
     expect(deleteProviderCredential).toHaveBeenCalledWith(
       'keyring:provider:openai',
     );

@@ -60,6 +60,8 @@ export interface RegistryProvider {
 export interface ProviderRegistry {
   schemaVersion: number;
   providers: RegistryProvider[];
+  /** Credential references durably queued for idempotent cleanup. */
+  pendingCredentialDeletes?: string[];
   importedAt?: string;
   pricingCacheAt?: string;
 }

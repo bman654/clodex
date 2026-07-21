@@ -5,6 +5,11 @@ import { saveProviderCredential } from '../env.js';
 import { credentialAuthRef } from '../credential-helper.js';
 import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
+import {
+  cancelCredentialDelete,
+  journalCredentialWriteLocked,
+  reconcilePendingCredentialDeletes,
+} from './credential-lifecycle.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
 import { loadRegistry, saveRegistry } from './io.js';
 import {
@@ -34,6 +39,7 @@ export interface AddCustomEndpointResult {
   modelCount?: number;
   error?: string;
   hint?: string;
+  credentialCleanupPending?: boolean;
 }
 
 function npmForKind(kind: CustomEndpointKind): string {
@@ -215,21 +221,38 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
     };
 
     registry.providers.push(entry);
+    if (!anonymous) cancelCredentialDelete(registry, authRef);
     saveRegistry(registry);
 
-    return { added: true, provider: entry, modelCount: fetched.models.length };
+    return {
+      added: true,
+      provider: entry,
+      modelCount: fetched.models.length,
+    };
   });
 
-  if (anonymous) return commitProvider();
-  return withCredentialMutationLock(authRef, async () => {
-    const saved = await saveProviderCredential(authRef, apiKey);
-    if (!saved) {
-      return {
-        added: false,
-        error: 'Could not save API key to the credential store.',
-        hint: 'Check credential-store access and try again.',
-      };
-    }
-    return commitProvider();
-  });
+  const result: AddCustomEndpointResult = anonymous
+    ? await commitProvider()
+    : await withCredentialMutationLock(authRef, async () => {
+      await withRegistryWriteLock(() => {
+        const registry = loadRegistry();
+        journalCredentialWriteLocked(registry, authRef);
+      });
+      const saved = await saveProviderCredential(authRef, apiKey);
+      if (!saved) {
+        return {
+          added: false,
+          error: 'Could not save API key to the credential store.',
+          hint: 'Check credential-store access and try again.',
+        };
+      }
+      return commitProvider();
+    });
+
+  const cleanup = await reconcilePendingCredentialDeletes();
+  if (result.added) {
+    result.credentialCleanupPending =
+      cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
+  }
+  return result;
 }
