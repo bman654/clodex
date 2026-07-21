@@ -11,9 +11,13 @@ permissions:
 
 jobs:
   commitlint:
-    # Keep this inert in relay-ai; enable it with the rest of the release system
-    # after migration by setting CLODEX_PUBLISH_ENABLED=true.
-    if: vars.CLODEX_PUBLISH_ENABLED == 'true'
+    # Deliberately ungated. This previously carried
+    # `if: vars.CLODEX_PUBLISH_ENABLED == 'true'` to stay inert in relay-ai before
+    # the migration to a dedicated repo. That gate silently broke the check for the
+    # contributors who need it most: repository variables do not resolve for
+    # `pull_request` runs from a fork, so `vars.CLODEX_PUBLISH_ENABLED` was empty
+    # there and the job reported "skipped" — a green check that never ran. Linting
+    # commit messages publishes nothing, so there is nothing to gate.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
