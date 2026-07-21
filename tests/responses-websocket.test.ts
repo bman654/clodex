@@ -469,6 +469,69 @@ describe('createResponsesWebSocketFetch', () => {
     await readAll(second);
   });
 
+  it('reuses a socket only while the authorization credential is unchanged', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const firstUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'first' }],
+    };
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      providerId: 'openai',
+      accountId: 'acct-token-rotation',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const first = await wsFetch('https://x', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer token-a' },
+      body: JSON.stringify(sessionPayload([firstUser])),
+    });
+    const firstSocket = lastSocket();
+    firstSocket.emit('open');
+    emitTextResponse(firstSocket, 'resp_token_a_1', 'first answer');
+    await readAll(first);
+
+    const firstAssistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'first answer' }],
+    };
+    const secondUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'second' }],
+    };
+    const secondInput = [firstUser, firstAssistant, secondUser];
+    const second = await wsFetch('https://x', {
+      method: 'POST',
+      headers: new Headers({ authorization: 'Bearer token-a' }),
+      body: JSON.stringify(sessionPayload(secondInput)),
+    });
+    expect(fakeSockets).toHaveLength(1);
+    emitTextResponse(firstSocket, 'resp_token_a_2', 'second answer');
+    await readAll(second);
+
+    const secondAssistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'second answer' }],
+    };
+    const thirdUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'third' }],
+    };
+    const third = await wsFetch('https://x', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer token-b' },
+      body: JSON.stringify(sessionPayload([...secondInput, secondAssistant, thirdUser])),
+    });
+
+    expect(fakeSockets).toHaveLength(2);
+    const replacementSocket = lastSocket();
+    expect(replacementSocket).not.toBe(firstSocket);
+    expect(replacementSocket.options.headers?.Authorization).toBe('Bearer token-b');
+    replacementSocket.emit('open');
+    emitTextResponse(replacementSocket, 'resp_token_b_1', 'third answer');
+    await readAll(third);
+    expect(JSON.stringify(diagnostics)).not.toMatch(/token-[ab]/);
+  });
+
   it('emits correlated privacy-safe reasons when a history mismatch creates another head', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
@@ -1130,19 +1193,51 @@ describe('createResponsesWebSocketFetch', () => {
     });
   });
 
-  it('partitions by provider, account, model, effort, and session only', () => {
+  it('partitions by provider, account, model, effort, session, and credential fingerprint', () => {
     const payload = sessionPayload([]);
-    const base = responsesWebSocketPartitionKey(WS_URL, payload, { providerId: 'openai', accountId: 'a' });
-    expect(base).not.toBe(responsesWebSocketPartitionKey(WS_URL, payload, { providerId: 'other', accountId: 'a' }));
-    expect(base).not.toBe(responsesWebSocketPartitionKey(WS_URL, payload, { providerId: 'openai', accountId: 'b' }));
-    expect(base).not.toBe(responsesWebSocketPartitionKey(WS_URL, { ...payload, model: 'gpt-other' }, { providerId: 'openai', accountId: 'a' }));
-    expect(base).not.toBe(responsesWebSocketPartitionKey(WS_URL, { ...payload, reasoning: { effort: 'low' } }, { providerId: 'openai', accountId: 'a' }));
-    expect(base).not.toBe(responsesWebSocketPartitionKey(WS_URL, { ...payload, prompt_cache_key: 'other-session' }, { providerId: 'openai', accountId: 'a' }));
+    const options = { providerId: 'openai', accountId: 'a' };
+    const base = responsesWebSocketPartitionKey(WS_URL, payload, options, 'credential-a');
+    expect(base).not.toBe(responsesWebSocketPartitionKey(
+      WS_URL,
+      payload,
+      { providerId: 'other', accountId: 'a' },
+      'credential-a',
+    ));
+    expect(base).not.toBe(responsesWebSocketPartitionKey(
+      WS_URL,
+      payload,
+      { providerId: 'openai', accountId: 'b' },
+      'credential-a',
+    ));
+    expect(base).not.toBe(responsesWebSocketPartitionKey(
+      WS_URL,
+      { ...payload, model: 'gpt-other' },
+      options,
+      'credential-a',
+    ));
+    expect(base).not.toBe(responsesWebSocketPartitionKey(
+      WS_URL,
+      { ...payload, reasoning: { effort: 'low' } },
+      options,
+      'credential-a',
+    ));
+    expect(base).not.toBe(responsesWebSocketPartitionKey(
+      WS_URL,
+      { ...payload, prompt_cache_key: 'other-session' },
+      options,
+      'credential-a',
+    ));
+    expect(base).not.toBe(responsesWebSocketPartitionKey(
+      WS_URL,
+      payload,
+      options,
+      'credential-b',
+    ));
     expect(base).toBe(responsesWebSocketPartitionKey(WS_URL, {
       ...payload,
       instructions: 'changed',
       tools: [{ type: 'function', name: 'Write' }],
-    }, { providerId: 'openai', accountId: 'a' }));
+    }, options, 'credential-a'));
   });
 
   it('canonicalizes object key ordering in prompt fingerprints', () => {

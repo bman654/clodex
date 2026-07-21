@@ -194,7 +194,8 @@ describe('effortProviderOptions + deepMergeProviderOptions', () => {
 });
 
 describe('createLanguageModel', () => {
-  it('routes OpenAI OAuth through the ChatGPT Codex backend with the account header', async () => {
+  it('prefers the current OpenAI OAuth token account claim over stored metadata', async () => {
+    vi.resetModules();
     const responses = vi.fn((modelId: string) => ({ modelId, provider: 'openai-responses' }));
     const chat = vi.fn((modelId: string) => ({ modelId, provider: 'openai-chat' }));
     const createOpenAI = vi.fn(() => ({ responses, chat }));
@@ -218,11 +219,43 @@ describe('createLanguageModel', () => {
       baseURL: 'https://chatgpt.com/backend-api/codex',
       fetch: expect.any(Function),
       headers: {
-        'ChatGPT-Account-Id': 'stored-acct-456',
+        'ChatGPT-Account-Id': 'acct-123',
         originator: 'clodex',
       },
     });
     expect(responses).toHaveBeenCalledWith('gpt-5.5');
+    vi.doUnmock('@ai-sdk/openai');
+  });
+
+  it('falls back to the stored OpenAI account id when the current token has no account claim', async () => {
+    vi.resetModules();
+    const responses = vi.fn((modelId: string) => ({
+      modelId,
+      provider: 'openai-responses',
+    }));
+    const chat = vi.fn((modelId: string) => ({
+      modelId,
+      provider: 'openai-chat',
+    }));
+    const createOpenAI = vi.fn(() => ({ responses, chat }));
+    vi.doMock('@ai-sdk/openai', () => ({ createOpenAI }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai',
+      modelId: 'gpt-5.5',
+      apiKey: 'opaque-access-token',
+      authType: 'oauth',
+      oauthAccountId: 'stored-acct-456',
+    });
+
+    expect(createOpenAI).toHaveBeenCalledWith(
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'ChatGPT-Account-Id': 'stored-acct-456',
+        }),
+      }),
+    );
     vi.doUnmock('@ai-sdk/openai');
   });
 

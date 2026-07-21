@@ -208,6 +208,12 @@ function hasResponsesLiteHeader(headers: Record<string, string>): boolean {
   );
 }
 
+function authorizationHeaderFingerprint(headers: Record<string, string>): string {
+  const authorization = Object.entries(headers)
+    .find(([key]) => key.toLowerCase() === 'authorization')?.[1];
+  return authorization ? createHash('sha256').update(authorization).digest('hex') : '';
+}
+
 function bodyToString(body: BodyInit | null | undefined): string {
   if (body == null) return '';
   if (typeof body === 'string') return body;
@@ -290,12 +296,15 @@ function instructionChangeSummary(previous: string | undefined, current: string 
  * Opaque socket partition key. Prompt fields intentionally are not part of this
  * key: Responses accepts fresh instructions/tools on each create, and Claude can
  * change them during a normal tool loop. Exact conversation lineage is validated
- * separately before previous_response_id is used.
+ * separately before previous_response_id is used. The authorization fingerprint
+ * prevents a refreshed credential from inheriting a socket authenticated with the
+ * token that the upstream rejected.
  */
 export function responsesWebSocketPartitionKey(
   wsUrl: string,
   payload: JsonObject,
   options: Pick<ResponsesWebSocketFetchOptions, 'providerId' | 'accountId'> = {},
+  authorizationFingerprint = '',
 ): string | undefined {
   const promptCacheKey = payload.prompt_cache_key;
   const model = payload.model;
@@ -311,6 +320,7 @@ export function responsesWebSocketPartitionKey(
     model,
     effort,
     promptCacheKey,
+    authorizationFingerprint,
   ].join('\x1f');
   return createHash('sha256').update(material).digest('hex');
 }
@@ -1113,7 +1123,13 @@ export function createResponsesWebSocketFetch(
     }
     if (hasResponsesLiteHeader(headers)) payload = applyResponsesLiteShape(payload);
 
-    const partitionKey = responsesWebSocketPartitionKey(wsUrl, payload, options);
+    const authorizationFingerprint = authorizationHeaderFingerprint(headers);
+    const partitionKey = responsesWebSocketPartitionKey(
+      wsUrl,
+      payload,
+      options,
+      authorizationFingerprint,
+    );
     const promptFingerprint = responsesWebSocketPromptFingerprint(payload);
     const promptFieldHashes = responsesWebSocketPromptFieldHashes(payload);
     const instructionsSnapshot = instructionsFromPayload(payload);

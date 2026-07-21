@@ -144,8 +144,11 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
   if (npm === '@ai-sdk/openai') {
     const { createOpenAI } = await import('@ai-sdk/openai');
     const useResponsesEndpoint = shouldUseOpenAiResponsesEndpoint(modelId);
+    const tokenAccountId = spec.authType === 'oauth'
+      ? extractOpenAiAccountId({ access_token: apiKey })?.trim()
+      : undefined;
     const accountId = spec.authType === 'oauth'
-      ? spec.oauthAccountId ?? extractOpenAiAccountId({ access_token: apiKey })
+      ? tokenAccountId || spec.oauthAccountId
       : undefined;
     const oauthOptions = spec.authType === 'oauth'
       ? {
