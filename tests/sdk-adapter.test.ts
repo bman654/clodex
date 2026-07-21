@@ -532,6 +532,34 @@ describe('generateAnthropicResponse', () => {
     vi.resetModules();
   });
 
+  it('forceStream propagates an SDK error part with its upstream status', async () => {
+    vi.resetModules();
+    const upstreamError = { statusCode: 401, message: 'Unauthorized' };
+    async function* stream() {
+      yield { type: 'start' };
+      yield { type: 'text-delta', text: 'partial' };
+      yield { type: 'error', error: upstreamError };
+    }
+    const streamText = vi.fn(() => ({ stream: stream() }));
+    vi.doMock('ai', () => ({
+      generateText: vi.fn(),
+      streamText,
+      tool: vi.fn((spec: unknown) => spec),
+      jsonSchema: vi.fn((schema: unknown) => schema),
+    }));
+
+    const { generateAnthropicResponse } = await import('../src/sdk-adapter.js');
+    await expect(generateAnthropicResponse(
+      {} as never,
+      { messages: [] },
+      'gpt-5.6-sol',
+      { forceStream: true },
+    )).rejects.toBe(upstreamError);
+
+    vi.doUnmock('ai');
+    vi.resetModules();
+  });
+
   it('forceStream propagates an SDK abort even when lifecycle observation is disabled', async () => {
     vi.resetModules();
     const abort = new AbortController();

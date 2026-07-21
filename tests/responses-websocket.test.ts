@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { createOpenAI } from '@ai-sdk/openai';
+import { streamText } from 'ai';
 
 // Fake `ws` WebSocket that records constructor args and lets tests drive events.
 const { fakeSockets } = vi.hoisted(() => ({ fakeSockets: [] as FakeWebSocket[] }));
@@ -27,6 +29,7 @@ import {
   withResponsesWebSocketDiagnosticContext,
   type ResponsesWebSocketDiagnosticEvent,
 } from '../src/oauth/responses-websocket.js';
+import { sdkUpstreamErrorDetails } from '../src/upstream-error.js';
 
 const WS_URL = 'wss://chatgpt.com/backend-api/codex/responses';
 
@@ -219,8 +222,16 @@ describe('createResponsesWebSocketFetch', () => {
     const error = Object.assign(new Error('secret socket failure'), { code: 'ECONNRESET' });
     socket.emit('error', error);
     const body = await readAll(res);
-    expect(body).toContain('"type":"error"');
-    expect(body).toContain('secret socket failure');
+    expect(JSON.parse(body.replace(/^data: /, '').trim())).toEqual({
+      type: 'error',
+      sequence_number: 0,
+      error: {
+        type: 'transport_error',
+        code: 'websocket_transport_error',
+        message: 'secret socket failure',
+        param: null,
+      },
+    });
     expect(diagnostics).toContainEqual(expect.objectContaining({
       event: 'ws_response_error',
       requestId: 'req-socket-error',
@@ -234,6 +245,104 @@ describe('createResponsesWebSocketFetch', () => {
       errorMessageHash: expect.stringMatching(/^[a-f0-9]{16}$/),
     }));
     expect(JSON.stringify(diagnostics)).not.toContain('secret socket failure');
+  });
+
+  it('terminates an unexpected HTTP upgrade response with a schema-valid stream error', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await withResponsesWebSocketDiagnosticContext(
+      { requestId: 'req-upgrade-401' },
+      () => wsFetch('https://x', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer private-rejected-token' },
+        body: JSON.stringify(
+          sessionPayload([
+            {
+              role: 'user',
+              content: [{ type: 'input_text', text: 'private request body' }],
+            },
+          ]),
+        ),
+      }),
+    );
+    const socket = lastSocket();
+    const resume = vi.fn();
+    socket.emit(
+      'unexpected-response',
+      {},
+      {
+        statusCode: 401,
+        statusMessage: 'private response status',
+        headers: { 'x-private': 'private response header' },
+        resume,
+      },
+    );
+
+    const body = await readAll(res);
+    const frame = JSON.parse(body.replace(/^data: /, '').trim());
+    expect(frame).toEqual({
+      type: 'error',
+      sequence_number: 0,
+      error: {
+        type: 'authentication_error',
+        code: '401',
+        message: 'WebSocket upgrade failed (HTTP 401)',
+        param: null,
+      },
+    });
+    const provider = createOpenAI({
+      apiKey: 'test-only',
+      fetch: async () => new Response(body, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      }),
+    });
+    const streamed = streamText({
+      model: provider.responses('gpt-5.6-sol'),
+      prompt: 'test',
+      onError: () => {},
+    });
+    let upstreamError: unknown;
+    for await (const part of streamed.stream) {
+      if (part.type === 'error') upstreamError = part.error;
+    }
+    expect(sdkUpstreamErrorDetails(upstreamError)?.statusCode).toBe(401);
+    expect(resume).toHaveBeenCalledOnce();
+    expect(socket.close).toHaveBeenCalledOnce();
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({
+        event: 'ws_response_error',
+        requestId: 'req-upgrade-401',
+        source: 'unexpected_response',
+        httpStatusCode: 401,
+        emittedModelData: false,
+      }),
+    );
+    const serialized = JSON.stringify(diagnostics);
+    expect(serialized).not.toContain('private-rejected-token');
+    expect(serialized).not.toContain('private request body');
+    expect(serialized).not.toContain('private response status');
+    expect(serialized).not.toContain('private response header');
+
+    const next = await wsFetch('https://x', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer private-rejected-token' },
+      body: JSON.stringify(
+        sessionPayload([
+          {
+            role: 'user',
+            content: [{ type: 'input_text', text: 'replacement request' }],
+          },
+        ]),
+      ),
+    });
+    expect(fakeSockets).toHaveLength(2);
+    const replacement = lastSocket();
+    replacement.emit('open');
+    emitTextResponse(replacement, 'resp_after_401', 'recovered');
+    await readAll(next);
   });
 
   it('logs sanitized upstream response failure details after partial output', async () => {
