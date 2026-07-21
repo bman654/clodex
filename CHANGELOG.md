@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/bman654/clodex/compare/v1.0.4...v1.1.0) (2026-07-21)
+
+
+### Features
+
+* **wrapper:** add opt-in readiness enforcement ([#12](https://github.com/bman654/clodex/issues/12)) ([e590981](https://github.com/bman654/clodex/commit/e5909812cfef7110c800aa39e1cf037df403815a))
+
+
+### Bug Fixes
+
+* **transport:** isolate connections by credential ([#9](https://github.com/bman654/clodex/issues/9)) ([b770db6](https://github.com/bman654/clodex/commit/b770db6fb6f406a0b18919e8e297c123ed612526))
+* **transport:** terminate rejected connection upgrades ([#11](https://github.com/bman654/clodex/issues/11)) ([904b077](https://github.com/bman654/clodex/commit/904b07731c6440c6f9c81daa7ac6d3d67e41061e))
+
 ## [1.0.4](https://github.com/bman654/clodex/compare/v1.0.3...v1.0.4) (2026-07-20)
 
 
