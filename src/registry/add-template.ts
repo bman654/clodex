@@ -1,6 +1,7 @@
 // src/registry/add-template.ts — add a provider from a builtin template
 
 import { saveProviderCredential } from '../env.js';
+import { credentialAuthRef } from '../credential-helper.js';
 import { isSdkMigratedNpm } from '../provider-factory.js';
 import type { ProviderTemplate } from '../provider-templates.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
@@ -94,13 +95,13 @@ export async function addProviderFromTemplate(
     };
   }
 
-  const authRef = `keyring:provider:${template.id}`;
+  const authRef = credentialAuthRef(`provider:${template.id}`);
   const saved = trimmedKey ? await saveProviderCredential(authRef, trimmedKey) : true;
   if (!saved) {
     return {
       added: false,
-      error: 'Could not save API key to Keychain.',
-      hint: 'Grant Keychain access or try again.',
+      error: 'Could not save API key to the credential store.',
+      hint: 'Check credential-store access and try again.',
     };
   }
 

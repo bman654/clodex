@@ -1,6 +1,7 @@
 // src/registry/custom-endpoint.ts — add custom OpenAI/Anthropic-compatible providers
 
 import { saveProviderCredential } from '../env.js';
+import { credentialAuthRef } from '../credential-helper.js';
 import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
@@ -177,10 +178,11 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
     return { added: false, error: fetched.error ?? 'No models returned.', hint: fetched.hint };
   }
 
+  const authRef = credentialAuthRef(`provider:${providerId}`);
   if (apiKey !== 'local') {
-    const saved = await saveProviderCredential(`keyring:provider:${providerId}`, apiKey);
+    const saved = await saveProviderCredential(authRef, apiKey);
     if (!saved) {
-      return { added: false, error: 'Could not save API key to Keychain.', hint: 'Grant Keychain access and try again.' };
+      return { added: false, error: 'Could not save API key to the credential store.', hint: 'Check credential-store access and try again.' };
     }
   }
 
@@ -190,7 +192,7 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
     templateId: input.kind === 'anthropic' ? 'custom-anthropic' : 'custom-openai',
     name: input.displayName.trim(),
     enabled: true,
-    authRef: apiKey === 'local' ? `keyring:provider:${providerId}` : `keyring:provider:${providerId}`,
+    authRef,
     api: { npm, url: fetched.baseUrl, ...(headers ? { headers } : {}) },
     addedAt: now,
     refreshedAt: now,

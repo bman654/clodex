@@ -4,7 +4,10 @@ import { printOAuthStepsPanel } from '../ui.js';
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import open from 'open';
-import { saveProviderCredential } from '../env.js';
+import {
+  probeProviderCredentialStore,
+  saveProviderCredential,
+} from '../env.js';
 import { runOpenAiDeviceCodeFlow } from '../oauth/openai.js';
 import {
   supportsNativeOAuth,
@@ -74,14 +77,15 @@ export async function saveNativeOAuthCredential(
 ): Promise<void> {
   const cred = tokensToStoredCredential(tokens, undefined, accountId, providerData);
   const registryId = toOAuthRegistryId(providerId);
+  const authRef = oauthAuthRef(registryId);
   let diagMsg = '';
   const saved = await saveProviderCredential(
-    oauthAuthRef(registryId),
+    authRef,
     oauthCredentialToKeychainJson(cred),
     (msg) => { diagMsg = msg; },
   );
-  if (!saved) throw new Error(`Could not save OAuth tokens to Keychain${diagMsg ? ` — ${diagMsg}` : ' — grant access and try again'}`);
-  await upsertOAuthProvider(providerId, cred);
+  if (!saved) throw new Error(`Could not save OAuth tokens to the credential store${diagMsg ? ` — ${diagMsg}` : ' — check access and try again'}`);
+  await upsertOAuthProvider(providerId, cred, authRef);
 }
 
 /**
@@ -93,12 +97,15 @@ function oauthDisplayName(registryId: string, fallbackName: string): string {
   return fallbackName;
 }
 
-async function upsertOAuthProvider(providerId: string, cred: StoredOAuthCredential): Promise<RegistryProvider> {
+async function upsertOAuthProvider(
+  providerId: string,
+  cred: StoredOAuthCredential,
+  authRef: string,
+): Promise<RegistryProvider> {
   const registryId = toOAuthRegistryId(providerId);
   const templateId = providerId.replace(/-oauth$/, '') || providerId;
 
   const registry = loadRegistry();
-  const authRef = oauthAuthRef(registryId);
   const template = getTemplateById(templateId);
   let entry: RegistryProvider | undefined = registry.providers.find(pr => pr.id === registryId);
 
@@ -142,19 +149,26 @@ export async function authenticateProvider(
     throw new Error('OAuth sign-in is only available for openai (ChatGPT Plus/Pro).');
   }
 
+  const authRef = oauthAuthRef(registryId);
+  let storeDiagMsg = '';
+  const storeReady = await probeProviderCredentialStore(authRef, (msg) => { storeDiagMsg = msg; });
+  if (!storeReady) {
+    throw new Error(`Credential store is unavailable${storeDiagMsg ? ` — ${storeDiagMsg}` : ''}`);
+  }
+
   const cred = await runNativeDeviceCode(providerId);
 
   let nativeDiagMsg = '';
   const saved = await saveProviderCredential(
-    oauthAuthRef(registryId),
+    authRef,
     oauthCredentialToKeychainJson(cred),
     (msg) => { nativeDiagMsg = msg; },
   );
   if (!saved) {
-    p.log.warn(`Could not save OAuth tokens to Keychain — ${nativeDiagMsg || 'session may not persist.'}`);
+    p.log.warn(`Could not save OAuth tokens to the credential store — ${nativeDiagMsg || 'session may not persist.'}`);
   }
 
-  const registryProvider = await upsertOAuthProvider(providerId, cred);
+  const registryProvider = await upsertOAuthProvider(providerId, cred, authRef);
 
   const refreshSpinner = p.spinner();
   refreshSpinner.start('Refreshing model list...');

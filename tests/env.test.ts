@@ -10,6 +10,8 @@ import {
   clodexKeyEnvVar,
   resolveProviderCredential,
 } from '../src/env.js';
+
+const TEST_HELPER_ID = 'a'.repeat(64);
 import { CONFLICTING_ENV_VARS } from '../src/constants.js';
 
 const UPSTREAM_URL = 'https://api.example.com';
@@ -88,6 +90,12 @@ describe('provider credentials', () => {
   it('parses authRef strings', () => {
     expect(parseAuthRef('keyring:provider:openai')).toEqual({ kind: 'keyring', account: 'provider:openai' });
     expect(parseAuthRef('keyring:oauth:provider:openai-oauth')).toEqual({ kind: 'keyring', account: 'oauth:provider:openai-oauth' });
+    expect(parseAuthRef(`helper:v1:${TEST_HELPER_ID}:oauth:provider:openai-oauth`)).toEqual({
+      kind: 'helper',
+      helperId: TEST_HELPER_ID,
+      account: 'oauth:provider:openai-oauth',
+    });
+    expect(parseAuthRef('helper:oauth:provider:openai-oauth')).toBeNull();
     expect(parseAuthRef('env:OPENAI_API_KEY')).toEqual({ kind: 'env', varName: 'OPENAI_API_KEY' });
     expect(parseAuthRef('bad')).toBeNull();
   });

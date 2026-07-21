@@ -10,6 +10,7 @@ vi.mock('../src/oauth/openai.js', () => ({
   })),
 }));
 vi.mock('../src/env.js', () => ({
+  probeProviderCredentialStore: vi.fn(async () => true),
   saveProviderCredential: vi.fn(async () => false),
 }));
 vi.mock('../src/registry/io.js', () => ({
@@ -26,7 +27,7 @@ vi.mock('@clack/prompts', () => ({
   isCancel: vi.fn(() => false),
 }));
 
-import { saveProviderCredential } from '../src/env.js';
+import { probeProviderCredentialStore, saveProviderCredential } from '../src/env.js';
 import { saveRegistry } from '../src/registry/io.js';
 import { authenticateProvider } from '../src/registry/provider-auth.js';
 import { runOpenAiDeviceCodeFlow } from '../src/oauth/openai.js';
@@ -34,6 +35,7 @@ import * as prompts from '@clack/prompts';
 
 describe('authenticateProvider', () => {
   beforeEach(() => {
+    vi.mocked(probeProviderCredentialStore).mockReset().mockResolvedValue(true);
     vi.mocked(saveProviderCredential).mockClear();
     vi.mocked(saveRegistry).mockClear();
     vi.mocked(runOpenAiDeviceCodeFlow).mockClear();
@@ -44,11 +46,23 @@ describe('authenticateProvider', () => {
     const result = await authenticateProvider('openai');
 
     expect(prompts.select).not.toHaveBeenCalled();
+    expect(probeProviderCredentialStore).toHaveBeenCalledWith(
+      'keyring:oauth:provider:openai-oauth',
+      expect.any(Function),
+    );
     expect(runOpenAiDeviceCodeFlow).toHaveBeenCalled();
     expect(saveRegistry).toHaveBeenCalled();
     expect(result.providerId).toBe('openai-oauth');
     expect(result.credential.access).toBe('openai-access');
     expect(result.registryProvider.name).toBe('OpenAI (ChatGPT)');
+  });
+
+  it('stops before device authorization when the credential store preflight fails', async () => {
+    vi.mocked(probeProviderCredentialStore).mockResolvedValue(false);
+    await expect(authenticateProvider('openai')).rejects.toThrow('Credential store is unavailable');
+    expect(runOpenAiDeviceCodeFlow).not.toHaveBeenCalled();
+    expect(saveProviderCredential).not.toHaveBeenCalled();
+    expect(saveRegistry).not.toHaveBeenCalled();
   });
 
   it('warns and continues when token persistence fails (graceful degradation)', async () => {

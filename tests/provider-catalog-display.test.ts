@@ -11,9 +11,12 @@ import {
 } from '../src/provider-catalog.js';
 import { emptyRegistry, saveRegistry } from '../src/registry/io.js';
 
+const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:openai-oauth`;
+
 describe('provider-catalog-display', () => {
   let home: string;
   const prevHome = process.env.CLODEX_HOME;
+  const prevHelper = process.env.CLODEX_CREDENTIAL_HELPER;
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'clodex-display-'));
@@ -23,6 +26,8 @@ describe('provider-catalog-display', () => {
   afterEach(() => {
     if (prevHome === undefined) delete process.env.CLODEX_HOME;
     else process.env.CLODEX_HOME = prevHome;
+    if (prevHelper === undefined) delete process.env.CLODEX_CREDENTIAL_HELPER;
+    else process.env.CLODEX_CREDENTIAL_HELPER = prevHelper;
     rmSync(home, { recursive: true, force: true });
     vi.restoreAllMocks();
   });
@@ -77,6 +82,24 @@ describe('provider-catalog-display', () => {
       expect(await resolveLocalProviderApiKey(provider)).toBe('oauth-key');
       expect(env.resolveProviderCredential).toHaveBeenCalledWith('openai', 'keyring:oauth:provider:openai');
     });
+
+    it('uses the materialized authRef even when the current environment selects another store', async () => {
+      vi.spyOn(env, 'resolveProviderCredential').mockResolvedValue('oauth-key');
+      const provider = {
+        id: 'openai-oauth',
+        name: 'OpenAI (ChatGPT)',
+        apiKey: '',
+        authType: 'oauth',
+        authRef: 'keyring:oauth:provider:openai-oauth',
+        models: [],
+      } as any;
+      process.env.CLODEX_CREDENTIAL_HELPER = process.execPath;
+      expect(await resolveLocalProviderApiKey(provider)).toBe('oauth-key');
+      expect(env.resolveProviderCredential).toHaveBeenCalledWith(
+        'openai-oauth',
+        'keyring:oauth:provider:openai-oauth',
+      );
+    });
   });
 
   describe('formatRegistryAuthLabel', () => {
@@ -89,6 +112,14 @@ describe('provider-catalog-display', () => {
         authRef: 'keyring:provider:groq',
         authType: 'api',
       } as any)).toBe('keychain (API key)');
+      expect(formatRegistryAuthLabel({
+        authRef: TEST_HELPER_REF,
+        authType: 'oauth',
+      } as any)).toBe('helper (OAuth)');
+      expect(formatRegistryAuthLabel({
+        authRef: `helper:v1:${'b'.repeat(64)}:provider:groq`,
+        authType: 'api',
+      } as any)).toBe('helper (API key)');
       expect(formatRegistryAuthLabel({
         authRef: 'env:OPENAI_API_KEY',
       } as any)).toBe('env:OPENAI_API_KEY');
@@ -117,4 +148,3 @@ describe('provider-catalog-display', () => {
     });
   });
 });
-
