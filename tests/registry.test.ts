@@ -10,6 +10,7 @@ import {
   saveRegistry,
   slugifyProviderId,
 } from '../src/registry/index.js';
+import { withRegistryWriteLockSync } from '../src/registry/lock.js';
 
 describe('provider id validation', () => {
   it('accepts stable slugs', () => {
@@ -69,7 +70,7 @@ describe('registry io', () => {
         }],
       },
     });
-    saveRegistry(registry);
+    withRegistryWriteLockSync(() => saveRegistry(registry));
     const loaded = loadRegistry();
     expect(loaded.providers).toHaveLength(1);
     expect(loaded.providers[0]?.id).toBe('groq');
@@ -77,7 +78,7 @@ describe('registry io', () => {
   });
 
   it('writes providers.json with restrictive permissions', () => {
-    saveRegistry(emptyRegistry());
+    withRegistryWriteLockSync(() => saveRegistry(emptyRegistry()));
     const path = join(home, 'providers.json');
     expect(existsSync(path)).toBe(true);
     const mode = statSync(path).mode & 0o777;
@@ -227,6 +228,128 @@ describe('materializeRegistry', () => {
     expect(locals).toHaveLength(1);
     expect(locals[0]?.apiKey).toBe('');
     expect(locals[0]?.authRef).toBe('none:anonymous');
+  });
+
+  it('normalizes the current-main anonymous custom endpoint representation', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'legacy-custom',
+      templateId: 'custom-openai',
+      name: 'Legacy Custom',
+      enabled: true,
+      authRef: 'keyring:provider:legacy-custom',
+      api: {
+        npm: '@ai-sdk/openai-compatible',
+        url: 'https://legacy-custom.example/v1',
+      },
+      addedAt: '2026-06-09T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-06-09T00:00:00.000Z',
+        models: [{
+          id: 'local-model',
+          name: 'Local Model',
+          upstreamModelId: 'local-model',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    });
+
+    const locals = materializeRegistry(registry, () => 'local');
+
+    expect(locals).toHaveLength(1);
+    expect(locals[0]?.apiKey).toBe('');
+    expect(locals[0]?.authRef).toBe('none:anonymous');
+    expect(locals[0]?.authType).toBe('none');
+  });
+
+  it('rejects an ambiguous local sentinel with a mismatched credential reference', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'legacy-custom',
+      templateId: 'custom-openai',
+      name: 'Legacy Custom',
+      enabled: true,
+      authRef: 'keyring:provider:other-provider',
+      api: {
+        npm: '@ai-sdk/openai-compatible',
+        url: 'https://legacy-custom.example/v1',
+      },
+      addedAt: '2026-06-09T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-06-09T00:00:00.000Z',
+        models: [{
+          id: 'local-model',
+          name: 'Local Model',
+          upstreamModelId: 'local-model',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    });
+
+    expect(materializeRegistry(registry, () => 'local')).toHaveLength(0);
+  });
+
+  it('does not materialize a current-main anonymous candidate when its credential is missing', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'legacy-custom',
+      templateId: 'custom-openai',
+      name: 'Legacy Custom',
+      enabled: true,
+      authRef: 'keyring:provider:legacy-custom',
+      api: {
+        npm: '@ai-sdk/openai-compatible',
+        url: 'https://legacy-custom.example/v1',
+      },
+      addedAt: '2026-06-09T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-06-09T00:00:00.000Z',
+        models: [{
+          id: 'local-model',
+          name: 'Local Model',
+          upstreamModelId: 'local-model',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    });
+
+    expect(materializeRegistry(registry, () => null)).toHaveLength(0);
+  });
+
+  it('preserves a real credential on a custom endpoint without authType', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'legacy-custom',
+      templateId: 'custom-openai',
+      name: 'Legacy Custom',
+      enabled: true,
+      authRef: 'keyring:provider:legacy-custom',
+      api: {
+        npm: '@ai-sdk/openai-compatible',
+        url: 'https://legacy-custom.example/v1',
+      },
+      addedAt: '2026-06-09T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-06-09T00:00:00.000Z',
+        models: [{
+          id: 'local-model',
+          name: 'Local Model',
+          upstreamModelId: 'local-model',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    });
+
+    const locals = materializeRegistry(registry, () => 'sk-real-key');
+
+    expect(locals).toHaveLength(1);
+    expect(locals[0]?.apiKey).toBe('sk-real-key');
+    expect(locals[0]?.authRef).toBe('keyring:provider:legacy-custom');
+    expect(locals[0]?.authType).toBeUndefined();
   });
 
   it('normalizes the unambiguous legacy no-auth representation', () => {

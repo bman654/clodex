@@ -25,6 +25,12 @@ Clodex verifies the selected store with a disposable write, read, and delete
 before starting device authorization. It also reads back real credential
 writes.
 
+Credential storage is fail-closed. If the selected credential store fails its
+probe, Clodex stops before device authorization and includes the backend
+diagnostic in the error instead of continuing with tokens that cannot be
+durably stored. Set `CLODEX_CREDENTIAL_HELPER` to the absolute path of an
+external helper, then run the authorization command again.
+
 ## Protocol
 
 The helper receives one of these invocations:

@@ -19,7 +19,10 @@ import {
 import { getTemplateById } from '../provider-templates.js';
 import { oauthAuthRef, toOAuthRegistryId } from './import-build.js';
 import { loadRegistry, saveRegistry } from './io.js';
-import { withRegistryWriteLock } from './lock.js';
+import {
+  withCredentialMutationLock,
+  withRegistryWriteLock,
+} from './lock.js';
 import { refreshProviderModels } from './refresh-models.js';
 import type { RegistryProvider } from './types.js';
 
@@ -79,14 +82,16 @@ export async function saveNativeOAuthCredential(
   const cred = tokensToStoredCredential(tokens, undefined, accountId, providerData);
   const registryId = toOAuthRegistryId(providerId);
   const authRef = oauthAuthRef(registryId);
-  let diagMsg = '';
-  const saved = await saveProviderCredential(
-    authRef,
-    oauthCredentialToKeychainJson(cred),
-    (msg) => { diagMsg = msg; },
-  );
-  if (!saved) throw new Error(`Could not save OAuth tokens to the credential store${diagMsg ? ` — ${diagMsg}` : ' — check access and try again'}`);
-  await upsertOAuthProvider(providerId, cred, authRef);
+  await withCredentialMutationLock(authRef, async () => {
+    let diagMsg = '';
+    const saved = await saveProviderCredential(
+      authRef,
+      oauthCredentialToKeychainJson(cred),
+      (msg) => { diagMsg = msg; },
+    );
+    if (!saved) throw new Error(`Could not save OAuth tokens to the credential store${diagMsg ? ` — ${diagMsg}` : ' — check access and try again'}`);
+    await upsertOAuthProvider(providerId, cred, authRef);
+  });
 }
 
 /**
@@ -156,22 +161,32 @@ export async function authenticateProvider(
   let storeDiagMsg = '';
   const storeReady = await probeProviderCredentialStore(authRef, (msg) => { storeDiagMsg = msg; });
   if (!storeReady) {
-    throw new Error(`Credential store is unavailable${storeDiagMsg ? ` — ${storeDiagMsg}` : ''}`);
+    throw new Error(
+      `Credential store is unavailable${storeDiagMsg ? `: ${storeDiagMsg}` : ''}. `
+      + 'Set CLODEX_CREDENTIAL_HELPER to an absolute path to an external credential helper and try again.',
+    );
   }
 
   const cred = await runNativeDeviceCode(providerId);
 
-  let nativeDiagMsg = '';
-  const saved = await saveProviderCredential(
-    authRef,
-    oauthCredentialToKeychainJson(cred),
-    (msg) => { nativeDiagMsg = msg; },
-  );
-  if (!saved) {
-    p.log.warn(`Could not save OAuth tokens to the credential store — ${nativeDiagMsg || 'session may not persist.'}`);
+  const persisted = await withCredentialMutationLock(authRef, async () => {
+    let nativeDiagMsg = '';
+    const saved = await saveProviderCredential(
+      authRef,
+      oauthCredentialToKeychainJson(cred),
+      (msg) => { nativeDiagMsg = msg; },
+    );
+    const registryProvider = await upsertOAuthProvider(
+      providerId,
+      cred,
+      authRef,
+    );
+    return { saved, nativeDiagMsg, registryProvider };
+  });
+  if (!persisted.saved) {
+    p.log.warn(`Could not save OAuth tokens to the credential store — ${persisted.nativeDiagMsg || 'session may not persist.'}`);
   }
-
-  const registryProvider = await upsertOAuthProvider(providerId, cred, authRef);
+  const { registryProvider } = persisted;
 
   const refreshSpinner = p.spinner();
   refreshSpinner.start('Refreshing model list...');

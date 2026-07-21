@@ -8,6 +8,7 @@ import {
   toggleProviderEnabled,
 } from '../src/registry/crud.js';
 import { emptyRegistry, loadRegistry, saveRegistry } from '../src/registry/io.js';
+import { withRegistryWriteLockSync } from '../src/registry/lock.js';
 import { providerAuthHelpText } from '../src/registry/provider-auth.js';
 import type { RegistryProvider } from '../src/registry/types.js';
 import * as env from '../src/env.js';
@@ -118,7 +119,7 @@ describe('registry crud', () => {
   it('toggles provider enabled state', () => {
     const registry = emptyRegistry();
     registry.providers.push(openaiEntry());
-    saveRegistry(registry);
+    withRegistryWriteLockSync(() => saveRegistry(registry));
 
     expect(toggleProviderEnabled('openai')).toEqual({ toggled: true, enabled: false });
     expect(loadRegistry().providers[0]?.enabled).toBe(false);
@@ -127,7 +128,7 @@ describe('registry crud', () => {
   it('removes provider and deletes its credential', async () => {
     const registry = emptyRegistry();
     registry.providers.push(openaiEntry());
-    saveRegistry(registry);
+    withRegistryWriteLockSync(() => saveRegistry(registry));
 
     const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(true);
     const result = await removeProviderFromRegistry('openai');
@@ -143,7 +144,7 @@ describe('registry crud', () => {
       openaiEntry({ authRef: 'keyring:provider:shared' }),
       openaiEntry({ id: 'openai-oauth', name: 'OpenAI (ChatGPT)', authType: 'oauth', authRef: 'keyring:provider:shared' }),
     );
-    saveRegistry(registry);
+    withRegistryWriteLockSync(() => saveRegistry(registry));
 
     const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(true);
     const result = await removeProviderFromRegistry('openai');

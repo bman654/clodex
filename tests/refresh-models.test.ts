@@ -13,6 +13,7 @@ vi.mock('../src/registry/io.js', () => ({
   saveRegistry: vi.fn(),
 }));
 vi.mock('../src/registry/lock.js', () => ({
+  withCredentialMutationLock: vi.fn(async (_authRef: string, operation: () => unknown) => operation()),
   withRegistryWriteLock: vi.fn(async (operation: () => unknown) => operation()),
 }));
 

@@ -10,6 +10,7 @@ import {
   resolveProvidersForDisplay,
 } from '../src/provider-catalog.js';
 import { emptyRegistry, saveRegistry } from '../src/registry/io.js';
+import { withRegistryWriteLockSync } from '../src/registry/lock.js';
 
 const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:openai-oauth`;
 
@@ -64,7 +65,7 @@ describe('provider-catalog-display', () => {
         addedAt: new Date().toISOString(),
         modelsCache: { fetchedAt: new Date().toISOString(), models: [] },
       });
-      saveRegistry(registry);
+      withRegistryWriteLockSync(() => saveRegistry(registry));
 
       const provider = { id: 'groq', name: 'Groq', apiKey: '', models: [] } as any;
       expect(await resolveLocalProviderApiKey(provider)).toBe('opencode-key');
@@ -160,7 +161,7 @@ describe('provider-catalog-display', () => {
         addedAt: new Date().toISOString(),
         modelsCache: { fetchedAt: new Date().toISOString(), models: [] },
       });
-      saveRegistry(registry);
+      withRegistryWriteLockSync(() => saveRegistry(registry));
 
       const entries = await resolveProvidersForDisplay();
       expect(entries.map(e => e.id)).toEqual(['groq']);

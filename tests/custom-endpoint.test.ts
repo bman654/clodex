@@ -6,6 +6,7 @@ const registryState = vi.hoisted(() => ({
 }));
 const lockState = vi.hoisted(() => ({
   active: false,
+  credentialActive: false,
   entries: 0,
 }));
 
@@ -31,6 +32,20 @@ vi.mock('../src/registry/lock.js', () => ({
       return await operation();
     } finally {
       lockState.active = false;
+    }
+  }),
+  withCredentialMutationLock: vi.fn(async <T>(
+    _authRef: string,
+    operation: () => Promise<T> | T,
+  ): Promise<T> => {
+    if (lockState.credentialActive) {
+      throw new Error('credential lock re-entered');
+    }
+    lockState.credentialActive = true;
+    try {
+      return await operation();
+    } finally {
+      lockState.credentialActive = false;
     }
   }),
 }));
@@ -78,6 +93,7 @@ describe('custom endpoint registry updates', () => {
   beforeEach(() => {
     registryState.current = { schemaVersion: 1, providers: [] };
     lockState.active = false;
+    lockState.credentialActive = false;
     lockState.entries = 0;
 
     vi.mocked(saveProviderCredential).mockReset().mockResolvedValue(true);
@@ -104,11 +120,16 @@ describe('custom endpoint registry updates', () => {
       observedLockStates.push(lockState.active);
       return successfulDiscovery();
     });
+    vi.mocked(saveProviderCredential).mockImplementation(async () => {
+      observedLockStates.push(lockState.active);
+      expect(lockState.credentialActive).toBe(true);
+      return true;
+    });
 
     const result = await addCustomEndpointProvider(endpointInput);
 
     expect(result.added).toBe(true);
-    expect(observedLockStates).toEqual([false]);
+    expect(observedLockStates).toEqual([false, false]);
     expect(lockState.entries).toBe(1);
     expect(lockState.active).toBe(false);
   });
@@ -177,8 +198,11 @@ describe('custom endpoint registry updates', () => {
       added: true,
       provider: { id: 'custom-test-endpoint-2' },
     });
+    expect(result.provider?.authRef).toMatch(
+      /^keyring:provider:custom-test-endpoint:[0-9a-f-]{36}$/,
+    );
     expect(saveProviderCredential).toHaveBeenCalledWith(
-      'keyring:provider:custom-test-endpoint-2',
+      result.provider?.authRef,
       endpointInput.apiKey,
     );
     expect(registryState.current.providers.map((provider) => provider.id)).toEqual([

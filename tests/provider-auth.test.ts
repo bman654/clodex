@@ -1,6 +1,9 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
-const lockState = vi.hoisted(() => ({ active: false }));
+const lockState = vi.hoisted(() => ({
+  active: false,
+  credentialActive: false,
+}));
 
 vi.mock('../src/ui.js', () => ({
   printOAuthStepsPanel: vi.fn(),
@@ -31,6 +34,17 @@ vi.mock('../src/registry/lock.js', () => ({
       lockState.active = false;
     }
   }),
+  withCredentialMutationLock: vi.fn(async (
+    _authRef: string,
+    operation: () => unknown,
+  ) => {
+    lockState.credentialActive = true;
+    try {
+      return await operation();
+    } finally {
+      lockState.credentialActive = false;
+    }
+  }),
 }));
 vi.mock('@clack/prompts', () => ({
   log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), success: vi.fn() },
@@ -50,6 +64,7 @@ describe('authenticateProvider', () => {
   beforeEach(() => {
     vi.mocked(probeProviderCredentialStore).mockReset().mockResolvedValue(true);
     lockState.active = false;
+    lockState.credentialActive = false;
     vi.mocked(saveProviderCredential).mockClear();
     vi.mocked(saveRegistry).mockClear();
     vi.mocked(runOpenAiDeviceCodeFlow).mockClear();
@@ -58,6 +73,11 @@ describe('authenticateProvider', () => {
   });
 
   it('runs the OpenAI device-code flow and stores the openai-oauth registry entry', async () => {
+    vi.mocked(saveProviderCredential).mockImplementationOnce(async () => {
+      expect(lockState.active).toBe(false);
+      expect(lockState.credentialActive).toBe(true);
+      return true;
+    });
     const result = await authenticateProvider('openai');
 
     expect(prompts.select).not.toHaveBeenCalled();
@@ -73,8 +93,14 @@ describe('authenticateProvider', () => {
   });
 
   it('stops before device authorization when the credential store preflight fails', async () => {
-    vi.mocked(probeProviderCredentialStore).mockResolvedValue(false);
-    await expect(authenticateProvider('openai')).rejects.toThrow('Credential store is unavailable');
+    vi.mocked(probeProviderCredentialStore).mockImplementationOnce(async (_authRef, diagnostic) => {
+      diagnostic?.('native keyring probe failed');
+      return false;
+    });
+    await expect(authenticateProvider('openai')).rejects.toThrow(
+      'Credential store is unavailable: native keyring probe failed. '
+      + 'Set CLODEX_CREDENTIAL_HELPER to an absolute path to an external credential helper and try again.',
+    );
     expect(runOpenAiDeviceCodeFlow).not.toHaveBeenCalled();
     expect(saveProviderCredential).not.toHaveBeenCalled();
     expect(saveRegistry).not.toHaveBeenCalled();

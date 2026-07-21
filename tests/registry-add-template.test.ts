@@ -8,7 +8,11 @@ import * as pricing from '../src/registry/pricing.js';
 import type { ProviderTemplate } from '../src/provider-templates.js';
 import type { ProviderRegistry } from '../src/registry/types.js';
 
-const lockState = vi.hoisted(() => ({ active: false }));
+const lockState = vi.hoisted(() => ({
+  active: false,
+  credentialActive: false,
+  credentialTails: new Map<string, Promise<void>>(),
+}));
 
 vi.mock('../src/env.js', () => ({ saveProviderCredential: vi.fn() }));
 vi.mock('../src/provider-factory.js', () => ({ isSdkMigratedNpm: vi.fn() }));
@@ -31,6 +35,29 @@ vi.mock('../src/registry/lock.js', () => ({
       lockState.active = false;
     }
   }),
+  withCredentialMutationLock: vi.fn(async (
+    authRef: string,
+    operation: () => unknown,
+  ) => {
+    const previous = lockState.credentialTails.get(authRef) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => gate);
+    lockState.credentialTails.set(authRef, tail);
+    await previous;
+    lockState.credentialActive = true;
+    try {
+      return await operation();
+    } finally {
+      lockState.credentialActive = false;
+      release();
+      if (lockState.credentialTails.get(authRef) === tail) {
+        lockState.credentialTails.delete(authRef);
+      }
+    }
+  }),
 }));
 
 describe('registry/add-template', () => {
@@ -46,6 +73,8 @@ describe('registry/add-template', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     lockState.active = false;
+    lockState.credentialActive = false;
+    lockState.credentialTails.clear();
 
     vi.mocked(providerFactory.isSdkMigratedNpm).mockReturnValue(true);
     vi.mocked(env.saveProviderCredential).mockResolvedValue(true);
@@ -120,12 +149,39 @@ describe('registry/add-template', () => {
     vi.mocked(pricing.enrichPricingAsync).mockImplementation(() => {
       expect(lockState.active).toBe(false);
     });
+    vi.mocked(env.saveProviderCredential).mockImplementation(async () => {
+      expect(lockState.active).toBe(false);
+      expect(lockState.credentialActive).toBe(true);
+      return true;
+    });
 
     const res = await addProviderFromTemplate(dummyTemplate, 'key');
 
     expect(res.added).toBe(true);
     expect(fetchTemplate.fetchTemplateModels).toHaveBeenCalledOnce();
     expect(pricing.enrichPricingAsync).toHaveBeenCalledOnce();
+  });
+
+  it('serializes concurrent writes to the same provider credential', async () => {
+    let registry: ProviderRegistry = { schemaVersion: 1, providers: [] };
+    vi.mocked(io.loadRegistry).mockImplementation(() =>
+      structuredClone(registry));
+    vi.mocked(io.saveRegistry).mockImplementation((next) => {
+      registry = structuredClone(next);
+    });
+
+    const results = await Promise.all([
+      addProviderFromTemplate(dummyTemplate, 'first-key'),
+      addProviderFromTemplate(dummyTemplate, 'second-key'),
+    ]);
+
+    expect(results.filter(result => result.added)).toHaveLength(1);
+    expect(results.filter(result => !result.added)).toHaveLength(1);
+    expect(env.saveProviderCredential).toHaveBeenCalledOnce();
+    const [savedAuthRef, savedKey] = vi.mocked(env.saveProviderCredential).mock.calls[0]!;
+    expect(savedAuthRef).toBe('keyring:provider:test-template');
+    expect(['first-key', 'second-key']).toContain(savedKey);
+    expect(registry.providers).toHaveLength(1);
   });
 
   it('revalidates provider existence after model discovery', async () => {

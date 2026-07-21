@@ -92,6 +92,16 @@ export function isAnonymousProvider(
     && provider.authRef === `keyring:provider:${provider.id}`;
 }
 
+function isLegacyAnonymousCustomEndpoint(
+  provider: RegistryProvider,
+  credential: string | null,
+): boolean {
+  return provider.authType === undefined
+    && (provider.templateId === 'custom-openai' || provider.templateId === 'custom-anthropic')
+    && provider.authRef === `keyring:provider:${provider.id}`
+    && credential === 'local';
+}
+
 function materializeOne(
   provider: RegistryProvider,
   resolveCredential: CredentialResolver,
@@ -101,8 +111,12 @@ function materializeOne(
   if (!isValidProviderId(provider.id)) return null;
 
   const freeOnly = provider.subscriptionFilter === 'free';
-  const anonymous = isAnonymousProvider(provider);
-  const apiKey = anonymous ? '' : resolveCredential(provider) ?? '';
+  const explicitAnonymous = isAnonymousProvider(provider);
+  const credential = explicitAnonymous ? null : resolveCredential(provider);
+  const legacyAnonymous = isLegacyAnonymousCustomEndpoint(provider, credential);
+  if (provider.authType === undefined && credential === 'local' && !legacyAnonymous) return null;
+  const anonymous = explicitAnonymous || legacyAnonymous;
+  const apiKey = anonymous ? '' : credential ?? '';
   const models: LocalProviderModel[] = [];
   for (const cached of provider.modelsCache?.models ?? []) {
     const freeStatus = classifyFreeStatus({
@@ -125,7 +139,7 @@ function materializeOne(
     name: provider.name,
     apiKey,
     authRef: anonymous ? 'none:anonymous' : provider.authRef,
-    authType: provider.authType,
+    authType: anonymous ? 'none' : provider.authType,
     headers: provider.api.headers,
     models,
   };

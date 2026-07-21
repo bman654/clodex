@@ -2,7 +2,11 @@
 
 import { deleteProviderCredential } from '../env.js';
 import { loadRegistry, saveRegistry } from './io.js';
-import { withRegistryWriteLock, withRegistryWriteLockSync } from './lock.js';
+import {
+  withCredentialMutationLock,
+  withRegistryWriteLock,
+  withRegistryWriteLockSync,
+} from './lock.js';
 import type { RegistryProvider } from './types.js';
 
 export interface RemoveProviderResult {
@@ -22,31 +26,54 @@ export async function removeProviderFromRegistry(
   id: string,
   opts?: { deleteCredential?: boolean },
 ): Promise<RemoveProviderResult> {
-  return withRegistryWriteLock(async () => {
+  const removal = await withRegistryWriteLock(() => {
     const registry = loadRegistry();
     const index = registry.providers.findIndex(p => p.id === id);
     if (index < 0) {
-      return { removed: false, id, credentialDeleted: false, error: `Provider not found: ${id}` };
+      return {
+        result: {
+          removed: false,
+          id,
+          credentialDeleted: false,
+          error: `Provider not found: ${id}`,
+        },
+        authRefToDelete: null,
+      };
     }
 
     const [removedProvider] = registry.providers.splice(index, 1);
     saveRegistry(registry);
 
-    let credentialDeleted = false;
-    if (opts?.deleteCredential !== false) {
-      const shouldDelete = !credentialStillReferenced(removedProvider.authRef, registry.providers);
-      if (shouldDelete) {
-        credentialDeleted = await deleteProviderCredential(removedProvider.authRef);
-      }
-    }
-
     return {
-      removed: true,
-      id,
-      name: removedProvider.name,
-      credentialDeleted,
+      result: {
+        removed: true,
+        id,
+        name: removedProvider.name,
+        credentialDeleted: false,
+      },
+      authRefToDelete:
+        opts?.deleteCredential !== false &&
+        !credentialStillReferenced(removedProvider.authRef, registry.providers)
+          ? removedProvider.authRef
+          : null,
     };
   });
+
+  const authRefToDelete = removal.authRefToDelete;
+  if (authRefToDelete) {
+    await withCredentialMutationLock(authRefToDelete, async () => {
+      const referencedAgain = await withRegistryWriteLock(() =>
+        credentialStillReferenced(
+          authRefToDelete,
+          loadRegistry().providers,
+        ));
+      if (referencedAgain) return;
+      removal.result.credentialDeleted = await deleteProviderCredential(
+        authRefToDelete,
+      );
+    });
+  }
+  return removal.result;
 }
 
 export function toggleProviderEnabled(id: string): { toggled: boolean; enabled?: boolean; error?: string } {

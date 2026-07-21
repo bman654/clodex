@@ -1,7 +1,10 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   closeSync,
+  fstatSync,
+  fsyncSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -15,7 +18,6 @@ import { getProvidersPath } from '../paths.js';
 const DEFAULT_WAIT_MS = 30_000;
 const DEFAULT_RETRY_MS = 25;
 const LOCK_MAX_HOLD_MS = 10 * 60 * 1000;
-const INVALID_LOCK_STALE_MS = 10 * 60 * 1000;
 
 interface RegistryLockOwner {
   pid: number;
@@ -36,17 +38,31 @@ interface RegistryLockOptions {
   retryMs?: number;
   now?: () => number;
   isAlive?: (pid: number) => boolean;
+  reclaimExpiredLiveOwner?: boolean;
 }
 
 interface RegistryLockContext {
   leases: ReadonlyMap<string, RegistryLockLease>;
 }
 
-interface RegistryLockLease {
+export interface RegistryLockLease {
   active: boolean;
+  readonly lockPath: string;
+  readonly token: string;
+  readonly device: number;
+  readonly inode: number;
+  assertOwned: () => void;
+  release: () => void;
 }
 
 const registryLockContext = new AsyncLocalStorage<RegistryLockContext>();
+
+export class RegistryLockLostError extends Error {
+  constructor(lockPath: string) {
+    super(`Provider registry lock ownership was lost before write: ${lockPath}`);
+    this.name = 'RegistryLockLostError';
+  }
+}
 
 export function getRegistryLockPath(): string {
   return `${getProvidersPath()}.lock`;
@@ -78,10 +94,102 @@ function parseLockOwner(raw: string): RegistryLockOwner | null {
   }
 }
 
+function createLockRecord(
+  lockPath: string,
+  owner: RegistryLockOwner,
+): RegistryLockSnapshot | null {
+  const raw = JSON.stringify(owner);
+  const tempPath = `${lockPath}.${process.pid}.${owner.token}.tmp`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(tempPath, 'wx', 0o600);
+    writeFileSync(fd, raw);
+    fsyncSync(fd);
+    const stats = fstatSync(fd);
+    try {
+      linkSync(tempPath, lockPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') return null;
+      throw err;
+    }
+    return {
+      raw,
+      device: stats.dev,
+      inode: stats.ino,
+      modifiedAt: stats.mtimeMs,
+    };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    try {
+      unlinkSync(tempPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+}
+
+function lockFileMatchesLease(lease: RegistryLockLease): boolean {
+  let fd: number | undefined;
+  try {
+    fd = openSync(lease.lockPath, 'r');
+    const openedStats = fstatSync(fd);
+    const owner = parseLockOwner(readFileSync(fd, 'utf8'));
+    const pathStats = statSync(lease.lockPath);
+    return (
+      owner?.token === lease.token &&
+      openedStats.dev === lease.device &&
+      openedStats.ino === lease.inode &&
+      pathStats.dev === lease.device &&
+      pathStats.ino === lease.inode
+    );
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function createLease(
+  lockPath: string,
+  owner: RegistryLockOwner,
+  snapshot: RegistryLockSnapshot,
+): RegistryLockLease {
+  const lease: RegistryLockLease = {
+    active: true,
+    lockPath,
+    token: owner.token,
+    device: snapshot.device,
+    inode: snapshot.inode,
+    assertOwned: () => {
+      if (!lease.active || !lockFileMatchesLease(lease)) {
+        lease.active = false;
+        throw new RegistryLockLostError(lockPath);
+      }
+    },
+    release: () => {
+      if (!lease.active) return;
+      lease.active = false;
+      if (lockFileMatchesLease(lease)) unlinkSync(lockPath);
+    },
+  };
+  return lease;
+}
+
+export function assertRegistryWriteOwnership(
+  registryPath = getProvidersPath(),
+): void {
+  const lockPath = `${registryPath}.lock`;
+  const lease = registryLockContext.getStore()?.leases.get(lockPath);
+  if (!lease) throw new RegistryLockLostError(lockPath);
+  lease.assertOwned();
+}
+
 function getStaleLockSnapshot(
   lockPath: string,
   now: number,
   alive: (pid: number) => boolean,
+  reclaimExpiredLiveOwner: boolean,
 ): RegistryLockSnapshot | null {
   const raw = readFileSync(lockPath, 'utf8');
   const stats = statSync(lockPath);
@@ -94,12 +202,11 @@ function getStaleLockSnapshot(
   const owner = parseLockOwner(raw);
   if (owner) {
     const expired = now - owner.startedAt >= LOCK_MAX_HOLD_MS;
-    return alive(owner.pid) && !expired ? null : snapshot;
+    return alive(owner.pid) && (!reclaimExpiredLiveOwner || !expired)
+      ? null
+      : snapshot;
   }
-
-  // A process can be between exclusive creation and writing its owner record.
-  // Only reap malformed locks after a long grace period.
-  return now - snapshot.modifiedAt >= INVALID_LOCK_STALE_MS ? snapshot : null;
+  return snapshot;
 }
 
 function removeStaleLock(
@@ -130,119 +237,104 @@ function tryAcquireReaperGuard(
   lockPath: string,
   now: number,
   alive: (pid: number) => boolean,
-): (() => void) | null {
+  reclaimExpiredLiveOwner: boolean,
+): RegistryLockLease | null {
   const guardPath = `${lockPath}.reap`;
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const token = randomUUID();
-    let fd: number | undefined;
+    const owner: RegistryLockOwner = {
+      pid: process.pid,
+      startedAt: now,
+      token: randomUUID(),
+    };
     try {
-      fd = openSync(guardPath, 'wx', 0o600);
-      const owner: RegistryLockOwner = {
-        pid: process.pid,
-        startedAt: now,
-        token,
-      };
-      writeFileSync(fd, JSON.stringify(owner));
-      closeSync(fd);
-      fd = undefined;
-      return () => {
-        try {
-          const current = parseLockOwner(readFileSync(guardPath, 'utf8'));
-          if (current?.token === token) unlinkSync(guardPath);
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        }
-      };
+      const snapshot = createLockRecord(guardPath, owner);
+      if (snapshot) return createLease(guardPath, owner, snapshot);
     } catch (err) {
-      if (fd !== undefined) {
-        try {
-          closeSync(fd);
-        } catch {
-          // The original error remains authoritative.
-        }
-        removeStaleLock(guardPath);
-        throw err;
-      }
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-
-      let stale: RegistryLockSnapshot | null = null;
-      try {
-        stale = getStaleLockSnapshot(guardPath, now, alive);
-      } catch (readErr) {
-        if ((readErr as NodeJS.ErrnoException).code === 'ENOENT') continue;
-        throw readErr;
-      }
-      if (!stale) return null;
-      if (!removeStaleLock(guardPath, stale)) continue;
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw err;
     }
+
+    let stale: RegistryLockSnapshot | null = null;
+    try {
+      stale = getStaleLockSnapshot(
+        guardPath,
+        now,
+        alive,
+        reclaimExpiredLiveOwner,
+      );
+    } catch (readErr) {
+      if ((readErr as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw readErr;
+    }
+    if (!stale) return null;
+    if (!removeStaleLock(guardPath, stale)) continue;
   }
   return null;
 }
 
 export function tryAcquireRegistryLock(
   lockPath = getRegistryLockPath(),
-  options: Pick<RegistryLockOptions, 'now' | 'isAlive'> = {},
-): (() => void) | null {
+  options: Pick<
+    RegistryLockOptions,
+    'now' | 'isAlive' | 'reclaimExpiredLiveOwner'
+  > = {},
+): RegistryLockLease | null {
   const now = options.now?.() ?? Date.now();
   const alive = options.isAlive ?? isPidAlive;
+  const reclaimExpiredLiveOwner = options.reclaimExpiredLiveOwner ?? true;
   mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const token = randomUUID();
-    let fd: number | undefined;
+    const owner: RegistryLockOwner = {
+      pid: process.pid,
+      startedAt: now,
+      token: randomUUID(),
+    };
     try {
-      fd = openSync(lockPath, 'wx', 0o600);
-      const owner: RegistryLockOwner = {
-        pid: process.pid,
-        startedAt: now,
-        token,
-      };
-      writeFileSync(fd, JSON.stringify(owner));
-      closeSync(fd);
-      fd = undefined;
-      return () => {
-        try {
-          const current = parseLockOwner(readFileSync(lockPath, 'utf8'));
-          if (current?.token === token) unlinkSync(lockPath);
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-        }
-      };
+      const snapshot = createLockRecord(lockPath, owner);
+      if (snapshot) return createLease(lockPath, owner, snapshot);
     } catch (err) {
-      if (fd !== undefined) {
-        try {
-          closeSync(fd);
-        } catch {
-          // The original error remains authoritative.
-        }
-        removeStaleLock(lockPath);
-        throw err;
-      }
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw err;
+    }
 
-      let stale: RegistryLockSnapshot | null = null;
+    let stale: RegistryLockSnapshot | null = null;
+    try {
+      stale = getStaleLockSnapshot(
+        lockPath,
+        now,
+        alive,
+        reclaimExpiredLiveOwner,
+      );
+    } catch (readErr) {
+      if ((readErr as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw readErr;
+    }
+    if (!stale) return null;
+    const reaperLease = tryAcquireReaperGuard(
+      lockPath,
+      now,
+      alive,
+      reclaimExpiredLiveOwner,
+    );
+    if (!reaperLease) return null;
+    try {
+      let currentStale: RegistryLockSnapshot | null = null;
       try {
-        stale = getStaleLockSnapshot(lockPath, now, alive);
+        currentStale = getStaleLockSnapshot(
+          lockPath,
+          now,
+          alive,
+          reclaimExpiredLiveOwner,
+        );
       } catch (readErr) {
         if ((readErr as NodeJS.ErrnoException).code === 'ENOENT') continue;
         throw readErr;
       }
-      if (!stale) return null;
-      const releaseReaper = tryAcquireReaperGuard(lockPath, now, alive);
-      if (!releaseReaper) return null;
-      try {
-        let currentStale: RegistryLockSnapshot | null = null;
-        try {
-          currentStale = getStaleLockSnapshot(lockPath, now, alive);
-        } catch (readErr) {
-          if ((readErr as NodeJS.ErrnoException).code === 'ENOENT') continue;
-          throw readErr;
-        }
-        if (!currentStale) return null;
-        if (!removeStaleLock(lockPath, currentStale)) continue;
-      } finally {
-        releaseReaper();
-      }
+      if (!currentStale) return null;
+      if (!removeStaleLock(lockPath, currentStale)) continue;
+    } finally {
+      reaperLease.release();
     }
   }
   return null;
@@ -258,7 +350,7 @@ function sleepSync(ms: number): void {
 
 function lockTimeoutError(lockPath: string, waitMs: number): Error {
   return new Error(
-    `Timed out after ${waitMs}ms waiting for provider registry lock: ${lockPath}`,
+    `Timed out after ${waitMs}ms waiting for lock: ${lockPath}`,
   );
 }
 
@@ -274,19 +366,19 @@ export async function withRegistryWriteLock<T>(
   const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
   const now = options.now ?? Date.now;
   const deadline = now() + waitMs;
-  let release: (() => void) | null = null;
+  let lease: RegistryLockLease | null = null;
 
-  while (!release) {
-    release = tryAcquireRegistryLock(lockPath, {
+  while (!lease) {
+    lease = tryAcquireRegistryLock(lockPath, {
       now,
       isAlive: options.isAlive,
+      reclaimExpiredLiveOwner: options.reclaimExpiredLiveOwner,
     });
-    if (release) break;
+    if (lease) break;
     if (now() >= deadline) throw lockTimeoutError(lockPath, waitMs);
     await sleep(retryMs);
   }
 
-  const lease: RegistryLockLease = { active: true };
   const leases = new Map(inheritedLeases);
   leases.set(lockPath, lease);
   const context: RegistryLockContext = { leases };
@@ -294,8 +386,7 @@ export async function withRegistryWriteLock<T>(
     try {
       return await operation();
     } finally {
-      lease.active = false;
-      release?.();
+      lease.release();
     }
   });
 }
@@ -312,19 +403,19 @@ export function withRegistryWriteLockSync<T>(
   const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
   const now = options.now ?? Date.now;
   const deadline = now() + waitMs;
-  let release: (() => void) | null = null;
+  let lease: RegistryLockLease | null = null;
 
-  while (!release) {
-    release = tryAcquireRegistryLock(lockPath, {
+  while (!lease) {
+    lease = tryAcquireRegistryLock(lockPath, {
       now,
       isAlive: options.isAlive,
+      reclaimExpiredLiveOwner: options.reclaimExpiredLiveOwner,
     });
-    if (release) break;
+    if (lease) break;
     if (now() >= deadline) throw lockTimeoutError(lockPath, waitMs);
     sleepSync(retryMs);
   }
 
-  const lease: RegistryLockLease = { active: true };
   const leases = new Map(inheritedLeases);
   leases.set(lockPath, lease);
   const context: RegistryLockContext = { leases };
@@ -332,8 +423,25 @@ export function withRegistryWriteLockSync<T>(
     try {
       return operation();
     } finally {
-      lease.active = false;
-      release?.();
+      lease.release();
     }
+  });
+}
+
+export function getCredentialMutationLockPath(authRef: string): string {
+  const digest = createHash('sha256')
+    .update('clodex-credential-mutation\0')
+    .update(authRef)
+    .digest('hex');
+  return `${getProvidersPath()}.credential-${digest}.lock`;
+}
+
+export function withCredentialMutationLock<T>(
+  authRef: string,
+  operation: () => Promise<T> | T,
+): Promise<T> {
+  return withRegistryWriteLock(operation, {
+    lockPath: getCredentialMutationLockPath(authRef),
+    reclaimExpiredLiveOwner: false,
   });
 }

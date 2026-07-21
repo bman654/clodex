@@ -7,7 +7,10 @@ import type { ProviderTemplate } from '../provider-templates.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
 import { loadRegistry, saveRegistry } from './io.js';
-import { withRegistryWriteLock } from './lock.js';
+import {
+  withCredentialMutationLock,
+  withRegistryWriteLock,
+} from './lock.js';
 import {
   buildPricingIndex,
   enrichModelsWithPricing,
@@ -107,7 +110,10 @@ export async function addProviderFromTemplate(
     buildPricingIndex(pricingCache),
     platform,
   );
-  const result = await withRegistryWriteLock(async () => {
+  const authRef = trimmedKey
+    ? credentialAuthRef(`provider:${template.id}`)
+    : 'none:anonymous';
+  const commitProvider = () => withRegistryWriteLock(() => {
     const registry = loadRegistry();
     const existing = registry.providers.find(p => p.id === template.id);
     if (existing && !opts?.replaceExisting) {
@@ -115,18 +121,6 @@ export async function addProviderFromTemplate(
         added: false,
         error: `${template.name} is already configured.`,
         hint: `Remove it first with: clodex providers remove ${template.id}`,
-      };
-    }
-
-    const authRef = trimmedKey
-      ? credentialAuthRef(`provider:${template.id}`)
-      : 'none:anonymous';
-    const saved = trimmedKey ? await saveProviderCredential(authRef, trimmedKey) : true;
-    if (!saved) {
-      return {
-        added: false,
-        error: 'Could not save API key to the credential store.',
-        hint: 'Check credential-store access and try again.',
       };
     }
 
@@ -162,6 +156,34 @@ export async function addProviderFromTemplate(
     saveRegistry(registry);
     return { added: true, provider: entry, modelCount: pricedModels.length };
   });
+
+  const result = trimmedKey
+    ? await withCredentialMutationLock(authRef, async () => {
+      const commitError = await withRegistryWriteLock(() => {
+        const registry = loadRegistry();
+        const existing = registry.providers.find(p => p.id === template.id);
+        if (existing && !opts?.replaceExisting) {
+          return {
+            added: false,
+            error: `${template.name} is already configured.`,
+            hint: `Remove it first with: clodex providers remove ${template.id}`,
+          };
+        }
+        return null;
+      });
+      if (commitError) return commitError;
+
+      const saved = await saveProviderCredential(authRef, trimmedKey);
+      if (!saved) {
+        return {
+          added: false,
+          error: 'Could not save API key to the credential store.',
+          hint: 'Check credential-store access and try again.',
+        };
+      }
+      return commitProvider();
+    })
+    : await commitProvider();
 
   if (result.added) enrichPricingAsync();
   return result;

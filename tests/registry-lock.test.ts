@@ -1,12 +1,16 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  RegistryLockLostError,
+  getCredentialMutationLockPath,
   tryAcquireRegistryLock,
+  withCredentialMutationLock,
   withRegistryWriteLock,
   withRegistryWriteLockSync,
 } from '../src/registry/lock.js';
+import { emptyRegistry, saveRegistry } from '../src/registry/io.js';
 
 const roots: string[] = [];
 
@@ -24,14 +28,14 @@ afterEach(() => {
 describe('provider registry lock', () => {
   it('allows only one owner until the matching release runs', () => {
     const lockPath = temporaryLockPath();
-    const release = tryAcquireRegistryLock(lockPath);
-    expect(release).toBeTypeOf('function');
+    const lease = tryAcquireRegistryLock(lockPath);
+    expect(lease).toMatchObject({ active: true });
     expect(tryAcquireRegistryLock(lockPath)).toBeNull();
 
-    release?.();
-    const nextRelease = tryAcquireRegistryLock(lockPath);
-    expect(nextRelease).toBeTypeOf('function');
-    nextRelease?.();
+    lease?.release();
+    const nextLease = tryAcquireRegistryLock(lockPath);
+    expect(nextLease).toMatchObject({ active: true });
+    nextLease?.release();
   });
 
   it('retains a fresh lock owned by a live process and reaps a dead owner', () => {
@@ -45,15 +49,15 @@ describe('provider registry lock', () => {
     expect(
       tryAcquireRegistryLock(lockPath, { now: () => now, isAlive: () => true }),
     ).toBeNull();
-    const release = tryAcquireRegistryLock(lockPath, {
+    const lease = tryAcquireRegistryLock(lockPath, {
       now: () => now,
       isAlive: () => false,
     });
-    expect(release).toBeTypeOf('function');
+    expect(lease).toMatchObject({ active: true });
     expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).not.toBe(
       'first-owner',
     );
-    release?.();
+    lease?.release();
   });
 
   it('reaps an expired lock even when its owner process is still alive', () => {
@@ -68,16 +72,37 @@ describe('provider registry lock', () => {
       }),
     );
 
-    const release = tryAcquireRegistryLock(lockPath, {
+    const lease = tryAcquireRegistryLock(lockPath, {
       now: () => now,
       isAlive: () => true,
     });
 
-    expect(release).toBeTypeOf('function');
+    expect(lease).toMatchObject({ active: true });
     expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).not.toBe(
       'expired-owner',
     );
-    release?.();
+    lease?.release();
+  });
+
+  it('does not reap an expired live owner for a credential mutation lock', () => {
+    const lockPath = temporaryLockPath();
+    const now = Date.now();
+    writeFileSync(
+      lockPath,
+      JSON.stringify({
+        pid: 1234,
+        startedAt: now - 10 * 60 * 1000,
+        token: 'live-credential-owner',
+      }),
+    );
+
+    expect(
+      tryAcquireRegistryLock(lockPath, {
+        now: () => now,
+        isAlive: () => true,
+        reclaimExpiredLiveOwner: false,
+      }),
+    ).toBeNull();
   });
 
   it('does not remove a replacement created during stale-lock reclamation', () => {
@@ -92,13 +117,13 @@ describe('provider registry lock', () => {
       }),
     );
 
-    let competingRelease: (() => void) | null = null;
+    let competingLease: ReturnType<typeof tryAcquireRegistryLock> = null;
     let interleaved = false;
-    const release = tryAcquireRegistryLock(lockPath, {
+    const lease = tryAcquireRegistryLock(lockPath, {
       isAlive: (pid) => {
         if (pid === stalePid && !interleaved) {
           interleaved = true;
-          competingRelease = tryAcquireRegistryLock(lockPath, {
+          competingLease = tryAcquireRegistryLock(lockPath, {
             isAlive: () => false,
           });
         }
@@ -107,11 +132,11 @@ describe('provider registry lock', () => {
     });
 
     try {
-      expect(competingRelease).toBeTypeOf('function');
-      expect(release).toBeNull();
+      expect(competingLease).toMatchObject({ active: true });
+      expect(lease).toBeNull();
     } finally {
-      release?.();
-      competingRelease?.();
+      lease?.release();
+      competingLease?.release();
     }
   });
 
@@ -154,13 +179,13 @@ describe('provider registry lock', () => {
     writeFileSync(lockPath, JSON.stringify(deadOwner));
     writeFileSync(`${lockPath}.reap`, JSON.stringify(deadOwner));
 
-    const release = tryAcquireRegistryLock(lockPath, { isAlive: () => false });
+    const lease = tryAcquireRegistryLock(lockPath, { isAlive: () => false });
 
-    expect(release).toBeTypeOf('function');
+    expect(lease).toMatchObject({ active: true });
     expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).not.toBe(
       'dead-owner',
     );
-    release?.();
+    lease?.release();
   });
 
   it('acquires nested locks when their paths differ', async () => {
@@ -179,9 +204,9 @@ describe('provider registry lock', () => {
       { lockPath: firstPath },
     );
 
-    const release = tryAcquireRegistryLock(secondPath);
-    expect(release).toBeTypeOf('function');
-    release?.();
+    const lease = tryAcquireRegistryLock(secondPath);
+    expect(lease).toMatchObject({ active: true });
+    lease?.release();
   });
 
   it('serializes independent asynchronous callers', async () => {
@@ -213,6 +238,46 @@ describe('provider registry lock', () => {
     releaseFirst();
     await Promise.all([first, second]);
     expect(events).toEqual(['first-enter', 'first-exit', 'second-enter']);
+  });
+
+  it('serializes mutations for the same credential reference', async () => {
+    const home = dirname(temporaryLockPath());
+    const previousHome = process.env.CLODEX_HOME;
+    process.env.CLODEX_HOME = home;
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    try {
+      const first = withCredentialMutationLock(
+        'keyring:provider:openai',
+        async () => {
+          events.push('first-enter');
+          await firstGate;
+          events.push('first-exit');
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const second = withCredentialMutationLock(
+        'keyring:provider:openai',
+        () => {
+          events.push('second-enter');
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(events).toEqual(['first-enter']);
+      expect(getCredentialMutationLockPath('keyring:provider:openai')).not
+        .toContain('provider:openai');
+      releaseFirst();
+      await Promise.all([first, second]);
+      expect(events).toEqual(['first-enter', 'first-exit', 'second-enter']);
+    } finally {
+      if (previousHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousHome;
+    }
   });
 
   it('invalidates inherited asynchronous ownership after releasing the lock', async () => {
@@ -296,12 +361,12 @@ describe('provider registry lock', () => {
       { lockPath },
     );
 
-    const release = tryAcquireRegistryLock(lockPath);
-    expect(release).toBeTypeOf('function');
+    const lease = tryAcquireRegistryLock(lockPath);
+    expect(lease).toMatchObject({ active: true });
     try {
       await detachedFinished;
     } finally {
-      release?.();
+      lease?.release();
     }
 
     expect(events).toEqual([]);
@@ -309,6 +374,107 @@ describe('provider registry lock', () => {
       expect.objectContaining({
         message: expect.stringContaining('Timed out after 0ms'),
       }),
+    );
+  });
+
+  it('reclaims an incomplete lock without waiting for the normal timeout', () => {
+    const lockPath = temporaryLockPath();
+    writeFileSync(lockPath, '');
+
+    const lease = tryAcquireRegistryLock(lockPath, {
+      isAlive: () => true,
+    });
+
+    expect(lease).toMatchObject({ active: true });
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toEqual(
+      expect.objectContaining({
+        pid: process.pid,
+        token: expect.any(String),
+      }),
+    );
+    lease?.release();
+  });
+
+  it('rejects registry writes without an active matching lease', () => {
+    const registryPath = temporaryLockPath().replace(/\.lock$/, '');
+
+    expect(() => saveRegistry(emptyRegistry(), registryPath)).toThrow(
+      RegistryLockLostError,
+    );
+  });
+
+  it('does not use a lease to authorize a different registry path', () => {
+    const lockPath = temporaryLockPath();
+    const otherRegistryPath = temporaryLockPath().replace(/\.lock$/, '');
+
+    withRegistryWriteLockSync(
+      () => {
+        expect(() =>
+          saveRegistry(emptyRegistry(), otherRegistryPath),
+        ).toThrow(RegistryLockLostError);
+      },
+      { lockPath },
+    );
+  });
+
+  it('rejects an expired owner before it can overwrite a newer registry', async () => {
+    const lockPath = temporaryLockPath();
+    const registryPath = lockPath.replace(/\.lock$/, '');
+    let now = Date.now();
+    let firstEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      firstEntered = resolve;
+    });
+    let resumeFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      resumeFirst = resolve;
+    });
+
+    const first = withRegistryWriteLock(
+      async () => {
+        firstEntered();
+        await firstGate;
+        saveRegistry({ ...emptyRegistry(), importedAt: 'first' }, registryPath);
+      },
+      { lockPath, now: () => now, isAlive: () => true },
+    );
+    await entered;
+
+    let secondSaved!: () => void;
+    const secondSavedGate = new Promise<void>((resolve) => {
+      secondSaved = resolve;
+    });
+    let releaseSecond!: () => void;
+    const secondGate = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+
+    now += 10 * 60 * 1000;
+    const second = withRegistryWriteLock(
+      async () => {
+        saveRegistry({ ...emptyRegistry(), importedAt: 'second' }, registryPath);
+        secondSaved();
+        await secondGate;
+      },
+      { lockPath, now: () => now, isAlive: () => true },
+    );
+    await secondSavedGate;
+    const secondToken = JSON.parse(readFileSync(lockPath, 'utf8')).token;
+
+    resumeFirst();
+    await expect(first).rejects.toBeInstanceOf(RegistryLockLostError);
+    expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).toBe(secondToken);
+    expect(
+      tryAcquireRegistryLock(lockPath, {
+        now: () => now,
+        isAlive: () => true,
+      }),
+    ).toBeNull();
+
+    releaseSecond();
+    await second;
+    expect(JSON.parse(readFileSync(registryPath, 'utf8')).importedAt).toBe(
+      'second',
     );
   });
 });

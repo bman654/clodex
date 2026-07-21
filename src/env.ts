@@ -13,6 +13,7 @@ import {
   parseStoredOAuthCredential,
 } from './oauth/types.js';
 import { refreshStoredOAuthCredential, oauthCredentialShouldRefresh } from './oauth/refresh.js';
+import { withCredentialMutationLock } from './registry/lock.js';
 import type { ConflictInfo } from './types.js';
 
 export function detectConflicts(): ConflictInfo[] {
@@ -386,17 +387,18 @@ function decodeProviderSecret(raw: string | null): string | null {
 async function refreshOAuthStoredCredential(
   ref: StoredCredentialRef,
   providerId: string,
-  raw: string,
   diag?: (msg: string) => void,
 ): Promise<string | null> {
   const authRef = storedCredentialAuthRef(ref);
   const existing = oauthRefreshInflight.get(authRef);
   if (existing) return existing;
 
-  const work = (async (): Promise<string | null> => {
-    const cred = parseStoredOAuthCredential(raw);
+  const work = withCredentialMutationLock(authRef, async (): Promise<string | null> => {
+    const currentRaw = await readStoredCredential(ref, diag);
+    if (!currentRaw) return null;
+    const cred = parseStoredOAuthCredential(currentRaw);
     if (!cred || !oauthCredentialShouldRefresh(cred, providerId)) {
-      return decodeProviderSecret(raw);
+      return decodeProviderSecret(currentRaw);
     }
     try {
       const refreshed = await refreshStoredOAuthCredential(providerId, cred);
@@ -409,7 +411,7 @@ async function refreshOAuthStoredCredential(
       if (cred.access && cred.expires > Date.now()) return cred.access;
       throw err;
     }
-  })();
+  });
 
   oauthRefreshInflight.set(authRef, work);
   try {
@@ -425,7 +427,7 @@ async function readProviderSecret(ref: StoredCredentialRef, diag?: (msg: string)
 
   const oauthProviderId = oauthProviderIdFromAccount(ref.account);
   if (oauthProviderId && raw.trim().startsWith('{')) {
-    return refreshOAuthStoredCredential(ref, oauthProviderId, raw, diag);
+    return refreshOAuthStoredCredential(ref, oauthProviderId, diag);
   }
   return decodeProviderSecret(raw);
 }
@@ -437,12 +439,14 @@ export async function saveProviderCredential(
 ): Promise<boolean> {
   const parsed = parseAuthRef(authRef);
   if (!parsed || parsed.kind === 'env' || parsed.kind === 'none') return false;
-  const written = await writeStoredCredential(parsed, key, diag);
-  if (!written) return false;
-  const readBack = await readStoredCredential(parsed, diag);
-  if (readBack === key) return true;
-  diag?.('credential store read-back verification failed');
-  return false;
+  return withCredentialMutationLock(authRef, async () => {
+    const written = await writeStoredCredential(parsed, key, diag);
+    if (!written) return false;
+    const readBack = await readStoredCredential(parsed, diag);
+    if (readBack === key) return true;
+    diag?.('credential store read-back verification failed');
+    return false;
+  });
 }
 
 /** Verify that a credential backend can durably round-trip a disposable secret. */
@@ -484,5 +488,6 @@ export async function deleteProviderCredential(
 ): Promise<boolean> {
   const parsed = parseAuthRef(authRef);
   if (!parsed || parsed.kind === 'env' || parsed.kind === 'none') return false;
-  return deleteStoredCredential(parsed, diag);
+  return withCredentialMutationLock(authRef, () =>
+    deleteStoredCredential(parsed, diag));
 }

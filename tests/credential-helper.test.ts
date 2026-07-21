@@ -20,6 +20,7 @@ import {
 } from '../src/env.js';
 import { removeProviderFromRegistry } from '../src/registry/crud.js';
 import { emptyRegistry, loadRegistry, saveRegistry } from '../src/registry/io.js';
+import { withRegistryWriteLockSync } from '../src/registry/lock.js';
 
 const helperPath = fileURLToPath(new URL('./fixtures/credential-helper.mjs', import.meta.url));
 const previousClodexHome = process.env.CLODEX_HOME;
@@ -111,7 +112,7 @@ describe('external credential helper', () => {
       api: { npm: '@ai-sdk/openai', url: 'https://api.openai.com/v1' },
       addedAt: '2026-07-21T00:00:00.000Z',
     });
-    saveRegistry(registry);
+    withRegistryWriteLockSync(() => saveRegistry(registry));
 
     const result = await removeProviderFromRegistry('openai');
 
@@ -145,16 +146,19 @@ describe('external credential helper', () => {
     expect(diagnostics).toContain('credential store read-back verification failed');
   });
 
-  it('never deletes a newer credential after a concurrent read-back mismatch', async () => {
-    process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE = 'interleave-readback';
+  it('serializes concurrent writes to the same helper credential', async () => {
+    process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE = 'detect-overlap';
     const authRef = credentialAuthRef('provider:test');
     const storePath = process.env.CLODEX_TEST_CREDENTIAL_HELPER_STORE!;
 
     const firstWrite = saveProviderCredential(authRef, 'first-value');
-    await waitForPath(`${storePath}.first-get`);
+    await waitForPath(`${storePath}.set-started`);
     const secondWrite = saveProviderCredential(authRef, 'second-value');
+    await new Promise(resolve => setTimeout(resolve, 50));
 
-    await expect(firstWrite).resolves.toBe(false);
+    expect(existsSync(`${storePath}.overlapping-set`)).toBe(false);
+    writeFileSync(`${storePath}.release-set`, '', { encoding: 'utf8', mode: 0o600 });
+    await expect(firstWrite).resolves.toBe(true);
     await expect(secondWrite).resolves.toBe(true);
     await expect(readCredentialHelperAccount('provider:test')).resolves.toBe('second-value');
   });

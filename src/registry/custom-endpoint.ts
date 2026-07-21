@@ -1,12 +1,16 @@
 // src/registry/custom-endpoint.ts — add custom OpenAI/Anthropic-compatible providers
 
+import { randomUUID } from 'node:crypto';
 import { saveProviderCredential } from '../env.js';
 import { credentialAuthRef } from '../credential-helper.js';
 import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
 import { loadRegistry, saveRegistry } from './io.js';
-import { withRegistryWriteLock } from './lock.js';
+import {
+  withCredentialMutationLock,
+  withRegistryWriteLock,
+} from './lock.js';
 import type { CachedModel, RegistryProvider } from './types.js';
 import { customProviderId, isValidProviderId, slugifyProviderId } from './validate.js';
 import { validateCustomEndpointUrl } from './url-security.js';
@@ -181,18 +185,12 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
     return { added: false, error: fetched.error ?? 'No models returned.', hint: fetched.hint };
   }
 
-  return withRegistryWriteLock(async () => {
+  const authRef = anonymous
+    ? 'none:anonymous'
+    : credentialAuthRef(`provider:${probeProviderId}:${randomUUID()}`);
+  const commitProvider = () => withRegistryWriteLock(() => {
     const registry = loadRegistry();
     const providerId = uniqueProviderId(displayName, registry);
-    const authRef = anonymous
-      ? 'none:anonymous'
-      : credentialAuthRef(`provider:${providerId}`);
-    if (!anonymous) {
-      const saved = await saveProviderCredential(authRef, apiKey);
-      if (!saved) {
-        return { added: false, error: 'Could not save API key to the credential store.', hint: 'Check credential-store access and try again.' };
-      }
-    }
 
     const now = new Date().toISOString();
     const entry: RegistryProvider = {
@@ -220,5 +218,18 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
     saveRegistry(registry);
 
     return { added: true, provider: entry, modelCount: fetched.models.length };
+  });
+
+  if (anonymous) return commitProvider();
+  return withCredentialMutationLock(authRef, async () => {
+    const saved = await saveProviderCredential(authRef, apiKey);
+    if (!saved) {
+      return {
+        added: false,
+        error: 'Could not save API key to the credential store.',
+        hint: 'Check credential-store access and try again.',
+      };
+    }
+    return commitProvider();
   });
 }
