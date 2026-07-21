@@ -1,8 +1,10 @@
 // src/registry/refresh-models.ts — user-initiated model list refresh per modelSource
 
+import { isDeepStrictEqual } from 'node:util';
 import { fetchAnthropicModels } from './custom-endpoint.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
 import { loadRegistry, saveRegistry } from './io.js';
+import { withRegistryWriteLock } from './lock.js';
 import { resolveModelSource } from './model-source.js';
 import { validateCustomEndpointUrl } from './url-security.js';
 import {
@@ -299,12 +301,23 @@ function updateProviderCache(
   };
 }
 
+function providerDiscoveryInputsMatch(
+  current: RegistryProvider,
+  started: RegistryProvider,
+): boolean {
+  return current.authRef === started.authRef
+    && current.authType === started.authType
+    && current.templateId === started.templateId
+    && isDeepStrictEqual(current.api, started.api);
+}
+
 export async function refreshProviderModels(
   providerId: string,
   apiKey: string | null,
-  registry = loadRegistry(),
+  registry?: ProviderRegistry,
 ): Promise<RefreshProviderResult> {
-  const provider = registry.providers.find(p => p.id === providerId);
+  const workingRegistry = registry ?? loadRegistry();
+  const provider = workingRegistry.providers.find(p => p.id === providerId);
   if (!provider) {
     return { id: providerId, name: providerId, ok: false, reason: 'Provider not found.' };
   }
@@ -410,8 +423,19 @@ export async function refreshProviderModels(
     const platform = pricingPlatformForProvider(provider.templateId, provider.id);
     const enriched = enrichModelsWithPricing(models, buildPricingIndex(pricingCache), platform);
 
-    updateProviderCache(registry, providerId, enriched, baseUrl);
-    saveRegistry(registry);
+    await withRegistryWriteLock(() => {
+      const currentRegistry = loadRegistry();
+      const currentProvider = currentRegistry.providers.find(candidate => candidate.id === providerId);
+      if (!currentProvider) throw new Error('Provider was removed while models were refreshing.');
+      if (currentProvider.authRef !== provider.authRef) {
+        throw new Error('Provider credentials changed while models were refreshing.');
+      }
+      if (!providerDiscoveryInputsMatch(currentProvider, provider)) {
+        throw new Error('Provider configuration changed while models were refreshing.');
+      }
+      updateProviderCache(currentRegistry, providerId, enriched, baseUrl);
+      saveRegistry(currentRegistry);
+    });
     enrichPricingAsync();
 
     return {
@@ -442,7 +466,7 @@ export async function refreshAllProviderModels(
 
   for (const provider of enabledProviders) {
     const key = await resolveRefreshCredential(provider, resolveKey);
-    refreshed.push(await refreshProviderModels(provider.id, key, registry));
+    refreshed.push(await refreshProviderModels(provider.id, key));
   }
 
   return { refreshed };

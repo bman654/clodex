@@ -6,6 +6,7 @@ import type { ProviderTemplate } from '../provider-templates.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
 import { loadRegistry, saveRegistry } from './io.js';
+import { withRegistryWriteLock } from './lock.js';
 import {
   buildPricingIndex,
   enrichModelsWithPricing,
@@ -65,15 +66,19 @@ export async function addProviderFromTemplate(
     return { added: false, error: 'API key cannot be empty.' };
   }
 
-  const registry = loadRegistry();
-  const existing = registry.providers.find(p => p.id === template.id);
-  if (existing && !opts?.replaceExisting) {
-    return {
-      added: false,
-      error: `${template.name} is already configured.`,
-      hint: `Remove it first with: clodex providers remove ${template.id}`,
-    };
-  }
+  const existingError = await withRegistryWriteLock(() => {
+    const registry = loadRegistry();
+    const existing = registry.providers.find(p => p.id === template.id);
+    if (existing && !opts?.replaceExisting) {
+      return {
+        added: false,
+        error: `${template.name} is already configured.`,
+        hint: `Remove it first with: clodex providers remove ${template.id}`,
+      };
+    }
+    return null;
+  });
+  if (existingError) return existingError;
 
   const fetched = await fetchTemplateModels(template, trimmedKey, opts?.baseUrl);
   if (fetched.error || fetched.models.length === 0) {
@@ -94,17 +99,6 @@ export async function addProviderFromTemplate(
     };
   }
 
-  const authRef = `keyring:provider:${template.id}`;
-  const saved = trimmedKey ? await saveProviderCredential(authRef, trimmedKey) : true;
-  if (!saved) {
-    return {
-      added: false,
-      error: 'Could not save API key to Keychain.',
-      hint: 'Grant Keychain access or try again.',
-    };
-  }
-
-  const now = new Date().toISOString();
   const pricingCache = loadPricingCache();
   const platform = pricingPlatformForProvider(template.id, template.id);
   const pricedModels = enrichModelsWithPricing(
@@ -112,33 +106,57 @@ export async function addProviderFromTemplate(
     buildPricingIndex(pricingCache),
     platform,
   );
-  const entry: RegistryProvider = {
-    id: template.id,
-    templateId: template.id,
-    name: template.name,
-    enabled: true,
-    authRef,
-    authType: template.authType,
-    api: {
-      npm: template.npm,
-      url: fetched.baseUrl,
-    },
-    addedAt: existing?.addedAt ?? now,
-    refreshedAt: now,
-    modelsCache: {
-      fetchedAt: now,
-      models: pricedModels,
-    },
-  };
+  const result = await withRegistryWriteLock(async () => {
+    const registry = loadRegistry();
+    const existing = registry.providers.find(p => p.id === template.id);
+    if (existing && !opts?.replaceExisting) {
+      return {
+        added: false,
+        error: `${template.name} is already configured.`,
+        hint: `Remove it first with: clodex providers remove ${template.id}`,
+      };
+    }
 
-  if (existing) {
-    const idx = registry.providers.findIndex(p => p.id === template.id);
-    registry.providers[idx] = entry;
-  } else {
-    registry.providers.push(entry);
-  }
-  saveRegistry(registry);
-  enrichPricingAsync();
+    const authRef = `keyring:provider:${template.id}`;
+    const saved = trimmedKey ? await saveProviderCredential(authRef, trimmedKey) : true;
+    if (!saved) {
+      return {
+        added: false,
+        error: 'Could not save API key to Keychain.',
+        hint: 'Grant Keychain access or try again.',
+      };
+    }
 
-  return { added: true, provider: entry, modelCount: pricedModels.length };
+    const now = new Date().toISOString();
+    const entry: RegistryProvider = {
+      id: template.id,
+      templateId: template.id,
+      name: template.name,
+      enabled: true,
+      authRef,
+      authType: template.authType,
+      api: {
+        npm: template.npm,
+        url: fetched.baseUrl,
+      },
+      addedAt: existing?.addedAt ?? now,
+      refreshedAt: now,
+      modelsCache: {
+        fetchedAt: now,
+        models: pricedModels,
+      },
+    };
+
+    if (existing) {
+      const idx = registry.providers.findIndex(p => p.id === template.id);
+      registry.providers[idx] = entry;
+    } else {
+      registry.providers.push(entry);
+    }
+    saveRegistry(registry);
+    return { added: true, provider: entry, modelCount: pricedModels.length };
+  });
+
+  if (result.added) enrichPricingAsync();
+  return result;
 }

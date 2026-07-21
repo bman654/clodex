@@ -1,5 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
+const lockState = vi.hoisted(() => ({ active: false }));
+
 vi.mock('../src/ui.js', () => ({
   printOAuthStepsPanel: vi.fn(),
 }));
@@ -19,6 +21,16 @@ vi.mock('../src/registry/io.js', () => ({
 vi.mock('../src/registry/refresh-models.js', () => ({
   refreshProviderModels: vi.fn(),
 }));
+vi.mock('../src/registry/lock.js', () => ({
+  withRegistryWriteLock: vi.fn(async (operation: () => unknown) => {
+    lockState.active = true;
+    try {
+      return await operation();
+    } finally {
+      lockState.active = false;
+    }
+  }),
+}));
 vi.mock('@clack/prompts', () => ({
   log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), success: vi.fn() },
   spinner: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })),
@@ -30,13 +42,16 @@ import { saveProviderCredential } from '../src/env.js';
 import { saveRegistry } from '../src/registry/io.js';
 import { authenticateProvider } from '../src/registry/provider-auth.js';
 import { runOpenAiDeviceCodeFlow } from '../src/oauth/openai.js';
+import { refreshProviderModels } from '../src/registry/refresh-models.js';
 import * as prompts from '@clack/prompts';
 
 describe('authenticateProvider', () => {
   beforeEach(() => {
+    lockState.active = false;
     vi.mocked(saveProviderCredential).mockClear();
     vi.mocked(saveRegistry).mockClear();
     vi.mocked(runOpenAiDeviceCodeFlow).mockClear();
+    vi.mocked(refreshProviderModels).mockClear();
     vi.mocked(prompts.select).mockClear();
   });
 
@@ -56,6 +71,32 @@ describe('authenticateProvider', () => {
     expect(saveProviderCredential).toHaveBeenCalled();
     expect(saveRegistry).toHaveBeenCalled();
     expect(result.providerId).toBe('openai-oauth');
+  });
+
+  it('holds the registry lock only while persisting the provider entry', async () => {
+    const observations: Array<[string, boolean]> = [];
+    vi.mocked(runOpenAiDeviceCodeFlow).mockImplementationOnce(async () => {
+      observations.push(['authorization', lockState.active]);
+      return {
+        tokens: { access_token: 'access-token', refresh_token: 'refresh-token', expires_in: 3600 },
+        accountId: 'account-id',
+      };
+    });
+    vi.mocked(saveRegistry).mockImplementationOnce(() => {
+      observations.push(['registry-write', lockState.active]);
+    });
+    vi.mocked(refreshProviderModels).mockImplementationOnce(async () => {
+      observations.push(['model-refresh', lockState.active]);
+      return { id: 'openai-oauth', name: 'OpenAI', ok: true };
+    });
+
+    await authenticateProvider('openai');
+
+    expect(observations).toEqual([
+      ['authorization', false],
+      ['registry-write', true],
+      ['model-refresh', false],
+    ]);
   });
 
   it('rejects non-OpenAI providers', async () => {

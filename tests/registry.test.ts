@@ -108,6 +108,38 @@ describe('registry io', () => {
     expect(loaded.providers[0]?.id).toBe('groq');
   });
 
+  it('serializes migration writes and reloads state after acquiring the lock', () => {
+    const path = join(home, 'providers.json');
+    const lockPath = `${path}.lock`;
+    const raw = {
+      schemaVersion: 1,
+      providers: [{
+        id: 'openai',
+        templateId: 'openai',
+        name: 'OpenAI',
+        enabled: true,
+        authRef: 'keyring:oauth:provider:openai',
+        authType: 'oauth',
+        api: { npm: '@ai-sdk/openai' },
+        addedAt: '2026-06-09T00:00:00.000Z',
+      }],
+    };
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path, JSON.stringify(raw));
+    writeFileSync(lockPath, JSON.stringify({
+      pid: 2_147_483_647,
+      startedAt: Date.now() - 60_000,
+      token: 'dead-owner',
+    }));
+
+    const loaded = loadRegistry(path);
+    const persisted = JSON.parse(readFileSync(path, 'utf8'));
+
+    expect(loaded.providers[0]?.id).toBe('openai-oauth');
+    expect(persisted.providers[0]?.id).toBe('openai-oauth');
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
 });
 
 describe('materializeRegistry', () => {
