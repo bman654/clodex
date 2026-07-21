@@ -1036,3 +1036,126 @@ describe('anthropic passthrough debug logging', () => {
     expect(body.system?.[1]?.text).toBe('You are helpful.');
   });
 });
+
+describe('OAuth route credential resolution', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  it('resolves the current token before dispatch and updates the route cache', async () => {
+    const refreshToken = vi.fn(async () => 'fresh-oauth-token');
+    const route: ProxyRoute = {
+      aliasId: 'claude-oauth-route',
+      realModelId: 'claude-oauth-route',
+      displayName: 'OAuth Route',
+      upstreamUrl: 'https://api.example.test',
+      apiKey: 'stale-oauth-token',
+      modelFormat: 'anthropic',
+      providerId: 'oauth-provider',
+      authType: 'oauth',
+      providerData: {},
+      refreshToken,
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ type: 'message', content: [] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+
+      expect(response.status).toBe(200);
+      expect(refreshToken).toHaveBeenCalledTimes(1);
+      expect(route.apiKey).toBe('fresh-oauth-token');
+      const [, init] = vi.mocked(fetch).mock.calls[0]!;
+      expect((init?.headers as Record<string, string>).Authorization).toBe(
+        'Bearer fresh-oauth-token',
+      );
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('rebuilds the translated SDK route and retries once after an OAuth 401', async () => {
+    const refreshToken = vi.fn(async (rejectedAccessToken?: string) =>
+      rejectedAccessToken === undefined
+        ? 'rejected-oauth-token'
+        : 'fresh-oauth-token',
+    );
+    const route: ProxyRoute = {
+      aliasId: 'anthropic-oauth-provider__chat-route',
+      realModelId: 'chat-route',
+      displayName: 'OAuth Retry Route',
+      upstreamUrl: '',
+      apiKey: 'launch-token',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      providerId: 'oauth-provider',
+      authType: 'oauth',
+      refreshToken,
+    };
+    const fetchMock = vi.fn(
+      async (_input: string | URL | Request, init?: RequestInit) => {
+        const authorization = new Headers(init?.headers).get('authorization');
+        if (authorization === 'Bearer rejected-oauth-token') {
+          return new Response(
+            JSON.stringify({ error: { message: 'expired token' } }),
+            {
+              status: 401,
+              headers: { 'Content-Type': 'application/json' },
+            },
+          );
+        }
+        return new Response(
+          [
+            'data: {"id":"chatcmpl-retry","object":"chat.completion.chunk","created":1,"model":"chat-route","choices":[{"index":0,"delta":{"role":"assistant","content":"recovered"},"finish_reason":null}]}',
+            'data: {"id":"chatcmpl-retry","object":"chat.completion.chunk","created":1,"model":"chat-route","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+            'data: [DONE]',
+            '',
+          ].join('\n\n'),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'text/event-stream' },
+          },
+        );
+      },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toContain('recovered');
+      expect(refreshToken).toHaveBeenNthCalledWith(1);
+      expect(refreshToken).toHaveBeenNthCalledWith(2, 'rejected-oauth-token');
+      expect(route.apiKey).toBe('fresh-oauth-token');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(
+        fetchMock.mock.calls.map(([, init]) =>
+          new Headers(init?.headers).get('authorization'),
+        ),
+      ).toEqual(['Bearer rejected-oauth-token', 'Bearer fresh-oauth-token']);
+    } finally {
+      handle.close();
+    }
+  });
+});

@@ -1,6 +1,7 @@
 // Route map + catalog assembly for the mid-session /model switch menu.
 import { MAX_MODEL_CATALOG } from './constants.js';
 import { claudeCodeClientModelId } from './context-model-id.js';
+import { resolveProviderCredential } from './env.js';
 import { isSdkMigratedNpm } from './provider-factory.js';
 import { aliasModelId } from './proxy.js';
 import type { ProxyRoute } from './proxy.js';
@@ -22,6 +23,16 @@ export function localModelToRoute(lp: LocalProvider, model: LocalProviderModel):
     baseURL: model.apiBaseUrl,
     providerId: lp.id,
     authType: lp.authType,
+    refreshToken: lp.authType === 'oauth' && lp.authRef
+      ? rejectedAccessToken => rejectedAccessToken === undefined
+        ? resolveProviderCredential(lp.id, lp.authRef!)
+        : resolveProviderCredential(
+            lp.id,
+            lp.authRef!,
+            undefined,
+            { rejectedAccessToken },
+          )
+      : undefined,
     oauthAccountId: lp.oauthAccountId,
     providerData: lp.providerData,
     headers: lp.headers,

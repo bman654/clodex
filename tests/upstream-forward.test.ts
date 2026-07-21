@@ -80,8 +80,9 @@ describe('anthropicUpstreamHeaders', () => {
 describe('fetchWithOAuthRetry', () => {
   it('refreshes once on 401 and retries with the refreshed token', async () => {
     const refreshToken = vi.fn(async () => 'new-token');
+    const cancel = vi.fn(async () => {});
     const request = vi.fn()
-      .mockResolvedValueOnce({ status: 401 })
+      .mockResolvedValueOnce({ status: 401, body: { cancel } })
       .mockResolvedValueOnce({ status: 200 });
 
     const result = await fetchWithOAuthRetry('old-token', request, refreshToken);
@@ -89,7 +90,38 @@ describe('fetchWithOAuthRetry', () => {
     expect(result.response.status).toBe(200);
     expect(result.apiKey).toBe('new-token');
     expect(result.refreshed).toBe(true);
+    expect(refreshToken).toHaveBeenCalledWith('old-token');
     expect(request).toHaveBeenNthCalledWith(1, 'old-token');
     expect(request).toHaveBeenNthCalledWith(2, 'new-token');
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['the rejected token', 'old-token'],
+    ['no token', null],
+  ])('does not retry when resolution returns %s', async (_label, resolved) => {
+    const refreshToken = vi.fn(async () => resolved);
+    const cancel = vi.fn(async () => {});
+    const request = vi.fn().mockResolvedValue({ status: 401, body: { cancel } });
+
+    const result = await fetchWithOAuthRetry('old-token', request, refreshToken);
+
+    expect(result.response.status).toBe(401);
+    expect(result.refreshed).toBe(false);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('returns a second 401 without entering another refresh loop', async () => {
+    const refreshToken = vi.fn(async () => 'new-token');
+    const request = vi.fn().mockResolvedValue({ status: 401 });
+
+    const result = await fetchWithOAuthRetry('old-token', request, refreshToken);
+
+    expect(result.response.status).toBe(401);
+    expect(result.apiKey).toBe('new-token');
+    expect(result.refreshed).toBe(true);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(refreshToken).toHaveBeenCalledTimes(1);
   });
 });

@@ -49,21 +49,29 @@ export class UpstreamUnreachableError extends Error {
   }
 }
 
-export async function fetchWithOAuthRetry<TResponse extends { status: number }>(
+export async function fetchWithOAuthRetry<TResponse extends {
+  status: number;
+  body?: { cancel?: () => Promise<void> | void } | null;
+}>(
   apiKey: string,
   request: (apiKey: string) => Promise<TResponse>,
-  refreshToken?: () => Promise<string | null>,
+  refreshToken?: (rejectedAccessToken: string) => Promise<string | null>,
 ): Promise<{ response: TResponse; apiKey: string; refreshed: boolean }> {
   let response = await request(apiKey);
   if (response.status !== 401 || !refreshToken) {
     return { response, apiKey, refreshed: false };
   }
 
-  const refreshed = await refreshToken().catch(() => null);
+  const refreshed = await refreshToken(apiKey).catch(() => null);
   if (!refreshed || refreshed === apiKey) {
     return { response, apiKey, refreshed: false };
   }
 
+  try {
+    await response.body?.cancel?.();
+  } catch {
+    // A failed cleanup must not prevent the bounded retry.
+  }
   response = await request(refreshed);
   return { response, apiKey: refreshed, refreshed: true };
 }
@@ -75,7 +83,7 @@ export interface RelayAnthropicOptions {
   log?: (message: string) => void;
   claudeCodeSessionId?: string;
   extraHeaders?: Record<string, string>;
-  refreshToken?: () => Promise<string | null>;
+  refreshToken?: (rejectedAccessToken: string) => Promise<string | null>;
   onTokenRefreshed?: (token: string) => void;
   onUpstreamError?: (statusCode: number, body: string) => void;
   signal?: AbortSignal;

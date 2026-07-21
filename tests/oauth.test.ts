@@ -22,6 +22,22 @@ describe('oauth types', () => {
     expect(cred.expires).toBeGreaterThan(Date.now());
   });
 
+  it('rejects malformed token responses before they can be stored', () => {
+    expect(() => tokensToStoredCredential(
+      {} as unknown as Parameters<typeof tokensToStoredCredential>[0],
+    )).toThrow(
+      'missing a valid access token',
+    );
+    expect(() => tokensToStoredCredential({
+      access_token: 'access',
+      expires_in: Number.NaN,
+    })).toThrow('invalid expiration');
+    expect(() => tokensToStoredCredential({
+      access_token: 'access',
+      expires_in: 1e308,
+    })).toThrow('invalid expiration');
+  });
+
   it('reads JWT exp for proactive refresh hint', () => {
     const header = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
     const payload = Buffer.from(JSON.stringify({ exp: Math.floor(Date.now() / 1000) - 10 })).toString('base64url');
@@ -51,6 +67,27 @@ describe('oauth refresh http', () => {
         includeBody: true,
       },
     )).rejects.toThrow('xAI token refresh failed (401): bad refresh');
+  });
+
+  it('bounds the refresh request with an abort signal', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      access_token: 'new-access',
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await postOAuthRefresh(
+      'https://auth/token',
+      new URLSearchParams({ grant_type: 'refresh_token' }),
+      {
+        contentType: 'form',
+        errorPrefix: 'token refresh failed',
+      },
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://auth/token',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
   });
 });
 
@@ -96,4 +133,3 @@ describe('oauth refresh', () => {
     })).rejects.toThrow('not implemented');
   });
 });
-

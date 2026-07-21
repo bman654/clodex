@@ -1,5 +1,7 @@
 import type { OAuthTokenResponse } from './types.js';
 
+const OAUTH_REFRESH_TIMEOUT_MS = 30_000;
+
 export interface PostOAuthRefreshOptions {
   contentType: 'form' | 'json';
   errorPrefix: string;
@@ -16,6 +18,7 @@ export async function postOAuthRefresh(
   const isJson = options.contentType === 'json';
   const response = await fetch(url, {
     method: 'POST',
+    signal: AbortSignal.timeout(OAUTH_REFRESH_TIMEOUT_MS),
     headers: {
       'Content-Type': isJson ? 'application/json' : 'application/x-www-form-urlencoded',
       Accept: 'application/json',

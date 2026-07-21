@@ -6,6 +6,7 @@ export interface StoredOAuthCredential {
   refresh: string;
   /** Epoch millis when the access token expires. */
   expires: number;
+  accessRejected?: true;
   accountId?: string;
   providerData?: Record<string, unknown>;
 }
@@ -28,11 +29,36 @@ export function tokensToStoredCredential(
   accountId?: string,
   providerData?: Record<string, unknown>,
 ): StoredOAuthCredential {
+  const access = typeof tokens.access_token === 'string'
+    ? tokens.access_token.trim()
+    : '';
+  if (!access) {
+    throw new Error('OAuth token response is missing a valid access token');
+  }
+
+  if (
+    tokens.expires_in !== undefined
+    && (
+      typeof tokens.expires_in !== 'number'
+      || !Number.isFinite(tokens.expires_in)
+      || tokens.expires_in < 0
+    )
+  ) {
+    throw new Error('OAuth token response has an invalid expiration');
+  }
+
+  const returnedRefresh = typeof tokens.refresh_token === 'string'
+    ? tokens.refresh_token.trim()
+    : '';
+  const expires = Date.now() + (tokens.expires_in ?? 3600) * 1000;
+  if (!Number.isFinite(expires)) {
+    throw new Error('OAuth token response has an invalid expiration');
+  }
   return {
     type: 'oauth',
-    access: tokens.access_token,
-    refresh: tokens.refresh_token ?? existingRefresh ?? '',
-    expires: Date.now() + (tokens.expires_in ?? 3600) * 1000,
+    access,
+    refresh: returnedRefresh || existingRefresh || '',
+    expires,
     ...(accountId ? { accountId } : {}),
     ...(providerData ? { providerData } : {}),
   };
@@ -44,8 +70,11 @@ export function parseStoredOAuthCredential(raw: string | null): StoredOAuthCrede
     const parsed = JSON.parse(raw) as StoredOAuthCredential;
     if (parsed.type === 'oauth'
       && typeof parsed.access === 'string'
+      && parsed.access.trim().length > 0
       && typeof parsed.refresh === 'string'
-      && typeof parsed.expires === 'number') {
+      && typeof parsed.expires === 'number'
+      && Number.isFinite(parsed.expires)
+      && (parsed.accessRejected === undefined || parsed.accessRejected === true)) {
       return parsed;
     }
   } catch {

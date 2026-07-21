@@ -1,9 +1,12 @@
 // tests/catalog.test.ts
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { MAX_MODEL_CATALOG } from '../src/constants.js';
 import { buildCatalogRoutes, localModelToRoute, makeRouteResolver } from '../src/catalog.js';
+import * as env from '../src/env.js';
 import type { ModelInfo } from '../src/types.js';
 import type { FavoriteModel, LocalProvider } from '../src/types.js';
+
+const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:openai-oauth`;
 
 describe('buildCatalogRoutes', () => {
   const starting = {
@@ -57,12 +60,14 @@ describe('localModelToRoute', () => {
     });
   });
 
-  it('preserves OAuth provider data for catalog routes', () => {
+  it('preserves OAuth provider data and exact credential references for catalog routes', async () => {
+    const resolveSpy = vi.spyOn(env, 'resolveProviderCredential').mockResolvedValue('refreshed-token');
     const provider: LocalProvider = {
       id: 'openai-oauth',
       name: 'OpenAI OAuth (ChatGPT)',
       apiKey: 'oauth-token',
       authType: 'oauth',
+      authRef: TEST_HELPER_REF,
       providerData: { plan: 'pro' },
       models: [{
         id: 'gpt-5.6-sol',
@@ -80,6 +85,21 @@ describe('localModelToRoute', () => {
       authType: 'oauth',
       providerData: { plan: 'pro' },
     });
+    await expect(route?.refreshToken?.()).resolves.toBe('refreshed-token');
+    expect(resolveSpy).toHaveBeenNthCalledWith(
+      1,
+      'openai-oauth',
+      TEST_HELPER_REF,
+    );
+    await expect(route?.refreshToken?.('rejected-token')).resolves.toBe('refreshed-token');
+    expect(resolveSpy).toHaveBeenNthCalledWith(
+      2,
+      'openai-oauth',
+      TEST_HELPER_REF,
+      undefined,
+      { rejectedAccessToken: 'rejected-token' },
+    );
+    resolveSpy.mockRestore();
   });
 
   it('propagates Responses-Lite / WebSocket capability flags onto the route', () => {

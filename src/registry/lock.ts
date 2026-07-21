@@ -421,8 +421,10 @@ export function getCredentialMutationLockPath(authRef: string): string {
 export function withCredentialMutationLock<T>(
   authRef: string,
   operation: () => Promise<T> | T,
+  options: Pick<RegistryLockOptions, 'waitMs' | 'retryMs'> = {},
 ): Promise<T> {
   return withRegistryWriteLock(operation, {
+    ...options,
     lockPath: getCredentialMutationLockPath(authRef),
   });
 }
