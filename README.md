@@ -14,6 +14,8 @@ You can also run clodex as a local OpenAI-compatible endpoint in front of your C
 
 > clodex is derived from the original [relay-ai](https://github.com/jacob-bd/relay-ai) project, heavily modified and streamlined for this one use case, with the full commit history preserved.
 
+Contributions are welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) for how to scope a PR and what the quality bar is.
+
 ## Quick Start (ChatGPT/Codex plan)
 
 ```bash

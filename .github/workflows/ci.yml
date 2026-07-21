@@ -1,0 +1,35 @@
+name: CI
+
+# Runs on every pull request and every push to main. Deliberately NOT gated behind
+# CLODEX_PUBLISH_ENABLED: that variable exists to keep the *release* machinery dormant
+# outside the dedicated repo, but typecheck/test/build publish nothing and should always
+# run — a PR with no CI signal is the failure mode this workflow exists to prevent.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# A new push to a PR branch cancels the in-flight run for that branch; main is never
+# cancelled so every landed commit keeps its own result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      # Corepack reads the pinned pnpm version from package.json's packageManager field.
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
