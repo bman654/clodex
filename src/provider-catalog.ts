@@ -27,6 +27,8 @@ export function providersForPicker(providers: LocalProvider[]): LocalProvider[] 
 
 /** Resolve API key when provider.apiKey is empty (registry authRef or OAuth keyring). */
 export async function resolveLocalProviderApiKey(provider: LocalProvider): Promise<string | null> {
+  if (provider.authRef === 'none:anonymous') return 'anonymous';
+
   const direct = provider.apiKey?.trim();
   if (direct) return direct;
   
@@ -38,7 +40,7 @@ export async function resolveLocalProviderApiKey(provider: LocalProvider): Promi
   }
 
   const reg = loadRegistry().providers.find(p => p.id === provider.id);
-  const authRef = reg?.authRef ?? oauthAuthRef(provider.id);
+  const authRef = provider.authRef ?? reg?.authRef ?? oauthAuthRef(provider.id);
   return resolveProviderCredential(provider.id, authRef);
 }
 
@@ -50,6 +52,7 @@ export function formatRegistryAuthLabel(
     return 'keychain (OAuth)';
   }
   if (provider.authType === 'none') {
+    if (provider.authRef === 'none:anonymous') return 'anonymous';
     return 'gcloud / manual credentials';
   }
   if (provider.authRef.startsWith('keyring:')) {

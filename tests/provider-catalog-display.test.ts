@@ -71,6 +71,18 @@ describe('provider-catalog-display', () => {
       expect(await resolveLocalProviderApiKey(provider)).toBe('anonymous');
     });
 
+    it('does not resurrect a direct key for an explicitly anonymous provider', async () => {
+      const provider = {
+        id: 'local',
+        name: 'Local',
+        apiKey: 'stale-key',
+        authRef: 'none:anonymous',
+        authType: 'none',
+        models: [],
+      } as any;
+      expect(await resolveLocalProviderApiKey(provider)).toBe('anonymous');
+    });
+
     it('falls back to the OAuth keyring ref when there is no registry authRef and no zen/go/anonymous special case', async () => {
       vi.spyOn(env, 'resolveProviderCredential').mockResolvedValue('oauth-key');
       const provider = { id: 'openai', name: 'OpenAI', apiKey: '', models: [] } as any;
@@ -92,6 +104,10 @@ describe('provider-catalog-display', () => {
       expect(formatRegistryAuthLabel({
         authRef: 'env:OPENAI_API_KEY',
       } as any)).toBe('env:OPENAI_API_KEY');
+      expect(formatRegistryAuthLabel({
+        authRef: 'none:anonymous',
+        authType: 'none',
+      } as any)).toBe('anonymous');
     });
   });
 
@@ -117,4 +133,3 @@ describe('provider-catalog-display', () => {
     });
   });
 });
-

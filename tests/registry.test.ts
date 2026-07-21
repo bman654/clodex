@@ -164,6 +164,38 @@ describe('materializeRegistry', () => {
     expect(materializeRegistry(registry, () => null)).toHaveLength(0);
   });
 
+  it('materializes explicit anonymous access without consulting a credential resolver', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'anonymous-provider',
+      templateId: 'anonymous-provider',
+      name: 'Anonymous Provider',
+      enabled: true,
+      authRef: 'none:anonymous',
+      authType: 'none',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://anonymous.example/v1' },
+      addedAt: '2026-06-09T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-06-09T00:00:00.000Z',
+        models: [{
+          id: 'free-model',
+          name: 'Free Model',
+          upstreamModelId: 'free-model',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    });
+
+    const locals = materializeRegistry(registry, () => {
+      throw new Error('anonymous access must not resolve a credential');
+    });
+
+    expect(locals).toHaveLength(1);
+    expect(locals[0]?.apiKey).toBe('');
+    expect(locals[0]?.authRef).toBe('none:anonymous');
+  });
+
   it('marks NVIDIA imported models as free provider access', () => {
     const registry = emptyRegistry();
     registry.providers.push({

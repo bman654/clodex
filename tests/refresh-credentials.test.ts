@@ -65,4 +65,24 @@ describe('resolveRefreshCredential', () => {
       else process.env['OPENAI_API_KEY'] = prev;
     }
   });
+
+  it('does not resolve credentials or environment fallbacks for explicit anonymous access', async () => {
+    const previous = process.env['OPENAI_API_KEY'];
+    process.env['OPENAI_API_KEY'] = 'sk-from-env';
+    let called = false;
+    try {
+      const key = await resolveRefreshCredential(
+        makeProvider({ authRef: 'none:anonymous', authType: 'none' }),
+        async () => {
+          called = true;
+          return 'stale-key';
+        },
+      );
+      expect(key).toBeNull();
+      expect(called).toBe(false);
+    } finally {
+      if (previous === undefined) delete process.env['OPENAI_API_KEY'];
+      else process.env['OPENAI_API_KEY'] = previous;
+    }
+  });
 });

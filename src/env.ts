@@ -147,10 +147,12 @@ const oauthRefreshInflight = new Map<string, Promise<string | null>>();
 
 export type ParsedAuthRef =
   | { kind: 'keyring'; account: string }
-  | { kind: 'env'; varName: string };
+  | { kind: 'env'; varName: string }
+  | { kind: 'none' };
 
-/** Parse registry authRef strings like `keyring:provider:openai` or `env:OPENAI_API_KEY`. */
+/** Parse registry credential references. */
 export function parseAuthRef(authRef: string): ParsedAuthRef | null {
+  if (authRef === 'none:anonymous') return { kind: 'none' };
   if (authRef.startsWith('keyring:')) {
     const account = authRef.slice('keyring:'.length);
     return account ? { kind: 'keyring', account } : null;
@@ -259,10 +261,11 @@ export async function resolveProviderCredential(
   authRef: string,
   diag?: (msg: string) => void,
 ): Promise<string | null> {
+  const parsed = parseAuthRef(authRef);
+  if (parsed?.kind === 'none') return null;
+
   const namespaced = readEnvCredential(clodexKeyEnvVar(providerId));
   if (namespaced) return namespaced;
-
-  const parsed = parseAuthRef(authRef);
   if (!parsed) return null;
 
   if (parsed.kind === 'env') {
@@ -373,5 +376,4 @@ export async function deleteProviderCredential(
   if (!parsed || parsed.kind !== 'keyring') return false;
   return deleteKeyringAccount(parsed.account, diag);
 }
-
 

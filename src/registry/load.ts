@@ -16,6 +16,7 @@ export async function loadRegistryProviders(
   const oauthAccountIds = new Map<string, string>();
   const oauthProviderData = new Map<string, Record<string, unknown>>();
   await Promise.all(registry.providers.map(async provider => {
+    if (provider.authRef === 'none:anonymous') return;
     try {
       const key = await resolveProviderCredential(provider.id, provider.authRef, diag);
       if (key) keys.set(provider.id, key);
@@ -47,5 +48,9 @@ export function loadRegistryProvidersSync(
   opts?: { agent?: CompatibilityAgent },
 ): LocalProvider[] {
   const registry = loadRegistry();
-  return materializeRegistry(registry, provider => resolveKey(provider.id, provider.authRef), opts);
+  return materializeRegistry(
+    registry,
+    provider => provider.authRef === 'none:anonymous' ? null : resolveKey(provider.id, provider.authRef),
+    opts,
+  );
 }

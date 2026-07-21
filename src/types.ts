@@ -48,6 +48,8 @@ export interface LocalProvider {
   id: string;
   name: string;
   apiKey: string;
+  /** Exact registry credential reference used to resolve this provider. */
+  authRef?: string;
   authType?: 'api' | 'oauth' | 'none';
   oauthAccountId?: string;
   providerData?: Record<string, unknown>;

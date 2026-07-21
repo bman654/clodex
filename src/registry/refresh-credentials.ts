@@ -55,6 +55,8 @@ export async function resolveRefreshCredential(
   provider: RegistryProvider,
   resolveKey: (provider: RegistryProvider) => Promise<string | null>,
 ): Promise<string | null> {
+  if (provider.authRef === 'none:anonymous') return null;
+
   // OAuth token refresh (e.g. an expired/revoked refresh token returning 401) throws
   // rather than resolving to null. Treat that the same as "no key" so callers fall
   // through to refreshProviderModels' existing friendly "sign in again" messaging
