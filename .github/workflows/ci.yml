@@ -1,23 +1,25 @@
 name: CI
 
-# Runs on every pull request and every push to main. Deliberately NOT gated behind
-# CLODEX_PUBLISH_ENABLED: that variable exists to keep the *release* machinery dormant
-# outside the dedicated repo, but typecheck/test/build publish nothing and should always
-# run — a PR with no CI signal is the failure mode this workflow exists to prevent.
+# Pull requests only. Pushes to main are already covered by the `test` job in
+# release-please.yml, which gates the release via `needs: test` — running both here
+# meant every main push executed typecheck/test/build twice and produced two separate
+# checks both named "test".
+#
+# Deliberately NOT gated behind CLODEX_PUBLISH_ENABLED: that variable keeps the
+# *release* machinery dormant outside the dedicated repo, but typecheck/test/build
+# publish nothing, and repository variables do not resolve for pull_request runs from a
+# fork — gating here would silently skip CI for external contributors, the exact failure
+# this workflow exists to prevent.
 on:
   pull_request:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
 
-# A new push to a PR branch cancels the in-flight run for that branch; main is never
-# cancelled so every landed commit keeps its own result.
+# A new push to a PR branch cancels the in-flight run for the previous commit.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
   test:
