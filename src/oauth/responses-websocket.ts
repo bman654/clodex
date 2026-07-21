@@ -12,6 +12,7 @@ import type { FetchFunction } from '@ai-sdk/provider-utils';
 import type { RawData, WebSocket as WsWebSocket } from 'ws';
 import { CODEX_RESPONSES_WEBSOCKETS_BETA } from '../constants.js';
 import { outboundWsProxyAgent } from '../outbound-proxy.js';
+import { anthropicErrorType } from '../upstream-error.js';
 
 const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite';
 const TERMINAL_EVENT_TYPES = new Set(['response.completed', 'response.failed', 'response.incomplete']);
@@ -801,6 +802,7 @@ function failContext(
   ctx: RequestContext,
   message: string,
   diagnosticDetails: Record<string, unknown>,
+  statusCode?: number,
 ): void {
   if (ctx.closed || entry.current !== ctx) return;
   entry.debug(`fail: ${message}`);
@@ -809,7 +811,16 @@ function failContext(
     ...diagnosticTextFingerprint('errorMessage', message),
   });
   flushPending(ctx);
-  encodeSse(ctx, { type: 'error', error: { message } });
+  encodeSse(ctx, {
+    type: 'error',
+    sequence_number: ctx.frameCount,
+    error: {
+      type: statusCode === undefined ? 'transport_error' : anthropicErrorType(statusCode),
+      code: statusCode === undefined ? 'websocket_transport_error' : String(statusCode),
+      message,
+      param: null,
+    },
+  });
   deleteEntry(entry);
   closeContext(ctx);
 }
@@ -1039,13 +1050,17 @@ function createConnection(
     if (ctx && !ctx.closed) sendContext(entry, ctx);
   });
   socket.on('unexpected-response', (_request, response) => {
-    debug(`unexpected-response status=${response.statusCode}`);
+    const statusCode = response.statusCode ?? 502;
+    debug(`unexpected-response status=${statusCode}`);
+    response.resume();
     const ctx = entry.current;
     if (ctx && !ctx.closed) {
-      emitResponseErrorDiagnostic(entry, ctx, {
+      failContext(entry, ctx, `WebSocket upgrade failed (HTTP ${statusCode})`, {
         source: 'unexpected_response',
-        httpStatusCode: response.statusCode,
-      });
+        httpStatusCode: statusCode,
+      }, statusCode);
+    } else {
+      deleteEntry(entry);
     }
   });
   socket.on('message', (data: RawData) => handleSocketMessage(entry, data));

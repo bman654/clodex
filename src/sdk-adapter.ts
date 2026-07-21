@@ -930,6 +930,11 @@ export async function generateAnthropicResponse(
         if (abortSignal.aborted || part.type === 'abort') {
           throw streamAbortError(abortSignal);
         }
+        if (part.type === 'error') {
+          throw part.error instanceof Error || (part.error && typeof part.error === 'object')
+            ? part.error
+            : new Error(typeof part.error === 'string' ? part.error : 'Upstream stream failed');
+        }
         if (part.type === 'text-delta') streamedText.push(part.text ?? '');
         else if (part.type === 'tool-call') {
           streamedToolCalls.push({
