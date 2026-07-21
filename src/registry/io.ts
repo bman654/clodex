@@ -15,6 +15,7 @@ import { dirname } from 'node:path';
 import { ensureLegacyAppHomeMigrated, getAppHome, getProvidersPath } from '../paths.js';
 import type { ProviderRegistry, RegistryProvider } from './types.js';
 import { REGISTRY_SCHEMA_VERSION } from './types.js';
+import { withRegistryWriteLockSync } from './lock.js';
 import { migrateOAuthOpenAiProvider } from './migrate.js';
 import { isValidProviderId } from './validate.js';
 
@@ -122,7 +123,11 @@ export function loadRegistry(path = getProvidersPath()): ProviderRegistry {
     const migrated = migrateOAuthOpenAiProvider(registry);
     if (migrated) {
       try {
-        saveRegistry(registry, path);
+        withRegistryWriteLockSync(() => {
+          if (!existsSync(path)) return;
+          const current = parseRegistry(JSON.parse(readFileSync(path, 'utf8')));
+          if (migrateOAuthOpenAiProvider(current)) saveRegistry(current, path);
+        }, { lockPath: `${path}.lock` });
       } catch {
         // Parsed data remains usable even when migration persistence fails.
       }

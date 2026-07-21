@@ -2,6 +2,7 @@
 
 import { parseAuthRef, deleteProviderCredential } from '../env.js';
 import { loadRegistry, saveRegistry } from './io.js';
+import { withRegistryWriteLock, withRegistryWriteLockSync } from './lock.js';
 import type { RegistryProvider } from './types.js';
 
 export interface RemoveProviderResult {
@@ -21,37 +22,41 @@ export async function removeProviderFromRegistry(
   id: string,
   opts?: { deleteCredential?: boolean },
 ): Promise<RemoveProviderResult> {
-  const registry = loadRegistry();
-  const index = registry.providers.findIndex(p => p.id === id);
-  if (index < 0) {
-    return { removed: false, id, credentialDeleted: false, error: `Provider not found: ${id}` };
-  }
-
-  const [removedProvider] = registry.providers.splice(index, 1);
-  saveRegistry(registry);
-
-  let credentialDeleted = false;
-  if (opts?.deleteCredential !== false) {
-    const parsed = parseAuthRef(removedProvider.authRef);
-    const shouldDelete = !credentialStillReferenced(removedProvider.authRef, registry.providers);
-    if (shouldDelete && parsed?.kind === 'keyring') {
-      credentialDeleted = await deleteProviderCredential(removedProvider.authRef);
+  return withRegistryWriteLock(async () => {
+    const registry = loadRegistry();
+    const index = registry.providers.findIndex(p => p.id === id);
+    if (index < 0) {
+      return { removed: false, id, credentialDeleted: false, error: `Provider not found: ${id}` };
     }
-  }
 
-  return {
-    removed: true,
-    id,
-    name: removedProvider.name,
-    credentialDeleted,
-  };
+    const [removedProvider] = registry.providers.splice(index, 1);
+    saveRegistry(registry);
+
+    let credentialDeleted = false;
+    if (opts?.deleteCredential !== false) {
+      const parsed = parseAuthRef(removedProvider.authRef);
+      const shouldDelete = !credentialStillReferenced(removedProvider.authRef, registry.providers);
+      if (shouldDelete && parsed?.kind === 'keyring') {
+        credentialDeleted = await deleteProviderCredential(removedProvider.authRef);
+      }
+    }
+
+    return {
+      removed: true,
+      id,
+      name: removedProvider.name,
+      credentialDeleted,
+    };
+  });
 }
 
 export function toggleProviderEnabled(id: string): { toggled: boolean; enabled?: boolean; error?: string } {
-  const registry = loadRegistry();
-  const provider = registry.providers.find(p => p.id === id);
-  if (!provider) return { toggled: false, error: `Provider not found: ${id}` };
-  provider.enabled = !provider.enabled;
-  saveRegistry(registry);
-  return { toggled: true, enabled: provider.enabled };
+  return withRegistryWriteLockSync(() => {
+    const registry = loadRegistry();
+    const provider = registry.providers.find(p => p.id === id);
+    if (!provider) return { toggled: false, error: `Provider not found: ${id}` };
+    provider.enabled = !provider.enabled;
+    saveRegistry(registry);
+    return { toggled: true, enabled: provider.enabled };
+  });
 }

@@ -19,6 +19,7 @@ import {
 import { getTemplateById } from '../provider-templates.js';
 import { oauthAuthRef, toOAuthRegistryId } from './import-build.js';
 import { loadRegistry, saveRegistry } from './io.js';
+import { withRegistryWriteLock } from './lock.js';
 import { refreshProviderModels } from './refresh-models.js';
 import type { RegistryProvider } from './types.js';
 
@@ -102,41 +103,43 @@ async function upsertOAuthProvider(
   cred: StoredOAuthCredential,
   authRef: string,
 ): Promise<RegistryProvider> {
-  const registryId = toOAuthRegistryId(providerId);
-  const templateId = providerId.replace(/-oauth$/, '') || providerId;
+  return withRegistryWriteLock(() => {
+    const registryId = toOAuthRegistryId(providerId);
+    const templateId = providerId.replace(/-oauth$/, '') || providerId;
 
-  const registry = loadRegistry();
-  const template = getTemplateById(templateId);
-  let entry: RegistryProvider | undefined = registry.providers.find(pr => pr.id === registryId);
+    const registry = loadRegistry();
+    const template = getTemplateById(templateId);
+    let entry: RegistryProvider | undefined = registry.providers.find(pr => pr.id === registryId);
 
-  if (!entry) {
-    if (!template) {
-      throw new Error(`Provider "${providerId}" is not in your registry and has no template`);
+    if (!entry) {
+      if (!template) {
+        throw new Error(`Provider "${providerId}" is not in your registry and has no template`);
+      }
+      const displayName = oauthDisplayName(registryId, template.name);
+      entry = {
+        id: registryId,
+        templateId,
+        name: displayName,
+        enabled: true,
+        authRef,
+        authType: 'oauth',
+        api: {
+          npm: template.npm,
+          url: template.defaultBaseUrl ?? '',
+          ...(template.headers ? { headers: template.headers } : {}),
+        },
+        addedAt: new Date().toISOString(),
+      };
+    } else {
+      entry = { ...entry, authType: 'oauth', authRef, templateId };
     }
-    const displayName = oauthDisplayName(registryId, template.name);
-    entry = {
-      id: registryId,
-      templateId,
-      name: displayName,
-      enabled: true,
-      authRef,
-      authType: 'oauth',
-      api: {
-        npm: template.npm,
-        url: template.defaultBaseUrl ?? '',
-        ...(template.headers ? { headers: template.headers } : {}),
-      },
-      addedAt: new Date().toISOString(),
-    };
-  } else {
-    entry = { ...entry, authType: 'oauth', authRef, templateId };
-  }
 
-  const idx = registry.providers.findIndex(pr => pr.id === registryId);
-  if (idx >= 0) registry.providers[idx] = entry;
-  else registry.providers.push(entry);
-  saveRegistry(registry);
-  return entry;
+    const idx = registry.providers.findIndex(pr => pr.id === registryId);
+    if (idx >= 0) registry.providers[idx] = entry;
+    else registry.providers.push(entry);
+    saveRegistry(registry);
+    return entry;
+  });
 }
 
 export async function authenticateProvider(
