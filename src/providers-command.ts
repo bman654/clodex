@@ -312,6 +312,10 @@ export async function runProvidersRemove(id: string, interactive = false): Promi
     p.log.error(result.error ?? `Could not remove ${id}`);
     return 1;
   }
+  if (result.error) {
+    p.log.error(result.error);
+    return 1;
+  }
 
   p.log.success(`Removed ${result.name ?? id}.`);
   if (result.credentialDeleted) {

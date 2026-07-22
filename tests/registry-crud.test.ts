@@ -108,6 +108,30 @@ describe('registry provider removal', () => {
     expect(lockState.active).toBe(false);
   });
 
+  it('reports a credential cleanup failure with the credential reference', async () => {
+    vi.mocked(deleteProviderCredential).mockImplementation(async () => {
+      expect(lockState.active).toBe(false);
+      expect(lockState.credentialActive).toBe(true);
+      return false;
+    });
+
+    const result = await removeProviderFromRegistry('openai');
+
+    expect(result).toMatchObject({
+      removed: true,
+      credentialDeleted: false,
+      error: expect.stringContaining('keyring:provider:openai'),
+    });
+    expect(result.error).toMatch(/credential.*(?:cleanup|deletion).*failed/i);
+    expect(result.error).toContain('must be removed manually');
+    expect(registryState.current.providers).toHaveLength(0);
+    expect(deleteProviderCredential).toHaveBeenCalledWith(
+      'keyring:provider:openai',
+    );
+    expect(lockState.active).toBe(false);
+    expect(lockState.credentialActive).toBe(false);
+  });
+
   it('serializes deletion against reattaching the same credential reference', async () => {
     let startDelete!: () => void;
     const deleteStarted = new Promise<void>((resolve) => {

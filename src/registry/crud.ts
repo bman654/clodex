@@ -17,6 +17,11 @@ export interface RemoveProviderResult {
   error?: string;
 }
 
+interface PendingProviderRemoval {
+  result: RemoveProviderResult;
+  authRefToDelete: string | null;
+}
+
 function credentialStillReferenced(authRef: string, remaining: RegistryProvider[]): boolean {
   return remaining.some(p => p.authRef === authRef);
 }
@@ -26,7 +31,7 @@ export async function removeProviderFromRegistry(
   id: string,
   opts?: { deleteCredential?: boolean },
 ): Promise<RemoveProviderResult> {
-  const removal = await withRegistryWriteLock(() => {
+  const removal = await withRegistryWriteLock<PendingProviderRemoval>(() => {
     const registry = loadRegistry();
     const index = registry.providers.findIndex(p => p.id === id);
     if (index < 0) {
@@ -71,6 +76,12 @@ export async function removeProviderFromRegistry(
       removal.result.credentialDeleted = await deleteProviderCredential(
         authRefToDelete,
       );
+      if (!removal.result.credentialDeleted) {
+        removal.result.error =
+          `Provider ${removal.result.name ?? id} was removed, but credential ` +
+          `cleanup failed for ${authRefToDelete}. The credential remains in ` +
+          'the configured store and must be removed manually.';
+      }
     });
   }
   return removal.result;

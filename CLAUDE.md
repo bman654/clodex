@@ -73,6 +73,8 @@ clodex-claude [args...]     # second bin: launch claude bridged to a running clo
 
 **Provider registry** (`src/registry/`): only two providers exist — templates in `src/provider-templates.ts` (`openai` API-key template with `https://api.openai.com/v1`, and `openai-oauth`). `provider-auth.ts` implements the OpenAI device-code OAuth flow; `refresh-models.ts` fetches the model list (3-tier fetch for OAuth). `io.ts::loadRegistry` and `config.ts::readConfig` both trigger the one-time legacy migration. Materialization (`materialize.ts`) turns registry providers into `LocalProvider`s with per-model `npm`/`baseUrl`/`upstreamModelId`.
 
+Registry writes use atomic hard-link lock publication, so the filesystem containing `CLODEX_HOME` must support hard links. A parseable lock owned by a live PID is never reclaimed based on age; contenders wait for a bounded interval and fail with the owner PID. Malformed locks and locks owned by dead PIDs remain reclaimable. This live-owner rule is what makes the final ownership check before `providers.json` publication meaningful because a concurrent process cannot invalidate a live writer between its check and rename.
+
 **Config & migration** (`src/paths.ts`, `src/config.ts`, `src/env.ts`):
 
 - Config home `~/.clodex`, override `CLODEX_HOME`. `ensureLegacyAppHomeMigrated()` silently copies a legacy `~/.relay-ai` (skipping `logs/`) on first read — **never mutates the legacy directory**.
