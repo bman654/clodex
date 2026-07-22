@@ -2,6 +2,7 @@ import { Readable } from 'node:stream';
 import type { ServerResponse } from 'node:http';
 import { sanitizeCredential } from './server/auth.js';
 import { CLAUDE_CODE_USER_AGENT } from './oauth/claude-identity.js';
+import { isCredentialBearingHeader } from './credential-headers.js';
 
 export function anthropicUpstreamHeaders(
   apiKey: string,
@@ -17,7 +18,7 @@ export function anthropicUpstreamHeaders(
   const forwardedExtraHeaders = resolvedAuthType === 'none'
     ? Object.fromEntries(
         Object.entries(extraHeaders ?? {}).filter(
-          ([name]) => !['authorization', 'x-api-key'].includes(name.toLowerCase()),
+          ([name]) => !isCredentialBearingHeader(name),
         ),
       )
     : extraHeaders;

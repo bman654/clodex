@@ -4,7 +4,7 @@ import http from 'node:http';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { aliasModelId, startProxyCatalog, type ProxyRoute } from '../src/proxy.js';
+import { aliasModelId, startProxy, startProxyCatalog, type ProxyRoute } from '../src/proxy.js';
 import { getProxyDebugLogPath } from '../src/trace-log.js';
 import { anthropicMessagesEndpoint, estimateAnthropicInputTokens } from '../src/anthropic-endpoints.js';
 
@@ -82,6 +82,10 @@ describe('aliasModelId', () => {
 });
 
 describe('SDK anonymous route handling', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('does not reject empty upstream keys before SDK routing', async () => {
     const route: ProxyRoute = {
       aliasId: 'anthropic-kilo__tencent/hy3:free',
@@ -147,6 +151,83 @@ describe('SDK anonymous route handling', () => {
       const headers = new Headers(init.headers);
       expect(headers.has('authorization')).toBe(false);
       expect(headers.has('x-api-key')).toBe(false);
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('forwards single-route anonymous messages and token counts without credential headers', async () => {
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.endsWith('/v1/messages/count_tokens')) {
+        return new Response('{"input_tokens":17}', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          id: 'msg_anonymous',
+          type: 'message',
+          role: 'assistant',
+          model: 'anonymous-model',
+          content: [],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const handle = await startProxy(
+      'https://anonymous.example',
+      'anonymous-model',
+      false,
+      undefined,
+      {
+        providerId: 'local',
+        authType: 'none',
+        modelFormat: 'anthropic',
+        headers: {
+          Authorization: 'Bearer configured-value',
+          Cookie: 'session=configured-value',
+          'X-Auth-Token': 'configured-value',
+          'X-Custom': 'preserved',
+        },
+      },
+      '',
+    );
+
+    try {
+      const messages = await postToProxy(handle.port, handle.token, {
+        model: 'anonymous-model',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+      const tokens = await postToProxy(handle.port, handle.token, {
+        model: 'anonymous-model',
+        messages: [{ role: 'user', content: 'count this' }],
+      }, undefined, '/v1/messages/count_tokens');
+
+      expect(messages.status).toBe(200);
+      expect(tokens.status).toBe(200);
+      expect(JSON.parse(tokens.body)).toEqual({ input_tokens: 17 });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+      expect(calls.map(([url]) => url)).toEqual([
+        'https://anonymous.example/v1/messages',
+        'https://anonymous.example/v1/messages/count_tokens',
+      ]);
+      for (const [, init] of calls) {
+        const headers = new Headers(init.headers);
+        expect(headers.has('authorization')).toBe(false);
+        expect(headers.has('x-api-key')).toBe(false);
+        expect(headers.has('cookie')).toBe(false);
+        expect(headers.has('x-auth-token')).toBe(false);
+        expect(headers.get('x-custom')).toBe('preserved');
+      }
     } finally {
       handle.close();
       vi.unstubAllGlobals();

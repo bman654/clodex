@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import pc from 'picocolors';
 import { getLogsPath } from './paths.js';
+import { isCredentialBearingHeader } from './credential-headers.js';
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -283,7 +284,6 @@ export interface WebSocketDiagnosticRequestLogEntry {
 }
 
 const REDACTED_DIAGNOSTIC_HEADER = '[REDACTED]';
-const SENSITIVE_DIAGNOSTIC_HEADER = /(?:^|[-_])(?:authorization|api[-_]?key|cookie|token|secret|credential)(?:$|[-_])/i;
 const CONVERSATION_BODY_FIELDS = new Set(['system', 'messages', 'tools']);
 
 function canonicalDiagnosticValue(value: unknown): unknown {
@@ -315,7 +315,7 @@ export function sanitizeDiagnosticHeaders(
   const out: Record<string, string | string[]> = {};
   for (const [name, value] of Object.entries(headers).sort(([left], [right]) => left.localeCompare(right))) {
     if (value === undefined) continue;
-    out[name.toLowerCase()] = SENSITIVE_DIAGNOSTIC_HEADER.test(name)
+    out[name.toLowerCase()] = isCredentialBearingHeader(name)
       ? REDACTED_DIAGNOSTIC_HEADER
       : value;
   }

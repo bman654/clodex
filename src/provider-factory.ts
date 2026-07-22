@@ -13,6 +13,7 @@ import {
   CLAUDE_CODE_USER_AGENT,
   injectClaudeIdentity,
 } from './oauth/claude-identity.js';
+import { isCredentialBearingHeader } from './credential-headers.js';
 
 /** Models that must use /v1/responses instead of /v1/chat/completions. */
 const RESPONSES_ONLY_PREFIXES = [
@@ -41,8 +42,9 @@ const fetchWithoutCredentialHeaders: typeof fetch = (input, init) => {
   const headers = new Headers(
     init?.headers ?? (input instanceof Request ? input.headers : undefined),
   );
-  headers.delete('authorization');
-  headers.delete('x-api-key');
+  for (const name of [...headers.keys()]) {
+    if (isCredentialBearingHeader(name)) headers.delete(name);
+  }
   return fetch(input, { ...init, headers });
 };
 

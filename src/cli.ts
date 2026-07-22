@@ -1264,6 +1264,9 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   const usesAnthropicProxy = selectedModel.modelFormat === 'anthropic' &&
     (isOAuthAnthropic || anonymousProvider);
 
+  // Static provider headers remain part of the proxied endpoint contract,
+  // including OAuth routes. Anonymous dispatch filters credential-bearing
+  // names at the final boundary while retaining non-credential metadata.
   if (usesAnthropicProxy) {
     // The passthrough proxy owns upstream authentication for OAuth and strips it
     // entirely for explicitly anonymous Anthropic endpoints.

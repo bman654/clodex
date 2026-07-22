@@ -12,6 +12,44 @@ import {
 } from '../src/provider-factory.js';
 import { VERTEX_ANTHROPIC_NPM } from '../src/constants.js';
 
+async function expectCredentialHeadersStripped(fetchImpl: typeof fetch): Promise<void> {
+  const transport = vi.fn(async () => new Response(null, { status: 204 }));
+  vi.stubGlobal('fetch', transport);
+  try {
+    await fetchImpl('https://anonymous.example/v1/messages', {
+      headers: {
+        Authorization: 'Bearer configured-value',
+        'X-API-Key': 'configured-value',
+        Cookie: 'session=configured-value',
+        'Proxy-Authorization': 'Bearer configured-value',
+        'X-Auth-Token': 'configured-value',
+        'X-Client-Secret': 'configured-value',
+        'X-Credential-Id': 'configured-value',
+        'Content-Type': 'application/json',
+        'X-Custom': 'preserved',
+      },
+    });
+
+    const [, init] = transport.mock.calls[0] as unknown as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    for (const name of [
+      'authorization',
+      'x-api-key',
+      'cookie',
+      'proxy-authorization',
+      'x-auth-token',
+      'x-client-secret',
+      'x-credential-id',
+    ]) {
+      expect(headers.has(name)).toBe(false);
+    }
+    expect(headers.get('content-type')).toBe('application/json');
+    expect(headers.get('x-custom')).toBe('preserved');
+  } finally {
+    vi.unstubAllGlobals();
+  }
+}
+
 describe('isSdkMigratedNpm', () => {
   it('returns true for any OpenCode-assigned npm except anthropic', () => {
     expect(isSdkMigratedNpm('@ai-sdk/openai')).toBe(true);
@@ -278,6 +316,8 @@ describe('createLanguageModel', () => {
       fetch: expect.any(Function),
     });
     expect(responses).toHaveBeenCalledWith('anonymous-model');
+    const options = createOpenAI.mock.calls[0]?.[0] as { fetch: typeof fetch };
+    await expectCredentialHeadersStripped(options.fetch);
     vi.doUnmock('@ai-sdk/openai');
   });
 
@@ -395,6 +435,8 @@ describe('createLanguageModel', () => {
       baseURL: 'https://api.kilo.ai/api/gateway',
       fetch: expect.any(Function),
     });
+    const options = createOpenAICompatible.mock.calls[0]?.[0] as { fetch: typeof fetch };
+    await expectCredentialHeadersStripped(options.fetch);
     vi.doUnmock('@ai-sdk/openai-compatible');
   });
 
@@ -420,24 +462,7 @@ describe('createLanguageModel', () => {
     expect(anthropicFactory).toHaveBeenCalledWith('anonymous-model');
 
     const options = createAnthropic.mock.calls[0]?.[0] as { fetch: typeof fetch };
-    const transport = vi.fn(async () => new Response(null, { status: 204 }));
-    vi.stubGlobal('fetch', transport);
-    await options.fetch(new Request('https://anonymous.example/v1/messages', {
-      headers: {
-        Authorization: 'Bearer environment-secret',
-        'x-api-key': 'environment-secret',
-        'Content-Type': 'application/json',
-        'X-Custom': 'preserved',
-      },
-    }));
-
-    const [, init] = transport.mock.calls[0] as unknown as [string, RequestInit];
-    const headers = new Headers(init.headers);
-    expect(headers.has('authorization')).toBe(false);
-    expect(headers.has('x-api-key')).toBe(false);
-    expect(headers.get('content-type')).toBe('application/json');
-    expect(headers.get('x-custom')).toBe('preserved');
-    vi.unstubAllGlobals();
+    await expectCredentialHeadersStripped(options.fetch);
     vi.doUnmock('@ai-sdk/anthropic');
   });
 

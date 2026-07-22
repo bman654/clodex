@@ -324,6 +324,47 @@ describe('server router', () => {
     });
   });
 
+  it('forwards anonymous OpenAI chat completions without authentication headers', async () => {
+    const upstream = await startUpstream({
+      id: 'chatcmpl-anonymous',
+      choices: [{ message: { content: 'anonymous ok' }, finish_reason: 'stop' }],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        id: 'anonymous-chat-model',
+        name: 'Anonymous Chat Model',
+        isFree: true,
+        brand: 'Other',
+        providerId: 'local',
+        sourceBackend: 'go',
+        modelFormat: 'openai',
+        completionsUrl: `${upstream.baseUrl}/v1/chat/completions`,
+        apiKey: '',
+        authType: 'none',
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'anonymous-chat-model',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ id: 'chatcmpl-anonymous' });
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0]).toMatchObject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      authorization: undefined,
+      xApiKey: undefined,
+    });
+  });
+
   // OpenAI-format Anthropic translation now routes through the Vercel AI SDK adapter
   // (createLanguageModel + streamAnthropicResponse/generateAnthropicResponse), which
   // requires an SDK `npm` on the model. Translation correctness is covered by
