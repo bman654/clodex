@@ -35,6 +35,7 @@ vi.mock('../src/env.js', async importOriginal => {
 });
 vi.mock('../src/registry/io.js', () => ({
   loadRegistry: vi.fn(() => structuredClone(registryState.current)),
+  loadRegistryStrict: vi.fn(() => structuredClone(registryState.current)),
   saveRegistry: vi.fn((registry: ProviderRegistry) => {
     if (!lockState.active) throw new Error('registry write escaped its lock');
     registryState.current = structuredClone(registry);
@@ -273,6 +274,31 @@ describe('authenticateProvider', () => {
     expect(registryState.current.providers[0]?.authRef).toBe(helperAuthRef);
   });
 
+  it('reauthorizes the same OAuth reference without deleting the active credential', async () => {
+    const authRef = 'keyring:oauth:provider:openai-oauth';
+    registryState.current.providers.push({
+      id: 'openai-oauth',
+      templateId: 'openai',
+      name: 'OpenAI (ChatGPT)',
+      enabled: true,
+      authRef,
+      authType: 'oauth',
+      api: { npm: '@ai-sdk/openai', url: 'https://api.openai.com/v1' },
+      addedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const result = await authenticateProvider('openai');
+
+    expect(saveProviderCredential).toHaveBeenCalledWith(
+      authRef,
+      expect.any(String),
+      expect.any(Function),
+    );
+    expect(result.registryProvider.authRef).toBe(authRef);
+    expect(deleteProviderCredential).not.toHaveBeenCalled();
+    expect(journalState.pending.size).toBe(0);
+  });
+
   it('keeps the new provider active and queues the prior credential when cleanup is uncertain', async () => {
     registryState.current.providers.push({
       id: 'openai-oauth',
@@ -350,7 +376,7 @@ describe('authenticateProvider', () => {
       templateId: 'openai',
       name: 'OpenAI (ChatGPT)',
       enabled: true,
-      authRef: 'keyring:oauth:provider:openai-oauth:previous',
+      authRef: `helper:v1:${'b'.repeat(64)}:oauth:provider:openai-oauth`,
       authType: 'oauth',
       api: { npm: '@ai-sdk/openai', url: 'https://api.openai.com/v1' },
       addedAt: '2026-01-01T00:00:00.000Z',

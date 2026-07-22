@@ -31,7 +31,11 @@ vi.mock('../src/env.js', async importOriginal => {
 });
 vi.mock('../src/provider-factory.js', () => ({ isSdkMigratedNpm: vi.fn() }));
 vi.mock('../src/registry/fetch-template-models.js', () => ({ fetchTemplateModels: vi.fn() }));
-vi.mock('../src/registry/io.js', () => ({ loadRegistry: vi.fn(), saveRegistry: vi.fn() }));
+vi.mock('../src/registry/io.js', () => ({
+  loadRegistry: vi.fn(),
+  loadRegistryStrict: vi.fn(),
+  saveRegistry: vi.fn(),
+}));
 vi.mock('../src/registry/credential-cleanup-journal.js', () => ({
   isStoredCredentialRef: vi.fn((authRef: string) =>
     authRef.startsWith('keyring:') || authRef.startsWith('helper:v1:')),
@@ -125,6 +129,8 @@ describe('registry/add-template', () => {
       providers: [],
     };
     vi.mocked(io.loadRegistry).mockReset().mockImplementation(() =>
+      structuredClone(registryState));
+    vi.mocked(io.loadRegistryStrict).mockReset().mockImplementation(() =>
       structuredClone(registryState));
     vi.mocked(io.saveRegistry).mockReset().mockImplementation((registry) => {
       if (!lockState.active) throw new Error('registry write escaped its lock');

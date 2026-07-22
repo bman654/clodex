@@ -22,7 +22,7 @@ vi.mock('../src/env.js', async importOriginal => ({
   deleteProviderCredential: vi.fn(),
 }));
 vi.mock('../src/registry/io.js', () => ({
-  loadRegistry: vi.fn(() => structuredClone(registryState.current)),
+  loadRegistryStrict: vi.fn(() => structuredClone(registryState.current)),
 }));
 vi.mock('../src/registry/credential-cleanup-journal.js', () => ({
   isStoredCredentialRef: vi.fn((authRef: string) =>
@@ -77,6 +77,7 @@ vi.mock('../src/registry/lock.js', () => ({
 import { deleteProviderCredential } from '../src/env.js';
 import * as cleanupJournal from '../src/registry/credential-cleanup-journal.js';
 import { reconcilePendingCredentialDeletes } from '../src/registry/credential-lifecycle.js';
+import { loadRegistryStrict } from '../src/registry/io.js';
 
 const TEST_HELPER_ID = 'a'.repeat(64);
 const helperRef = (account: string): string => `helper:v1:${TEST_HELPER_ID}:${account}`;
@@ -93,6 +94,8 @@ describe('credential cleanup lifecycle', () => {
     lockState.events = [];
     lockState.afterRegistryUnlock = null;
     vi.mocked(deleteProviderCredential).mockReset().mockResolvedValue(true);
+    vi.mocked(loadRegistryStrict).mockReset()
+      .mockImplementation(() => structuredClone(registryState.current));
     vi.mocked(cleanupJournal.loadPendingCredentialDeletes).mockReset()
       .mockImplementation(async () => [...journalState.pending]);
     vi.mocked(cleanupJournal.cancelCredentialDelete).mockReset()
@@ -212,6 +215,20 @@ describe('credential cleanup lifecycle', () => {
     expect(result.persistenceError).toContain('registry lock timed out');
   });
 
+  it('keeps cleanup queued when the provider registry cannot be read', async () => {
+    const authRef = helperRef('provider:registry-unreadable');
+    journalState.pending.add(authRef);
+    vi.mocked(loadRegistryStrict).mockImplementationOnce(() => {
+      throw new Error('provider registry is unreadable');
+    });
+
+    const result = await reconcilePendingCredentialDeletes();
+
+    expect(deleteProviderCredential).not.toHaveBeenCalled();
+    expect(result.pending).toEqual([authRef]);
+    expect(result.persistenceError).toContain('provider registry is unreadable');
+  });
+
   it('reports a snapshot read failure without rejecting', async () => {
     vi.mocked(cleanupJournal.loadPendingCredentialDeletes).mockRejectedValueOnce(
       new Error('journal lock timed out'),
@@ -251,5 +268,21 @@ describe('credential cleanup lifecycle', () => {
     expect(result.deleted).toEqual([authRef]);
     expect(result.pending).toEqual([authRef]);
     expect(result.persistenceError).toContain('journal write failed');
+  });
+
+  it('retries an already-deleted credential when marker clearing previously failed', async () => {
+    const authRef = helperRef('provider:already-deleted');
+    journalState.pending.add(authRef);
+    journalState.cancelFailures.add(authRef);
+
+    const first = await reconcilePendingCredentialDeletes();
+    journalState.cancelFailures.delete(authRef);
+    const second = await reconcilePendingCredentialDeletes();
+
+    expect(first.deleted).toEqual([authRef]);
+    expect(first.pending).toEqual([authRef]);
+    expect(second.deleted).toEqual([authRef]);
+    expect(second.pending).toEqual([]);
+    expect(deleteProviderCredential).toHaveBeenCalledTimes(2);
   });
 });

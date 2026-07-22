@@ -206,7 +206,7 @@ describe('registry crud', () => {
     expect(logErrorMock).not.toHaveBeenCalled();
     expect(logSuccessMock).toHaveBeenCalledWith('Removed OpenAI.');
     expect(warnMock).toHaveBeenCalledWith(
-      'Provider credential cleanup is queued for retry.',
+      'Credential cleanup is pending and will be retried by the next provider command.',
     );
   });
 
@@ -323,7 +323,7 @@ describe('provider command cleanup reconciliation', () => {
     expect(deleteSpy).toHaveBeenNthCalledWith(1, authRef);
     await expect(loadPendingCredentialDeletes()).resolves.toEqual([authRef]);
     expect(warnMock).toHaveBeenCalledWith(
-      'Some credential cleanup is still pending and will be retried later.',
+      'Credential cleanup is pending and will be retried by the next provider command.',
     );
     const persisted = JSON.parse(
       readFileSync(join(home, 'credential-cleanup.json'), 'utf8'),
@@ -335,6 +335,22 @@ describe('provider command cleanup reconciliation', () => {
     expect(deleteSpy).toHaveBeenNthCalledWith(2, authRef);
     await expect(loadPendingCredentialDeletes()).resolves.toEqual([]);
     expect(warnMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns once when a mutating command leaves cleanup pending', async () => {
+    const authRef = helperRef('provider:openai');
+    const registry = emptyRegistry();
+    registry.providers.push(openaiEntry({ authRef }));
+    withRegistryWriteLockSync(() => saveRegistry(registry));
+    vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(false);
+
+    await expect(runProvidersCommand(['remove', 'openai'])).resolves.toBe(0);
+
+    expect(warnMock).toHaveBeenCalledTimes(1);
+    expect(warnMock).toHaveBeenCalledWith(
+      'Credential cleanup is pending and will be retried by the next provider command.',
+    );
+    await expect(loadPendingCredentialDeletes()).resolves.toEqual([authRef]);
   });
 });
 
@@ -381,7 +397,7 @@ describe('providers add menu', () => {
     await expect(runProvidersAdd()).resolves.toBe(0);
 
     expect(warnMock).toHaveBeenCalledWith(
-      'A previous credential is queued for cleanup and will be retried by the next provider command.',
+      'Credential cleanup is pending and will be retried by the next provider command.',
     );
   });
 });

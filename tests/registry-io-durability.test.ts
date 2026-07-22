@@ -10,6 +10,8 @@ const fsState = vi.hoisted(() => ({
   failTempFsync: false,
   failParentFsync: false,
   dropLockAfterTempFsync: false,
+  maxWriteBytes: Number.POSITIVE_INFINITY,
+  tempWriteSizes: [] as number[],
 }));
 
 function ioError(message: string): NodeJS.ErrnoException {
@@ -33,6 +35,21 @@ vi.mock('node:fs', async importOriginal => {
     closeSync: vi.fn((fd: number) => {
       actual.closeSync(fd);
       fsState.openPaths.delete(fd);
+    }),
+    writeSync: vi.fn((
+      fd: number,
+      buffer: Uint8Array,
+      offset: number,
+      length: number,
+    ) => {
+      const path = fsState.openPaths.get(fd);
+      if (isRegistryTemp(path)) {
+        const bytes = Math.min(length, fsState.maxWriteBytes);
+        fsState.tempWriteSizes.push(bytes);
+        if (bytes === 0) return 0;
+        return actual.writeSync(fd, buffer, offset, bytes);
+      }
+      return actual.writeSync(fd, buffer, offset, length);
     }),
     fsyncSync: vi.fn((fd: number) => {
       const path = fsState.openPaths.get(fd);
@@ -85,6 +102,8 @@ describe('registry publication durability', () => {
     fsState.failTempFsync = false;
     fsState.failParentFsync = false;
     fsState.dropLockAfterTempFsync = false;
+    fsState.maxWriteBytes = Number.POSITIVE_INFINITY;
+    fsState.tempWriteSizes = [];
   });
 
   afterEach(() => {
@@ -141,6 +160,27 @@ describe('registry publication durability', () => {
     expect(publishRegistry).toThrow(RegistryLockLostError);
 
     expect(fsState.events).toEqual(['temp-fsync']);
+    expect(existsSync(fsState.registryPath)).toBe(false);
+  });
+
+  it('retries short writes until the complete registry payload is stored', () => {
+    fsState.maxWriteBytes = 5;
+
+    publishRegistry();
+
+    expect(fsState.tempWriteSizes.length).toBeGreaterThan(1);
+    expect(fsState.tempWriteSizes.every(size => size > 0 && size <= 5)).toBe(true);
+    expect(JSON.parse(readFileSync(fsState.registryPath, 'utf8'))).toEqual(
+      emptyRegistry(),
+    );
+  });
+
+  it('does not publish when a secure write makes no progress', () => {
+    fsState.maxWriteBytes = 0;
+
+    expect(publishRegistry).toThrow('Could not complete secure file write');
+
+    expect(fsState.events).toEqual([]);
     expect(existsSync(fsState.registryPath)).toBe(false);
   });
 });

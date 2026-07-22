@@ -5,7 +5,7 @@ import {
   loadPendingCredentialDeletes,
   queueCredentialDelete,
 } from './credential-cleanup-journal.js';
-import { loadRegistry } from './io.js';
+import { loadRegistryStrict } from './io.js';
 import {
   withCredentialMutationLock,
   withRegistryWriteLock,
@@ -40,7 +40,9 @@ export function credentialIsReferenced(
 
 /** Persist cleanup intent before a credential can become unreferenced. */
 export async function journalCredentialWrite(authRef: string): Promise<void> {
-  await queueCredentialDelete(authRef);
+  if (!await queueCredentialDelete(authRef)) {
+    throw new Error('Credential reference is not managed by Clodex.');
+  }
 }
 
 interface SingleCleanupResult {
@@ -74,7 +76,7 @@ async function reconcilePendingCredentialDelete(
     return await withCredentialMutationLock(authRef, async () => {
       try {
         const clearedReferencedMarker = await withRegistryWriteLock(async () => {
-          if (!credentialIsReferenced(loadRegistry(), authRef)) return false;
+          if (!credentialIsReferenced(loadRegistryStrict(), authRef)) return false;
           await cancelCredentialDelete(authRef);
           return true;
         });

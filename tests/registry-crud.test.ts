@@ -20,6 +20,7 @@ vi.mock('../src/env.js', async importOriginal => ({
 }));
 vi.mock('../src/registry/io.js', () => ({
   loadRegistry: vi.fn(() => structuredClone(registryState.current)),
+  loadRegistryStrict: vi.fn(() => structuredClone(registryState.current)),
   saveRegistry: vi.fn((registry: ProviderRegistry) => {
     if (!lockState.active) throw new Error('registry write escaped its lock');
     registryState.current = structuredClone(registry);

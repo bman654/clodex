@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -92,7 +94,7 @@ describe('credential cleanup journal', () => {
     expect(await loadPendingCredentialDeletes()).toEqual([authRef]);
   });
 
-  it('sanitizes stored references and persists cancellation atomically', async () => {
+  it('deduplicates managed references and persists cancellation atomically', async () => {
     const authRef = helperRef('provider:stale');
     writeFileSync(getCredentialCleanupPath(), JSON.stringify({
       schemaVersion: 1,
@@ -100,10 +102,8 @@ describe('credential cleanup journal', () => {
         authRef,
         authRef,
         'keyring:provider:stale',
-        'env:OPENAI_API_KEY',
-        42,
       ],
-    }));
+    }), { mode: 0o600 });
 
     expect(await loadPendingCredentialDeletes()).toEqual([
       authRef,
@@ -116,4 +116,107 @@ describe('credential cleanup journal', () => {
       'keyring:provider:stale',
     ]);
   });
+
+  it.each([
+    ['malformed JSON', '{'],
+    ['wrong schema', JSON.stringify({ schemaVersion: 2, pendingCredentialDeletes: [] })],
+    ['non-object root', JSON.stringify([])],
+    ['missing pending list', JSON.stringify({ schemaVersion: 1 })],
+    ['non-array pending list', JSON.stringify({
+      schemaVersion: 1,
+      pendingCredentialDeletes: 'keyring:provider:stale',
+    })],
+  ])('rejects %s without processing cleanup entries', async (_label, content) => {
+    writeFileSync(getCredentialCleanupPath(), content, { mode: 0o600 });
+
+    await expect(loadPendingCredentialDeletes()).rejects.toThrow(
+      'Could not read credential cleanup journal',
+    );
+  });
+
+  it('rejects unmanaged or malformed credential references', async () => {
+    writeFileSync(getCredentialCleanupPath(), JSON.stringify({
+      schemaVersion: 1,
+      pendingCredentialDeletes: [
+        'keyring:arbitrary-account',
+        'env:OPENAI_API_KEY',
+        42,
+      ],
+    }), { mode: 0o600 });
+
+    await expect(loadPendingCredentialDeletes()).rejects.toThrow(
+      'invalid entry at index 0',
+    );
+    expect(await queueCredentialDelete('keyring:arbitrary-account')).toBe(false);
+  });
+
+  it('accepts generated replacement, custom, OAuth, and scoped account shapes', async () => {
+    const uuid = '550e8400-e29b-41d4-a716-446655440000';
+    const refs = [
+      'keyring:provider:openai',
+      `keyring:provider:openai:replacement:${uuid}`,
+      `keyring:provider:custom-openai:${uuid}`,
+      'keyring:oauth:provider:openai-oauth',
+      `keyring:provider:openai::credential::v1:${'a'.repeat(32)}`,
+      helperRef(`oauth:provider:openai-oauth::credential::v1:${'b'.repeat(32)}`),
+    ];
+
+    for (const authRef of refs) {
+      expect(await queueCredentialDelete(authRef)).toBe(true);
+    }
+
+    expect(await loadPendingCredentialDeletes()).toEqual(refs);
+  });
+
+  it('bounds the persisted journal before parsing entries', async () => {
+    writeFileSync(getCredentialCleanupPath(), 'x'.repeat(1024 * 1024 + 1), {
+      mode: 0o600,
+    });
+
+    await expect(loadPendingCredentialDeletes()).rejects.toThrow(
+      'Credential cleanup journal is too large',
+    );
+  });
+
+  it('bounds the number of pending entries', async () => {
+    writeFileSync(getCredentialCleanupPath(), JSON.stringify({
+      schemaVersion: 1,
+      pendingCredentialDeletes: Array.from(
+        { length: 1025 },
+        () => 'keyring:provider:openai',
+      ),
+    }), { mode: 0o600 });
+
+    await expect(loadPendingCredentialDeletes()).rejects.toThrow(
+      'too many pending entries',
+    );
+  });
+
+  it('rejects a symlinked journal', async () => {
+    const target = join(home, 'journal-target.json');
+    writeFileSync(target, JSON.stringify({
+      schemaVersion: 1,
+      pendingCredentialDeletes: ['keyring:provider:openai'],
+    }), { mode: 0o600 });
+    symlinkSync(target, getCredentialCleanupPath());
+
+    await expect(loadPendingCredentialDeletes()).rejects.toThrow(
+      'must be a regular file',
+    );
+  });
+
+  it.runIf(typeof process.getuid === 'function')(
+    'rejects a journal with group or other permissions',
+    async () => {
+      writeFileSync(getCredentialCleanupPath(), JSON.stringify({
+        schemaVersion: 1,
+        pendingCredentialDeletes: ['keyring:provider:openai'],
+      }), { mode: 0o600 });
+      chmodSync(getCredentialCleanupPath(), 0o644);
+
+      await expect(loadPendingCredentialDeletes()).rejects.toThrow(
+        'permissions are too broad',
+      );
+    },
+  );
 });

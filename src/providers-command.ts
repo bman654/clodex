@@ -40,6 +40,9 @@ import {
 
 export type ProvidersSubcommand = 'hub' | 'add' | 'list' | 'remove' | 'refresh-models' | 'auth' | 'help';
 
+const CREDENTIAL_CLEANUP_PENDING_MESSAGE =
+  'Credential cleanup is pending and will be retried by the next provider command.';
+
 export function parseProvidersArgs(args: string[]): {
   subcommand: ProvidersSubcommand;
   showHelp: boolean;
@@ -117,7 +120,7 @@ export async function runProvidersAuth(providerId: string, method?: ProviderAuth
     const result = await authenticateProvider(providerId, { method });
     p.log.success(`Signed in to ${result.registryProvider.name} — credential saved to the credential store.`);
     if (result.credentialCleanupPending) {
-      p.log.warn('A previous credential is queued for cleanup and will be retried by the next provider command.');
+      p.log.warn(CREDENTIAL_CLEANUP_PENDING_MESSAGE);
     }
     return 0;
   } catch (err) {
@@ -264,7 +267,7 @@ async function runTemplateAddFlow(): Promise<number> {
 
   logConnected(template.name, result.modelCount ?? 0);
   if (result.credentialCleanupPending) {
-    p.log.warn('A previous credential is queued for cleanup and will be retried by the next provider command.');
+    p.log.warn(CREDENTIAL_CLEANUP_PENDING_MESSAGE);
   }
   return 0;
 }
@@ -329,7 +332,7 @@ export async function runProvidersRemove(id: string, interactive = false): Promi
     p.log.info('Provider API key removed from the credential store.');
   }
   if (result.credentialCleanupPending) {
-    p.log.warn('Provider credential cleanup is queued for retry.');
+    p.log.warn(CREDENTIAL_CLEANUP_PENDING_MESSAGE);
   }
   return 0;
 }
@@ -484,15 +487,25 @@ export async function runProvidersCommand(args: string[]): Promise<number> {
     return 0;
   }
 
-  let cleanupPending = false;
-  try {
-    const cleanup = await reconcilePendingCredentialDeletes();
-    cleanupPending = cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
-  } catch {
-    cleanupPending = true;
-  }
-  if (cleanupPending) {
-    p.log.warn('Some credential cleanup is still pending and will be retried later.');
+  const reconcilesDuringMutation =
+    parsed.subcommand === 'add'
+    || parsed.subcommand === 'remove'
+    || (
+      parsed.subcommand === 'auth'
+      && !parsed.showHelp
+      && parsed.removeId !== undefined
+    );
+  if (!reconcilesDuringMutation) {
+    let cleanupPending = false;
+    try {
+      const cleanup = await reconcilePendingCredentialDeletes();
+      cleanupPending = cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
+    } catch {
+      cleanupPending = true;
+    }
+    if (cleanupPending) {
+      p.log.warn(CREDENTIAL_CLEANUP_PENDING_MESSAGE);
+    }
   }
 
   if (parsed.subcommand === 'list') return runProvidersList();

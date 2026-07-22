@@ -39,11 +39,19 @@ schema 1 provider fields from dropping pending cleanup. A new unreferenced
 credential is journaled before it is written, provider changes are saved before
 superseded credentials are deleted, and uncertain deletion outcomes remain
 queued. Per-credential cross-process locks serialize writes, activation,
-removal, and reconciliation for the same reference without blocking unrelated
-credentials. Reconciliation is best-effort: one busy credential does not block
-unrelated cleanup or turn an already-saved provider into a failed creation. The
-next `clodex providers` command retries queued deletions idempotently and never
-deletes a credential that is referenced by an active provider.
+removal, and reconciliation for the same reference. Reconciliation is
+best-effort and sequential: a contended credential can delay later entries
+until its lock attempt times out, but the timeout does not turn an already-saved
+provider into a failed creation. The next `clodex providers` command retries
+queued deletions idempotently and never deletes a credential that is referenced
+by an active provider. If the registry cannot be read and validated, cleanup
+stays queued instead of treating the registry as empty.
+
+The cleanup journal accepts only credential accounts generated for Clodex
+provider and OAuth records, including replacement, custom-provider, and scoped
+credential instances. It rejects symbolic links, foreign ownership, broad
+permissions on POSIX, files over 1 MiB, and more than 1,024 queued entries
+before attempting any credential-store deletion.
 
 ## Protocol
 
