@@ -1101,8 +1101,8 @@ describe('OAuth route credential resolution', () => {
         : 'fresh-oauth-token',
     );
     const route: ProxyRoute = {
-      aliasId: 'anthropic-oauth-provider__chat-route',
-      realModelId: 'chat-route',
+      aliasId: 'anthropic-oauth-provider__gpt-3-5-turbo-instruct',
+      realModelId: 'gpt-3.5-turbo-instruct',
       displayName: 'OAuth Retry Route',
       upstreamUrl: '',
       apiKey: 'launch-token',
@@ -1116,7 +1116,7 @@ describe('OAuth route credential resolution', () => {
       async (_input: string | URL | Request, init?: RequestInit) => {
         const authorization = new Headers(init?.headers).get('authorization');
         if (authorization === 'Bearer rejected-oauth-token') {
-          return new Response(
+        return new Response(
             JSON.stringify({ error: { message: 'expired token' } }),
             {
               status: 401,
@@ -1124,10 +1124,10 @@ describe('OAuth route credential resolution', () => {
             },
           );
         }
-        return new Response(
+          return new Response(
           [
-            'data: {"id":"chatcmpl-retry","object":"chat.completion.chunk","created":1,"model":"chat-route","choices":[{"index":0,"delta":{"role":"assistant","content":"recovered"},"finish_reason":null}]}',
-            'data: {"id":"chatcmpl-retry","object":"chat.completion.chunk","created":1,"model":"chat-route","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+            'data: {"id":"chatcmpl-retry","object":"chat.completion.chunk","created":1,"model":"gpt-3.5-turbo-instruct","choices":[{"index":0,"delta":{"role":"assistant","content":"recovered"},"finish_reason":null}]}',
+            'data: {"id":"chatcmpl-retry","object":"chat.completion.chunk","created":1,"model":"gpt-3.5-turbo-instruct","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
             'data: [DONE]',
             '',
           ].join('\n\n'),

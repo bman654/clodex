@@ -539,6 +539,7 @@ export async function startProxyCatalog(
               ? event => writeWebSocketDiagnosticLog(webSocketDiagnosticsLogPath, event)
               : undefined,
           });
+          translationLifecycle?.dispatched();
           if (clientWantsStream) {
             // Internal override (primarily a test seam / operational tuning knob).
             const keepAliveMs =
@@ -694,7 +695,6 @@ export async function startProxyCatalog(
           return 'done';
         };
 
-        translationLifecycle?.dispatched();
         for (;;) {
           try {
             await runSdkRequest();
