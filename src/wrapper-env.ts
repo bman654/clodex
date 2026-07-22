@@ -11,11 +11,12 @@ const PROXY_ENV_VARS = ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'
 export const REQUIRE_SERVER_ENV = 'CLODEX_REQUIRE_SERVER';
 
 export function removeAnthropicProxyBypass(env: NodeJS.ProcessEnv): void {
-  const noProxy = env['NO_PROXY'] ?? env['no_proxy'];
-  if (noProxy === undefined) return;
+  const noProxyValues = [env['NO_PROXY'], env['no_proxy']]
+    .filter((value): value is string => value !== undefined);
+  if (noProxyValues.length === 0) return;
 
-  const filtered = noProxy
-    .split(',')
+  const filtered = [...new Set(noProxyValues
+    .flatMap(value => value.split(','))
     .map(value => value.trim())
     .filter(Boolean)
     .filter(value => {
@@ -27,7 +28,7 @@ export function removeAnthropicProxyBypass(env: NodeJS.ProcessEnv): void {
         ? 'api.anthropic.com'.endsWith(suffix)
         : 'api.anthropic.com' === suffix || 'api.anthropic.com'.endsWith(`.${suffix}`);
       return !bypassesAnthropic;
-    })
+    }))]
     .join(',');
   if (filtered) {
     env['NO_PROXY'] = filtered;

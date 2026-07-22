@@ -1,11 +1,9 @@
 // tests/proxy.test.ts
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import http from 'node:http';
-import { EventEmitter } from 'node:events';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Readable } from 'node:stream';
 import { aliasModelId, startProxy, startProxyCatalog, type ProxyRoute } from '../src/proxy.js';
 import { getProxyDebugLogPath } from '../src/trace-log.js';
 import { anthropicMessagesEndpoint, estimateAnthropicInputTokens } from '../src/anthropic-endpoints.js';
@@ -253,27 +251,6 @@ describe('SDK anonymous route handling', () => {
 
 describe('catalog model aliases', () => {
   it('rejects unresolved configured model ids without using the default route', async () => {
-    let requestHandler: ((req: any, res: any) => Promise<void>) | undefined;
-    const fakeServer = Object.assign(new EventEmitter(), {
-      listen: (_port: number, _host: string, onListening: () => void) => {
-        queueMicrotask(onListening);
-        return fakeServer;
-      },
-      address: () => ({ address: '127.0.0.1', family: 'IPv4', port: 43001 }),
-      close: () => fakeServer,
-    });
-    vi.resetModules();
-    vi.doMock('node:http', async () => {
-      const actual = await vi.importActual<typeof import('node:http')>('node:http');
-      return {
-        ...actual,
-        createServer: (handler: typeof requestHandler) => {
-          requestHandler = handler;
-          return fakeServer;
-        },
-      };
-    });
-    const { startProxyCatalog: startIsolatedProxyCatalog } = await import('../src/proxy.js');
     const route: ProxyRoute = {
       aliasId: 'clodex:test:default-model',
       realModelId: 'default-model',
@@ -286,7 +263,7 @@ describe('catalog model aliases', () => {
     const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
     vi.stubGlobal('fetch', fetchMock);
 
-    const handle = await startIsolatedProxyCatalog(
+    const handle = await startProxyCatalog(
       [route],
       route.aliasId,
       false,
@@ -297,55 +274,66 @@ describe('catalog model aliases', () => {
     );
 
     try {
-      const invoke = async (model: string) => {
-        const payload = JSON.stringify({
-          model,
+      for (const testCase of [
+        { model: 'clodex:test:unavailable-model', path: '/v1/messages' },
+        { model: 'missing-route', path: '/v1/messages' },
+        { model: 'missing-route[1m]', path: '/v1/messages' },
+        { model: 'missing-route[1M]', path: '/v1/messages' },
+        { model: 'models/missing-route[1m]', path: '/v1/messages' },
+        { model: 'missing-route', path: '/v1/messages/count_tokens' },
+      ]) {
+        const response = await postToProxy(handle.port, handle.token, {
+          model: testCase.model,
           max_tokens: 100,
           messages: [{ role: 'user', content: 'hi' }],
           stream: false,
-        });
-        const req = Readable.from([Buffer.from(payload)]) as any;
-        req.method = 'POST';
-        req.url = '/v1/messages';
-        req.headers = { authorization: `Bearer ${handle.token}` };
-        const res = Object.assign(new EventEmitter(), {
-          statusCode: 0,
-          body: '',
-          headersSent: false,
-          writableFinished: false,
-          writeHead(status: number) {
-            this.statusCode = status;
-            this.headersSent = true;
-            return this;
-          },
-          end(chunk = '') {
-            this.body += String(chunk);
-            this.writableFinished = true;
-            return this;
+        }, undefined, testCase.path);
+
+        expect(response.status, `${testCase.path} ${testCase.model}`).toBe(400);
+        expect(JSON.parse(response.body)).toEqual({
+          type: 'error',
+          error: {
+            type: 'invalid_request_error',
+            message: `Clodex model route '${testCase.model}' is unavailable. Run \`clodex models --list\` to see available routes, or \`clodex patch\` to refresh saved aliases.`,
           },
         });
-
-        expect(requestHandler).toBeDefined();
-        await requestHandler!(req, res);
-        return res;
-      };
-
-      const canonicalResponse = await invoke('clodex:test:unavailable-model');
-      expect(canonicalResponse.statusCode).toBe(400);
-      expect(fetchMock).not.toHaveBeenCalled();
-
-      const aliasResponse = await invoke('missing-route');
-      expect(aliasResponse.statusCode).toBe(400);
-      expect(fetchMock).not.toHaveBeenCalled();
-
-      const suffixedAliasResponse = await invoke('missing-route[1m]');
-      expect(suffixedAliasResponse.statusCode).toBe(400);
+      }
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       handle.close();
       vi.unstubAllGlobals();
-      vi.doUnmock('node:http');
-      vi.resetModules();
+    }
+  });
+
+  it('rejects unresolved canonical ids when model aliases are not configured', async () => {
+    const route: ProxyRoute = {
+      aliasId: 'clodex:test:default-model',
+      realModelId: 'default-model',
+      displayName: 'Default Model',
+      upstreamUrl: 'https://default.example',
+      apiKey: 'provider-key',
+      modelFormat: 'anthropic',
+      providerId: 'test-provider',
+    };
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+
+    try {
+      for (const path of ['/v1/messages', '/v1/messages/count_tokens']) {
+        const response = await postToProxy(handle.port, handle.token, {
+          model: 'clodex:test:unavailable-model',
+          max_tokens: 100,
+          messages: [{ role: 'user', content: 'hi' }],
+          stream: false,
+        }, undefined, path);
+        expect(response.status).toBe(400);
+        expect(JSON.parse(response.body).error.type).toBe('invalid_request_error');
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
     }
   });
 
@@ -361,7 +349,7 @@ describe('catalog model aliases', () => {
       providerId: 'test-provider',
     };
     const aliasTarget: ProxyRoute = {
-      aliasId: 'clodex:openai-oauth:gpt-5.6-sol',
+      aliasId: 'clodex:openai-oauth:gpt-5.6-sol[1m]',
       realModelId: 'gpt-5.6-sol',
       displayName: 'GPT-5.6 Sol',
       upstreamUrl: 'https://upstream-sol.example',
@@ -382,7 +370,7 @@ describe('catalog model aliases', () => {
       undefined,
       undefined,
       undefined,
-      [{ name: 'sol', routeId: aliasTarget.aliasId }],
+      [{ name: 'sol', routeId: 'clodex:openai-oauth:gpt-5.6-sol' }],
     );
 
     try {

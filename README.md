@@ -153,7 +153,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:17645/anthropic
 OPENAI_BASE_URL=http://127.0.0.1:17645/openai/v1
 ```
 
-Use any API key locally; network mode requires the server password. Proxy mode prints `HTTPS_PROXY`, `HTTP_PROXY`, and `NODE_EXTRA_CA_CERTS` values to export — do **not** set `ANTHROPIC_BASE_URL` in that mode.
+Use any API key locally; network mode requires the server password. Proxy mode prints `HTTPS_PROXY`, `HTTP_PROXY`, `NODE_EXTRA_CA_CERTS`, and adjusted `NO_PROXY` / `no_proxy` values to export. The adjusted bypass lists preserve unrelated hosts while ensuring `api.anthropic.com` reaches the selective proxy. Do **not** set `ANTHROPIC_BASE_URL` in that mode.
 
 Several `clodex server` instances can run at once — each advertises itself in `~/.clodex/server-runtime.json`, and `clodex-claude` prefers a proxy-mode server (newest first) when bridging (see [docs/background-agents.md](docs/background-agents.md)). Pass `--no-discovery` to keep a server out of that file, e.g. a dedicated endpoint you point another tool at.
 

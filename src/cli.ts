@@ -10,7 +10,7 @@ import { claudeCodeClientModelId } from './context-model-id.js';
 import { needsFirstRunSetup, runFirstRunWizard } from './first-run.js';
 import { MAX_MODEL_CATALOG } from './constants.js';
 import { startProxy, startProxyCatalog } from './proxy.js';
-import type { ProxyHandle, ProxyRoute } from './proxy.js';
+import type { ProxyHandle, ProxyModelAlias, ProxyRoute } from './proxy.js';
 import {
   buildCatalogRoutes,
   makeRouteResolver,
@@ -565,13 +565,22 @@ function printHelp(text: string): void {
 async function launchClaudeViaCatalog(
   catalogRoutes: ProxyRoute[],
   startingRoute: ProxyRoute,
+  modelAliases: ProxyModelAlias[],
   contextWindow: number | undefined,
   trace: boolean,
   claudeArgs: string[],
 ): Promise<number> {
   let proxyHandle: ProxyHandle;
   try {
-    proxyHandle = await startProxyCatalog(catalogRoutes, startingRoute.aliasId, trace);
+    proxyHandle = await startProxyCatalog(
+      catalogRoutes,
+      startingRoute.aliasId,
+      trace,
+      undefined,
+      undefined,
+      undefined,
+      modelAliases,
+    );
     p.log.info(
       `Switch menu active — proxy on port ${proxyHandle.port} ` +
       pc.dim(`(${catalogRoutes.length} model${catalogRoutes.length !== 1 ? 's' : ''} in /model)`),
@@ -1219,6 +1228,10 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     return launchClaudeViaCatalog(
       catalogRoutes,
       startingRoute,
+      (prefs.modelAliases ?? []).map(alias => ({
+        name: alias.name,
+        routeId: modelAliasTarget(alias),
+      })),
       selectedModel.contextWindow,
       trace,
       claudeArgs,

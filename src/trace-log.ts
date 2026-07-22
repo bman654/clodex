@@ -205,6 +205,12 @@ export interface InferenceResponseErrorLogEntry {
   attemptCount?: number;
 }
 
+export interface InferenceRouteUnavailableLogEntry {
+  requestId: string;
+  modelId: string;
+  statusCode: number;
+}
+
 export type InferenceResponseLifecycleEvent =
   | 'translation_dispatched'
   | 'translation_started'
@@ -516,6 +522,20 @@ export function writeInferenceResponseErrorLog(
     ...(entry.isRetryable !== undefined ? { isRetryable: entry.isRetryable } : {}),
     ...(entry.attemptCount !== undefined ? { attemptCount: entry.attemptCount } : {}),
     ...(includeContent ? { errorContent: compactLogValueWithMarker(entry.errorContent!, RESPONSE_ERROR_MAX) } : {}),
+  }));
+}
+
+/** Append a local routing-policy rejection without attributing it to an upstream provider. */
+export function writeInferenceRouteUnavailableLog(
+  path: string,
+  entry: InferenceRouteUnavailableLogEntry,
+): void {
+  writeSecureLogLine(path, JSON.stringify({
+    timestamp: new Date().toISOString(),
+    event: 'route_unavailable',
+    requestId: compactLogValue(entry.requestId, 100),
+    modelId: compactLogValue(entry.modelId),
+    statusCode: entry.statusCode,
   }));
 }
 

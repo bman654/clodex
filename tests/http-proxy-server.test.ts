@@ -42,6 +42,33 @@ async function connectMitm(proxyPort: number, ca: string): Promise<tls.TLSSocket
   return secure;
 }
 
+async function requestMitm(
+  proxyPort: number,
+  ca: string,
+  path: string,
+  body: string | Buffer,
+  headers: Record<string, string> = {},
+): Promise<string> {
+  const socket = await connectMitm(proxyPort, ca);
+  let response = '';
+  socket.on('data', chunk => { response += chunk.toString(); });
+  const payload = Buffer.isBuffer(body) ? body : Buffer.from(body);
+  socket.write([
+    `POST ${path} HTTP/1.1`,
+    'Host: api.anthropic.com',
+    'Authorization: Bearer subscription-oauth-token',
+    'Content-Type: application/json',
+    `Content-Length: ${payload.length}`,
+    'Connection: close',
+    ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`),
+    '',
+    '',
+  ].join('\r\n'));
+  socket.write(payload);
+  await once(socket, 'close');
+  return response;
+}
+
 function activeProxySockets(proxyPort: number): net.Socket[] {
   const getActiveHandles = (process as typeof process & {
     _getActiveHandles(): unknown[];
@@ -640,73 +667,95 @@ describe('selective HTTP proxy', () => {
         route: 'translated',
       });
 
-      const typoBody = JSON.stringify({ model: 'clodex:groq:typo', messages: [] });
-      const typoSocket = await connectMitm(proxy.port, certificates.caCert);
-      let typoResponse = '';
-      typoSocket.on('data', chunk => { typoResponse += chunk.toString(); });
-      typoSocket.write([
-        'POST /v1/messages HTTP/1.1',
-        'Host: api.anthropic.com',
-        'Authorization: Bearer subscription-oauth-token',
-        'Content-Type: application/json',
-        `Content-Length: ${Buffer.byteLength(typoBody)}`,
-        'Connection: close',
-        '',
-        '',
-      ].join('\r\n') + typoBody);
-      await once(typoSocket, 'close');
-      expect(typoResponse).toContain('400 Bad Request');
-      expect(typoResponse).toContain('Clodex model route is unavailable');
-      expect(anthropicRequests).toBe(0);
-      expect(fallbackAuth).toBeUndefined();
-      const inferenceEntries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-      expect(inferenceEntries.find(entry => !entry.event && entry.modelId === 'clodex:groq:typo')).toMatchObject({
-        modelId: 'clodex:groq:typo',
-        provider: 'groq',
-        route: 'translated',
+      const normalizedRouteBody = JSON.stringify({
+        model: 'clodex:groq:llama-3.3-70b[1M]',
+        messages: [],
+        stream: true,
       });
-      expect(inferenceEntries).toContainEqual(expect.objectContaining({
-        event: 'upstream_error',
-        modelId: 'clodex:groq:typo',
-        provider: 'groq',
-        route: 'translated',
-        statusCode: 400,
-      }));
+      const normalizedRouteResponse = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/v1/messages',
+        normalizedRouteBody,
+      );
+      expect(normalizedRouteResponse).toContain('200 OK');
+      expect(JSON.parse(adapterBody).model).toBe('clodex:groq:llama-3.3-70b[1M]');
 
-      const unavailableAliasBody = JSON.stringify({ model: 'missing-route', messages: [] });
-      const unavailableAliasSocket = await connectMitm(proxy.port, certificates.caCert);
-      let unavailableAliasResponse = '';
-      unavailableAliasSocket.on('data', chunk => { unavailableAliasResponse += chunk.toString(); });
-      unavailableAliasSocket.write([
-        'POST /v1/messages HTTP/1.1',
-        'Host: api.anthropic.com',
-        'Authorization: Bearer subscription-oauth-token',
-        'Content-Type: application/json',
-        `Content-Length: ${Buffer.byteLength(unavailableAliasBody)}`,
-        'Connection: close',
-        '',
-        '',
-      ].join('\r\n') + unavailableAliasBody);
-      await once(unavailableAliasSocket, 'close');
-      expect(unavailableAliasResponse).toContain('400 Bad Request');
-      expect(unavailableAliasResponse).toContain('Clodex model route is unavailable');
+      const compressedRouteBody = JSON.stringify({ model: 'llama', messages: [], stream: true });
+      const compressedRouteResponse = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/v1/messages',
+        gzipSync(Buffer.from(compressedRouteBody)),
+        { 'Content-Encoding': 'gzip' },
+      );
+      expect(compressedRouteResponse).toContain('200 OK');
+      expect(JSON.parse(adapterBody).model).toBe('llama');
+
+      const rejectedCases = [
+        { model: 'clodex:groq:typo', path: '/v1/messages' },
+        { model: 'missing-route', path: '/v1/messages' },
+        { model: 'missing-route[1m]', path: '/v1/messages' },
+        { model: 'missing-route[1M]', path: '/v1/messages' },
+        { model: 'models/missing-route[1m]', path: '/v1/messages' },
+        { model: 'missing-route', path: '/v1/messages/count_tokens' },
+      ];
+      for (const testCase of rejectedCases) {
+        const response = await requestMitm(
+          proxy.port,
+          certificates.caCert,
+          testCase.path,
+          JSON.stringify({ model: testCase.model, messages: [] }),
+        );
+        expect(response, `${testCase.path} ${testCase.model}`).toContain('400 Bad Request');
+        expect(response).toContain('invalid_request_error');
+        expect(response).toContain('clodex models --list');
+        expect(response).toContain('clodex patch');
+      }
+
+      const compressedUnavailableBody = JSON.stringify({ model: 'missing-route', messages: [] });
+      const compressedUnavailableResponse = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/v1/messages',
+        gzipSync(Buffer.from(compressedUnavailableBody)),
+        { 'Content-Encoding': 'gzip' },
+      );
+      expect(compressedUnavailableResponse).toContain('400 Bad Request');
+      expect(compressedUnavailableResponse).toContain('invalid_request_error');
+
+      const unreadableCompressedResponse = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/v1/messages',
+        Buffer.from('not-a-gzip-stream'),
+        { 'Content-Encoding': 'gzip' },
+      );
+      expect(unreadableCompressedResponse).toContain('400 Bad Request');
+      expect(unreadableCompressedResponse).toContain('Unable to inspect compressed request body');
       expect(anthropicRequests).toBe(0);
       expect(fallbackAuth).toBeUndefined();
+
       const unavailableAliasEntries = readFileSync(inferenceLogPath, 'utf8')
         .trim()
         .split('\n')
         .map(line => JSON.parse(line));
-      expect(unavailableAliasEntries.find(entry => !entry.event && entry.modelId === 'missing-route')).toMatchObject({
-        provider: 'unknown',
-        route: 'translated',
-      });
       expect(unavailableAliasEntries).toContainEqual(expect.objectContaining({
-        event: 'upstream_error',
+        event: 'route_unavailable',
         modelId: 'missing-route',
-        provider: 'unknown',
-        route: 'translated',
         statusCode: 400,
       }));
+      expect(unavailableAliasEntries).not.toContainEqual(expect.objectContaining({
+        event: 'upstream_error',
+        modelId: 'missing-route',
+      }));
+      for (const testCase of rejectedCases.filter(item => item.path === '/v1/messages')) {
+        expect(unavailableAliasEntries).not.toContainEqual(expect.objectContaining({
+          modelId: testCase.model,
+          provider: expect.any(String),
+          route: expect.any(String),
+        }));
+      }
     } finally {
       await proxy.close();
       await new Promise<void>(resolve => origin.close(() => resolve()));
