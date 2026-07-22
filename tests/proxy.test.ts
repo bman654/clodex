@@ -65,6 +65,20 @@ describe('Anthropic endpoint routing', () => {
       messages: [{ role: 'user', content: 'hello world' }],
     })).toBe(base);
   });
+
+  it('counts images at a flat vision estimate instead of base64 bytes/4', () => {
+    const data = 'A'.repeat(400_000);
+    const withImage = estimateAnthropicInputTokens({
+      messages: [{ role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'call_1', content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data } },
+        ] },
+      ] }],
+    });
+    // bytes/4 on the raw payload alone would be ~100k tokens
+    expect(withImage).toBeLessThan(5_000);
+    expect(withImage).toBeGreaterThanOrEqual(1_600);
+  });
 });
 
 describe('aliasModelId', () => {

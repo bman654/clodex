@@ -90,6 +90,37 @@ describe('translateMessages', () => {
     expect(out[1]).toEqual({ role: 'tool', content: [{ type: 'tool-result', toolCallId: 'call_1', toolName: 'Read', output: { type: 'text', value: 'file body' } }] });
   });
 
+  it('lifts tool_result images into a following user message instead of inlining base64', () => {
+    const data = Buffer.from('fake-png-bytes').toString('base64');
+    const messages = [
+      { role: 'assistant' as const, content: [{ type: 'tool_use', id: 'call_1', name: 'Read', input: { file_path: 'shot.png' } }] },
+      { role: 'user' as const, content: [
+        { type: 'tool_result', tool_use_id: 'call_1', content: [
+          { type: 'text', text: 'rendered 1 page' },
+          { type: 'image', source: { type: 'base64', media_type: 'image/png', data } },
+        ] },
+        { type: 'text', text: 'continue' },
+      ] },
+    ];
+    annotateToolNames(messages);
+    const out = translateMessages(messages, '@ai-sdk/openai') as any[];
+
+    expect(out[1].role).toBe('tool');
+    const value = out[1].content[0].output.value as string;
+    expect(value).not.toContain(data);
+    expect(value).toContain('rendered 1 page');
+    expect(value).toContain('attached');
+
+    expect(out[2].role).toBe('user');
+    expect(out[2].content[0]).toEqual({ type: 'text', text: expect.stringContaining('call_1') });
+    expect(out[2].content[1]).toEqual({
+      type: 'file',
+      mediaType: 'image/png',
+      data: { type: 'data', data: Buffer.from(data, 'base64') },
+    });
+    expect(out[2].content[2]).toEqual({ type: 'text', text: 'continue' });
+  });
+
   it('decodes thought_signature into providerOptions for Google only', () => {
     const msg = [{ role: 'assistant' as const, content: [
       { type: 'thinking', thinking: 'hmm', signature: 'SIG' },

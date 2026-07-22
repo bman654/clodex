@@ -247,6 +247,32 @@ function imagePart(block: AnthropicBlock): {
   return null;
 }
 
+/**
+ * Serialize a tool_result for the text-only function-output channel, lifting
+ * image blocks out into user-message parts (the caller pushes them right after
+ * the tool message). Left inline, an image's base64 payload would be
+ * JSON.stringify'd into the output text and tokenized as text at ~1.5 chars
+ * per token — a single screenshot can cost 200k+ tokens upstream.
+ */
+function serializeToolResultForModel(
+  tr: AnthropicBlock,
+  imageParts: Array<Record<string, unknown>>,
+): string {
+  if (!Array.isArray(tr.content)) return serializeToolResultContent(tr.content);
+  const rawId = splitToolUseId(tr.tool_use_id ?? '').rawId;
+  let imageIndex = 0;
+  const blocks = (tr.content as AnthropicBlock[]).map(block => {
+    if (!block || block.type !== 'image') return block;
+    const part = imagePart(block);
+    if (!part) return block;
+    imageIndex += 1;
+    const label = `image ${imageIndex} of tool call ${rawId}`;
+    imageParts.push({ type: 'text', text: `The following image is ${label}:` }, part);
+    return { type: 'image', note: `attached to the next user message as ${label}` };
+  });
+  return JSON.stringify(blocks);
+}
+
 // ── tool_result name resolution (tool messages need the tool name) ────────────
 export function annotateToolNames(messages: AnthropicMsg[]): void {
   const nameById = new Map<string, string>();
@@ -336,6 +362,7 @@ export function translateMessages(
           }
         }
       }
+      const toolResultImageParts: Array<Record<string, unknown>> = [];
       if (toolResults.length) {
         out.push({
           role: 'tool',
@@ -343,14 +370,15 @@ export function translateMessages(
             type: 'tool-result',
             toolCallId: splitToolUseId(tr.tool_use_id ?? '').rawId,
             toolName: tr._name ?? 'unknown',
-            output: { type: 'text', value: serializeToolResultContent(tr.content) },
+            output: { type: 'text', value: serializeToolResultForModel(tr, toolResultImageParts) },
             ...(openAiCacheBreakpoint(tr, openAiPromptCacheBreakpoints)
               ? { providerOptions: openAiCacheBreakpoint(tr, openAiPromptCacheBreakpoints) }
               : {}),
           })),
         } as unknown as ModelMessage);
       }
-      if (parts.length) out.push({ role: 'user', content: parts } as unknown as ModelMessage);
+      const userParts = [...toolResultImageParts, ...parts];
+      if (userParts.length) out.push({ role: 'user', content: userParts } as unknown as ModelMessage);
     } else if (msg.role === 'assistant') {
       const parts: Array<Record<string, unknown>> = [];
       for (const b of blocks) {
