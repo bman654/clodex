@@ -1,5 +1,11 @@
 // src/env.ts
 import { CONFLICTING_ENV_VARS } from './constants.js';
+import { randomUUID } from 'node:crypto';
+import {
+  deleteCredentialHelperAccount,
+  readCredentialHelperAccount,
+  writeCredentialHelperAccount,
+} from './credential-helper.js';
 import { claudeCodeClientModelId, stripOneMContextSuffix } from './context-model-id.js';
 import { resolveContextWindow } from './context-window.js';
 import {
@@ -7,6 +13,7 @@ import {
   parseStoredOAuthCredential,
 } from './oauth/types.js';
 import { refreshStoredOAuthCredential, oauthCredentialShouldRefresh } from './oauth/refresh.js';
+import { withCredentialMutationLock } from './registry/lock.js';
 import type { ConflictInfo } from './types.js';
 
 export function detectConflicts(): ConflictInfo[] {
@@ -147,10 +154,13 @@ const oauthRefreshInflight = new Map<string, Promise<string | null>>();
 
 export type ParsedAuthRef =
   | { kind: 'keyring'; account: string }
-  | { kind: 'env'; varName: string };
+  | { kind: 'helper'; helperId: string; account: string }
+  | { kind: 'env'; varName: string }
+  | { kind: 'none' };
 
-/** Parse registry authRef strings like `keyring:provider:openai` or `env:OPENAI_API_KEY`. */
+/** Parse registry credential references. */
 export function parseAuthRef(authRef: string): ParsedAuthRef | null {
+  if (authRef === 'none:anonymous') return { kind: 'none' };
   if (authRef.startsWith('keyring:')) {
     const account = authRef.slice('keyring:'.length);
     return account ? { kind: 'keyring', account } : null;
@@ -159,6 +169,8 @@ export function parseAuthRef(authRef: string): ParsedAuthRef | null {
     const varName = authRef.slice('env:'.length);
     return varName ? { kind: 'env', varName } : null;
   }
+  const helper = /^helper:v1:([0-9a-f]{64}):(.+)$/s.exec(authRef);
+  if (helper) return { kind: 'helper', helperId: helper[1]!, account: helper[2]! };
   return null;
 }
 
@@ -239,6 +251,7 @@ async function deleteKeyringAccount(account: string, diag?: (msg: string) => voi
   try {
     const { Entry } = await import('@napi-rs/keyring');
     const value = new Entry(KEYRING_SERVICE, account).getPassword();
+    if (value === null) return true;
     if (value?.startsWith(KEYRING_CHUNK_PREFIX)) {
       const chunkCount = Number(value.slice(KEYRING_CHUNK_PREFIX.length));
       for (let i = 0; i < chunkCount; i++) {
@@ -253,23 +266,75 @@ async function deleteKeyringAccount(account: string, diag?: (msg: string) => voi
   }
 }
 
-/** Resolve a provider secret from authRef (env → keyring). */
+type StoredCredentialRef = Extract<ParsedAuthRef, { kind: 'keyring' | 'helper' }>;
+
+function storedCredentialAuthRef(ref: StoredCredentialRef): string {
+  return ref.kind === 'helper'
+    ? `helper:v1:${ref.helperId}:${ref.account}`
+    : `keyring:${ref.account}`;
+}
+
+async function readStoredCredential(
+  ref: StoredCredentialRef,
+  diag?: (msg: string) => void,
+): Promise<string | null> {
+  if (ref.kind === 'keyring') return readKeyringAccount(ref.account, diag);
+  try {
+    return await readCredentialHelperAccount(ref.account, ref.helperId);
+  } catch (err) {
+    diag?.(err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
+async function writeStoredCredential(
+  ref: StoredCredentialRef,
+  value: string,
+  diag?: (msg: string) => void,
+): Promise<boolean> {
+  if (ref.kind === 'keyring') return writeKeyringAccount(ref.account, value, diag);
+  try {
+    await writeCredentialHelperAccount(ref.account, value, ref.helperId);
+    return true;
+  } catch (err) {
+    diag?.(err instanceof Error ? err.message : String(err));
+    return false;
+  }
+}
+
+async function deleteStoredCredential(
+  ref: StoredCredentialRef,
+  diag?: (msg: string) => void,
+): Promise<boolean> {
+  if (ref.kind === 'keyring') return deleteKeyringAccount(ref.account, diag);
+  try {
+    await deleteCredentialHelperAccount(ref.account, ref.helperId);
+    return true;
+  } catch (err) {
+    diag?.(err instanceof Error ? err.message : String(err));
+    return false;
+  }
+}
+
+/** Resolve a provider secret from a namespaced env var or its configured store. */
 export async function resolveProviderCredential(
   providerId: string,
   authRef: string,
   diag?: (msg: string) => void,
 ): Promise<string | null> {
+  const parsed = parseAuthRef(authRef);
+  if (parsed?.kind === 'none') return null;
+
   const namespaced = readEnvCredential(clodexKeyEnvVar(providerId));
   if (namespaced) return namespaced;
 
-  const parsed = parseAuthRef(authRef);
   if (!parsed) return null;
 
   if (parsed.kind === 'env') {
     return readEnvCredential(parsed.varName);
   }
 
-  return readProviderSecret(parsed.account, diag);
+  return readProviderSecret(parsed, diag);
 }
 
 /** Read OAuth metadata retained alongside the access token. */
@@ -278,8 +343,13 @@ export async function resolveProviderOAuthAccountId(
   diag?: (msg: string) => void,
 ): Promise<string | undefined> {
   const parsed = parseAuthRef(authRef);
-  if (!parsed || parsed.kind !== 'keyring' || !oauthProviderIdFromAccount(parsed.account)) return undefined;
-  const raw = await readKeyringAccount(parsed.account, diag);
+  if (
+    !parsed
+    || parsed.kind === 'env'
+    || parsed.kind === 'none'
+    || !oauthProviderIdFromAccount(parsed.account)
+  ) return undefined;
+  const raw = await readStoredCredential(parsed, diag);
   return parseStoredOAuthCredential(raw)?.accountId;
 }
 
@@ -288,8 +358,13 @@ export async function resolveProviderOAuthProviderData(
   diag?: (msg: string) => void,
 ): Promise<Record<string, unknown> | undefined> {
   const parsed = parseAuthRef(authRef);
-  if (!parsed || parsed.kind !== 'keyring' || !oauthProviderIdFromAccount(parsed.account)) return undefined;
-  const raw = await readKeyringAccount(parsed.account, diag);
+  if (
+    !parsed
+    || parsed.kind === 'env'
+    || parsed.kind === 'none'
+    || !oauthProviderIdFromAccount(parsed.account)
+  ) return undefined;
+  const raw = await readStoredCredential(parsed, diag);
   return parseStoredOAuthCredential(raw)?.providerData;
 }
 
@@ -309,47 +384,50 @@ function decodeProviderSecret(raw: string | null): string | null {
   return trimmed;
 }
 
-async function refreshOAuthKeyringAccount(
-  account: string,
+async function refreshOAuthStoredCredential(
+  ref: StoredCredentialRef,
   providerId: string,
-  raw: string,
   diag?: (msg: string) => void,
 ): Promise<string | null> {
-  const existing = oauthRefreshInflight.get(account);
+  const authRef = storedCredentialAuthRef(ref);
+  const existing = oauthRefreshInflight.get(authRef);
   if (existing) return existing;
 
-  const work = (async (): Promise<string | null> => {
-    const cred = parseStoredOAuthCredential(raw);
+  const work = withCredentialMutationLock(authRef, async (): Promise<string | null> => {
+    const currentRaw = await readStoredCredential(ref, diag);
+    if (!currentRaw) return null;
+    const cred = parseStoredOAuthCredential(currentRaw);
     if (!cred || !oauthCredentialShouldRefresh(cred, providerId)) {
-      return decodeProviderSecret(raw);
+      return decodeProviderSecret(currentRaw);
     }
     try {
       const refreshed = await refreshStoredOAuthCredential(providerId, cred);
       const json = oauthCredentialToKeychainJson(refreshed);
-      await writeKeyringAccount(account, json, diag);
+      const saved = await saveProviderCredential(authRef, json, diag);
+      if (!saved) throw new Error('Could not persist refreshed OAuth credential');
       return refreshed.access;
     } catch (err) {
       diag?.(err instanceof Error ? err.message : String(err));
       if (cred.access && cred.expires > Date.now()) return cred.access;
       throw err;
     }
-  })();
+  });
 
-  oauthRefreshInflight.set(account, work);
+  oauthRefreshInflight.set(authRef, work);
   try {
     return await work;
   } finally {
-    oauthRefreshInflight.delete(account);
+    oauthRefreshInflight.delete(authRef);
   }
 }
 
-async function readProviderSecret(account: string, diag?: (msg: string) => void): Promise<string | null> {
-  const raw = await readKeyringAccount(account, diag);
+async function readProviderSecret(ref: StoredCredentialRef, diag?: (msg: string) => void): Promise<string | null> {
+  const raw = await readStoredCredential(ref, diag);
   if (!raw) return null;
 
-  const oauthProviderId = oauthProviderIdFromAccount(account);
+  const oauthProviderId = oauthProviderIdFromAccount(ref.account);
   if (oauthProviderId && raw.trim().startsWith('{')) {
-    return refreshOAuthKeyringAccount(account, oauthProviderId, raw, diag);
+    return refreshOAuthStoredCredential(ref, oauthProviderId, diag);
   }
   return decodeProviderSecret(raw);
 }
@@ -360,18 +438,56 @@ export async function saveProviderCredential(
   diag?: (msg: string) => void,
 ): Promise<boolean> {
   const parsed = parseAuthRef(authRef);
-  if (!parsed || parsed.kind !== 'keyring') return false;
-  return writeKeyringAccount(parsed.account, key, diag);
+  if (!parsed || parsed.kind === 'env' || parsed.kind === 'none') return false;
+  return withCredentialMutationLock(authRef, async () => {
+    const written = await writeStoredCredential(parsed, key, diag);
+    if (!written) return false;
+    const readBack = await readStoredCredential(parsed, diag);
+    if (readBack === key) return true;
+    diag?.('credential store read-back verification failed');
+    return false;
+  });
 }
 
-/** Delete a provider secret from keyring (no-op for env: refs). */
+/** Verify that a credential backend can durably round-trip a disposable secret. */
+export async function probeProviderCredentialStore(
+  authRef: string,
+  diag?: (msg: string) => void,
+): Promise<boolean> {
+  const parsed = parseAuthRef(authRef);
+  if (!parsed || parsed.kind === 'env' || parsed.kind === 'none') return false;
+  const probeAccount = `${parsed.account}::probe::${randomUUID()}`;
+  const probeRef: StoredCredentialRef = parsed.kind === 'helper'
+    ? { kind: 'helper', helperId: parsed.helperId, account: probeAccount }
+    : { kind: 'keyring', account: probeAccount };
+  const value = randomUUID();
+  let verified = false;
+  try {
+    const written = await writeStoredCredential(probeRef, value, diag);
+    if (!written) return false;
+    const readBack = await readStoredCredential(probeRef, diag);
+    if (readBack !== value) {
+      diag?.('credential store probe read-back verification failed');
+      return false;
+    }
+    verified = true;
+  } finally {
+    const deleted = await deleteStoredCredential(probeRef, diag);
+    if (!deleted) {
+      diag?.('credential store probe cleanup failed');
+      verified = false;
+    }
+  }
+  return verified;
+}
+
+/** Delete a provider secret from its credential store (no-op for env: refs). */
 export async function deleteProviderCredential(
   authRef: string,
   diag?: (msg: string) => void,
 ): Promise<boolean> {
   const parsed = parseAuthRef(authRef);
-  if (!parsed || parsed.kind !== 'keyring') return false;
-  return deleteKeyringAccount(parsed.account, diag);
+  if (!parsed || parsed.kind === 'env' || parsed.kind === 'none') return false;
+  return withCredentialMutationLock(authRef, () =>
+    deleteStoredCredential(parsed, diag));
 }
-
-

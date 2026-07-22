@@ -1,20 +1,26 @@
 // src/registry/io.ts — load/save providers.json with secure permissions
 
+import { randomUUID } from 'node:crypto';
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
   openSync,
   readFileSync,
   renameSync,
+  unlinkSync,
   writeSync,
-  closeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { ensureLegacyAppHomeMigrated, getAppHome, getProvidersPath } from '../paths.js';
 import type { ProviderRegistry, RegistryProvider } from './types.js';
 import { REGISTRY_SCHEMA_VERSION } from './types.js';
+import {
+  assertRegistryWriteOwnership,
+  withRegistryWriteLockSync,
+} from './lock.js';
 import { migrateOAuthOpenAiProvider } from './migrate.js';
 import { isValidProviderId } from './validate.js';
 
@@ -122,7 +128,11 @@ export function loadRegistry(path = getProvidersPath()): ProviderRegistry {
     const migrated = migrateOAuthOpenAiProvider(registry);
     if (migrated) {
       try {
-        saveRegistry(registry, path);
+        withRegistryWriteLockSync(() => {
+          if (!existsSync(path)) return;
+          const current = parseRegistry(JSON.parse(readFileSync(path, 'utf8')));
+          if (migrateOAuthOpenAiProvider(current)) saveRegistry(current, path);
+        }, { lockPath: `${path}.lock` });
       } catch {
         // Parsed data remains usable even when migration persistence fails.
       }
@@ -134,6 +144,7 @@ export function loadRegistry(path = getProvidersPath()): ProviderRegistry {
 }
 
 export function saveRegistry(registry: ProviderRegistry, path = getProvidersPath()): void {
+  assertRegistryWriteOwnership(path);
   const payload = `${JSON.stringify(registry, null, 2)}\n`;
   const backup = `${path}.bak`;
   if (existsSync(path)) {
@@ -143,9 +154,18 @@ export function saveRegistry(registry: ProviderRegistry, path = getProvidersPath
       // backup is best-effort
     }
   }
-  const tmp = `${path}.tmp`;
-  writeSecureFile(tmp, payload);
-  renameSync(tmp, path);
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeSecureFile(tmp, payload);
+    assertRegistryWriteOwnership(path);
+    renameSync(tmp, path);
+  } finally {
+    try {
+      unlinkSync(tmp);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
 }
 
 export function emptyRegistry(): ProviderRegistry {

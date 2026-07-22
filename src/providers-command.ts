@@ -114,7 +114,7 @@ function providerLabel(name: string, modelCount: number, enabled: boolean): stri
 export async function runProvidersAuth(providerId: string, method?: ProviderAuthMethod): Promise<number> {
   try {
     const result = await authenticateProvider(providerId, { method });
-    p.log.success(`Signed in to ${result.registryProvider.name} — credential saved to Keychain.`);
+    p.log.success(`Signed in to ${result.registryProvider.name} — credential saved to the credential store.`);
     return 0;
   } catch (err) {
     if (err instanceof Error && err.message === 'Cancelled') {
@@ -312,10 +312,14 @@ export async function runProvidersRemove(id: string, interactive = false): Promi
     p.log.error(result.error ?? `Could not remove ${id}`);
     return 1;
   }
+  if (result.error) {
+    p.log.error(result.error);
+    return 1;
+  }
 
   p.log.success(`Removed ${result.name ?? id}.`);
   if (result.credentialDeleted) {
-    p.log.info('Provider API key removed from Keychain.');
+    p.log.info('Provider API key removed from the credential store.');
   }
   return 0;
 }
@@ -359,7 +363,7 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
       label: provider.enabled ? 'Disable provider' : 'Enable provider',
       hint: provider.enabled ? 'Hide from clodex claude picker' : 'Show in clodex claude picker',
     },
-    { value: 'remove', label: 'Remove provider', hint: 'Delete from registry and Keychain when safe' },
+    { value: 'remove', label: 'Remove provider', hint: 'Delete from registry and credential store when safe' },
     { value: 'back', label: 'Back', hint: '' },
   );
 

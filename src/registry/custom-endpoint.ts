@@ -1,10 +1,16 @@
 // src/registry/custom-endpoint.ts — add custom OpenAI/Anthropic-compatible providers
 
+import { randomUUID } from 'node:crypto';
 import { saveProviderCredential } from '../env.js';
+import { credentialAuthRef } from '../credential-helper.js';
 import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
 import { loadRegistry, saveRegistry } from './io.js';
+import {
+  withCredentialMutationLock,
+  withRegistryWriteLock,
+} from './lock.js';
 import type { CachedModel, RegistryProvider } from './types.js';
 import { customProviderId, isValidProviderId, slugifyProviderId } from './validate.js';
 import { validateCustomEndpointUrl } from './url-security.js';
@@ -52,7 +58,7 @@ export async function fetchAnthropicModels(
     const response = await fetch(modelsUrl, {
       method: 'GET',
       headers: {
-        'x-api-key': apiKey,
+        ...(apiKey ? { 'x-api-key': apiKey } : {}),
         'anthropic-version': '2023-06-01',
         Accept: 'application/json',
         ...extraHeaders,
@@ -146,29 +152,31 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
     return { added: false, error: urlCheck.error, hint: urlCheck.hint };
   }
 
-  const registry = loadRegistry();
-  const providerId = uniqueProviderId(input.displayName.trim(), registry);
+  const normalizedUrl = urlCheck.normalizedUrl;
+  const displayName = input.displayName.trim();
+  const probeProviderId = uniqueProviderId(displayName, { providers: [] });
   const npm = npmForKind(input.kind);
-  const apiKey = input.apiKey.trim() || 'local';
+  const apiKey = input.apiKey.trim();
+  const anonymous = apiKey.length === 0;
 
   const headers = input.headers && Object.keys(input.headers).length > 0 ? input.headers : undefined;
 
   let fetched: { models: CachedModel[]; baseUrl: string; error?: string; hint?: string };
   if (input.kind === 'anthropic') {
-    fetched = await fetchAnthropicModels(urlCheck.normalizedUrl, apiKey, headers);
+    fetched = await fetchAnthropicModels(normalizedUrl, apiKey, headers);
   } else {
     fetched = await fetchTemplateModels(
       {
-        id: providerId,
-        name: input.displayName,
-        authType: apiKey === 'local' ? 'none' : 'api',
+        id: probeProviderId,
+        name: displayName,
+        authType: anonymous ? 'none' : 'api',
         npm,
-        defaultBaseUrl: urlCheck.normalizedUrl,
+        defaultBaseUrl: normalizedUrl,
         modelSource: 'api-list',
         supported: true,
       },
       apiKey,
-      urlCheck.normalizedUrl,
+      normalizedUrl,
       headers,
     );
   }
@@ -177,40 +185,51 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
     return { added: false, error: fetched.error ?? 'No models returned.', hint: fetched.hint };
   }
 
-  if (apiKey !== 'local') {
-    const saved = await saveProviderCredential(`keyring:provider:${providerId}`, apiKey);
+  const authRef = anonymous
+    ? 'none:anonymous'
+    : credentialAuthRef(`provider:${probeProviderId}:${randomUUID()}`);
+  const commitProvider = () => withRegistryWriteLock(() => {
+    const registry = loadRegistry();
+    const providerId = uniqueProviderId(displayName, registry);
+
+    const now = new Date().toISOString();
+    const entry: RegistryProvider = {
+      id: providerId,
+      templateId: input.kind === 'anthropic' ? 'custom-anthropic' : 'custom-openai',
+      name: displayName,
+      enabled: true,
+      authRef,
+      authType: anonymous ? 'none' : 'api',
+      api: { npm, url: fetched.baseUrl, ...(headers ? { headers } : {}) },
+      addedAt: now,
+      refreshedAt: now,
+      modelsCache: {
+        fetchedAt: now,
+        models: fetched.models.map(m => ({
+          ...m,
+          modelFormat: modelFormatForKind(input.kind),
+          npm,
+          apiUrl: fetched.baseUrl,
+        })),
+      },
+    };
+
+    registry.providers.push(entry);
+    saveRegistry(registry);
+
+    return { added: true, provider: entry, modelCount: fetched.models.length };
+  });
+
+  if (anonymous) return commitProvider();
+  return withCredentialMutationLock(authRef, async () => {
+    const saved = await saveProviderCredential(authRef, apiKey);
     if (!saved) {
-      return { added: false, error: 'Could not save API key to Keychain.', hint: 'Grant Keychain access and try again.' };
+      return {
+        added: false,
+        error: 'Could not save API key to the credential store.',
+        hint: 'Check credential-store access and try again.',
+      };
     }
-  }
-
-  const now = new Date().toISOString();
-  const entry: RegistryProvider = {
-    id: providerId,
-    templateId: input.kind === 'anthropic' ? 'custom-anthropic' : 'custom-openai',
-    name: input.displayName.trim(),
-    enabled: true,
-    authRef: apiKey === 'local' ? `keyring:provider:${providerId}` : `keyring:provider:${providerId}`,
-    api: { npm, url: fetched.baseUrl, ...(headers ? { headers } : {}) },
-    addedAt: now,
-    refreshedAt: now,
-    modelsCache: {
-      fetchedAt: now,
-      models: fetched.models.map(m => ({
-        ...m,
-        modelFormat: modelFormatForKind(input.kind),
-        npm,
-        apiUrl: fetched.baseUrl,
-      })),
-    },
-  };
-
-  if (apiKey === 'local') {
-    await saveProviderCredential(entry.authRef, 'local');
-  }
-
-  registry.providers.push(entry);
-  saveRegistry(registry);
-
-  return { added: true, provider: entry, modelCount: fetched.models.length };
+    return commitProvider();
+  });
 }

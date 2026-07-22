@@ -3,7 +3,7 @@
 import { resolveProviderCredential, resolveProviderOAuthAccountId, resolveProviderOAuthProviderData } from '../env.js';
 import type { CompatibilityAgent } from '../model-compatibility.js';
 import type { LocalProvider } from '../types.js';
-import { materializeRegistry } from './materialize.js';
+import { isAnonymousProvider, materializeRegistry } from './materialize.js';
 import { loadRegistry } from './io.js';
 
 /** Load enabled providers from ~/.clodex/providers.json with resolved credentials. */
@@ -16,6 +16,7 @@ export async function loadRegistryProviders(
   const oauthAccountIds = new Map<string, string>();
   const oauthProviderData = new Map<string, Record<string, unknown>>();
   await Promise.all(registry.providers.map(async provider => {
+    if (isAnonymousProvider(provider)) return;
     try {
       const key = await resolveProviderCredential(provider.id, provider.authRef, diag);
       if (key) keys.set(provider.id, key);
@@ -47,5 +48,9 @@ export function loadRegistryProvidersSync(
   opts?: { agent?: CompatibilityAgent },
 ): LocalProvider[] {
   const registry = loadRegistry();
-  return materializeRegistry(registry, provider => resolveKey(provider.id, provider.authRef), opts);
+  return materializeRegistry(
+    registry,
+    provider => isAnonymousProvider(provider) ? null : resolveKey(provider.id, provider.authRef),
+    opts,
+  );
 }

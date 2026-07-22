@@ -4,7 +4,10 @@ import { printOAuthStepsPanel } from '../ui.js';
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import open from 'open';
-import { saveProviderCredential } from '../env.js';
+import {
+  probeProviderCredentialStore,
+  saveProviderCredential,
+} from '../env.js';
 import { runOpenAiDeviceCodeFlow } from '../oauth/openai.js';
 import {
   supportsNativeOAuth,
@@ -16,6 +19,10 @@ import {
 import { getTemplateById } from '../provider-templates.js';
 import { oauthAuthRef, toOAuthRegistryId } from './import-build.js';
 import { loadRegistry, saveRegistry } from './io.js';
+import {
+  withCredentialMutationLock,
+  withRegistryWriteLock,
+} from './lock.js';
 import { refreshProviderModels } from './refresh-models.js';
 import type { RegistryProvider } from './types.js';
 
@@ -74,14 +81,17 @@ export async function saveNativeOAuthCredential(
 ): Promise<void> {
   const cred = tokensToStoredCredential(tokens, undefined, accountId, providerData);
   const registryId = toOAuthRegistryId(providerId);
-  let diagMsg = '';
-  const saved = await saveProviderCredential(
-    oauthAuthRef(registryId),
-    oauthCredentialToKeychainJson(cred),
-    (msg) => { diagMsg = msg; },
-  );
-  if (!saved) throw new Error(`Could not save OAuth tokens to Keychain${diagMsg ? ` — ${diagMsg}` : ' — grant access and try again'}`);
-  await upsertOAuthProvider(providerId, cred);
+  const authRef = oauthAuthRef(registryId);
+  await withCredentialMutationLock(authRef, async () => {
+    let diagMsg = '';
+    const saved = await saveProviderCredential(
+      authRef,
+      oauthCredentialToKeychainJson(cred),
+      (msg) => { diagMsg = msg; },
+    );
+    if (!saved) throw new Error(`Could not save OAuth tokens to the credential store${diagMsg ? ` — ${diagMsg}` : ' — check access and try again'}`);
+    await upsertOAuthProvider(providerId, cred, authRef);
+  });
 }
 
 /**
@@ -93,43 +103,48 @@ function oauthDisplayName(registryId: string, fallbackName: string): string {
   return fallbackName;
 }
 
-async function upsertOAuthProvider(providerId: string, cred: StoredOAuthCredential): Promise<RegistryProvider> {
-  const registryId = toOAuthRegistryId(providerId);
-  const templateId = providerId.replace(/-oauth$/, '') || providerId;
+async function upsertOAuthProvider(
+  providerId: string,
+  cred: StoredOAuthCredential,
+  authRef: string,
+): Promise<RegistryProvider> {
+  return withRegistryWriteLock(() => {
+    const registryId = toOAuthRegistryId(providerId);
+    const templateId = providerId.replace(/-oauth$/, '') || providerId;
 
-  const registry = loadRegistry();
-  const authRef = oauthAuthRef(registryId);
-  const template = getTemplateById(templateId);
-  let entry: RegistryProvider | undefined = registry.providers.find(pr => pr.id === registryId);
+    const registry = loadRegistry();
+    const template = getTemplateById(templateId);
+    let entry: RegistryProvider | undefined = registry.providers.find(pr => pr.id === registryId);
 
-  if (!entry) {
-    if (!template) {
-      throw new Error(`Provider "${providerId}" is not in your registry and has no template`);
+    if (!entry) {
+      if (!template) {
+        throw new Error(`Provider "${providerId}" is not in your registry and has no template`);
+      }
+      const displayName = oauthDisplayName(registryId, template.name);
+      entry = {
+        id: registryId,
+        templateId,
+        name: displayName,
+        enabled: true,
+        authRef,
+        authType: 'oauth',
+        api: {
+          npm: template.npm,
+          url: template.defaultBaseUrl ?? '',
+          ...(template.headers ? { headers: template.headers } : {}),
+        },
+        addedAt: new Date().toISOString(),
+      };
+    } else {
+      entry = { ...entry, authType: 'oauth', authRef, templateId };
     }
-    const displayName = oauthDisplayName(registryId, template.name);
-    entry = {
-      id: registryId,
-      templateId,
-      name: displayName,
-      enabled: true,
-      authRef,
-      authType: 'oauth',
-      api: {
-        npm: template.npm,
-        url: template.defaultBaseUrl ?? '',
-        ...(template.headers ? { headers: template.headers } : {}),
-      },
-      addedAt: new Date().toISOString(),
-    };
-  } else {
-    entry = { ...entry, authType: 'oauth', authRef, templateId };
-  }
 
-  const idx = registry.providers.findIndex(pr => pr.id === registryId);
-  if (idx >= 0) registry.providers[idx] = entry;
-  else registry.providers.push(entry);
-  saveRegistry(registry);
-  return entry;
+    const idx = registry.providers.findIndex(pr => pr.id === registryId);
+    if (idx >= 0) registry.providers[idx] = entry;
+    else registry.providers.push(entry);
+    saveRegistry(registry);
+    return entry;
+  });
 }
 
 export async function authenticateProvider(
@@ -142,19 +157,36 @@ export async function authenticateProvider(
     throw new Error('OAuth sign-in is only available for openai (ChatGPT Plus/Pro).');
   }
 
-  const cred = await runNativeDeviceCode(providerId);
-
-  let nativeDiagMsg = '';
-  const saved = await saveProviderCredential(
-    oauthAuthRef(registryId),
-    oauthCredentialToKeychainJson(cred),
-    (msg) => { nativeDiagMsg = msg; },
-  );
-  if (!saved) {
-    p.log.warn(`Could not save OAuth tokens to Keychain — ${nativeDiagMsg || 'session may not persist.'}`);
+  const authRef = oauthAuthRef(registryId);
+  let storeDiagMsg = '';
+  const storeReady = await probeProviderCredentialStore(authRef, (msg) => { storeDiagMsg = msg; });
+  if (!storeReady) {
+    throw new Error(
+      `Credential store is unavailable${storeDiagMsg ? `: ${storeDiagMsg}` : ''}. `
+      + 'Set CLODEX_CREDENTIAL_HELPER to an absolute path to an external credential helper and try again.',
+    );
   }
 
-  const registryProvider = await upsertOAuthProvider(providerId, cred);
+  const cred = await runNativeDeviceCode(providerId);
+
+  const persisted = await withCredentialMutationLock(authRef, async () => {
+    let nativeDiagMsg = '';
+    const saved = await saveProviderCredential(
+      authRef,
+      oauthCredentialToKeychainJson(cred),
+      (msg) => { nativeDiagMsg = msg; },
+    );
+    const registryProvider = await upsertOAuthProvider(
+      providerId,
+      cred,
+      authRef,
+    );
+    return { saved, nativeDiagMsg, registryProvider };
+  });
+  if (!persisted.saved) {
+    p.log.warn(`Could not save OAuth tokens to the credential store — ${persisted.nativeDiagMsg || 'session may not persist.'}`);
+  }
+  const { registryProvider } = persisted;
 
   const refreshSpinner = p.spinner();
   refreshSpinner.start('Refreshing model list...');

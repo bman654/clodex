@@ -2,23 +2,37 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { parseProvidersArgs, providerHubChoiceValue, providersHelpText, runProvidersAdd } from '../src/providers-command.js';
+import {
+  parseProvidersArgs,
+  providerHubChoiceValue,
+  providersHelpText,
+  runProvidersAdd,
+  runProvidersRemove,
+} from '../src/providers-command.js';
 import {
   removeProviderFromRegistry,
   toggleProviderEnabled,
 } from '../src/registry/crud.js';
 import { emptyRegistry, loadRegistry, saveRegistry } from '../src/registry/io.js';
+import { withRegistryWriteLockSync } from '../src/registry/lock.js';
 import { providerAuthHelpText } from '../src/registry/provider-auth.js';
 import type { RegistryProvider } from '../src/registry/types.js';
 import * as env from '../src/env.js';
 
 const selectMock = vi.hoisted(() => vi.fn());
+const logErrorMock = vi.hoisted(() => vi.fn());
+const logSuccessMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@clack/prompts', async importOriginal => {
   const actual = await importOriginal<typeof import('@clack/prompts')>();
   return {
     ...actual,
     select: selectMock,
+    log: {
+      ...actual.log,
+      error: logErrorMock,
+      success: logSuccessMock,
+    },
   };
 });
 
@@ -106,6 +120,8 @@ describe('registry crud', () => {
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'clodex-crud-'));
     process.env.CLODEX_HOME = home;
+    logErrorMock.mockReset();
+    logSuccessMock.mockReset();
   });
 
   afterEach(() => {
@@ -118,7 +134,7 @@ describe('registry crud', () => {
   it('toggles provider enabled state', () => {
     const registry = emptyRegistry();
     registry.providers.push(openaiEntry());
-    saveRegistry(registry);
+    withRegistryWriteLockSync(() => saveRegistry(registry));
 
     expect(toggleProviderEnabled('openai')).toEqual({ toggled: true, enabled: false });
     expect(loadRegistry().providers[0]?.enabled).toBe(false);
@@ -127,7 +143,7 @@ describe('registry crud', () => {
   it('removes provider and deletes its credential', async () => {
     const registry = emptyRegistry();
     registry.providers.push(openaiEntry());
-    saveRegistry(registry);
+    withRegistryWriteLockSync(() => saveRegistry(registry));
 
     const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(true);
     const result = await removeProviderFromRegistry('openai');
@@ -137,13 +153,35 @@ describe('registry crud', () => {
     expect(deleteSpy).toHaveBeenCalledWith('keyring:provider:openai');
   });
 
+  it('returns failure and avoids success output when credential cleanup fails', async () => {
+    const authRef = 'keyring:provider:openai';
+    const registry = emptyRegistry();
+    registry.providers.push(openaiEntry({ authRef }));
+    withRegistryWriteLockSync(() => saveRegistry(registry));
+
+    const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(false);
+    const code = await runProvidersRemove('openai');
+
+    expect(code).toBe(1);
+    expect(loadRegistry().providers).toHaveLength(0);
+    expect(deleteSpy).toHaveBeenCalledWith(authRef);
+    expect(logErrorMock).toHaveBeenCalledWith(expect.stringContaining(authRef));
+    expect(logErrorMock.mock.calls[0]?.[0]).toMatch(
+      /credential.*(?:cleanup|deletion).*failed/i,
+    );
+    expect(logErrorMock.mock.calls[0]?.[0]).toContain(
+      'must be removed manually',
+    );
+    expect(logSuccessMock).not.toHaveBeenCalled();
+  });
+
   it('keeps a shared credential when another provider still references it', async () => {
     const registry = emptyRegistry();
     registry.providers.push(
       openaiEntry({ authRef: 'keyring:provider:shared' }),
       openaiEntry({ id: 'openai-oauth', name: 'OpenAI (ChatGPT)', authType: 'oauth', authRef: 'keyring:provider:shared' }),
     );
-    saveRegistry(registry);
+    withRegistryWriteLockSync(() => saveRegistry(registry));
 
     const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(true);
     const result = await removeProviderFromRegistry('openai');

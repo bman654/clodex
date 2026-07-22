@@ -10,6 +10,7 @@ import {
   saveRegistry,
   slugifyProviderId,
 } from '../src/registry/index.js';
+import { withRegistryWriteLockSync } from '../src/registry/lock.js';
 
 describe('provider id validation', () => {
   it('accepts stable slugs', () => {
@@ -69,7 +70,7 @@ describe('registry io', () => {
         }],
       },
     });
-    saveRegistry(registry);
+    withRegistryWriteLockSync(() => saveRegistry(registry));
     const loaded = loadRegistry();
     expect(loaded.providers).toHaveLength(1);
     expect(loaded.providers[0]?.id).toBe('groq');
@@ -77,7 +78,7 @@ describe('registry io', () => {
   });
 
   it('writes providers.json with restrictive permissions', () => {
-    saveRegistry(emptyRegistry());
+    withRegistryWriteLockSync(() => saveRegistry(emptyRegistry()));
     const path = join(home, 'providers.json');
     expect(existsSync(path)).toBe(true);
     const mode = statSync(path).mode & 0o777;
@@ -106,6 +107,38 @@ describe('registry io', () => {
     const loaded = loadRegistry(path);
     expect(loaded.providers).toHaveLength(1);
     expect(loaded.providers[0]?.id).toBe('groq');
+  });
+
+  it('serializes migration writes and reloads state after acquiring the lock', () => {
+    const path = join(home, 'providers.json');
+    const lockPath = `${path}.lock`;
+    const raw = {
+      schemaVersion: 1,
+      providers: [{
+        id: 'openai',
+        templateId: 'openai',
+        name: 'OpenAI',
+        enabled: true,
+        authRef: 'keyring:oauth:provider:openai',
+        authType: 'oauth',
+        api: { npm: '@ai-sdk/openai' },
+        addedAt: '2026-06-09T00:00:00.000Z',
+      }],
+    };
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path, JSON.stringify(raw));
+    writeFileSync(lockPath, JSON.stringify({
+      pid: 2_147_483_647,
+      startedAt: Date.now() - 60_000,
+      token: 'dead-owner',
+    }));
+
+    const loaded = loadRegistry(path);
+    const persisted = JSON.parse(readFileSync(path, 'utf8'));
+
+    expect(loaded.providers[0]?.id).toBe('openai-oauth');
+    expect(persisted.providers[0]?.id).toBe('openai-oauth');
+    expect(existsSync(lockPath)).toBe(false);
   });
 
 });
@@ -148,6 +181,7 @@ describe('materializeRegistry', () => {
       name: 'Groq',
       enabled: true,
       authRef: 'keyring:provider:groq',
+      authType: 'api',
       api: { npm: '@ai-sdk/groq' },
       addedAt: '2026-06-09T00:00:00.000Z',
       modelsCache: {
@@ -162,6 +196,195 @@ describe('materializeRegistry', () => {
       },
     });
     expect(materializeRegistry(registry, () => null)).toHaveLength(0);
+  });
+
+  it('materializes explicit anonymous access without consulting a credential resolver', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'anonymous-provider',
+      templateId: 'anonymous-provider',
+      name: 'Anonymous Provider',
+      enabled: true,
+      authRef: 'none:anonymous',
+      authType: 'none',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://anonymous.example/v1' },
+      addedAt: '2026-06-09T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-06-09T00:00:00.000Z',
+        models: [{
+          id: 'free-model',
+          name: 'Free Model',
+          upstreamModelId: 'free-model',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    });
+
+    const locals = materializeRegistry(registry, () => {
+      throw new Error('anonymous access must not resolve a credential');
+    });
+
+    expect(locals).toHaveLength(1);
+    expect(locals[0]?.apiKey).toBe('');
+    expect(locals[0]?.authRef).toBe('none:anonymous');
+  });
+
+  it('normalizes the current-main anonymous custom endpoint representation', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'legacy-custom',
+      templateId: 'custom-openai',
+      name: 'Legacy Custom',
+      enabled: true,
+      authRef: 'keyring:provider:legacy-custom',
+      api: {
+        npm: '@ai-sdk/openai-compatible',
+        url: 'https://legacy-custom.example/v1',
+      },
+      addedAt: '2026-06-09T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-06-09T00:00:00.000Z',
+        models: [{
+          id: 'local-model',
+          name: 'Local Model',
+          upstreamModelId: 'local-model',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    });
+
+    const locals = materializeRegistry(registry, () => 'local');
+
+    expect(locals).toHaveLength(1);
+    expect(locals[0]?.apiKey).toBe('');
+    expect(locals[0]?.authRef).toBe('none:anonymous');
+    expect(locals[0]?.authType).toBe('none');
+  });
+
+  it('rejects an ambiguous local sentinel with a mismatched credential reference', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'legacy-custom',
+      templateId: 'custom-openai',
+      name: 'Legacy Custom',
+      enabled: true,
+      authRef: 'keyring:provider:other-provider',
+      api: {
+        npm: '@ai-sdk/openai-compatible',
+        url: 'https://legacy-custom.example/v1',
+      },
+      addedAt: '2026-06-09T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-06-09T00:00:00.000Z',
+        models: [{
+          id: 'local-model',
+          name: 'Local Model',
+          upstreamModelId: 'local-model',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    });
+
+    expect(materializeRegistry(registry, () => 'local')).toHaveLength(0);
+  });
+
+  it('does not materialize a current-main anonymous candidate when its credential is missing', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'legacy-custom',
+      templateId: 'custom-openai',
+      name: 'Legacy Custom',
+      enabled: true,
+      authRef: 'keyring:provider:legacy-custom',
+      api: {
+        npm: '@ai-sdk/openai-compatible',
+        url: 'https://legacy-custom.example/v1',
+      },
+      addedAt: '2026-06-09T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-06-09T00:00:00.000Z',
+        models: [{
+          id: 'local-model',
+          name: 'Local Model',
+          upstreamModelId: 'local-model',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    });
+
+    expect(materializeRegistry(registry, () => null)).toHaveLength(0);
+  });
+
+  it('preserves a real credential on a custom endpoint without authType', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'legacy-custom',
+      templateId: 'custom-openai',
+      name: 'Legacy Custom',
+      enabled: true,
+      authRef: 'keyring:provider:legacy-custom',
+      api: {
+        npm: '@ai-sdk/openai-compatible',
+        url: 'https://legacy-custom.example/v1',
+      },
+      addedAt: '2026-06-09T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-06-09T00:00:00.000Z',
+        models: [{
+          id: 'local-model',
+          name: 'Local Model',
+          upstreamModelId: 'local-model',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    });
+
+    const locals = materializeRegistry(registry, () => 'sk-real-key');
+
+    expect(locals).toHaveLength(1);
+    expect(locals[0]?.apiKey).toBe('sk-real-key');
+    expect(locals[0]?.authRef).toBe('keyring:provider:legacy-custom');
+    expect(locals[0]?.authType).toBeUndefined();
+  });
+
+  it('normalizes the unambiguous legacy no-auth representation', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'legacy-anonymous',
+      templateId: 'custom-openai',
+      name: 'Legacy Anonymous',
+      enabled: true,
+      authRef: 'keyring:provider:legacy-anonymous',
+      authType: 'none',
+      api: {
+        npm: '@ai-sdk/openai-compatible',
+        url: 'https://legacy-anonymous.example/v1',
+      },
+      addedAt: '2026-06-09T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-06-09T00:00:00.000Z',
+        models: [{
+          id: 'local-model',
+          name: 'Local Model',
+          upstreamModelId: 'local-model',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    });
+
+    const locals = materializeRegistry(registry, () => {
+      throw new Error('legacy no-auth access must not resolve a credential');
+    });
+
+    expect(locals).toHaveLength(1);
+    expect(locals[0]?.apiKey).toBe('');
+    expect(locals[0]?.authRef).toBe('none:anonymous');
   });
 
   it('marks NVIDIA imported models as free provider access', () => {

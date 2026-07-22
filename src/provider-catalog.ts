@@ -3,6 +3,7 @@ import type { CompatibilityAgent } from './model-compatibility.js';
 import { oauthAuthRef } from './registry/import-build.js';
 import { loadRegistry } from './registry/io.js';
 import { loadRegistryProviders } from './registry/load.js';
+import { isAnonymousProvider } from './registry/materialize.js';
 import { getTemplateById } from './provider-templates.js';
 import type { LocalProvider } from './types.js';
 import type { ServerModelInfo } from './server/models.js';
@@ -25,8 +26,10 @@ export function providersForPicker(providers: LocalProvider[]): LocalProvider[] 
   return providers.sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true }));
 }
 
-/** Resolve API key when provider.apiKey is empty (registry authRef or OAuth keyring). */
+/** Resolve API key when provider.apiKey is empty (registry authRef or OAuth credential store). */
 export async function resolveLocalProviderApiKey(provider: LocalProvider): Promise<string | null> {
+  if (provider.authRef === 'none:anonymous') return 'anonymous';
+
   const direct = provider.apiKey?.trim();
   if (direct) return direct;
   
@@ -38,7 +41,7 @@ export async function resolveLocalProviderApiKey(provider: LocalProvider): Promi
   }
 
   const reg = loadRegistry().providers.find(p => p.id === provider.id);
-  const authRef = reg?.authRef ?? oauthAuthRef(provider.id);
+  const authRef = provider.authRef ?? reg?.authRef ?? oauthAuthRef(provider.id);
   return resolveProviderCredential(provider.id, authRef);
 }
 
@@ -47,13 +50,17 @@ export function formatRegistryAuthLabel(
   provider: Pick<import('./registry/types.js').RegistryProvider, 'authRef' | 'authType'>,
 ): string {
   if (provider.authType === 'oauth' || provider.authRef.includes('oauth:provider:')) {
-    return 'keychain (OAuth)';
+    return provider.authRef.startsWith('helper:') ? 'helper (OAuth)' : 'keychain (OAuth)';
   }
+  if (isAnonymousProvider(provider)) return 'anonymous';
   if (provider.authType === 'none') {
     return 'gcloud / manual credentials';
   }
   if (provider.authRef.startsWith('keyring:')) {
     return 'keychain (API key)';
+  }
+  if (provider.authRef.startsWith('helper:')) {
+    return 'helper (API key)';
   }
   if (provider.authRef.startsWith('env:')) {
     return provider.authRef;

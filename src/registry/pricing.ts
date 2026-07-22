@@ -22,6 +22,7 @@ import bundledPricing from '../data/pricing-cache.json';
 import { getAppHome } from '../paths.js';
 import type { CachedModel } from './types.js';
 import { loadRegistry, saveRegistry } from './io.js';
+import { withRegistryWriteLock, withRegistryWriteLockSync } from './lock.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 
 export const PRICING_API_URL = 'https://ai-model-pricing.com/api/v1/pricing.json';
@@ -243,11 +244,13 @@ export function applyPricingToRegistryProviders(
 
 /** Apply bundled or on-disk pricing cache synchronously (non-blocking enrich baseline). */
 export function applyCachedPricing(): boolean {
-  const registry = loadRegistry();
-  const cache = loadPricingCache();
-  const changed = applyPricingToRegistryProviders(registry, cache);
-  if (changed) saveRegistry(registry);
-  return changed;
+  return withRegistryWriteLockSync(() => {
+    const registry = loadRegistry();
+    const cache = loadPricingCache();
+    const changed = applyPricingToRegistryProviders(registry, cache);
+    if (changed) saveRegistry(registry);
+    return changed;
+  });
 }
 
 /** Fetch latest pricing in the background; updates registry when complete. */
@@ -255,11 +258,14 @@ export function enrichPricingAsync(onComplete?: (updated: boolean) => void): voi
   void (async () => {
     const fetched = await fetchPricingCache();
     const cache = fetched ?? loadPricingCache();
-    const registry = loadRegistry();
-    const changed = applyPricingToRegistryProviders(registry, cache);
-    if (changed) saveRegistry(registry);
+    const changed = await withRegistryWriteLock(() => {
+      const registry = loadRegistry();
+      const updated = applyPricingToRegistryProviders(registry, cache);
+      if (updated) saveRegistry(registry);
+      return updated;
+    });
     onComplete?.(changed);
-  })();
+  })().catch(() => onComplete?.(false));
 }
 
 export function pricingPlatformForProvider(templateId: string, providerId: string): string | undefined {

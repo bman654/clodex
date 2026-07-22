@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { needsFirstRunSetup } from '../src/first-run.js';
 import { emptyRegistry, saveRegistry } from '../src/registry/io.js';
+import { withRegistryWriteLockSync } from '../src/registry/lock.js';
 
 describe('needsFirstRunSetup', () => {
   let home: string;
@@ -36,7 +37,7 @@ describe('needsFirstRunSetup', () => {
       api: { npm: '@ai-sdk/openai' },
       addedAt: new Date().toISOString(),
     });
-    saveRegistry(registry);
+    withRegistryWriteLockSync(() => saveRegistry(registry));
     expect(await needsFirstRunSetup()).toBe(false);
   });
 });
