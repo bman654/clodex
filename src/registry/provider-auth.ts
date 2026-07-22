@@ -20,7 +20,7 @@ import { getTemplateById } from '../provider-templates.js';
 import { oauthAuthRef, toOAuthRegistryId } from './import-build.js';
 import {
   cancelCredentialDelete,
-  journalCredentialWriteLocked,
+  journalCredentialWrite,
   queueCredentialDelete,
   reconcilePendingCredentialDeletes,
 } from './credential-lifecycle.js';
@@ -115,8 +115,8 @@ async function persistOAuthProvider(
       if (!previousEntry && !getTemplateById(templateId)) {
         throw new Error(`Provider "${providerId}" is not in your registry and has no template`);
       }
-      journalCredentialWriteLocked(registry, authRef);
     });
+    await journalCredentialWrite(authRef);
 
     let diagMsg = '';
     const saved = await saveProviderCredential(
@@ -128,7 +128,7 @@ async function persistOAuthProvider(
       throw new Error(`Could not save OAuth tokens to the credential store${diagMsg ? ` — ${diagMsg}` : ' — check access and try again'}`);
     }
 
-    return withRegistryWriteLock(() => {
+    const committed = await withRegistryWriteLock(async () => {
       const registry = loadRegistry();
       const template = getTemplateById(templateId);
       const previousEntry = registry.providers.find(provider => provider.id === registryId);
@@ -161,20 +161,31 @@ async function persistOAuthProvider(
       const idx = registry.providers.findIndex(provider => provider.id === registryId);
       if (idx >= 0) registry.providers[idx] = entry;
       else registry.providers.push(entry);
-      cancelCredentialDelete(registry, authRef);
       if (previousEntry?.authRef && previousEntry.authRef !== authRef) {
-        queueCredentialDelete(registry, previousEntry.authRef);
+        await queueCredentialDelete(previousEntry.authRef);
       }
       saveRegistry(registry);
+      try {
+        await cancelCredentialDelete(authRef);
+      } catch {
+        // Reconciliation below reports and retries the committed marker.
+      }
       return entry;
     });
+    return committed;
   });
 
-  const cleanup = await reconcilePendingCredentialDeletes();
+  let credentialCleanupPending = true;
+  try {
+    const cleanup = await reconcilePendingCredentialDeletes();
+    credentialCleanupPending =
+      cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
+  } catch {
+    credentialCleanupPending = true;
+  }
   return {
     registryProvider,
-    credentialCleanupPending:
-      cleanup.pending.length > 0 || cleanup.persistenceError !== undefined,
+    credentialCleanupPending,
   };
 }
 

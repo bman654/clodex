@@ -1,10 +1,21 @@
-import { deleteProviderCredential, parseAuthRef } from '../env.js';
-import { loadRegistry, saveRegistry } from './io.js';
+import { deleteProviderCredential } from '../env.js';
+import {
+  cancelCredentialDelete,
+  isStoredCredentialRef,
+  loadPendingCredentialDeletes,
+  queueCredentialDelete,
+} from './credential-cleanup-journal.js';
+import { loadRegistry } from './io.js';
 import {
   withCredentialMutationLock,
   withRegistryWriteLock,
 } from './lock.js';
 import type { ProviderRegistry } from './types.js';
+
+export {
+  cancelCredentialDelete,
+  queueCredentialDelete,
+} from './credential-cleanup-journal.js';
 
 export interface CredentialCleanupResult {
   deleted: string[];
@@ -12,134 +23,145 @@ export interface CredentialCleanupResult {
   persistenceError?: string;
 }
 
-function isStoredCredentialRef(authRef: string): boolean {
-  const parsed = parseAuthRef(authRef);
-  return parsed?.kind === 'keyring' || parsed?.kind === 'helper';
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function credentialIsReferenced(registry: ProviderRegistry, authRef: string): boolean {
+function appendError(errors: string[], context: string, error: unknown): void {
+  errors.push(`${context}: ${errorMessage(error)}`);
+}
+
+export function credentialIsReferenced(
+  registry: ProviderRegistry,
+  authRef: string,
+): boolean {
   return registry.providers.some(provider => provider.authRef === authRef);
 }
 
-/** Queue an unreferenced stored credential for idempotent cleanup. */
-export function queueCredentialDelete(registry: ProviderRegistry, authRef: string): boolean {
-  if (!isStoredCredentialRef(authRef) || credentialIsReferenced(registry, authRef)) return false;
-  const pending = registry.pendingCredentialDeletes ?? [];
-  if (pending.includes(authRef)) return false;
-  registry.pendingCredentialDeletes = [...pending, authRef];
-  return true;
-}
-
-/** Keep an active credential out of the cleanup queue. */
-export function cancelCredentialDelete(registry: ProviderRegistry, authRef: string): boolean {
-  const pending = registry.pendingCredentialDeletes;
-  if (!pending?.includes(authRef)) return false;
-  const next = pending.filter(candidate => candidate !== authRef);
-  if (next.length > 0) registry.pendingCredentialDeletes = next;
-  else delete registry.pendingCredentialDeletes;
-  return true;
-}
-
-/**
- * Persist a cleanup marker before writing an unreferenced credential. The
- * caller must hold that credential's mutation lock before entering the short
- * registry-lock section that invokes this function.
- */
-export function journalCredentialWriteLocked(registry: ProviderRegistry, authRef: string): void {
-  if (queueCredentialDelete(registry, authRef)) saveRegistry(registry);
+/** Persist cleanup intent before a credential can become unreferenced. */
+export async function journalCredentialWrite(authRef: string): Promise<void> {
+  await queueCredentialDelete(authRef);
 }
 
 interface SingleCleanupResult {
   deleted: boolean;
+  cleared: boolean;
   persistenceError?: string;
-}
-
-async function discardInvalidPendingRef(authRef: string): Promise<SingleCleanupResult> {
-  try {
-    await withRegistryWriteLock(() => {
-      const registry = loadRegistry();
-      if (cancelCredentialDelete(registry, authRef)) saveRegistry(registry);
-    });
-    return { deleted: false };
-  } catch (error) {
-    return { deleted: false, persistenceError: errorMessage(error) };
-  }
 }
 
 /**
  * Reconcile one queued reference without holding the registry lock during a
- * credential-store operation. Every registry check happens inside the
- * credential lock, so activation of the same reference is serialized with
- * deletion while unrelated credentials remain independent.
+ * credential-store operation. The credential lock serializes activation and
+ * deletion for this reference without blocking unrelated credentials.
  */
-async function reconcilePendingCredentialDelete(authRef: string): Promise<SingleCleanupResult> {
-  if (!isStoredCredentialRef(authRef)) return discardInvalidPendingRef(authRef);
-
-  return withCredentialMutationLock(authRef, async () => {
-    let queuedForDelete = false;
+async function reconcilePendingCredentialDelete(
+  authRef: string,
+): Promise<SingleCleanupResult> {
+  if (!isStoredCredentialRef(authRef)) {
     try {
-      await withRegistryWriteLock(() => {
-        const registry = loadRegistry();
-        if (!registry.pendingCredentialDeletes?.includes(authRef)) return;
-        if (credentialIsReferenced(registry, authRef)) {
-          cancelCredentialDelete(registry, authRef);
-          saveRegistry(registry);
-          return;
-        }
-        queuedForDelete = true;
-      });
+      await cancelCredentialDelete(authRef);
+      return { deleted: false, cleared: true };
     } catch (error) {
-      return { deleted: false, persistenceError: errorMessage(error) };
+      return {
+        deleted: false,
+        cleared: false,
+        persistenceError: errorMessage(error),
+      };
     }
-    if (!queuedForDelete) return { deleted: false };
+  }
 
-    let deleted = false;
-    try {
-      deleted = await deleteProviderCredential(authRef);
-    } catch {
-      deleted = false;
-    }
-
-    try {
-      await withRegistryWriteLock(() => {
-        const registry = loadRegistry();
-        if (!registry.pendingCredentialDeletes?.includes(authRef)) return;
-        if (credentialIsReferenced(registry, authRef) || deleted) {
-          cancelCredentialDelete(registry, authRef);
-          saveRegistry(registry);
+  try {
+    return await withCredentialMutationLock(authRef, async () => {
+      try {
+        const clearedReferencedMarker = await withRegistryWriteLock(async () => {
+          if (!credentialIsReferenced(loadRegistry(), authRef)) return false;
+          await cancelCredentialDelete(authRef);
+          return true;
+        });
+        if (clearedReferencedMarker) {
+          return { deleted: false, cleared: true };
         }
-      });
-    } catch (error) {
-      return { deleted, persistenceError: errorMessage(error) };
-    }
-    return { deleted };
-  });
+      } catch (error) {
+        return {
+          deleted: false,
+          cleared: false,
+          persistenceError: errorMessage(error),
+        };
+      }
+
+      let deleted = false;
+      try {
+        deleted = await deleteProviderCredential(authRef);
+      } catch {
+        deleted = false;
+      }
+      if (!deleted) return { deleted: false, cleared: false };
+
+      try {
+        await cancelCredentialDelete(authRef);
+        return { deleted: true, cleared: true };
+      } catch (error) {
+        return {
+          deleted: true,
+          cleared: false,
+          persistenceError: errorMessage(error),
+        };
+      }
+    });
+  } catch (error) {
+    return {
+      deleted: false,
+      cleared: false,
+      persistenceError: errorMessage(error),
+    };
+  }
 }
 
 /** Retry queued credential deletions sequentially and idempotently. */
 export async function reconcilePendingCredentialDeletes(): Promise<CredentialCleanupResult> {
-  const queued = await withRegistryWriteLock(() => [
-    ...(loadRegistry().pendingCredentialDeletes ?? []),
-  ]);
-  const deleted: string[] = [];
-  let persistenceError: string | undefined;
-
-  for (const authRef of queued) {
-    const result = await reconcilePendingCredentialDelete(authRef);
-    if (result.deleted) deleted.push(authRef);
-    persistenceError ??= result.persistenceError;
+  let queued: string[];
+  try {
+    queued = await loadPendingCredentialDeletes();
+  } catch (error) {
+    return {
+      deleted: [],
+      pending: [],
+      persistenceError: `Could not read pending credential cleanup: ${errorMessage(error)}`,
+    };
   }
 
-  const pending = await withRegistryWriteLock(() => [
-    ...(loadRegistry().pendingCredentialDeletes ?? []),
-  ]);
+  const knownPending = new Set(queued);
+  const deleted: string[] = [];
+  const errors: string[] = [];
+
+  for (const authRef of queued) {
+    let result: SingleCleanupResult;
+    try {
+      result = await reconcilePendingCredentialDelete(authRef);
+    } catch (error) {
+      result = {
+        deleted: false,
+        cleared: false,
+        persistenceError: errorMessage(error),
+      };
+    }
+    if (result.deleted) deleted.push(authRef);
+    if (result.cleared) knownPending.delete(authRef);
+    if (result.persistenceError) {
+      appendError(errors, `Cleanup for ${authRef}`, result.persistenceError);
+    }
+  }
+
+  let pending = [...knownPending];
+  try {
+    pending = await loadPendingCredentialDeletes();
+  } catch (error) {
+    appendError(errors, 'Could not confirm pending credential cleanup', error);
+  }
+
   return {
     deleted,
     pending,
-    ...(persistenceError ? { persistenceError } : {}),
+    ...(errors.length > 0 ? { persistenceError: errors.join('; ') } : {}),
   };
 }

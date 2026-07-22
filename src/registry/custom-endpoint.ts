@@ -7,7 +7,7 @@ import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
 import {
   cancelCredentialDelete,
-  journalCredentialWriteLocked,
+  journalCredentialWrite,
   reconcilePendingCredentialDeletes,
 } from './credential-lifecycle.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
@@ -194,7 +194,7 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
   const authRef = anonymous
     ? 'none:anonymous'
     : credentialAuthRef(`provider:${probeProviderId}:${randomUUID()}`);
-  const commitProvider = () => withRegistryWriteLock(() => {
+  const commitProvider = () => withRegistryWriteLock(async () => {
     const registry = loadRegistry();
     const providerId = uniqueProviderId(displayName, registry);
 
@@ -221,23 +221,28 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
     };
 
     registry.providers.push(entry);
-    if (!anonymous) cancelCredentialDelete(registry, authRef);
     saveRegistry(registry);
+    let credentialCleanupPending = false;
+    if (!anonymous) {
+      try {
+        await cancelCredentialDelete(authRef);
+      } catch {
+        credentialCleanupPending = true;
+      }
+    }
 
     return {
       added: true,
       provider: entry,
       modelCount: fetched.models.length,
+      ...(credentialCleanupPending ? { credentialCleanupPending: true } : {}),
     };
   });
 
   const result: AddCustomEndpointResult = anonymous
     ? await commitProvider()
     : await withCredentialMutationLock(authRef, async () => {
-      await withRegistryWriteLock(() => {
-        const registry = loadRegistry();
-        journalCredentialWriteLocked(registry, authRef);
-      });
+      await journalCredentialWrite(authRef);
       const saved = await saveProviderCredential(authRef, apiKey);
       if (!saved) {
         return {
@@ -249,10 +254,20 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
       return commitProvider();
     });
 
-  const cleanup = await reconcilePendingCredentialDeletes();
   if (result.added) {
-    result.credentialCleanupPending =
-      cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
+    try {
+      const cleanup = await reconcilePendingCredentialDeletes();
+      result.credentialCleanupPending =
+        cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
+    } catch {
+      result.credentialCleanupPending = true;
+    }
+  } else {
+    try {
+      await reconcilePendingCredentialDeletes();
+    } catch {
+      // The failed credential remains journaled for a later retry.
+    }
   }
   return result;
 }

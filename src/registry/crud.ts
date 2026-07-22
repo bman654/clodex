@@ -29,7 +29,7 @@ export async function removeProviderFromRegistry(
   id: string,
   opts?: { deleteCredential?: boolean },
 ): Promise<RemoveProviderResult> {
-  const removal = await withRegistryWriteLock<PendingProviderRemoval>(() => {
+  const removal = await withRegistryWriteLock<PendingProviderRemoval>(async () => {
     const registry = loadRegistry();
     const index = registry.providers.findIndex(p => p.id === id);
     if (index < 0) {
@@ -45,11 +45,9 @@ export async function removeProviderFromRegistry(
     }
 
     const [removedProvider] = registry.providers.splice(index, 1);
-    if (opts?.deleteCredential !== false) {
-      queueCredentialDelete(registry, removedProvider.authRef);
-    }
     const cleanupQueued = opts?.deleteCredential !== false
-      && registry.pendingCredentialDeletes?.includes(removedProvider.authRef) === true;
+      ? await queueCredentialDelete(removedProvider.authRef)
+      : false;
     saveRegistry(registry);
 
     return {
@@ -64,10 +62,14 @@ export async function removeProviderFromRegistry(
   });
 
   if (removal.authRef) {
-    const cleanup = await reconcilePendingCredentialDeletes();
-    removal.result.credentialDeleted = cleanup.deleted.includes(removal.authRef);
-    removal.result.credentialCleanupPending =
-      cleanup.pending.includes(removal.authRef) || cleanup.persistenceError !== undefined;
+    try {
+      const cleanup = await reconcilePendingCredentialDeletes();
+      removal.result.credentialDeleted = cleanup.deleted.includes(removal.authRef);
+      removal.result.credentialCleanupPending =
+        cleanup.pending.includes(removal.authRef) || cleanup.persistenceError !== undefined;
+    } catch {
+      removal.result.credentialCleanupPending = true;
+    }
   }
   return removal.result;
 }

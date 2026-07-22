@@ -8,7 +8,7 @@ import type { ProviderTemplate } from '../provider-templates.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 import {
   cancelCredentialDelete,
-  journalCredentialWriteLocked,
+  journalCredentialWrite,
   queueCredentialDelete,
   reconcilePendingCredentialDeletes,
 } from './credential-lifecycle.js';
@@ -128,7 +128,7 @@ export async function addProviderFromTemplate(
         : `provider:${template.id}`,
     )
     : 'none:anonymous';
-  const commitProvider = () => withRegistryWriteLock(() => {
+  const commitProvider = () => withRegistryWriteLock(async () => {
     const registry = loadRegistry();
     const existing = registry.providers.find(p => p.id === template.id);
     if (existing && !opts?.replaceExisting) {
@@ -168,15 +168,23 @@ export async function addProviderFromTemplate(
     } else {
       registry.providers.push(entry);
     }
-    if (trimmedKey) cancelCredentialDelete(registry, authRef);
     if (existing?.authRef && existing.authRef !== authRef) {
-      queueCredentialDelete(registry, existing.authRef);
+      await queueCredentialDelete(existing.authRef);
     }
     saveRegistry(registry);
+    let credentialCleanupPending = false;
+    if (trimmedKey) {
+      try {
+        await cancelCredentialDelete(authRef);
+      } catch {
+        credentialCleanupPending = true;
+      }
+    }
     return {
       added: true,
       provider: entry,
       modelCount: pricedModels.length,
+      ...(credentialCleanupPending ? { credentialCleanupPending: true } : {}),
     };
   });
 
@@ -192,10 +200,11 @@ export async function addProviderFromTemplate(
             hint: `Remove it first with: clodex providers remove ${template.id}`,
           };
         }
-        journalCredentialWriteLocked(registry, authRef);
         return null;
       });
       if (prepareError) return prepareError;
+
+      await journalCredentialWrite(authRef);
 
       const saved = await saveProviderCredential(authRef, trimmedKey);
       if (!saved) {
@@ -209,10 +218,20 @@ export async function addProviderFromTemplate(
     })
     : await commitProvider();
 
-  const cleanup = await reconcilePendingCredentialDeletes();
   if (result.added) {
-    result.credentialCleanupPending =
-      cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
+    try {
+      const cleanup = await reconcilePendingCredentialDeletes();
+      result.credentialCleanupPending =
+        cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
+    } catch {
+      result.credentialCleanupPending = true;
+    }
+  } else {
+    try {
+      await reconcilePendingCredentialDeletes();
+    } catch {
+      // The failed credential remains journaled for a later retry.
+    }
   }
 
   if (result.added) enrichPricingAsync();

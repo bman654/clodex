@@ -9,9 +9,13 @@ const lockState = vi.hoisted(() => ({
   registryTail: Promise.resolve(),
   credentialActive: false,
   credentialTails: new Map<string, Promise<void>>(),
+  afterRegistryUnlock: null as null | (() => void),
 }));
 const registryState = vi.hoisted(() => ({
   current: { schemaVersion: 1, providers: [] } as ProviderRegistry,
+}));
+const journalState = vi.hoisted(() => ({
+  pending: new Set<string>(),
 }));
 
 vi.mock('../src/ui.js', () => ({
@@ -36,6 +40,18 @@ vi.mock('../src/registry/io.js', () => ({
     registryState.current = structuredClone(registry);
   }),
 }));
+vi.mock('../src/registry/credential-cleanup-journal.js', () => ({
+  isStoredCredentialRef: vi.fn((authRef: string) =>
+    authRef.startsWith('keyring:') || authRef.startsWith('helper:v1:')),
+  loadPendingCredentialDeletes: vi.fn(async () => [...journalState.pending]),
+  queueCredentialDelete: vi.fn(async (authRef: string) => {
+    if (!authRef.startsWith('keyring:') && !authRef.startsWith('helper:v1:')) return false;
+    journalState.pending.add(authRef);
+    return true;
+  }),
+  cancelCredentialDelete: vi.fn(async (authRef: string) =>
+    journalState.pending.delete(authRef)),
+}));
 vi.mock('../src/registry/refresh-models.js', () => ({
   refreshProviderModels: vi.fn(),
 }));
@@ -52,6 +68,9 @@ vi.mock('../src/registry/lock.js', () => ({
     } finally {
       lockState.active = false;
       release();
+      const afterUnlock = lockState.afterRegistryUnlock;
+      lockState.afterRegistryUnlock = null;
+      afterUnlock?.();
     }
   }),
   withCredentialMutationLock: vi.fn(async <T>(
@@ -91,6 +110,7 @@ import {
 import { credentialAuthRef } from '../src/credential-helper.js';
 import { runOpenAiDeviceCodeFlow } from '../src/oauth/openai.js';
 import { reconcilePendingCredentialDeletes } from '../src/registry/credential-lifecycle.js';
+import * as cleanupJournal from '../src/registry/credential-cleanup-journal.js';
 import { saveRegistry } from '../src/registry/io.js';
 import { authenticateProvider } from '../src/registry/provider-auth.js';
 import { refreshProviderModels } from '../src/registry/refresh-models.js';
@@ -105,6 +125,7 @@ describe('authenticateProvider', () => {
     home = mkdtempSync(join(tmpdir(), 'clodex-provider-auth-'));
     process.env.CLODEX_HOME = home;
     registryState.current = { schemaVersion: 1, providers: [] };
+    journalState.pending.clear();
     delete process.env.CLODEX_CREDENTIAL_HELPER;
     vi.mocked(deleteProviderCredential).mockReset().mockResolvedValue(true);
     vi.mocked(probeProviderCredentialStore).mockReset().mockResolvedValue(true);
@@ -112,7 +133,18 @@ describe('authenticateProvider', () => {
     lockState.registryTail = Promise.resolve();
     lockState.credentialActive = false;
     lockState.credentialTails.clear();
+    lockState.afterRegistryUnlock = null;
     vi.mocked(saveProviderCredential).mockReset().mockResolvedValue(true);
+    vi.mocked(cleanupJournal.loadPendingCredentialDeletes).mockReset()
+      .mockImplementation(async () => [...journalState.pending]);
+    vi.mocked(cleanupJournal.queueCredentialDelete).mockReset()
+      .mockImplementation(async (authRef: string) => {
+        if (!authRef.startsWith('keyring:') && !authRef.startsWith('helper:v1:')) return false;
+        journalState.pending.add(authRef);
+        return true;
+      });
+    vi.mocked(cleanupJournal.cancelCredentialDelete).mockReset()
+      .mockImplementation(async (authRef: string) => journalState.pending.delete(authRef));
     vi.mocked(saveRegistry).mockReset().mockImplementation(registry => {
       if (!lockState.active) throw new Error('registry write escaped its lock');
       registryState.current = structuredClone(registry) as typeof registryState.current;
@@ -182,7 +214,7 @@ describe('authenticateProvider', () => {
     );
     expect(saveProviderCredential).toHaveBeenCalled();
     expect(registryState.current.providers).toHaveLength(0);
-    expect(registryState.current.pendingCredentialDeletes).toEqual([
+    expect([...journalState.pending]).toEqual([
       'keyring:oauth:provider:openai-oauth',
     ]);
     expect(deleteProviderCredential).not.toHaveBeenCalled();
@@ -259,7 +291,7 @@ describe('authenticateProvider', () => {
     const result = await authenticateProvider('openai');
     expect(result.credentialCleanupPending).toBe(true);
     expect(registryState.current.providers[0]?.authRef).toBe(helperAuthRef);
-    expect(registryState.current.pendingCredentialDeletes).toEqual([
+    expect([...journalState.pending]).toEqual([
       'keyring:oauth:provider:openai-oauth',
     ]);
     expect(deleteProviderCredential).toHaveBeenCalledWith('keyring:oauth:provider:openai-oauth');
@@ -267,28 +299,24 @@ describe('authenticateProvider', () => {
   });
 
   it('does not write a credential when the durable pending marker cannot be saved', async () => {
-    vi.mocked(saveRegistry).mockImplementationOnce(() => {
-      throw new Error('registry unavailable');
-    });
+    vi.mocked(cleanupJournal.queueCredentialDelete).mockRejectedValueOnce(
+      new Error('journal unavailable'),
+    );
 
-    await expect(authenticateProvider('openai')).rejects.toThrow('registry unavailable');
+    await expect(authenticateProvider('openai')).rejects.toThrow('journal unavailable');
     expect(saveProviderCredential).not.toHaveBeenCalled();
     expect(registryState.current.providers).toHaveLength(0);
   });
 
   it('leaves a newly written credential journaled when provider activation cannot be saved', async () => {
-    vi.mocked(saveRegistry)
-      .mockImplementationOnce(registry => {
-        registryState.current = structuredClone(registry) as typeof registryState.current;
-      })
-      .mockImplementationOnce(() => {
-        throw new Error('activation failed');
-      });
+    vi.mocked(saveRegistry).mockImplementationOnce(() => {
+      throw new Error('activation failed');
+    });
 
     await expect(authenticateProvider('openai')).rejects.toThrow('activation failed');
     expect(saveProviderCredential).toHaveBeenCalled();
     expect(registryState.current.providers).toHaveLength(0);
-    expect(registryState.current.pendingCredentialDeletes).toEqual([
+    expect([...journalState.pending]).toEqual([
       'keyring:oauth:provider:openai-oauth',
     ]);
     expect(deleteProviderCredential).not.toHaveBeenCalled();
@@ -313,7 +341,57 @@ describe('authenticateProvider', () => {
     expect(result.registryProvider.authRef).toBe('keyring:oauth:provider:openai-oauth');
     expect(cleanup.deleted).toEqual([]);
     expect(deleteProviderCredential).not.toHaveBeenCalled();
-    expect(registryState.current.pendingCredentialDeletes).toBeUndefined();
+    expect(journalState.pending.size).toBe(0);
+  });
+
+  it('retains a removal marker queued immediately after OAuth replacement commit', async () => {
+    registryState.current.providers.push({
+      id: 'openai-oauth',
+      templateId: 'openai',
+      name: 'OpenAI (ChatGPT)',
+      enabled: true,
+      authRef: 'keyring:oauth:provider:openai-oauth:previous',
+      authType: 'oauth',
+      api: { npm: '@ai-sdk/openai', url: 'https://api.openai.com/v1' },
+      addedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const cancellationLockStates: boolean[] = [];
+    vi.mocked(cleanupJournal.cancelCredentialDelete).mockImplementationOnce(
+      async authRef => {
+        cancellationLockStates.push(lockState.active);
+        return journalState.pending.delete(authRef);
+      },
+    );
+    vi.mocked(deleteProviderCredential).mockResolvedValue(false);
+    vi.mocked(saveRegistry).mockImplementationOnce(registry => {
+      if (!lockState.active) throw new Error('registry write escaped its lock');
+      registryState.current = structuredClone(registry);
+      const replacementRef = registry.providers[0]?.authRef;
+      lockState.afterRegistryUnlock = () => {
+        registryState.current.providers = [];
+        if (replacementRef) journalState.pending.add(replacementRef);
+      };
+    });
+
+    const result = await authenticateProvider('openai');
+    const replacementRef = result.registryProvider.authRef;
+
+    expect(cancellationLockStates).toEqual([true]);
+    expect(replacementRef).toBe('keyring:oauth:provider:openai-oauth');
+    expect(journalState.pending).toContain(replacementRef);
+    expect(result.credentialCleanupPending).toBe(true);
+  });
+
+  it('reports cleanup pending instead of rejecting after OAuth provider commit', async () => {
+    vi.mocked(cleanupJournal.loadPendingCredentialDeletes).mockRejectedValue(
+      new Error('cleanup journal lock timed out'),
+    );
+
+    const result = await authenticateProvider('openai');
+
+    expect(result.registryProvider.id).toBe('openai-oauth');
+    expect(result.credentialCleanupPending).toBe(true);
+    expect(registryState.current.providers).toHaveLength(1);
   });
 
   it('rejects non-OpenAI providers', async () => {

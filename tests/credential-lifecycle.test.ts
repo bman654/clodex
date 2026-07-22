@@ -4,51 +4,64 @@ import type { ProviderRegistry } from '../src/registry/types.js';
 const registryState = vi.hoisted(() => ({
   current: { schemaVersion: 1, providers: [] } as ProviderRegistry,
 }));
+const journalState = vi.hoisted(() => ({
+  pending: new Set<string>(),
+  cancelFailures: new Set<string>(),
+}));
 const lockState = vi.hoisted(() => ({
   registryActive: false,
   credentialActive: null as string | null,
-  credentialTails: new Map<string, Promise<void>>(),
+  credentialFailures: new Set<string>(),
+  registryFailures: new Set<string>(),
   events: [] as string[],
+  afterRegistryUnlock: null as null | (() => void),
 }));
 
-vi.mock('../src/env.js', async importOriginal => {
-  const actual = await importOriginal<typeof import('../src/env.js')>();
-  return {
-    ...actual,
-    deleteProviderCredential: vi.fn(),
-  };
-});
+vi.mock('../src/env.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/env.js')>(),
+  deleteProviderCredential: vi.fn(),
+}));
 vi.mock('../src/registry/io.js', () => ({
   loadRegistry: vi.fn(() => structuredClone(registryState.current)),
-  saveRegistry: vi.fn((registry: ProviderRegistry) => {
-    if (!lockState.registryActive) throw new Error('registry write escaped its lock');
-    registryState.current = structuredClone(registry);
+}));
+vi.mock('../src/registry/credential-cleanup-journal.js', () => ({
+  isStoredCredentialRef: vi.fn((authRef: string) =>
+    authRef.startsWith('keyring:') || authRef.startsWith('helper:v1:')),
+  loadPendingCredentialDeletes: vi.fn(async () => [...journalState.pending]),
+  queueCredentialDelete: vi.fn(async (authRef: string) => {
+    journalState.pending.add(authRef);
+    return true;
+  }),
+  cancelCredentialDelete: vi.fn(async (authRef: string) => {
+    if (journalState.cancelFailures.has(authRef)) {
+      throw new Error('journal write failed');
+    }
+    return journalState.pending.delete(authRef);
   }),
 }));
 vi.mock('../src/registry/lock.js', () => ({
   withRegistryWriteLock: vi.fn(async <T>(operation: () => Promise<T> | T): Promise<T> => {
+    const authRef = lockState.credentialActive;
+    if (authRef && lockState.registryFailures.has(authRef)) {
+      throw new Error(`registry lock timed out for ${authRef}`);
+    }
     if (lockState.registryActive) throw new Error('registry lock re-entered');
-    lockState.events.push('registry:enter');
     lockState.registryActive = true;
     try {
       return await operation();
     } finally {
       lockState.registryActive = false;
-      lockState.events.push('registry:exit');
+      const afterUnlock = lockState.afterRegistryUnlock;
+      lockState.afterRegistryUnlock = null;
+      afterUnlock?.();
     }
   }),
   withCredentialMutationLock: vi.fn(async <T>(
     authRef: string,
     operation: () => Promise<T> | T,
   ): Promise<T> => {
-    const previous = lockState.credentialTails.get(authRef) ?? Promise.resolve();
-    let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; });
-    const tail = previous.then(() => gate);
-    lockState.credentialTails.set(authRef, tail);
-    await previous;
-    if (lockState.credentialActive !== null) {
-      throw new Error(`nested credential lock: ${lockState.credentialActive} -> ${authRef}`);
+    if (lockState.credentialFailures.has(authRef)) {
+      throw new Error(`credential lock timed out for ${authRef}`);
     }
     lockState.credentialActive = authRef;
     lockState.events.push(`credential:enter:${authRef}`);
@@ -57,21 +70,13 @@ vi.mock('../src/registry/lock.js', () => ({
     } finally {
       lockState.events.push(`credential:exit:${authRef}`);
       lockState.credentialActive = null;
-      release();
-      if (lockState.credentialTails.get(authRef) === tail) {
-        lockState.credentialTails.delete(authRef);
-      }
     }
   }),
 }));
 
 import { deleteProviderCredential } from '../src/env.js';
-import {
-  cancelCredentialDelete,
-  queueCredentialDelete,
-  reconcilePendingCredentialDeletes,
-} from '../src/registry/credential-lifecycle.js';
-import { saveRegistry } from '../src/registry/io.js';
+import * as cleanupJournal from '../src/registry/credential-cleanup-journal.js';
+import { reconcilePendingCredentialDeletes } from '../src/registry/credential-lifecycle.js';
 
 const TEST_HELPER_ID = 'a'.repeat(64);
 const helperRef = (account: string): string => `helper:v1:${TEST_HELPER_ID}:${account}`;
@@ -79,124 +84,172 @@ const helperRef = (account: string): string => `helper:v1:${TEST_HELPER_ID}:${ac
 describe('credential cleanup lifecycle', () => {
   beforeEach(() => {
     registryState.current = { schemaVersion: 1, providers: [] };
+    journalState.pending.clear();
+    journalState.cancelFailures.clear();
     lockState.registryActive = false;
     lockState.credentialActive = null;
-    lockState.credentialTails.clear();
+    lockState.credentialFailures.clear();
+    lockState.registryFailures.clear();
     lockState.events = [];
+    lockState.afterRegistryUnlock = null;
     vi.mocked(deleteProviderCredential).mockReset().mockResolvedValue(true);
-    vi.mocked(saveRegistry).mockReset().mockImplementation(registry => {
-      if (!lockState.registryActive) throw new Error('registry write escaped its lock');
-      registryState.current = structuredClone(registry);
-    });
-  });
-
-  it('queues only unreferenced stored credentials', () => {
-    registryState.current.providers.push({
-      id: 'active',
-      templateId: 'active',
-      name: 'Active',
-      enabled: true,
-      authRef: helperRef('provider:active'),
-      api: {},
-      addedAt: '2026-01-01T00:00:00.000Z',
-    });
-
-    expect(queueCredentialDelete(registryState.current, helperRef('provider:active'))).toBe(false);
-    expect(queueCredentialDelete(registryState.current, 'env:OPENAI_API_KEY')).toBe(false);
-    expect(queueCredentialDelete(registryState.current, helperRef('provider:stale'))).toBe(true);
-    expect(queueCredentialDelete(registryState.current, helperRef('provider:stale'))).toBe(false);
-    expect(registryState.current.pendingCredentialDeletes).toEqual([helperRef('provider:stale')]);
+    vi.mocked(cleanupJournal.loadPendingCredentialDeletes).mockReset()
+      .mockImplementation(async () => [...journalState.pending]);
+    vi.mocked(cleanupJournal.cancelCredentialDelete).mockReset()
+      .mockImplementation(async (authRef: string) => {
+        if (journalState.cancelFailures.has(authRef)) {
+          throw new Error('journal write failed');
+        }
+        return journalState.pending.delete(authRef);
+      });
   });
 
   it('clears successful deletions while retaining failed and thrown deletions', async () => {
-    registryState.current.pendingCredentialDeletes = [
-      helperRef('provider:deleted'),
-      helperRef('provider:failed'),
-      'keyring:provider:thrown',
-    ];
+    const deletedRef = helperRef('provider:deleted');
+    const failedRef = helperRef('provider:failed');
+    const thrownRef = 'keyring:provider:thrown';
+    journalState.pending = new Set([deletedRef, failedRef, thrownRef]);
     vi.mocked(deleteProviderCredential).mockImplementation(async authRef => {
       expect(lockState.registryActive).toBe(false);
       expect(lockState.credentialActive).toBe(authRef);
       lockState.events.push(`delete:${authRef}`);
-      if (authRef.endsWith(':deleted')) return true;
-      if (authRef.endsWith(':thrown')) throw new Error('response lost');
+      if (authRef === deletedRef) return true;
+      if (authRef === thrownRef) throw new Error('response lost');
       return false;
     });
 
     const result = await reconcilePendingCredentialDeletes();
 
-    expect(result.deleted).toEqual([helperRef('provider:deleted')]);
-    expect(result.pending).toEqual([
-      helperRef('provider:failed'),
-      'keyring:provider:thrown',
-    ]);
-    expect(registryState.current.pendingCredentialDeletes).toEqual(result.pending);
-    for (const authRef of [
-      helperRef('provider:deleted'),
-      helperRef('provider:failed'),
-      'keyring:provider:thrown',
-    ]) {
-      const entered = lockState.events.indexOf(`credential:enter:${authRef}`);
-      const deletedAt = lockState.events.indexOf(`delete:${authRef}`);
-      const exited = lockState.events.indexOf(`credential:exit:${authRef}`);
-      expect(entered).toBeGreaterThanOrEqual(0);
-      expect(deletedAt).toBeGreaterThan(entered);
-      expect(exited).toBeGreaterThan(deletedAt);
-    }
+    expect(result.deleted).toEqual([deletedRef]);
+    expect(result.pending).toEqual([failedRef, thrownRef]);
+    expect([...journalState.pending]).toEqual(result.pending);
   });
 
   it('never deletes a credential that became active again', async () => {
+    const authRef = helperRef('provider:active');
     registryState.current.providers.push({
       id: 'active',
       templateId: 'active',
       name: 'Active',
       enabled: true,
-      authRef: helperRef('provider:active'),
+      authRef,
       api: {},
       addedAt: '2026-01-01T00:00:00.000Z',
     });
-    registryState.current.pendingCredentialDeletes = [helperRef('provider:active')];
+    journalState.pending.add(authRef);
 
     const result = await reconcilePendingCredentialDeletes();
 
     expect(deleteProviderCredential).not.toHaveBeenCalled();
     expect(result.pending).toEqual([]);
-    expect(registryState.current.pendingCredentialDeletes).toBeUndefined();
+    expect(journalState.pending.size).toBe(0);
   });
 
-  it('keeps the durable marker when clearing it cannot be saved', async () => {
-    registryState.current.pendingCredentialDeletes = [helperRef('provider:stale')];
-    vi.mocked(saveRegistry).mockImplementationOnce(() => {
-      throw new Error('disk full');
+  it('does not cancel a removal marker queued after an active-reference decision', async () => {
+    const authRef = helperRef('provider:removed-after-check');
+    registryState.current.providers.push({
+      id: 'active',
+      templateId: 'active',
+      name: 'Active',
+      enabled: true,
+      authRef,
+      api: {},
+      addedAt: '2026-01-01T00:00:00.000Z',
     });
-
-    const failed = await reconcilePendingCredentialDeletes();
-    expect(failed.persistenceError).toContain('disk full');
-    expect(failed.pending).toEqual([helperRef('provider:stale')]);
-    expect(registryState.current.pendingCredentialDeletes).toEqual([helperRef('provider:stale')]);
-
-    vi.mocked(saveRegistry).mockImplementation(registry => {
-      registryState.current = structuredClone(registry);
-    });
-    const retried = await reconcilePendingCredentialDeletes();
-    expect(retried.pending).toEqual([]);
-    expect(registryState.current.pendingCredentialDeletes).toBeUndefined();
-  });
-
-  it('can cancel a pending deletion when a credential becomes active', () => {
-    registryState.current.pendingCredentialDeletes = [helperRef('provider:new')];
-    expect(cancelCredentialDelete(registryState.current, helperRef('provider:new'))).toBe(true);
-    expect(registryState.current.pendingCredentialDeletes).toBeUndefined();
-  });
-
-  it('drops an anonymous cleanup marker without invoking credential deletion', async () => {
-    registryState.current.pendingCredentialDeletes = ['none:anonymous'];
+    journalState.pending.add(authRef);
+    vi.mocked(cleanupJournal.cancelCredentialDelete).mockImplementation(
+      async candidate => {
+        lockState.events.push(`cancel:${lockState.registryActive}`);
+        return journalState.pending.delete(candidate);
+      },
+    );
+    lockState.afterRegistryUnlock = () => {
+      registryState.current.providers = [];
+      journalState.pending.add(authRef);
+      lockState.events.push('provider-removed');
+    };
 
     const result = await reconcilePendingCredentialDeletes();
 
-    expect(result).toEqual({ deleted: [], pending: [] });
+    expect(lockState.events).toEqual([
+      `credential:enter:${authRef}`,
+      'cancel:true',
+      'provider-removed',
+      `credential:exit:${authRef}`,
+    ]);
     expect(deleteProviderCredential).not.toHaveBeenCalled();
-    expect(lockState.events.some(event => event.startsWith('credential:enter:'))).toBe(false);
-    expect(registryState.current.pendingCredentialDeletes).toBeUndefined();
+    expect(result.pending).toEqual([authRef]);
+    expect(journalState.pending).toEqual(new Set([authRef]));
+  });
+
+  it('isolates credential-lock failures and continues unrelated references', async () => {
+    const lockedRef = helperRef('provider:locked');
+    const deletableRef = helperRef('provider:deletable');
+    journalState.pending = new Set([lockedRef, deletableRef]);
+    lockState.credentialFailures.add(lockedRef);
+
+    const result = await reconcilePendingCredentialDeletes();
+
+    expect(deleteProviderCredential).toHaveBeenCalledWith(deletableRef);
+    expect(result.deleted).toEqual([deletableRef]);
+    expect(result.pending).toEqual([lockedRef]);
+    expect(result.persistenceError).toContain(lockedRef);
+    expect(result.persistenceError).toContain('credential lock timed out');
+  });
+
+  it('isolates registry-lock failures and continues unrelated references', async () => {
+    const lockedRef = helperRef('provider:registry-locked');
+    const deletableRef = helperRef('provider:deletable');
+    journalState.pending = new Set([lockedRef, deletableRef]);
+    lockState.registryFailures.add(lockedRef);
+
+    const result = await reconcilePendingCredentialDeletes();
+
+    expect(deleteProviderCredential).toHaveBeenCalledWith(deletableRef);
+    expect(result.deleted).toEqual([deletableRef]);
+    expect(result.pending).toEqual([lockedRef]);
+    expect(result.persistenceError).toContain(lockedRef);
+    expect(result.persistenceError).toContain('registry lock timed out');
+  });
+
+  it('reports a snapshot read failure without rejecting', async () => {
+    vi.mocked(cleanupJournal.loadPendingCredentialDeletes).mockRejectedValueOnce(
+      new Error('journal lock timed out'),
+    );
+
+    const result = await reconcilePendingCredentialDeletes();
+
+    expect(result).toEqual({
+      deleted: [],
+      pending: [],
+      persistenceError: expect.stringContaining('journal lock timed out'),
+    });
+    expect(deleteProviderCredential).not.toHaveBeenCalled();
+  });
+
+  it('retains known pending state when the final journal read fails', async () => {
+    const authRef = helperRef('provider:failed');
+    journalState.pending.add(authRef);
+    vi.mocked(deleteProviderCredential).mockResolvedValue(false);
+    vi.mocked(cleanupJournal.loadPendingCredentialDeletes)
+      .mockResolvedValueOnce([authRef])
+      .mockRejectedValueOnce(new Error('final journal read failed'));
+
+    const result = await reconcilePendingCredentialDeletes();
+
+    expect(result.pending).toEqual([authRef]);
+    expect(result.persistenceError).toContain('final journal read failed');
+  });
+
+  it('keeps a deleted reference journaled when clearing it fails', async () => {
+    const authRef = helperRef('provider:stale');
+    journalState.pending.add(authRef);
+    journalState.cancelFailures.add(authRef);
+
+    const result = await reconcilePendingCredentialDeletes();
+
+    expect(result.deleted).toEqual([authRef]);
+    expect(result.pending).toEqual([authRef]);
+    expect(result.persistenceError).toContain('journal write failed');
   });
 });

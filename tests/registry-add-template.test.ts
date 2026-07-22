@@ -4,6 +4,7 @@ import * as env from '../src/env.js';
 import * as providerFactory from '../src/provider-factory.js';
 import * as fetchTemplate from '../src/registry/fetch-template-models.js';
 import * as io from '../src/registry/io.js';
+import * as cleanupJournal from '../src/registry/credential-cleanup-journal.js';
 import * as pricing from '../src/registry/pricing.js';
 import type { ProviderTemplate } from '../src/provider-templates.js';
 import type { ProviderRegistry } from '../src/registry/types.js';
@@ -13,6 +14,10 @@ const lockState = vi.hoisted(() => ({
   registryTail: Promise.resolve(),
   credentialActive: false,
   credentialTails: new Map<string, Promise<void>>(),
+  afterRegistryUnlock: null as null | (() => void),
+}));
+const journalState = vi.hoisted(() => ({
+  pending: new Set<string>(),
 }));
 let registryState: ProviderRegistry;
 
@@ -27,6 +32,18 @@ vi.mock('../src/env.js', async importOriginal => {
 vi.mock('../src/provider-factory.js', () => ({ isSdkMigratedNpm: vi.fn() }));
 vi.mock('../src/registry/fetch-template-models.js', () => ({ fetchTemplateModels: vi.fn() }));
 vi.mock('../src/registry/io.js', () => ({ loadRegistry: vi.fn(), saveRegistry: vi.fn() }));
+vi.mock('../src/registry/credential-cleanup-journal.js', () => ({
+  isStoredCredentialRef: vi.fn((authRef: string) =>
+    authRef.startsWith('keyring:') || authRef.startsWith('helper:v1:')),
+  loadPendingCredentialDeletes: vi.fn(async () => [...journalState.pending]),
+  queueCredentialDelete: vi.fn(async (authRef: string) => {
+    if (!authRef.startsWith('keyring:') && !authRef.startsWith('helper:v1:')) return false;
+    journalState.pending.add(authRef);
+    return true;
+  }),
+  cancelCredentialDelete: vi.fn(async (authRef: string) =>
+    journalState.pending.delete(authRef)),
+}));
 vi.mock('../src/registry/pricing.js', () => ({
   loadPricingCache: vi.fn(),
   enrichModelsWithPricing: vi.fn(),
@@ -47,6 +64,9 @@ vi.mock('../src/registry/lock.js', () => ({
     } finally {
       lockState.active = false;
       release();
+      const afterUnlock = lockState.afterRegistryUnlock;
+      lockState.afterRegistryUnlock = null;
+      afterUnlock?.();
     }
   }),
   withCredentialMutationLock: vi.fn(async (
@@ -90,10 +110,16 @@ describe('registry/add-template', () => {
     lockState.registryTail = Promise.resolve();
     lockState.credentialActive = false;
     lockState.credentialTails.clear();
+    lockState.afterRegistryUnlock = null;
+    journalState.pending.clear();
 
     vi.mocked(providerFactory.isSdkMigratedNpm).mockReturnValue(true);
     vi.mocked(env.deleteProviderCredential).mockResolvedValue(true);
     vi.mocked(env.saveProviderCredential).mockResolvedValue(true);
+    vi.mocked(cleanupJournal.loadPendingCredentialDeletes).mockReset()
+      .mockImplementation(async () => [...journalState.pending]);
+    vi.mocked(cleanupJournal.queueCredentialDelete).mockClear();
+    vi.mocked(cleanupJournal.cancelCredentialDelete).mockClear();
     registryState = {
       schemaVersion: 1,
       providers: [],
@@ -241,21 +267,16 @@ describe('registry/add-template', () => {
   });
 
   it('fails if credential cannot be saved', async () => {
-    const persisted: ProviderRegistry[] = [];
-    vi.mocked(io.saveRegistry).mockImplementation(registry => {
-      registryState = structuredClone(registry);
-      persisted.push(structuredClone(registry));
-    });
     vi.mocked(env.saveProviderCredential).mockResolvedValue(false);
 
     const res = await addProviderFromTemplate(dummyTemplate, 'key');
     expect(res.added).toBe(false);
     expect(res.error).toContain('Could not save API key');
-    expect(persisted[0]?.pendingCredentialDeletes).toEqual([
+    expect(cleanupJournal.queueCredentialDelete).toHaveBeenCalledWith(
       'keyring:provider:test-template',
-    ]);
+    );
     expect(env.deleteProviderCredential).toHaveBeenCalledWith('keyring:provider:test-template');
-    expect(persisted.at(-1)?.pendingCredentialDeletes).toBeUndefined();
+    expect(journalState.pending.size).toBe(0);
   });
 
   it('successfully adds provider', async () => {
@@ -327,7 +348,7 @@ describe('registry/add-template', () => {
   });
 
   it('replaces existing provider if replaceExisting is true', async () => {
-    vi.mocked(io.loadRegistry).mockReturnValue({
+    registryState = {
       schemaVersion: 1,
       providers: [{
         id: 'test-template',
@@ -339,7 +360,7 @@ describe('registry/add-template', () => {
         api: {},
         addedAt: '2026-01-01T00:00:00.000Z',
       }],
-    });
+    };
 
     const res = await addProviderFromTemplate(dummyTemplate, 'key_123', { replaceExisting: true });
 
@@ -354,8 +375,8 @@ describe('registry/add-template', () => {
     expect(env.deleteProviderCredential).toHaveBeenCalledWith('keyring:provider:test-template');
   });
 
-  it('keeps a failed replacement journaled without changing the active provider', async () => {
-    vi.mocked(io.loadRegistry).mockReturnValue({
+  it('retains a removal marker queued immediately after replacement commit', async () => {
+    registryState = {
       schemaVersion: 1,
       providers: [{
         id: 'test-template',
@@ -367,15 +388,55 @@ describe('registry/add-template', () => {
         api: {},
         addedAt: '2026-01-01T00:00:00.000Z',
       }],
+    };
+    const cancellationLockStates: boolean[] = [];
+    vi.mocked(cleanupJournal.cancelCredentialDelete).mockImplementationOnce(
+      async authRef => {
+        cancellationLockStates.push(lockState.active);
+        return journalState.pending.delete(authRef);
+      },
+    );
+    vi.mocked(env.deleteProviderCredential).mockResolvedValue(false);
+    vi.mocked(io.saveRegistry).mockImplementationOnce(registry => {
+      if (!lockState.active) throw new Error('registry write escaped its lock');
+      registryState = structuredClone(registry);
+      const replacementRef = registry.providers[0]?.authRef;
+      lockState.afterRegistryUnlock = () => {
+        registryState.providers = [];
+        if (replacementRef) journalState.pending.add(replacementRef);
+      };
     });
-    let durableJournal: ProviderRegistry | undefined;
-    vi.mocked(io.saveRegistry)
-      .mockImplementationOnce(registry => {
-        durableJournal = structuredClone(registry);
-      })
-      .mockImplementationOnce(() => {
-        throw new Error('activation failed');
-      });
+
+    const result = await addProviderFromTemplate(dummyTemplate, 'replacement-key', {
+      replaceExisting: true,
+    });
+    const replacementRef = result.provider?.authRef;
+
+    expect(cancellationLockStates).toEqual([true]);
+    expect(replacementRef).toMatch(
+      /^keyring:provider:test-template:replacement:/,
+    );
+    expect(journalState.pending).toContain(replacementRef);
+    expect(result.credentialCleanupPending).toBe(true);
+  });
+
+  it('keeps a failed replacement journaled without changing the active provider', async () => {
+    registryState = {
+      schemaVersion: 1,
+      providers: [{
+        id: 'test-template',
+        templateId: 'test-template',
+        name: 'Existing',
+        enabled: true,
+        authType: 'api',
+        authRef: 'keyring:provider:test-template',
+        api: {},
+        addedAt: '2026-01-01T00:00:00.000Z',
+      }],
+    };
+    vi.mocked(io.saveRegistry).mockImplementationOnce(() => {
+      throw new Error('activation failed');
+    });
 
     await expect(
       addProviderFromTemplate(dummyTemplate, 'replacement-key', {
@@ -383,10 +444,23 @@ describe('registry/add-template', () => {
       }),
     ).rejects.toThrow('activation failed');
 
-    expect(durableJournal?.providers[0]?.authRef).toBe('keyring:provider:test-template');
-    expect(durableJournal?.pendingCredentialDeletes?.[0]).toMatch(
-      /^keyring:provider:test-template:replacement:/,
-    );
+    expect(registryState.providers[0]?.authRef).toBe('keyring:provider:test-template');
+    expect([...journalState.pending]).toEqual([
+      expect.stringMatching(/^keyring:provider:test-template:replacement:/),
+      'keyring:provider:test-template',
+    ]);
     expect(env.deleteProviderCredential).not.toHaveBeenCalled();
+  });
+
+  it('reports cleanup pending instead of failing after provider commit', async () => {
+    vi.mocked(cleanupJournal.loadPendingCredentialDeletes).mockRejectedValue(
+      new Error('cleanup journal lock timed out'),
+    );
+
+    const result = await addProviderFromTemplate(dummyTemplate, 'key');
+
+    expect(result.added).toBe(true);
+    expect(result.credentialCleanupPending).toBe(true);
+    expect(registryState.providers).toHaveLength(1);
   });
 });

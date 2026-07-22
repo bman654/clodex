@@ -217,7 +217,7 @@ clodex --version    # version
 - The config-home filesystem must support hard links because registry locks are
   published atomically. Keep `CLODEX_HOME` on a local filesystem rather than
   FAT, exFAT, or a network mount that rejects hard links. An abrupt process kill
-  during lock publication can leave a `providers.json.lock.*.tmp` file; it does
+  during lock publication can leave a `*.lock.*.tmp` file; it does
   not block later lock acquisition and can be removed when no Clodex process is
   running. A canonical `providers.json.lock` whose recorded PID is no longer
   running is reclaimed automatically on the next lock acquisition. If it remains

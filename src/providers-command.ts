@@ -263,6 +263,9 @@ async function runTemplateAddFlow(): Promise<number> {
   }
 
   logConnected(template.name, result.modelCount ?? 0);
+  if (result.credentialCleanupPending) {
+    p.log.warn('A previous credential is queued for cleanup and will be retried by the next provider command.');
+  }
   return 0;
 }
 
@@ -481,8 +484,14 @@ export async function runProvidersCommand(args: string[]): Promise<number> {
     return 0;
   }
 
-  const cleanup = await reconcilePendingCredentialDeletes();
-  if (cleanup.pending.length > 0 || cleanup.persistenceError) {
+  let cleanupPending = false;
+  try {
+    const cleanup = await reconcilePendingCredentialDeletes();
+    cleanupPending = cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
+  } catch {
+    cleanupPending = true;
+  }
+  if (cleanupPending) {
     p.log.warn('Some credential cleanup is still pending and will be retried later.');
   }
 

@@ -6,6 +6,7 @@ import {
   closeSync,
   copyFileSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -27,11 +28,6 @@ import { isValidProviderId } from './validate.js';
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 
-function isStoredCredentialRef(value: string): boolean {
-  if (value.startsWith('keyring:')) return value.length > 'keyring:'.length;
-  return /^helper:v1:[0-9a-f]{64}:.+$/s.test(value);
-}
-
 export function ensureSecureAppHome(): void {
   const home = getAppHome();
   mkdirSync(home, { recursive: true, mode: DIR_MODE });
@@ -45,9 +41,10 @@ export function ensureSecureAppHome(): void {
 function writeSecureFile(path: string, content: string): void {
   ensureSecureAppHome();
   mkdirSync(dirname(path), { recursive: true, mode: DIR_MODE });
-  const fd = openSync(path, 'w', FILE_MODE);
+  const fd = openSync(path, 'wx', FILE_MODE);
   try {
     writeSync(fd, content);
+    fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
@@ -55,6 +52,19 @@ function writeSecureFile(path: string, content: string): void {
     chmodSync(path, FILE_MODE);
   } catch {
     // best-effort
+  }
+}
+
+function syncParentDirectory(path: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(dirname(path), 'r');
+    fsyncSync(fd);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EINVAL' && code !== 'ENOTSUP' && code !== 'EPERM') throw error;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -117,16 +127,6 @@ function parseRegistry(raw: unknown): ProviderRegistry {
       typeof data.schemaVersion === 'number' ? data.schemaVersion : REGISTRY_SCHEMA_VERSION,
     providers,
   };
-  if (Array.isArray(data.pendingCredentialDeletes)) {
-    const pendingCredentialDeletes = data.pendingCredentialDeletes.filter(
-      (value): value is string => {
-        return typeof value === 'string' && isStoredCredentialRef(value);
-      },
-    );
-    if (pendingCredentialDeletes.length > 0) {
-      registry.pendingCredentialDeletes = [...new Set(pendingCredentialDeletes)];
-    }
-  }
   if (typeof data.importedAt === 'string') registry.importedAt = data.importedAt;
   if (typeof data.pricingCacheAt === 'string') registry.pricingCacheAt = data.pricingCacheAt;
   return registry;
@@ -174,6 +174,7 @@ export function saveRegistry(registry: ProviderRegistry, path = getProvidersPath
     writeSecureFile(tmp, payload);
     assertRegistryWriteOwnership(path);
     renameSync(tmp, path);
+    syncParentDirectory(path);
   } finally {
     try {
       unlinkSync(tmp);

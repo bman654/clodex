@@ -10,6 +10,9 @@ const lockState = vi.hoisted(() => ({
   credentialActive: false,
   credentialTails: new Map<string, Promise<void>>(),
 }));
+const journalState = vi.hoisted(() => ({
+  pending: new Set<string>(),
+}));
 
 vi.mock('../src/env.js', async importOriginal => ({
   ...await importOriginal<typeof import('../src/env.js')>(),
@@ -21,6 +24,18 @@ vi.mock('../src/registry/io.js', () => ({
     if (!lockState.active) throw new Error('registry write escaped its lock');
     registryState.current = structuredClone(registry);
   }),
+}));
+vi.mock('../src/registry/credential-cleanup-journal.js', () => ({
+  isStoredCredentialRef: vi.fn((authRef: string) =>
+    authRef.startsWith('keyring:') || authRef.startsWith('helper:v1:')),
+  loadPendingCredentialDeletes: vi.fn(async () => [...journalState.pending]),
+  queueCredentialDelete: vi.fn(async (authRef: string) => {
+    if (!authRef.startsWith('keyring:') && !authRef.startsWith('helper:v1:')) return false;
+    journalState.pending.add(authRef);
+    return true;
+  }),
+  cancelCredentialDelete: vi.fn(async (authRef: string) =>
+    journalState.pending.delete(authRef)),
 }));
 vi.mock('../src/registry/lock.js', () => ({
   withRegistryWriteLock: vi.fn(
@@ -78,6 +93,7 @@ describe('registry provider removal', () => {
     lockState.registryTail = Promise.resolve();
     lockState.credentialActive = false;
     lockState.credentialTails.clear();
+    journalState.pending.clear();
     registryState.current = {
       schemaVersion: 1,
       providers: [
@@ -132,7 +148,7 @@ describe('registry provider removal', () => {
     });
     expect(result.error).toBeUndefined();
     expect(registryState.current.providers).toHaveLength(0);
-    expect(registryState.current.pendingCredentialDeletes).toEqual([
+    expect([...journalState.pending]).toEqual([
       'keyring:provider:openai',
     ]);
     expect(deleteProviderCredential).toHaveBeenCalledWith(

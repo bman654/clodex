@@ -17,11 +17,19 @@ import {
 } from '../src/registry/crud.js';
 import { emptyRegistry, loadRegistry, saveRegistry } from '../src/registry/io.js';
 import { withRegistryWriteLockSync } from '../src/registry/lock.js';
+import {
+  loadPendingCredentialDeletes,
+  queueCredentialDelete,
+} from '../src/registry/credential-cleanup-journal.js';
 import { providerAuthHelpText } from '../src/registry/provider-auth.js';
 import type { RegistryProvider } from '../src/registry/types.js';
 import * as env from '../src/env.js';
 
 const selectMock = vi.hoisted(() => vi.fn());
+const passwordMock = vi.hoisted(() => vi.fn());
+const spinnerStartMock = vi.hoisted(() => vi.fn());
+const spinnerStopMock = vi.hoisted(() => vi.fn());
+const addTemplateMock = vi.hoisted(() => vi.fn());
 const logErrorMock = vi.hoisted(() => vi.fn());
 const logSuccessMock = vi.hoisted(() => vi.fn());
 const authenticateProviderMock = vi.hoisted(() => vi.fn());
@@ -34,6 +42,11 @@ vi.mock('@clack/prompts', async importOriginal => {
   return {
     ...actual,
     select: selectMock,
+    password: passwordMock,
+    spinner: () => ({
+      start: spinnerStartMock,
+      stop: spinnerStopMock,
+    }),
     log: {
       ...actual.log,
       error: logErrorMock,
@@ -48,6 +61,14 @@ vi.mock('../src/registry/provider-auth.js', async importOriginal => {
   return {
     ...actual,
     authenticateProvider: authenticateProviderMock,
+  };
+});
+
+vi.mock('../src/registry/add-template.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/registry/add-template.js')>();
+  return {
+    ...actual,
+    addProviderFromTemplate: addTemplateMock,
   };
 });
 
@@ -181,7 +202,7 @@ describe('registry crud', () => {
     expect(code).toBe(0);
     expect(loadRegistry().providers).toHaveLength(0);
     expect(deleteSpy).toHaveBeenCalledWith(authRef);
-    expect(loadRegistry().pendingCredentialDeletes).toEqual([authRef]);
+    await expect(loadPendingCredentialDeletes()).resolves.toEqual([authRef]);
     expect(logErrorMock).not.toHaveBeenCalled();
     expect(logSuccessMock).toHaveBeenCalledWith('Removed OpenAI.');
     expect(warnMock).toHaveBeenCalledWith(
@@ -254,7 +275,9 @@ describe('provider removal cleanup', () => {
     const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockImplementation(async () => {
       const duringDelete = loadRegistry();
       expect(duringDelete.providers).toHaveLength(0);
-      expect(duringDelete.pendingCredentialDeletes).toEqual([helperRef('provider:openai')]);
+      await expect(loadPendingCredentialDeletes()).resolves.toEqual([
+        helperRef('provider:openai'),
+      ]);
       return false;
     });
     const result = await removeProviderFromRegistry('openai');
@@ -264,7 +287,9 @@ describe('provider removal cleanup', () => {
     expect(result.error).toBeUndefined();
     expect(deleteSpy).toHaveBeenCalledWith(helperRef('provider:openai'));
     expect(loadRegistry().providers).toHaveLength(0);
-    expect(loadRegistry().pendingCredentialDeletes).toEqual([helperRef('provider:openai')]);
+    await expect(loadPendingCredentialDeletes()).resolves.toEqual([
+      helperRef('provider:openai'),
+    ]);
   });
 });
 
@@ -287,9 +312,7 @@ describe('provider command cleanup reconciliation', () => {
 
   it('persists uncertain cleanup for retry after a process restart', async () => {
     const authRef = helperRef('provider:stale');
-    const registry = emptyRegistry();
-    registry.pendingCredentialDeletes = [authRef];
-    withRegistryWriteLockSync(() => saveRegistry(registry));
+    await queueCredentialDelete(authRef);
     const deleteSpy = vi.spyOn(env, 'deleteProviderCredential')
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
@@ -298,19 +321,19 @@ describe('provider command cleanup reconciliation', () => {
     await runProvidersCommand(['auth']);
 
     expect(deleteSpy).toHaveBeenNthCalledWith(1, authRef);
-    expect(loadRegistry().pendingCredentialDeletes).toEqual([authRef]);
+    await expect(loadPendingCredentialDeletes()).resolves.toEqual([authRef]);
     expect(warnMock).toHaveBeenCalledWith(
       'Some credential cleanup is still pending and will be retried later.',
     );
     const persisted = JSON.parse(
-      readFileSync(join(home, 'providers.json'), 'utf8'),
+      readFileSync(join(home, 'credential-cleanup.json'), 'utf8'),
     ) as { pendingCredentialDeletes?: string[] };
     expect(persisted.pendingCredentialDeletes).toEqual([authRef]);
 
     await runProvidersCommand(['auth']);
 
     expect(deleteSpy).toHaveBeenNthCalledWith(2, authRef);
-    expect(loadRegistry().pendingCredentialDeletes).toBeUndefined();
+    await expect(loadPendingCredentialDeletes()).resolves.toEqual([]);
     expect(warnMock).toHaveBeenCalledTimes(1);
   });
 });
@@ -323,6 +346,11 @@ describe('providers add menu', () => {
     home = mkdtempSync(join(tmpdir(), 'clodex-providers-add-'));
     process.env.CLODEX_HOME = home;
     selectMock.mockReset();
+    passwordMock.mockReset();
+    spinnerStartMock.mockReset();
+    spinnerStopMock.mockReset();
+    addTemplateMock.mockReset();
+    warnMock.mockReset();
   });
 
   afterEach(() => {
@@ -339,5 +367,21 @@ describe('providers add menu', () => {
 
     const options = selectMock.mock.calls[0]?.[0].options.map((option: { value: string }) => option.value);
     expect(options).toEqual(['oauth', 'apikey']);
+  });
+
+  it('reports pending cleanup after an API-key provider is committed', async () => {
+    selectMock.mockResolvedValue('apikey');
+    passwordMock.mockResolvedValue('api-key');
+    addTemplateMock.mockResolvedValue({
+      added: true,
+      modelCount: 3,
+      credentialCleanupPending: true,
+    });
+
+    await expect(runProvidersAdd()).resolves.toBe(0);
+
+    expect(warnMock).toHaveBeenCalledWith(
+      'A previous credential is queued for cleanup and will be retried by the next provider command.',
+    );
   });
 });
