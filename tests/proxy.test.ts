@@ -250,6 +250,10 @@ describe('SDK anonymous route handling', () => {
 });
 
 describe('catalog model aliases', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('rejects unresolved configured model ids without using the default route', async () => {
     const route: ProxyRoute = {
       aliasId: 'clodex:test:default-model',
