@@ -62,8 +62,8 @@ are bounded.
 ## Security responsibilities
 
 Clodex owns OAuth parsing, refresh decisions, replacement-token serialization,
-and in-process refresh deduplication. The helper owns storage and its security
-properties. A helper should:
+and in-process refresh deduplication per provider and credential reference. The
+helper owns storage and its security properties. A helper should:
 
 - encrypt credentials at rest using a system or user trust root;
 - serialize concurrent updates when its backend requires it;

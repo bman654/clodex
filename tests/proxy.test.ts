@@ -350,7 +350,10 @@ describe('catalog model aliases', () => {
 });
 
 describe('token counting', () => {
-  it('returns a local estimate for translated routes without loading or invoking the provider', async () => {
+  it('returns a local estimate for translated OAuth routes before resolving credentials', async () => {
+    const refreshToken = vi.fn(async () => {
+      throw new Error('credential resolution must not run for local token counts');
+    });
     const route: ProxyRoute = {
       aliasId: 'clodex:test:translated-model',
       realModelId: 'translated-model',
@@ -360,6 +363,8 @@ describe('token counting', () => {
       modelFormat: 'openai',
       npm: 'missing-sdk-provider-that-must-not-load',
       providerId: 'test-provider',
+      authType: 'oauth',
+      refreshToken,
     };
     const handle = await startProxyCatalog([route], route.aliasId, false);
 
@@ -372,6 +377,7 @@ describe('token counting', () => {
       expect(res.status).toBe(200);
       expect(JSON.parse(res.body)).toEqual({ input_tokens: expect.any(Number) });
       expect(JSON.parse(res.body).input_tokens).toBeGreaterThan(0);
+      expect(refreshToken).not.toHaveBeenCalled();
     } finally {
       handle.close();
     }

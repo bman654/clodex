@@ -368,6 +368,14 @@ export async function startProxyCatalog(
 
       // Per-request route resolution: look up the alias, fall back to default
       const route = lookupRoute(byAlias, originalModel) ?? defaultRoute;
+      if (messagesEndpoint === 'count_tokens' && route.modelFormat !== 'anthropic') {
+        const inputTokens = estimateAnthropicInputTokens(anthropicBody);
+        plog(() => `token-count: local estimate model=${originalModel} input_tokens=${inputTokens}`);
+        res.setHeader('x-relay-token-count-source', 'local-estimate');
+        sendJson(res, 200, { input_tokens: inputTokens });
+        return;
+      }
+
       let apiKey = route.apiKey;
       if (route.authType === 'oauth' && route.refreshToken) {
         try {
@@ -393,14 +401,6 @@ export async function startProxyCatalog(
       const usesSdkAdapter = isSdkMigratedNpm(route.npm);
 
       if (messagesEndpoint === 'count_tokens') {
-        if (route.modelFormat !== 'anthropic') {
-          const inputTokens = estimateAnthropicInputTokens(anthropicBody);
-          plog(() => `token-count: local estimate model=${originalModel} input_tokens=${inputTokens}`);
-          res.setHeader('x-relay-token-count-source', 'local-estimate');
-          sendJson(res, 200, { input_tokens: inputTokens });
-          return;
-        }
-
         if (!apiKey && routeAuthType !== 'none') {
           anthropicError(res, 401, 'Missing API key');
           return;

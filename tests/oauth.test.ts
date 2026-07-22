@@ -69,6 +69,29 @@ describe('oauth refresh http', () => {
     )).rejects.toThrow('xAI token refresh failed (401): bad refresh');
   });
 
+  it('cancels an unread failed response body when error details are disabled', async () => {
+    const cancel = vi.fn(async () => {});
+    const text = vi.fn(async () => 'must stay unread');
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 401,
+      body: { cancel },
+      text,
+    })));
+
+    await expect(postOAuthRefresh(
+      'https://auth/token',
+      new URLSearchParams({ grant_type: 'refresh_token' }),
+      {
+        contentType: 'form',
+        errorPrefix: 'token refresh failed',
+        includeStatus: true,
+      },
+    )).rejects.toThrow('token refresh failed (401)');
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(text).not.toHaveBeenCalled();
+  });
+
   it('bounds the refresh request with an abort signal', async () => {
     const fetchMock = vi.fn(async () => new Response(JSON.stringify({
       access_token: 'new-access',

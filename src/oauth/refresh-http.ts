@@ -28,7 +28,16 @@ export async function postOAuthRefresh(
   });
 
   if (!response.ok) {
-    const detail = options.includeBody ? await response.text().catch(() => '') : '';
+    let detail = '';
+    if (options.includeBody) {
+      detail = await response.text().catch(() => '');
+    } else {
+      try {
+        await response.body?.cancel();
+      } catch {
+        // Preserve the refresh failure when transport cleanup also fails.
+      }
+    }
     const status = options.includeStatus ? ` (${response.status})` : '';
     throw new Error(`${options.errorPrefix}${status}${detail ? `: ${detail}` : ''}`);
   }

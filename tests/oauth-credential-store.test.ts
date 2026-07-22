@@ -157,6 +157,17 @@ describe('OAuth credential-store refresh', () => {
     await expect(resolveProviderCredential('openai-oauth', authRef)).resolves.toBe('static-access');
   });
 
+  it('round-trips a valid opaque JSON credential for a non-OAuth provider', async () => {
+    const opaqueAccount = `provider:opaque-${tempDir.split('-').at(-1)}`;
+    const opaqueAuthRef = credentialAuthRef(opaqueAccount);
+    const opaqueCredential = '{"custom":{"credential":"opaque-value"},"version":1}';
+
+    await expect(saveProviderCredential(opaqueAuthRef, opaqueCredential)).resolves.toBe(true);
+    await expect(resolveProviderCredential('opaque-provider', opaqueAuthRef)).resolves.toBe(
+      opaqueCredential,
+    );
+  });
+
   it('serves the rotated token from memory without launching the helper again', async () => {
     await expect(resolveProviderCredential('openai-oauth', authRef)).resolves.toBe('new-access');
     process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE = 'fail-get';
@@ -362,6 +373,38 @@ describe('OAuth credential-store refresh', () => {
     releaseRefresh();
 
     await expect(Promise.all([first, second])).resolves.toEqual(['new-access', 'new-access']);
+    expect(refreshStoredOAuthCredential).toHaveBeenCalledTimes(1);
+  });
+
+  it('makes fresh callers join an in-flight rejected-token refresh', async () => {
+    await writeCredentialHelperAccount(account, unexpiredCredential('revoked-access'));
+    await expect(resolveProviderCredential('openai-oauth', authRef)).resolves.toBe('revoked-access');
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>(resolve => { releaseRefresh = resolve; });
+    vi.mocked(refreshStoredOAuthCredential).mockImplementation(async () => {
+      await refreshGate;
+      return {
+        type: 'oauth',
+        access: 'new-access',
+        refresh: 'new-refresh',
+        expires: Date.now() + 3_600_000,
+      };
+    });
+
+    const rejectedCaller = resolveProviderCredential(
+      'openai-oauth',
+      authRef,
+      undefined,
+      { rejectedAccessToken: 'revoked-access' },
+    );
+    await vi.waitFor(() => expect(refreshStoredOAuthCredential).toHaveBeenCalledTimes(1));
+    const freshCaller = resolveProviderCredential('openai-oauth', authRef);
+    releaseRefresh();
+
+    await expect(Promise.all([rejectedCaller, freshCaller])).resolves.toEqual([
+      'new-access',
+      'new-access',
+    ]);
     expect(refreshStoredOAuthCredential).toHaveBeenCalledTimes(1);
   });
 

@@ -155,6 +155,7 @@ const oauthRefreshInflight = new Map<string, Promise<string | null>>();
 const oauthCredentialCache = new Map<string, StoredOAuthCredential>();
 const rejectedEnvCredentialFingerprints = new Map<string, string>();
 const OAUTH_REFRESH_LOCK_WAIT_MS = 150_000;
+const OAUTH_STATE_KEY_SEPARATOR = '\0';
 
 export type ParsedAuthRef =
   | { kind: 'keyring'; account: string }
@@ -377,7 +378,7 @@ export async function resolveProviderCredential(
 
   if (parsed.kind === 'env') {
     return usableEnvCredential(
-      `env:${parsed.varName}`,
+      `provider:${providerId}:env:${parsed.varName}`,
       readEnvCredential(parsed.varName),
       options.rejectedAccessToken,
     );
@@ -417,23 +418,39 @@ export async function resolveProviderOAuthProviderData(
   return parseStoredOAuthCredential(raw)?.providerData;
 }
 
-function decodeProviderSecret(raw: string | null): string | null {
+function decodeProviderSecret(raw: string | null, allowOpaqueJson = false): string | null {
   if (!raw) return null;
   const trimmed = raw.trim();
   if (!trimmed.startsWith('{')) return trimmed;
   const oauth = parseStoredOAuthCredential(trimmed);
   if (oauth) return oauth.access;
   try {
-    const parsed = JSON.parse(trimmed) as { type?: string; token?: string };
+    const parsed = JSON.parse(trimmed) as { type?: string; access?: string; token?: string };
     if (parsed.type === 'wellknown') {
       return typeof parsed.token === 'string' && parsed.token.trim()
         ? parsed.token.trim()
         : null;
     }
+    if (allowOpaqueJson && parsed.type === 'oauth') {
+      return typeof parsed.access === 'string' && parsed.access.trim()
+        ? parsed.access.trim()
+        : null;
+    }
+    return allowOpaqueJson ? raw : null;
   } catch {
     return null;
   }
-  return null;
+}
+
+function oauthCredentialStateKey(providerId: string, authRef: string): string {
+  return `${providerId}${OAUTH_STATE_KEY_SEPARATOR}${authRef}`;
+}
+
+function clearOAuthCredentialCache(authRef: string): void {
+  const suffix = `${OAUTH_STATE_KEY_SEPARATOR}${authRef}`;
+  for (const key of oauthCredentialCache.keys()) {
+    if (key.endsWith(suffix)) oauthCredentialCache.delete(key);
+  }
 }
 
 async function readOAuthProviderSecret(
@@ -442,8 +459,16 @@ async function readOAuthProviderSecret(
   diag?: (msg: string) => void,
   rejectedAccessToken?: string,
 ): Promise<string | null> {
-  const inflightKey = storedCredentialAuthRef(ref);
-  const cached = oauthCredentialCache.get(inflightKey);
+  const authRef = storedCredentialAuthRef(ref);
+  const stateKey = oauthCredentialStateKey(providerId, authRef);
+  const existing = oauthRefreshInflight.get(stateKey);
+  if (existing) {
+    const resolved = await existing;
+    if (resolved !== rejectedAccessToken) return resolved;
+    return readOAuthProviderSecret(ref, providerId, diag, rejectedAccessToken);
+  }
+
+  const cached = oauthCredentialCache.get(stateKey);
   if (
     cached
     && cached.access !== rejectedAccessToken
@@ -452,17 +477,10 @@ async function readOAuthProviderSecret(
   ) {
     return cached.access;
   }
-  if (cached?.access === rejectedAccessToken) oauthCredentialCache.delete(inflightKey);
+  if (cached?.access === rejectedAccessToken) oauthCredentialCache.delete(stateKey);
 
-  const existing = oauthRefreshInflight.get(inflightKey);
-  if (existing) {
-    const resolved = await existing;
-    if (resolved !== rejectedAccessToken) return resolved;
-    return readOAuthProviderSecret(ref, providerId, diag, rejectedAccessToken);
-  }
-
-  const work = withCredentialMutationLock(inflightKey, async (): Promise<string | null> => {
-    const latestCached = oauthCredentialCache.get(inflightKey);
+  const work = withCredentialMutationLock(authRef, async (): Promise<string | null> => {
+    const latestCached = oauthCredentialCache.get(stateKey);
     if (
       latestCached
       && latestCached.access !== rejectedAccessToken
@@ -481,7 +499,7 @@ async function readOAuthProviderSecret(
         const decoded = decodeProviderSecret(raw);
         return decoded === rejectedAccessToken ? null : decoded;
       }
-      oauthCredentialCache.set(inflightKey, cred);
+      oauthCredentialCache.set(stateKey, cred);
 
       const forceRefresh = cred.access === rejectedAccessToken || cred.accessRejected === true;
       if (!forceRefresh && !oauthCredentialShouldRefresh(cred, providerId)) {
@@ -494,7 +512,7 @@ async function readOAuthProviderSecret(
       } catch (err) {
         diag?.(err instanceof Error ? err.message : String(err));
         if (!forceRefresh && cred.access && cred.expires > Date.now()) return cred.access;
-        oauthCredentialCache.delete(inflightKey);
+        oauthCredentialCache.delete(stateKey);
         throw err;
       }
 
@@ -507,7 +525,7 @@ async function readOAuthProviderSecret(
       );
       const currentRaw = await readStoredCredential(ref, diag);
       if (currentRaw !== raw) {
-        oauthCredentialCache.delete(inflightKey);
+        oauthCredentialCache.delete(stateKey);
         continue;
       }
 
@@ -515,13 +533,13 @@ async function readOAuthProviderSecret(
         ? { ...refreshed, accessRejected: true }
         : refreshed;
       const json = oauthCredentialToKeychainJson(credentialToSave);
-      const saved = await saveProviderCredential(inflightKey, json, diag);
+      const saved = await saveProviderCredential(authRef, json, diag);
       if (!saved) {
-        oauthCredentialCache.delete(inflightKey);
+        oauthCredentialCache.delete(stateKey);
         throw new Error('Could not persist refreshed OAuth credential');
       }
       if (accessStillRejected) {
-        oauthCredentialCache.delete(inflightKey);
+        oauthCredentialCache.delete(stateKey);
         return null;
       }
       return refreshed.access;
@@ -531,12 +549,12 @@ async function readOAuthProviderSecret(
     waitMs: OAUTH_REFRESH_LOCK_WAIT_MS,
   });
 
-  oauthRefreshInflight.set(inflightKey, work);
+  oauthRefreshInflight.set(stateKey, work);
   try {
     return await work;
   } finally {
-    if (oauthRefreshInflight.get(inflightKey) === work) {
-      oauthRefreshInflight.delete(inflightKey);
+    if (oauthRefreshInflight.get(stateKey) === work) {
+      oauthRefreshInflight.delete(stateKey);
     }
   }
 }
@@ -551,7 +569,7 @@ async function readProviderSecret(
     return readOAuthProviderSecret(ref, oauthProviderId, diag, rejectedAccessToken);
   }
   const raw = await readStoredCredential(ref, diag);
-  const decoded = decodeProviderSecret(raw);
+  const decoded = decodeProviderSecret(raw, true);
   return decoded === rejectedAccessToken ? null : decoded;
 }
 
@@ -564,13 +582,16 @@ export async function saveProviderCredential(
   if (!parsed || parsed.kind === 'env' || parsed.kind === 'none') return false;
   return withCredentialMutationLock(authRef, async () => {
     const cacheKey = storedCredentialAuthRef(parsed);
-    oauthCredentialCache.delete(cacheKey);
+    clearOAuthCredentialCache(cacheKey);
     const written = await writeStoredCredential(parsed, key, diag);
     if (!written) return false;
     const readBack = await readStoredCredential(parsed, diag);
     if (readBack === key) {
       const oauth = parseStoredOAuthCredential(key);
-      if (oauth) oauthCredentialCache.set(cacheKey, oauth);
+      const oauthProviderId = oauthProviderIdFromAccount(parsed.account);
+      if (oauth && oauthProviderId) {
+        oauthCredentialCache.set(oauthCredentialStateKey(oauthProviderId, cacheKey), oauth);
+      }
       return true;
     }
     diag?.('credential store read-back verification failed');
@@ -618,7 +639,7 @@ export async function deleteProviderCredential(
   const parsed = parseAuthRef(authRef);
   if (!parsed || parsed.kind === 'env' || parsed.kind === 'none') return false;
   return withCredentialMutationLock(authRef, () => {
-    oauthCredentialCache.delete(storedCredentialAuthRef(parsed));
+    clearOAuthCredentialCache(storedCredentialAuthRef(parsed));
     return deleteStoredCredential(parsed, diag);
   });
 }
