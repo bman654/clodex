@@ -275,7 +275,8 @@ async function handleAnthropicMessages(
     const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
     const clientWantsStream = Boolean(body.stream);
     const forwardBody: Record<string, unknown> = { ...body, model: upstreamModelId(model) };
-    const isOAuth = model.authType === 'oauth';
+    const authType = model.authType ?? 'api';
+    const isOAuth = authType === 'oauth';
 
     auditInference(options, {
       requestId,
@@ -304,7 +305,7 @@ async function handleAnthropicMessages(
     plog(() => `anthropic-passthrough → ${messagesUrl} oauth=${isOAuth} stream=${clientWantsStream}`);
     await relayAnthropicMessages(res, messagesUrl, forwardBody, apiKey, clientWantsStream, {
       inboundBeta: effectiveBeta,
-      authType: isOAuth ? 'oauth' : 'api',
+      authType,
       log: message => plog(message),
       claudeCodeSessionId,
       extraHeaders: model.headers,
@@ -481,6 +482,7 @@ async function handleOpenAIChatCompletions(
       requestPreview: getLatestMessagePreview(body.messages, body.system),
     });
     await relayAnthropicMessages(res, completionsUrl, forwardBody, apiKey, Boolean(body.stream), {
+      authType: model.authType ?? 'api',
       onUpstreamError: options.inferenceLogPath
         ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
             modelId: body.model,

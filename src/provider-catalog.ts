@@ -28,16 +28,14 @@ export function providersForPicker(providers: LocalProvider[]): LocalProvider[] 
 
 /** Resolve API key when provider.apiKey is empty (registry authRef or OAuth credential store). */
 export async function resolveLocalProviderApiKey(provider: LocalProvider): Promise<string | null> {
-  if (provider.authRef === 'none:anonymous') return 'anonymous';
+  if (provider.authRef === 'none:anonymous' || provider.authType === 'none') return '';
 
   const direct = provider.apiKey?.trim();
   if (direct) return direct;
-  
-  if (provider.authType === 'none') return 'anonymous';
 
   const template = getTemplateById(provider.id);
   if (template?.apiKeyOptional || template?.anonymousFreeModels) {
-    return 'anonymous';
+    return '';
   }
 
   const reg = loadRegistry().providers.find(p => p.id === provider.id);

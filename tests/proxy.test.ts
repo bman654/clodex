@@ -107,6 +107,51 @@ describe('SDK anonymous route handling', () => {
     expect(res.status).toBe(502);
     expect(res.body).not.toContain('Missing API key');
   });
+
+  it('forwards anonymous Anthropic routes without authentication headers', async () => {
+    const route: ProxyRoute = {
+      aliasId: 'anthropic-local__anonymous-model',
+      realModelId: 'anonymous-model',
+      displayName: 'Anonymous Model',
+      upstreamUrl: 'https://anonymous.example',
+      apiKey: '',
+      authType: 'none',
+      modelFormat: 'anthropic',
+      providerId: 'local',
+    };
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({
+        id: 'msg_anonymous',
+        type: 'message',
+        role: 'assistant',
+        model: route.realModelId,
+        content: [],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+
+      expect(res.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledOnce();
+      const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      const headers = new Headers(init.headers);
+      expect(headers.has('authorization')).toBe(false);
+      expect(headers.has('x-api-key')).toBe(false);
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('catalog model aliases', () => {

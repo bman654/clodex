@@ -29,6 +29,24 @@ describe('anthropicUpstreamHeaders', () => {
       'X-Claude-Code-Session-Id': 'session-123',
     });
   });
+
+  it('omits authentication headers for anonymous requests', () => {
+    const headers = anthropicUpstreamHeaders('', false, undefined, 'none', undefined, {
+      authorization: 'Bearer configured-secret',
+      'X-API-Key': 'configured-secret',
+      'X-Custom': 'preserved',
+    });
+
+    expect(headers).not.toHaveProperty('Authorization');
+    expect(headers).not.toHaveProperty('authorization');
+    expect(headers).not.toHaveProperty('x-api-key');
+    expect(headers).not.toHaveProperty('X-API-Key');
+    expect(headers).toMatchObject({
+      'Content-Type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      'X-Custom': 'preserved',
+    });
+  });
 });
 
 describe('fetchWithOAuthRetry', () => {

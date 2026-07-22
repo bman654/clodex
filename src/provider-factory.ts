@@ -23,13 +23,28 @@ const RESPONSES_ONLY_PREFIXES = [
   'o4',
 ];
 
-type SdkProviderFactory = (options: { apiKey: string; baseURL?: string; name?: string; headers?: Record<string, string> }) => {
+type SdkProviderFactory = (options: {
+  apiKey: string;
+  baseURL?: string;
+  name?: string;
+  headers?: Record<string, string>;
+  fetch?: typeof fetch;
+}) => {
   (modelId: string): LanguageModel;
   chat: (modelId: string) => LanguageModel;
   responses: (modelId: string) => LanguageModel;
 };
 
 const factoryCache = new Map<string, Promise<SdkProviderFactory>>();
+
+const fetchWithoutCredentialHeaders: typeof fetch = (input, init) => {
+  const headers = new Headers(
+    init?.headers ?? (input instanceof Request ? input.headers : undefined),
+  );
+  headers.delete('authorization');
+  headers.delete('x-api-key');
+  return fetch(input, { ...init, headers });
+};
 
 /**
  * True when a model id must use the OpenAI/xAI Responses API instead of
@@ -177,7 +192,9 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
               }
             : {}),
         }
-      : { apiKey };
+      : spec.authType === 'none'
+        ? { apiKey: '', fetch: fetchWithoutCredentialHeaders }
+        : { apiKey };
     const openai = createOpenAI(oauthOptions);
     return useResponsesEndpoint ? openai.responses(modelId) : openai.chat(modelId);
   }
@@ -203,7 +220,9 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
               }
             : {}),
         }
-      : { apiKey };
+      : spec.authType === 'none'
+        ? { apiKey: '', fetch: fetchWithoutCredentialHeaders }
+        : { apiKey };
     if (spec.headers) {
       anthropicOptions.headers = { ...anthropicOptions.headers, ...spec.headers };
     }
@@ -220,7 +239,8 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
     const options = {
       name: spec.providerId ?? 'openai-compatible',
       baseURL: baseURL ?? '',
-      ...(apiKey.trim() ? { apiKey } : {}),
+      ...(spec.authType !== 'none' && apiKey.trim() ? { apiKey } : {}),
+      ...(spec.authType === 'none' ? { fetch: fetchWithoutCredentialHeaders } : {}),
       ...(spec.headers ? { headers: spec.headers } : {}),
     };
     model = createOpenAICompatible({
@@ -229,7 +249,8 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
   } else {
     const create = await loadSdkProviderFactory(npm);
     const provider = create({
-      apiKey,
+      apiKey: spec.authType === 'none' ? '' : apiKey,
+      ...(spec.authType === 'none' ? { fetch: fetchWithoutCredentialHeaders } : {}),
       ...(baseURL ? { baseURL } : {}),
       ...(spec.headers ? { headers: spec.headers } : {}),
     });

@@ -51,6 +51,7 @@ interface UpstreamRequest {
   method: string;
   url: string;
   authorization: string | undefined;
+  xApiKey: string | undefined;
   body: any;
 }
 
@@ -70,6 +71,9 @@ async function startUpstream(responseBody: any): Promise<{ baseUrl: string; requ
       authorization: Array.isArray(req.headers.authorization)
         ? req.headers.authorization[0]
         : req.headers.authorization,
+      xApiKey: Array.isArray(req.headers['x-api-key'])
+        ? req.headers['x-api-key'][0]
+        : req.headers['x-api-key'],
       body: await readRequestBody(req),
     });
 
@@ -274,6 +278,49 @@ describe('server router', () => {
       url: '/v1/messages',
       authorization: 'Bearer real-opencode-key',
       body: { model: 'claude-native', messages: [{ role: 'user', content: 'hi' }] },
+    });
+  });
+
+  it('forwards anonymous Anthropic-native messages without authentication headers', async () => {
+    const upstream = await startUpstream({
+      id: 'msg-anonymous',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'anonymous ok' }],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        id: 'anonymous-model',
+        name: 'Anonymous Model',
+        isFree: true,
+        brand: 'Other',
+        providerId: 'local',
+        sourceBackend: 'local',
+        modelFormat: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: '',
+        authType: 'none',
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'anonymous-model',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ id: 'msg-anonymous' });
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0]).toMatchObject({
+      method: 'POST',
+      url: '/v1/messages',
+      authorization: undefined,
+      xApiKey: undefined,
     });
   });
 

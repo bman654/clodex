@@ -66,7 +66,7 @@ export function buildHttpProxyRoutes(
       continue;
     }
     const route = localModelToRoute(provider, model);
-    if (!route || !route.apiKey.trim()) {
+    if (!route || (!route.apiKey.trim() && route.authType !== 'none')) {
       unavailable.push(favorite);
       continue;
     }

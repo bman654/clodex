@@ -7,18 +7,30 @@ export function anthropicUpstreamHeaders(
   apiKey: string,
   stream = false,
   inboundBeta?: string,
-  authType?: 'api' | 'oauth',
+  authType?: 'api' | 'oauth' | 'none',
   claudeCodeSessionId?: string,
   extraHeaders?: Record<string, string>,
 ): Record<string, string> {
   const key = sanitizeCredential(apiKey) ?? apiKey.trim();
-  const isOAuth = authType === 'oauth';
+  const resolvedAuthType = authType ?? 'api';
+  const isOAuth = resolvedAuthType === 'oauth';
+  const forwardedExtraHeaders = resolvedAuthType === 'none'
+    ? Object.fromEntries(
+        Object.entries(extraHeaders ?? {}).filter(
+          ([name]) => !['authorization', 'x-api-key'].includes(name.toLowerCase()),
+        ),
+      )
+    : extraHeaders;
   const headers: Record<string, string> = {
-    ...extraHeaders,
+    ...forwardedExtraHeaders,
     'Content-Type': 'application/json',
     'anthropic-version': '2023-06-01',
-    Authorization: `Bearer ${key}`,
-    ...(isOAuth ? {} : { 'x-api-key': key }),
+    ...(resolvedAuthType === 'none'
+      ? {}
+      : {
+          Authorization: `Bearer ${key}`,
+          ...(isOAuth ? {} : { 'x-api-key': key }),
+        }),
     ...(isOAuth ? { 'User-Agent': CLAUDE_CODE_USER_AGENT, 'x-app': 'cli' } : {}),
     ...(isOAuth && claudeCodeSessionId ? { 'X-Claude-Code-Session-Id': claudeCodeSessionId } : {}),
     ...(stream ? { Accept: 'text/event-stream' } : {}),
@@ -58,7 +70,7 @@ export async function fetchWithOAuthRetry<TResponse extends { status: number }>(
 /** Relay an Anthropic /v1/messages response (JSON or SSE) to the client. */
 export interface RelayAnthropicOptions {
   inboundBeta?: string;
-  authType?: 'api' | 'oauth';
+  authType?: 'api' | 'oauth' | 'none';
   log?: (message: string) => void;
   claudeCodeSessionId?: string;
   extraHeaders?: Record<string, string>;

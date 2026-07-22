@@ -18,8 +18,9 @@ OS keyring or an environment variable.
 
 Changing `CLODEX_CREDENTIAL_HELPER` to a different path does not redirect old
 references. Clodex refuses the operation before starting the new helper. Restore
-the prior path to read or delete the old credential, or reauthenticate to create
-a reference owned by the new helper.
+the prior path to read or delete the old credential. Reauthentication creates a
+reference owned by the new helper, but does not delete the credential from the
+previous store; remove that credential with the previous backend's tooling.
 
 Clodex verifies the selected store with a disposable write, read, and delete
 before starting device authorization. It also reads back real credential
@@ -71,5 +72,6 @@ executable wrapper. Clodex intentionally does not evaluate a shell command from
 this setting.
 
 Existing `keyring:` and `env:` provider references retain their original
-behavior. Enabling a helper affects newly saved credentials; reauthenticate a
-provider to move it to the helper-backed store.
+behavior. Enabling a helper affects newly saved credentials. Reauthentication
+stores future credentials in the helper-backed store while the previous store
+remains unchanged until its credential is explicitly removed.

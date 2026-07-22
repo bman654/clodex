@@ -259,6 +259,28 @@ describe('createLanguageModel', () => {
     vi.doUnmock('@ai-sdk/openai');
   });
 
+  it('installs credential-header stripping for anonymous OpenAI providers', async () => {
+    const responses = vi.fn((modelId: string) => ({ modelId, provider: 'openai-responses' }));
+    const chat = vi.fn((modelId: string) => ({ modelId, provider: 'openai-chat' }));
+    const createOpenAI = vi.fn(() => ({ responses, chat }));
+    vi.doMock('@ai-sdk/openai', () => ({ createOpenAI }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai',
+      modelId: 'anonymous-model',
+      apiKey: '',
+      authType: 'none',
+    });
+
+    expect(createOpenAI).toHaveBeenCalledWith({
+      apiKey: '',
+      fetch: expect.any(Function),
+    });
+    expect(responses).toHaveBeenCalledWith('anonymous-model');
+    vi.doUnmock('@ai-sdk/openai');
+  });
+
   it('ignores discovery baseURL for @ai-sdk/anthropic (SDK default includes /v1)', async () => {
     const anthropicFactory = vi.fn((modelId: string) => ({ modelId, provider: 'anthropic' }));
     const createAnthropic = vi.fn(() => anthropicFactory);
@@ -363,6 +385,7 @@ describe('createLanguageModel', () => {
       npm: '@ai-sdk/openai-compatible',
       modelId: 'tencent/hy3:free',
       apiKey: '',
+      authType: 'none',
       baseURL: 'https://api.kilo.ai/api/gateway',
       providerId: 'kilo',
     });
@@ -370,8 +393,52 @@ describe('createLanguageModel', () => {
     expect(createOpenAICompatible).toHaveBeenCalledWith({
       name: 'kilo',
       baseURL: 'https://api.kilo.ai/api/gateway',
+      fetch: expect.any(Function),
     });
     vi.doUnmock('@ai-sdk/openai-compatible');
+  });
+
+  it('strips generated credential headers for anonymous Anthropic providers', async () => {
+    const anthropicFactory = vi.fn((modelId: string) => ({ modelId }));
+    const createAnthropic = vi.fn(() => anthropicFactory);
+    vi.doMock('@ai-sdk/anthropic', () => ({ createAnthropic }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/anthropic',
+      modelId: 'anonymous-model',
+      apiKey: '',
+      authType: 'none',
+      baseURL: 'https://anonymous.example',
+    });
+
+    expect(createAnthropic).toHaveBeenCalledWith({
+      apiKey: '',
+      baseURL: 'https://anonymous.example/v1',
+      fetch: expect.any(Function),
+    });
+    expect(anthropicFactory).toHaveBeenCalledWith('anonymous-model');
+
+    const options = createAnthropic.mock.calls[0]?.[0] as { fetch: typeof fetch };
+    const transport = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', transport);
+    await options.fetch(new Request('https://anonymous.example/v1/messages', {
+      headers: {
+        Authorization: 'Bearer environment-secret',
+        'x-api-key': 'environment-secret',
+        'Content-Type': 'application/json',
+        'X-Custom': 'preserved',
+      },
+    }));
+
+    const [, init] = transport.mock.calls[0] as unknown as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(headers.has('authorization')).toBe(false);
+    expect(headers.has('x-api-key')).toBe(false);
+    expect(headers.get('content-type')).toBe('application/json');
+    expect(headers.get('x-custom')).toBe('preserved');
+    vi.unstubAllGlobals();
+    vi.doUnmock('@ai-sdk/anthropic');
   });
 
   it('merges custom headers into a non-OAuth custom anthropic endpoint', async () => {

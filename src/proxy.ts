@@ -368,9 +368,10 @@ export function startProxyCatalog(
       const route = lookupRoute(byAlias, originalModel) ?? defaultRoute;
       const apiKey = route.apiKey;
       const upstreamUrl = route.upstreamUrl;
+      const routeAuthType = route.authType ?? 'api';
 
       plog(() =>
-        `POST /v1/messages - alias=${originalModel} route=${route.realModelId} format=${route.modelFormat} key=${apiKey ? `len:${apiKey.length}` : 'MISSING'}`,
+        `POST /v1/messages - alias=${originalModel} route=${route.realModelId} format=${route.modelFormat} key=${routeAuthType === 'none' ? 'none' : apiKey ? `len:${apiKey.length}` : 'MISSING'}`,
       );
 
       const usesSdkAdapter = isSdkMigratedNpm(route.npm);
@@ -384,7 +385,7 @@ export function startProxyCatalog(
           return;
         }
 
-        if (!apiKey) {
+        if (!apiKey && routeAuthType !== 'none') {
           anthropicError(res, 401, 'Missing API key');
           return;
         }
@@ -393,11 +394,11 @@ export function startProxyCatalog(
         const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
         const forwardBody = { ...anthropicBody, model: route.realModelId };
         const targetUrl = `${upstreamUrl}/v1/messages/count_tokens`;
-        const isOAuth = route.authType === 'oauth';
+        const isOAuth = routeAuthType === 'oauth';
         try {
           await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, false, {
             inboundBeta,
-            authType: isOAuth ? 'oauth' : 'api',
+            authType: routeAuthType,
             log: message => plog(message),
             extraHeaders: route.headers,
             refreshToken: route.refreshToken,
@@ -413,7 +414,7 @@ export function startProxyCatalog(
         return;
       }
 
-      if (!apiKey && !usesSdkAdapter) {
+      if (!apiKey && routeAuthType !== 'none' && !usesSdkAdapter) {
         anthropicError(res, 401, 'Missing API key');
         return;
       }
@@ -426,7 +427,7 @@ export function startProxyCatalog(
         const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
         const forwardBody = { ...anthropicBody, model: route.realModelId };
         const targetUrl = `${upstreamUrl}/v1/messages`;
-        const isOAuth = route.authType === 'oauth';
+        const isOAuth = routeAuthType === 'oauth';
 
         let effectiveBeta = inboundBeta;
         let claudeCodeSessionId: string | undefined;
@@ -446,7 +447,7 @@ export function startProxyCatalog(
         try {
           await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, clientWantsStream, {
             inboundBeta: effectiveBeta,
-            authType: isOAuth ? 'oauth' : 'api',
+            authType: routeAuthType,
             log: message => plog(message),
             claudeCodeSessionId,
             extraHeaders: route.headers,
@@ -709,6 +710,7 @@ export function startProxy(
     interleavedReasoningField?: string;
     useResponsesLite?: boolean;
     preferWebSockets?: boolean;
+    headers?: Record<string, string>;
   },
   apiKey?: string,
 ): Promise<ProxyHandle> {
@@ -733,5 +735,6 @@ export function startProxy(
     interleavedReasoningField: sdk?.interleavedReasoningField,
     useResponsesLite: sdk?.useResponsesLite,
     preferWebSockets: sdk?.preferWebSockets,
+    headers: sdk?.headers,
   }], clientModelId, debug);
 }
