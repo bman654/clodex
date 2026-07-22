@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.0](https://github.com/bman654/clodex/compare/v1.1.0...v1.2.0) (2026-07-22)
+
+
+### Features
+
+* **auth:** harden credential and registry handling ([#8](https://github.com/bman654/clodex/issues/8)) ([502450c](https://github.com/bman654/clodex/commit/502450c42c4a6359307853a86dd5a33ed0aa5980))
+
+
+### Bug Fixes
+
+* **adapter:** deliver tool_result images as vision parts instead of base64 text ([#22](https://github.com/bman654/clodex/issues/22)) ([ac48a3b](https://github.com/bman654/clodex/commit/ac48a3b50ed8a6e58f6433ec8a64ba939036b776))
+
 ## [1.1.0](https://github.com/bman654/clodex/compare/v1.0.4...v1.1.0) (2026-07-21)
 
 
