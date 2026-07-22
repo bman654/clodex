@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ProviderRegistry } from '../src/registry/types.js';
+import { credentialInstanceAuthRef } from '../src/credential-helper.js';
 
 const registryState = vi.hoisted(() => ({
   current: { schemaVersion: 1, providers: [] } as ProviderRegistry,
@@ -8,6 +9,8 @@ const registryState = vi.hoisted(() => ({
 const lockState = vi.hoisted(() => ({
   active: false,
   credentialActive: false,
+  providerActive: false,
+  providerTails: new Map<string, Promise<void>>(),
   entries: 0,
   afterRegistryUnlock: null as null | (() => void),
 }));
@@ -16,8 +19,9 @@ const journalState = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/env.js', async importOriginal => ({
-  ...await importOriginal<typeof import('../src/env.js')>(),
+  ...(await importOriginal<typeof import('../src/env.js')>()),
   deleteProviderCredential: vi.fn(),
+  provisionProviderCredential: vi.fn(),
   saveProviderCredential: vi.fn(),
 }));
 vi.mock('../src/registry/fetch-template-models.js', () => ({
@@ -58,10 +62,8 @@ vi.mock('../src/registry/lock.js', () => ({
       afterUnlock?.();
     }
   }),
-  withCredentialMutationLock: vi.fn(async <T>(
-    _authRef: string,
-    operation: () => Promise<T> | T,
-  ): Promise<T> => {
+  withCredentialMutationLock: vi.fn(
+    async <T>(_authRef: string, operation: () => Promise<T> | T): Promise<T> => {
     if (lockState.credentialActive) {
       throw new Error('credential lock re-entered');
     }
@@ -71,7 +73,30 @@ vi.mock('../src/registry/lock.js', () => ({
     } finally {
       lockState.credentialActive = false;
     }
-  }),
+    },
+  ),
+  withProviderMutationLock: vi.fn(
+    async <T>(providerSlot: string, operation: () => Promise<T> | T): Promise<T> => {
+      const previous = lockState.providerTails.get(providerSlot) ?? Promise.resolve();
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => {
+        release = resolve;
+      });
+      const tail = previous.then(() => gate);
+      lockState.providerTails.set(providerSlot, tail);
+      await previous;
+      lockState.providerActive = true;
+      try {
+        return await operation();
+      } finally {
+        lockState.providerActive = false;
+        release();
+        if (lockState.providerTails.get(providerSlot) === tail) {
+          lockState.providerTails.delete(providerSlot);
+        }
+      }
+    },
+  ),
 }));
 vi.mock('../src/registry/url-security.js', () => ({
   validateCustomEndpointUrl: vi.fn(),
@@ -80,6 +105,7 @@ vi.mock('../src/registry/url-security.js', () => ({
 import {
   clodexKeyEnvVar,
   deleteProviderCredential,
+  provisionProviderCredential,
   resolveProviderCredential,
   saveProviderCredential,
 } from '../src/env.js';
@@ -117,18 +143,22 @@ function successfulDiscovery() {
 
 describe('custom endpoint credential lifecycle', () => {
   const previousHelper = process.env.CLODEX_CREDENTIAL_HELPER;
-
+  const firstCredentialRef = credentialInstanceAuthRef('provider:custom-test-endpoint');
+  const secondCredentialRef = credentialInstanceAuthRef('provider:custom-test-endpoint-2');
   beforeEach(() => {
     delete process.env.CLODEX_CREDENTIAL_HELPER;
     registryState.current = { schemaVersion: 1, providers: [] };
     registryState.persisted = [];
     lockState.active = false;
     lockState.credentialActive = false;
+    lockState.providerActive = false;
+    lockState.providerTails.clear();
     lockState.entries = 0;
     lockState.afterRegistryUnlock = null;
     journalState.pending.clear();
 
     vi.mocked(deleteProviderCredential).mockReset().mockResolvedValue(true);
+    vi.mocked(provisionProviderCredential).mockReset().mockResolvedValue(true);
     vi.mocked(saveProviderCredential).mockReset().mockResolvedValue(true);
     vi.mocked(cleanupJournal.loadPendingCredentialDeletes).mockReset()
       .mockImplementation(async () => [...journalState.pending]);
@@ -161,9 +191,10 @@ describe('custom endpoint credential lifecycle', () => {
       observedLockStates.push(lockState.active);
       return successfulDiscovery();
     });
-    vi.mocked(saveProviderCredential).mockImplementation(async () => {
+    vi.mocked(provisionProviderCredential).mockImplementation(async () => {
       observedLockStates.push(lockState.active);
       expect(lockState.credentialActive).toBe(true);
+      expect(lockState.providerActive).toBe(true);
       return true;
     });
 
@@ -171,7 +202,7 @@ describe('custom endpoint credential lifecycle', () => {
 
     expect(result.added).toBe(true);
     expect(observedLockStates).toEqual([false, false]);
-    expect(lockState.entries).toBeGreaterThanOrEqual(1);
+    expect(lockState.entries).toBe(2);
     expect(lockState.active).toBe(false);
   });
 
@@ -195,21 +226,24 @@ describe('custom endpoint credential lifecycle', () => {
       endpointInput.baseUrl,
       undefined,
     );
+    expect(provisionProviderCredential).not.toHaveBeenCalled();
     expect(saveProviderCredential).not.toHaveBeenCalled();
     expect(registryState.current.providers[0]).toMatchObject({
       authRef: 'none:anonymous',
       authType: 'none',
     });
-    await expect(resolveProviderCredential(
-      result.provider!.id,
-      result.provider!.authRef,
-    )).resolves.toBeNull();
+    await expect(
+      resolveProviderCredential(result.provider!.id, result.provider!.authRef),
+    ).resolves.toBeNull();
   });
 
   it('omits the Anthropic API key header for anonymous discovery', async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
       data: [{ id: 'local-model', name: 'Local Model' }],
-    }), { status: 200 }));
+        }),
+        { status: 200 },
+      ),
+    );
     vi.stubGlobal('fetch', fetchMock);
 
     const result = await fetchAnthropicModels('https://local.example/v1', '');
@@ -239,14 +273,12 @@ describe('custom endpoint credential lifecycle', () => {
       added: true,
       provider: { id: 'custom-test-endpoint-2' },
     });
-    expect(result.provider?.authRef).toMatch(
-      /^keyring:provider:custom-test-endpoint:[0-9a-f-]{36}$/,
-    );
-    expect(saveProviderCredential).toHaveBeenCalledWith(
+    expect(result.provider?.authRef).toBe(secondCredentialRef);
+    expect(provisionProviderCredential).toHaveBeenCalledWith(
       result.provider?.authRef,
       endpointInput.apiKey,
     );
-    expect(registryState.current.providers.map((provider) => provider.id)).toEqual([
+    expect(registryState.current.providers.map(provider => provider.id)).toEqual([
       'custom-test-endpoint',
       'custom-test-endpoint-2',
     ]);
@@ -267,6 +299,7 @@ describe('custom endpoint credential lifecycle', () => {
       error: 'Network discovery failed.',
       hint: 'Check the endpoint.',
     });
+    expect(provisionProviderCredential).not.toHaveBeenCalled();
     expect(saveProviderCredential).not.toHaveBeenCalled();
     expect(deleteProviderCredential).not.toHaveBeenCalled();
     expect(saveRegistry).not.toHaveBeenCalled();
@@ -275,20 +308,18 @@ describe('custom endpoint credential lifecycle', () => {
   });
 
   it('cleans the journal without activating a provider when credential writing fails', async () => {
-    vi.mocked(saveProviderCredential).mockResolvedValue(false);
+    vi.mocked(provisionProviderCredential).mockResolvedValue(false);
 
     const result = await addCustomEndpointProvider(endpointInput);
 
-    const authRef = vi.mocked(saveProviderCredential).mock.calls[0]?.[0];
-    expect(authRef).toMatch(
-      /^keyring:provider:custom-test-endpoint:[0-9a-f-]{36}$/,
-    );
+    const authRef = vi.mocked(provisionProviderCredential).mock.calls[0]?.[0];
+    expect(authRef).toBe(firstCredentialRef);
     expect(result).toMatchObject({
       added: false,
       error: 'Could not save API key to the credential store.',
     });
     expect(cleanupJournal.queueCredentialDelete).toHaveBeenCalledWith(authRef);
-    expect(saveProviderCredential).toHaveBeenCalledWith(authRef!, endpointInput.apiKey);
+    expect(provisionProviderCredential).toHaveBeenCalledWith(authRef!, endpointInput.apiKey);
     expect(deleteProviderCredential).toHaveBeenCalledWith(authRef!);
     expect(registryState.current.providers).toEqual([]);
     expect(journalState.pending.size).toBe(0);
@@ -301,11 +332,9 @@ describe('custom endpoint credential lifecycle', () => {
 
     await expect(addCustomEndpointProvider(endpointInput)).rejects.toThrow('activation failed');
 
-    const authRef = vi.mocked(saveProviderCredential).mock.calls[0]?.[0];
-    expect(authRef).toMatch(
-      /^keyring:provider:custom-test-endpoint:[0-9a-f-]{36}$/,
-    );
-    expect(saveProviderCredential).toHaveBeenCalledWith(authRef!, endpointInput.apiKey);
+    const authRef = vi.mocked(provisionProviderCredential).mock.calls[0]?.[0];
+    expect(authRef).toBe(firstCredentialRef);
+    expect(provisionProviderCredential).toHaveBeenCalledWith(authRef!, endpointInput.apiKey);
     expect(registryState.current.providers).toEqual([]);
     expect(journalState.pending).toEqual(new Set([authRef]));
     expect(deleteProviderCredential).not.toHaveBeenCalled();
@@ -359,9 +388,7 @@ describe('custom endpoint credential lifecycle', () => {
     const authRef = result.provider?.authRef;
 
     expect(cancellationLockStates).toEqual([true]);
-    expect(authRef).toMatch(
-      /^keyring:provider:custom-test-endpoint:[0-9a-f-]{36}$/,
-    );
+    expect(authRef).toBe(firstCredentialRef);
     expect(journalState.pending).toContain(authRef);
     expect(result.credentialCleanupPending).toBe(true);
   });
@@ -376,5 +403,67 @@ describe('custom endpoint credential lifecycle', () => {
     expect(result.added).toBe(true);
     expect(result.credentialCleanupPending).toBe(true);
     expect(registryState.current.providers).toHaveLength(1);
+  });
+
+  it('reuses the same provider slot after a failed credential verification', async () => {
+    vi.mocked(provisionProviderCredential).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+
+    const first = await addCustomEndpointProvider(endpointInput);
+    const second = await addCustomEndpointProvider(endpointInput);
+
+    expect(first.added).toBe(false);
+    expect(second.added).toBe(true);
+    expect(vi.mocked(provisionProviderCredential).mock.calls.map(call => call[0])).toEqual([
+      firstCredentialRef,
+      firstCredentialRef,
+    ]);
+    expect(registryState.current.providers).toHaveLength(1);
+  });
+
+  it('serializes concurrent allocation for colliding custom provider names', async () => {
+    const results = await Promise.all([
+      addCustomEndpointProvider(endpointInput),
+      addCustomEndpointProvider({
+        ...endpointInput,
+        displayName: 'Test--Endpoint',
+      }),
+    ]);
+
+    expect(results.every(result => result.added)).toBe(true);
+    expect(registryState.current.providers.map(provider => provider.id)).toEqual([
+      'custom-test-endpoint',
+      'custom-test-endpoint-2',
+    ]);
+    expect(registryState.current.providers.map(provider => provider.authRef)).toEqual([
+      firstCredentialRef,
+      secondCredentialRef,
+    ]);
+  });
+
+  it('serializes base and suffix collisions in one allocation domain', async () => {
+    registryState.current.providers.push({
+      id: 'custom-foo',
+      templateId: 'custom-openai',
+      name: 'Existing Foo',
+      enabled: true,
+      authRef: 'none:anonymous',
+      authType: 'none',
+      api: { npm: '@ai-sdk/openai-compatible', url: endpointInput.baseUrl },
+      addedAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const results = await Promise.all([
+      addCustomEndpointProvider({ ...endpointInput, displayName: 'Foo' }),
+      addCustomEndpointProvider({ ...endpointInput, displayName: 'Foo 2' }),
+    ]);
+
+    expect(results.every(result => result.added)).toBe(true);
+    const addedProviders = results.map(result => result.provider!);
+    expect(new Set(addedProviders.map(provider => provider.id)).size).toBe(2);
+    for (const provider of addedProviders) {
+      expect(provider.authRef).toBe(
+        credentialInstanceAuthRef(`provider:${provider.id}`),
+      );
+    }
   });
 });

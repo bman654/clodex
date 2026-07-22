@@ -214,17 +214,33 @@ clodex --version    # version
 ## Configuration
 
 - Config home: `~/.clodex` (override with `CLODEX_HOME`). On first run, config is migrated automatically from a legacy `~/.relay-ai` directory if present; the legacy directory is never modified.
-- The config-home filesystem must support hard links because registry locks are
-  published atomically. Keep `CLODEX_HOME` on a local filesystem rather than
-  FAT, exFAT, or a network mount that rejects hard links. An abrupt process kill
-  during lock publication can leave a `*.lock.*.tmp` file; it does
-  not block later lock acquisition and can be removed when no Clodex process is
+- The config-home filesystem and the native account home must support hard
+  links because registry and credential locks are published atomically. Keep
+  `CLODEX_HOME` and `~/.clodex/credential-locks` on local filesystems rather
+  than FAT, exFAT, or a network mount that rejects hard links. An abrupt process
+  kill during lock publication can leave a `*.lock.*.tmp` file; it does not
+  block later lock acquisition and can be removed when no Clodex process is
   running. A canonical `providers.json.lock` whose recorded PID is no longer
-  running is reclaimed automatically on the next lock acquisition. If it remains
-  while that PID is active, stop every Clodex process and verify the recorded PID
-  before removing the lock manually. Never remove the canonical lock while a
-  Clodex process is active.
-- Credentials live in the OS credential store (Keychain / Windows Credential Manager / Secret Service) under the `clodex` service. Set `CLODEX_CREDENTIAL_HELPER` to an absolute executable path to use an external secure store instead; see [credential helpers](docs/credential-helpers.md).
+  running is reclaimed automatically on the next lock acquisition. If it
+  remains while that PID is active, stop every Clodex process and verify the
+  recorded PID before removing the lock manually. Never remove the canonical
+  lock while a Clodex process is active.
+- Credentials live in the OS credential store (Keychain / Windows Credential
+  Manager / Secret Service). The `clodex` service holds the main value or
+  published marker; `clodex-chunks` holds current long-credential chunks;
+  `clodex-journal` holds crash-recovery metadata and a deletion marker; and
+  `clodex-deleted` holds a redundant non-secret deletion guard. Use Clodex
+  provider removal instead of deleting these entries individually. Non-secret
+  per-account managed-state markers live under the native OS account home at
+  `~/.clodex/keyring-state`; before each journal write they record the exact
+  non-secret intent so a retry can replay and verify it. They also prevent a
+  temporarily unavailable keyring journal from being mistaken for an absent
+  one. Credential mutation locks live beside that state at
+  `~/.clodex/credential-locks`. Both paths are independent of `CLODEX_HOME` and
+  runtime or temporary-directory environment overrides. This keeps concurrent
+  processes serialized when they use different config homes. Set
+  `CLODEX_CREDENTIAL_HELPER` to an absolute executable path to use an external
+  secure store instead; see [credential helpers](docs/credential-helpers.md).
 - Proxied routes forward configured provider headers for API-key and OAuth authentication. Anonymous routes preserve non-credential headers while removing authorization, API-key, cookie, token, secret, and credential-bearing header names before dispatch.
 - `CLODEX_CLAUDE_PATH` overrides Claude Code binary discovery.
 - **Outbound proxy:** when `HTTP_PROXY`/`HTTPS_PROXY` (and optionally `NO_PROXY`) are set in clodex's environment, all clodex-originated network calls honor them — OAuth sign-in and token refresh, model-list and models.dev refreshes, upstream OpenAI API calls, and the ChatGPT/Codex OAuth WebSocket transport (tunneled via HTTP CONNECT).

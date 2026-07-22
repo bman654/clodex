@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -10,16 +10,30 @@ const keyring = vi.hoisted(() => ({
   failSetKey: '' as string,
   failDeleteSuffix: '' as string,
   failDeleteKey: '' as string,
+  failFindService: '' as string,
+  failFindCount: 0,
+  omitFindKey: '' as string,
+  omitFindOnceKey: '' as string,
+  omitFindAccount: '' as string,
+  getCount: 0,
+  findCount: 0,
   onGet: null as ((key: string) => void) | null,
-  operations: [] as Array<{ type: 'set' | 'delete'; key: string; value?: string }>,
+  operations: [] as Array<{
+    type: 'set' | 'delete';
+    key: string;
+    value?: string;
+  }>,
   lockHome: '' as string,
 }));
 
-vi.mock('node:os', async (importOriginal) => {
+vi.mock('node:os', async importOriginal => {
   const actual = await importOriginal<typeof import('node:os')>();
   return {
     ...actual,
-    homedir: () => keyring.lockHome || actual.homedir(),
+    userInfo: () => ({
+      ...actual.userInfo(),
+      homedir: keyring.lockHome || actual.userInfo().homedir,
+    }),
   };
 });
 
@@ -32,7 +46,12 @@ vi.mock('@napi-rs/keyring', () => ({
     }
 
     getPassword(): string | null {
-      keyring.onGet?.(this.key);
+      keyring.getCount++;
+      try {
+        keyring.onGet?.(this.key);
+      } catch {
+        return null;
+      }
       return keyring.values.get(this.key) ?? null;
     }
 
@@ -43,62 +62,206 @@ vi.mock('@napi-rs/keyring', () => ({
       ) {
         throw new Error('injected keyring write failure');
       }
-      keyring.operations.push({ type: 'set', key: this.key, value });
-      keyring.values.set(this.key, value);
+      const nativeValue = Buffer.from(value, 'utf8').toString('utf8');
+      keyring.operations.push({
+        type: 'set',
+        key: this.key,
+        value: nativeValue,
+      });
+      keyring.values.set(this.key, nativeValue);
     }
 
-    deletePassword(): void {
+    deletePassword(): boolean {
       if (
         (keyring.failDeleteSuffix && this.key.endsWith(keyring.failDeleteSuffix))
         || (keyring.failDeleteKey && this.key === keyring.failDeleteKey)
       ) {
-        throw new Error('injected keyring delete failure');
+        return false;
       }
+      const deleted = keyring.values.delete(this.key);
+      if (!deleted) return false;
       keyring.operations.push({ type: 'delete', key: this.key });
-      keyring.values.delete(this.key);
+      return true;
     }
+  },
+  findCredentials: (service: string) => {
+    keyring.findCount++;
+    if (keyring.failFindService === service && keyring.failFindCount > 0) {
+      keyring.failFindCount--;
+      throw new Error('injected keyring enumeration failure');
+    }
+    const prefix = `${service}:`;
+    return [...keyring.values.entries()]
+      .filter(([key]) => {
+        if (!key.startsWith(prefix)) return false;
+        if (key === keyring.omitFindOnceKey) {
+          keyring.omitFindOnceKey = '';
+          return false;
+        }
+        const credentialAccount = key.slice(prefix.length);
+        if (
+          keyring.omitFindAccount &&
+          (credentialAccount === keyring.omitFindAccount ||
+            credentialAccount.startsWith(`${keyring.omitFindAccount}::`))
+        )
+          return false;
+        return key !== keyring.omitFindKey;
+      })
+      .map(([key, password]) => ({
+        account: key.slice(prefix.length),
+        password,
+      }));
   },
 }));
 
 import {
   deleteProviderCredential,
+  probeProviderCredentialStore,
+  provisionProviderCredential,
   resolveProviderCredential,
-  saveProviderCredential,
+  saveProviderCredential as replaceProviderCredential,
 } from '../src/env.js';
 
-const account = 'oauth:provider:test';
+const credentialInstance = `v1:${'1'.repeat(32)}`;
+const account = `oauth:provider:test::credential::${credentialInstance}`;
 const authRef = `keyring:${account}`;
 const mainKey = `clodex:${account}`;
 const journalKey = `clodex-journal:${account}`;
+const deletedKey = `clodex-deleted:${account}`;
 const journalPrefix = '__relay_chunk_journal__:v1:';
 const previousHome = process.env.CLODEX_HOME;
+const previousRuntimeDir = process.env.XDG_RUNTIME_DIR;
 let tempDir = '';
+
+function testCredentialAuthRef(accountBase: string): string {
+  return `keyring:${accountBase}::credential::${credentialInstance}`;
+}
+
+function managedStatePath(refAccount = account): string {
+  const accountDigest = createHash('sha256').update(refAccount).digest('hex');
+  return join(keyring.lockHome, '.clodex', 'keyring-state', `${accountDigest}.managed`);
+}
+
+function hasStoredCredentialState(ref: string): boolean {
+  const refAccount = ref.slice('keyring:'.length);
+  if (existsSync(managedStatePath(refAccount))) {
+    return true;
+  }
+  return [...keyring.values.keys()].some(key => {
+    const separatorIndex = key.indexOf(':');
+    const service = key.slice(0, separatorIndex);
+    const storedAccount = key.slice(separatorIndex + 1);
+    return (
+      ['clodex', 'clodex-chunks', 'clodex-journal', 'clodex-deleted'].includes(service) &&
+      (storedAccount === refAccount || storedAccount.startsWith(`${refAccount}::chunk::`))
+    );
+  });
+}
+
+function saveProviderCredential(
+  ref: string,
+  value: string,
+  diag?: (msg: string) => void,
+): Promise<boolean> {
+  return hasStoredCredentialState(ref)
+    ? replaceProviderCredential(ref, value, diag)
+    : provisionProviderCredential(ref, value, diag);
+}
 
 function currentChunkKeys(): string[] {
   return [...keyring.values.keys()].filter(key => key.includes(`${account}::chunk::`));
 }
 
-function expectUnverifiableTombstone(): string {
+function clearMockKeyringState(): void {
+  keyring.values.clear();
+  rmSync(join(keyring.lockHome, '.clodex', 'keyring-state'), { recursive: true, force: true });
+}
+
+function expectUnverifiableTombstone(blockLegacy = false): string {
   const raw = keyring.values.get(journalKey);
   expect(raw?.startsWith(journalPrefix)).toBe(true);
   expect(JSON.parse(raw!.slice(journalPrefix.length))).toEqual({
     mode: 'delete',
     generations: [],
+    ...(blockLegacy ? { blockLegacy: true } : {}),
     unverifiable: true,
   });
   return raw!;
+}
+
+function expectDeletionMarker(): void {
+  const raw = keyring.values.get(journalKey);
+  expect(raw?.startsWith(journalPrefix)).toBe(true);
+  expect(JSON.parse(raw!.slice(journalPrefix.length))).toEqual({
+    mode: 'deleted',
+    generations: [],
+  });
+  expectDeletionGuard();
+}
+
+function expectDeletionGuard(): void {
+  expect(keyring.values.has(mainKey)).toBe(false);
+  expect(keyring.values.get(deletedKey)).toBe('v1:deleted');
+}
+
+function publishedMarker(): {
+  count: number;
+  generation?: string;
+  digest?: string;
+} {
+  const raw = keyring.values.get(mainKey);
+  expect(raw?.startsWith('__relay_chunked__:')).toBe(true);
+  const encoded = raw!.slice('__relay_chunked__:'.length);
+  const current = /^v3:([^:]+):(\d+):([0-9a-f]{64})$/.exec(encoded);
+  const versioned = /^v2:([^:]+):(\d+)$/.exec(encoded);
+  const legacy = /^(\d+)$/.exec(encoded);
+  const count = Number(current?.[2] ?? versioned?.[2] ?? legacy?.[1]);
+  return {
+    count,
+    ...(current?.[1] || versioned?.[1] ? { generation: current?.[1] ?? versioned?.[1] } : {}),
+    ...(current?.[3] ? { digest: current[3] } : {}),
+  };
+}
+
+function expectActiveInventory(
+  marker: ReturnType<typeof publishedMarker> = publishedMarker(),
+): void {
+  const raw = keyring.values.get(journalKey);
+  expect(raw?.startsWith(journalPrefix)).toBe(true);
+  expect(JSON.parse(raw!.slice(journalPrefix.length))).toEqual({
+    mode: 'write',
+    generations: [marker],
+  });
+}
+
+function expectActiveShort(value: string): void {
+  const raw = keyring.values.get(journalKey);
+  expect(raw?.startsWith(journalPrefix)).toBe(true);
+  expect(JSON.parse(raw!.slice(journalPrefix.length))).toEqual({
+    mode: 'short',
+    generations: [],
+    shortDigest: createHash('sha256').update(value).digest('hex'),
+  });
 }
 
 describe('keyring credential chunks', () => {
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'clodex-keyring-'));
     process.env.CLODEX_HOME = tempDir;
+    process.env.XDG_RUNTIME_DIR = tempDir;
     keyring.lockHome = tempDir;
     keyring.values.clear();
     keyring.failSetSuffix = '';
     keyring.failSetKey = '';
     keyring.failDeleteSuffix = '';
     keyring.failDeleteKey = '';
+    keyring.failFindService = '';
+    keyring.failFindCount = 0;
+    keyring.omitFindKey = '';
+    keyring.omitFindOnceKey = '';
+    keyring.omitFindAccount = '';
+    keyring.getCount = 0;
+    keyring.findCount = 0;
     keyring.onGet = null;
     keyring.operations = [];
   });
@@ -106,7 +269,22 @@ describe('keyring credential chunks', () => {
   afterEach(() => {
     if (previousHome === undefined) delete process.env.CLODEX_HOME;
     else process.env.CLODEX_HOME = previousHome;
+    if (previousRuntimeDir === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = previousRuntimeDir;
     rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('requires a versioned account reference for provisioned credentials', async () => {
+    const diagnostics: string[] = [];
+
+    await expect(
+      provisionProviderCredential('keyring:provider:test', 'secret-value', message =>
+        diagnostics.push(message),
+      ),
+    ).resolves.toBe(false);
+
+    expect(diagnostics).toContain('provisioned credentials require a versioned account instance');
+    expect(keyring.values.size).toBe(0);
   });
 
   it('publishes a new chunk generation before removing the previous one', async () => {
@@ -141,22 +319,62 @@ describe('keyring credential chunks', () => {
       .map((operation, index) => ({ operation, index }))
       .filter(({ operation }) => operation.type === 'delete' && firstChunks.includes(operation.key))
       .map(({ index }) => index);
-    const journalSetIndex = keyring.operations.findIndex(operation =>
-      operation.type === 'set' && operation.key === journalKey,
-    );
-    const journalDeleteIndex = keyring.operations.findIndex(operation =>
-      operation.type === 'delete' && operation.key === journalKey,
-    );
+    const journalSetIndices = keyring.operations
+      .map((operation, index) => ({ operation, index }))
+      .filter(({ operation }) => operation.type === 'set' && operation.key === journalKey)
+      .map(({ index }) => index);
+    const initialJournalSetIndex = journalSetIndices.at(0)!;
+    const inventorySetIndex = journalSetIndices.at(-1)!;
     expect(markerSetIndex).toBeGreaterThanOrEqual(0);
-    expect(journalSetIndex).toBeGreaterThanOrEqual(0);
-    expect(journalDeleteIndex).toBeGreaterThanOrEqual(0);
+    expect(journalSetIndices).toHaveLength(2);
     expect(newChunkSetIndices).toHaveLength(2);
     expect(oldChunkDeleteIndices).toHaveLength(3);
-    expect(newChunkSetIndices.every(index => journalSetIndex < index)).toBe(true);
+    expect(newChunkSetIndices.every(index => initialJournalSetIndex < index)).toBe(true);
     expect(newChunkSetIndices.every(index => index < markerSetIndex)).toBe(true);
     expect(oldChunkDeleteIndices.every(index => index > markerSetIndex)).toBe(true);
-    expect(oldChunkDeleteIndices.every(index => index < journalDeleteIndex)).toBe(true);
+    expect(oldChunkDeleteIndices.every(index => index < inventorySetIndex)).toBe(true);
+    expectActiveInventory();
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe(second);
+  });
+
+  it('does not split a surrogate pair across native keyring chunks', async () => {
+    const secret = `${'a'.repeat(1_199)}😀b`;
+
+    await expect(saveProviderCredential(authRef, secret)).resolves.toBe(true);
+
+    expect(currentChunkKeys()).toHaveLength(2);
+    expect([...keyring.values.values()].every(value => !value.includes('�'))).toBe(true);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe(secret);
+  });
+
+  it('does not multiply missing-entry scans for a steady short credential', async () => {
+    await expect(saveProviderCredential(authRef, 'short-secret')).resolves.toBe(true);
+    keyring.getCount = 0;
+    keyring.findCount = 0;
+
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('short-secret');
+
+    expect(keyring.getCount).toBe(5);
+    expect(keyring.findCount).toBe(1);
+  });
+
+  it('places keyring coordination state under the native account home', async () => {
+    const defaultHome = mkdtempSync(join(tmpdir(), 'clodex-default-home-'));
+    const alternateRuntime = mkdtempSync(join(tmpdir(), 'clodex-runtime-'));
+    keyring.lockHome = defaultHome;
+    process.env.XDG_RUNTIME_DIR = alternateRuntime;
+    try {
+      await expect(saveProviderCredential(authRef, 'short-secret')).resolves.toBe(true);
+
+      expect(existsSync(join(defaultHome, '.clodex', 'credential-locks'))).toBe(true);
+      expect(existsSync(join(defaultHome, '.clodex', 'keyring-state'))).toBe(true);
+      expect(existsSync(join(tempDir, 'clodex-keyring-locks'))).toBe(false);
+      expect(existsSync(join(tempDir, 'keyring-state'))).toBe(false);
+      expect(existsSync(join(alternateRuntime, 'clodex-keyring-locks'))).toBe(false);
+    } finally {
+      rmSync(defaultHome, { recursive: true, force: true });
+      rmSync(alternateRuntime, { recursive: true, force: true });
+    }
   });
 
   it('keeps the published credential readable when a new generation fails', async () => {
@@ -170,9 +388,10 @@ describe('keyring credential chunks', () => {
 
     expect(keyring.values.get(mainKey)).toBe(firstMarker);
     expect(keyring.values.has(journalKey)).toBe(true);
+    keyring.failSetSuffix = '';
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe(first);
     expect(currentChunkKeys().sort()).toEqual(firstChunks.sort());
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectActiveInventory();
   });
 
   it('recovers journaled chunks when publishing the new marker fails', async () => {
@@ -189,7 +408,221 @@ describe('keyring credential chunks', () => {
     keyring.failSetKey = '';
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe(first);
     expect(currentChunkKeys().sort()).toEqual(firstChunks.sort());
+    expectActiveInventory();
+  });
+
+  it('retains a short fallback when its second read collapses before a failed long write', async () => {
+    const first = 'short-secret';
+    await expect(saveProviderCredential(authRef, first)).resolves.toBe(true);
+
+    let mainReads = 0;
+    keyring.omitFindOnceKey = mainKey;
+    keyring.onGet = key => {
+      if (key === mainKey && ++mainReads === 2) {
+        throw new Error('injected collapsed keyring read failure');
+      }
+    };
+    keyring.failSetSuffix = '::1';
+
+    await expect(saveProviderCredential(authRef, 'b'.repeat(2_500))).resolves.toBe(false);
+
+    keyring.onGet = null;
+    keyring.failSetSuffix = '';
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe(first);
+    expect(keyring.values.get(mainKey)).toBe(first);
+    expect(currentChunkKeys()).toEqual([]);
+    expectActiveShort(first);
+  });
+
+  it('retains a long fallback when its second read collapses before a failed short write', async () => {
+    const first = 'a'.repeat(2_500);
+    await expect(saveProviderCredential(authRef, first)).resolves.toBe(true);
+    const marker = publishedMarker();
+    const chunks = currentChunkKeys();
+
+    let mainReads = 0;
+    keyring.omitFindOnceKey = mainKey;
+    keyring.onGet = key => {
+      if (key === mainKey && ++mainReads === 2) {
+        throw new Error('injected collapsed keyring read failure');
+      }
+    };
+    keyring.failSetKey = mainKey;
+
+    await expect(saveProviderCredential(authRef, 'short-secret')).resolves.toBe(false);
+
+    keyring.onGet = null;
+    keyring.failSetKey = '';
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe(first);
+    expect(currentChunkKeys().sort()).toEqual(chunks.sort());
+    expectActiveInventory(marker);
+  });
+
+  it('recovers a short credential when publishing a long marker fails', async () => {
+    const first = 'short-secret';
+    await expect(saveProviderCredential(authRef, first)).resolves.toBe(true);
+    keyring.failSetKey = mainKey;
+
+    await expect(saveProviderCredential(authRef, 'b'.repeat(2_500))).resolves.toBe(false);
+
+    keyring.failSetKey = '';
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe(first);
+    expect(keyring.values.get(mainKey)).toBe(first);
+    expect(currentChunkKeys()).toEqual([]);
+    expectActiveShort(first);
+  });
+
+  it('recovers a long credential when publishing a short value fails', async () => {
+    const first = 'a'.repeat(2_500);
+    await expect(saveProviderCredential(authRef, first)).resolves.toBe(true);
+    const marker = publishedMarker();
+    const chunks = currentChunkKeys();
+    keyring.failSetKey = mainKey;
+
+    await expect(saveProviderCredential(authRef, 'short-secret')).resolves.toBe(false);
+
+    keyring.failSetKey = '';
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe(first);
+    expect(currentChunkKeys().sort()).toEqual(chunks.sort());
+    expectActiveInventory(marker);
+  });
+
+  it('retries an unpublished long credential after chunk or marker publication fails', async () => {
+    const secret = 'a'.repeat(2_500);
+    for (const failure of ['chunk', 'marker'] as const) {
+      clearMockKeyringState();
+      keyring.operations = [];
+      if (failure === 'chunk') keyring.failSetSuffix = '::1';
+      else keyring.failSetKey = mainKey;
+
+      await expect(saveProviderCredential(authRef, secret)).resolves.toBe(false);
+
+      keyring.failSetSuffix = '';
+      keyring.failSetKey = '';
+      await expect(saveProviderCredential(authRef, secret)).resolves.toBe(true);
+      await expect(resolveProviderCredential('test', authRef)).resolves.toBe(secret);
+      expectActiveInventory();
+    }
+  });
+
+  it('verifies a first long publication after a transient collapsed marker read', async () => {
+    const secret = 'a'.repeat(2_500);
+    let remainingCollapsedReads = 2;
+    keyring.onGet = key => {
+      const markerWasPublished = keyring.operations.some(
+        operation => operation.type === 'set' && operation.key === mainKey,
+      );
+      if (key === mainKey && markerWasPublished && remainingCollapsedReads > 0) {
+        remainingCollapsedReads--;
+        keyring.omitFindOnceKey = mainKey;
+        throw new Error('injected collapsed keyring read failure');
+      }
+    };
+
+    await expect(saveProviderCredential(authRef, secret)).resolves.toBe(false);
+
+    expect(remainingCollapsedReads).toBe(1);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe(secret);
+    expect(remainingCollapsedReads).toBe(0);
+    expect(currentChunkKeys()).toHaveLength(3);
+    expect(keyring.values.has(journalKey)).toBe(true);
+
+    keyring.onGet = null;
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe(secret);
+    expect(currentChunkKeys()).toHaveLength(3);
+    expectActiveInventory();
+  });
+
+  it('reuses the provisioned account after an ambiguous publication result', async () => {
+    const secret = 'a'.repeat(2_500);
+    let remainingCollapsedReads = 2;
+    keyring.onGet = key => {
+      const markerWasPublished = keyring.operations.some(
+        operation => operation.type === 'set' && operation.key === mainKey,
+      );
+      if (key === mainKey && markerWasPublished && remainingCollapsedReads > 0) {
+        remainingCollapsedReads--;
+        keyring.omitFindOnceKey = mainKey;
+        throw new Error('injected collapsed keyring read failure');
+      }
+    };
+
+    await expect(provisionProviderCredential(authRef, secret)).resolves.toBe(false);
+
+    keyring.onGet = null;
+    await expect(provisionProviderCredential(authRef, secret)).resolves.toBe(true);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe(secret);
+    expectActiveInventory();
+  });
+
+  it('retries an unpublished short credential after publication fails', async () => {
+    keyring.failSetKey = mainKey;
+    await expect(saveProviderCredential(authRef, 'first-secret')).resolves.toBe(false);
+
+    keyring.failSetKey = '';
+    await expect(saveProviderCredential(authRef, 'different-secret')).resolves.toBe(true);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('different-secret');
+    expectActiveShort('different-secret');
+  });
+
+  it('replays the first journal write after publication fails', async () => {
+    keyring.failSetKey = journalKey;
+    await expect(provisionProviderCredential(authRef, 'short-secret')).resolves.toBe(false);
     expect(keyring.values.has(journalKey)).toBe(false);
+
+    keyring.failSetKey = '';
+    await expect(provisionProviderCredential(authRef, 'short-secret')).resolves.toBe(true);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('short-secret');
+    expectActiveShort('short-secret');
+  });
+
+  it('shares interrupted journal intent across config homes', async () => {
+    const firstConfigHome = mkdtempSync(join(tmpdir(), 'clodex-config-a-'));
+    const secondConfigHome = mkdtempSync(join(tmpdir(), 'clodex-config-b-'));
+    try {
+      process.env.CLODEX_HOME = firstConfigHome;
+      keyring.failSetKey = journalKey;
+      await expect(provisionProviderCredential(authRef, 'first-secret')).resolves.toBe(false);
+      expect(existsSync(managedStatePath())).toBe(true);
+
+      process.env.CLODEX_HOME = secondConfigHome;
+      keyring.failSetKey = '';
+      await expect(provisionProviderCredential(authRef, 'second-secret')).resolves.toBe(true);
+
+      process.env.CLODEX_HOME = firstConfigHome;
+      await expect(resolveProviderCredential('test', authRef)).resolves.toBe('second-secret');
+      expect(existsSync(join(firstConfigHome, 'keyring-state'))).toBe(false);
+      expect(existsSync(join(secondConfigHome, 'keyring-state'))).toBe(false);
+    } finally {
+      rmSync(firstConfigHome, { recursive: true, force: true });
+      rmSync(secondConfigHome, { recursive: true, force: true });
+    }
+  });
+
+  it('replays a failed replacement journal without losing the active credential', async () => {
+    await expect(saveProviderCredential(authRef, 'first-secret')).resolves.toBe(true);
+
+    keyring.failSetKey = journalKey;
+    await expect(saveProviderCredential(authRef, 'a'.repeat(2_500))).resolves.toBe(false);
+
+    keyring.failSetKey = '';
+    await expect(saveProviderCredential(authRef, 'a'.repeat(2_500))).resolves.toBe(true);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('a'.repeat(2_500));
+    expectActiveInventory();
+  });
+
+  it('fails closed when the local journal intent is malformed', async () => {
+    const diagnostics: string[] = [];
+    mkdirSync(join(keyring.lockHome, '.clodex', 'keyring-state'), { recursive: true });
+    writeFileSync(managedStatePath(), 'v1:preparing:not-valid!\n', { mode: 0o600 });
+
+    await expect(
+      provisionProviderCredential(authRef, 'short-secret', message => diagnostics.push(message)),
+    ).resolves.toBe(false);
+
+    expect(keyring.values.has(mainKey)).toBe(false);
+    expect(keyring.values.has(journalKey)).toBe(false);
+    expect(diagnostics).toContain('keyring error: keyring managed-state marker is invalid');
   });
 
   it('removes old chunks after replacing a long credential with a short one', async () => {
@@ -200,6 +633,45 @@ describe('keyring credential chunks', () => {
 
     expect(keyring.values.get(mainKey)).toBe('short-secret');
     expect(currentChunkKeys()).toEqual([]);
+    expectActiveShort('short-secret');
+  });
+
+  it('retains cleanup inventory until an older-release removal is confirmed', async () => {
+    const secret = 'a'.repeat(2_500);
+    await expect(saveProviderCredential(authRef, secret)).resolves.toBe(true);
+    const marker = publishedMarker();
+    const chunks = currentChunkKeys();
+    expect(chunks).toHaveLength(3);
+    expectActiveInventory(marker);
+
+    keyring.values.delete(mainKey);
+
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+    expect(chunks.every(key => keyring.values.has(key))).toBe(true);
+    expectActiveInventory(marker);
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    expect(chunks.every(key => !keyring.values.has(key))).toBe(true);
+    expectDeletionGuard();
+    expectDeletionMarker();
+  });
+
+  it('preserves active chunks when a collapsed main read omits the entry', async () => {
+    const secret = 'a'.repeat(2_500);
+    await expect(saveProviderCredential(authRef, secret)).resolves.toBe(true);
+    const marker = keyring.values.get(mainKey);
+    const journal = keyring.values.get(journalKey);
+    const chunks = currentChunkKeys();
+    keyring.omitFindKey = mainKey;
+    keyring.onGet = key => {
+      if (key === mainKey) throw new Error('injected collapsed keyring read failure');
+    };
+
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+
+    expect(keyring.values.get(mainKey)).toBe(marker);
+    expect(keyring.values.get(journalKey)).toBe(journal);
+    expect(chunks.every(key => keyring.values.has(key))).toBe(true);
   });
 
   it('reads and deletes valid legacy chunks', async () => {
@@ -209,7 +681,54 @@ describe('keyring credential chunks', () => {
 
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe('legacy-secret');
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
-    expect(keyring.values.size).toBe(0);
+    expect(currentChunkKeys()).toEqual([]);
+    expectDeletionGuard();
+    expectDeletionMarker();
+  });
+
+  it('does not replace pre-journal chunks when keychain reads hide the account', async () => {
+    const marker = '__relay_chunked__:2';
+    const firstChunk = `clodex:${account}::chunk::0`;
+    const secondChunk = `clodex:${account}::chunk::1`;
+    keyring.values.set(mainKey, marker);
+    keyring.values.set(firstChunk, 'legacy-');
+    keyring.values.set(secondChunk, 'secret');
+    keyring.omitFindAccount = account;
+    keyring.onGet = key => {
+      if (key.endsWith(`:${account}`) || key.includes(`:${account}::chunk::`))
+        throw new Error('injected collapsed keyring read failure');
+    };
+
+    await expect(replaceProviderCredential(authRef, 'replacement-secret')).resolves.toBe(false);
+
+    expect(keyring.values.get(mainKey)).toBe(marker);
+    expect(keyring.values.get(firstChunk)).toBe('legacy-');
+    expect(keyring.values.get(secondChunk)).toBe('secret');
+    expect(keyring.values.has(journalKey)).toBe(false);
+    expect(keyring.operations).toEqual([]);
+  });
+
+  it('does not delete pre-journal chunks when keychain reads hide the account', async () => {
+    const marker = '__relay_chunked__:2';
+    const firstChunk = `clodex:${account}::chunk::0`;
+    const secondChunk = `clodex:${account}::chunk::1`;
+    keyring.values.set(mainKey, marker);
+    keyring.values.set(firstChunk, 'legacy-');
+    keyring.values.set(secondChunk, 'secret');
+    keyring.omitFindAccount = account;
+    keyring.onGet = key => {
+      if (key.endsWith(`:${account}`) || key.includes(`:${account}::chunk::`))
+        throw new Error('injected collapsed keyring read failure');
+    };
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
+
+    expect(keyring.values.get(mainKey)).toBe(marker);
+    expect(keyring.values.get(firstChunk)).toBe('legacy-');
+    expect(keyring.values.get(secondChunk)).toBe('secret');
+    expect(keyring.values.has(journalKey)).toBe(false);
+    expect(keyring.values.has(deletedKey)).toBe(false);
+    expect(keyring.operations).toEqual([]);
   });
 
   it('does not report deletion success while credential chunks remain', async () => {
@@ -218,13 +737,77 @@ describe('keyring credential chunks', () => {
 
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
 
-    expect(keyring.values.has(mainKey)).toBe(false);
+    expectDeletionGuard();
     expect(keyring.values.has(journalKey)).toBe(true);
     await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
     keyring.failDeleteSuffix = '';
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
     expect(currentChunkKeys()).toEqual([]);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectDeletionGuard();
+    expectDeletionMarker();
+  });
+
+  it('preserves transition inventory when the first delete journal read collapses', async () => {
+    await expect(saveProviderCredential(authRef, 'a'.repeat(2_500))).resolves.toBe(true);
+    keyring.failDeleteSuffix = '::0';
+    await expect(saveProviderCredential(authRef, 'short-secret')).resolves.toBe(true);
+    expect(currentChunkKeys().length).toBeGreaterThan(0);
+    keyring.failDeleteSuffix = '';
+    let remainingCollapsedReads = 2;
+    keyring.onGet = key => {
+      if (key === journalKey && remainingCollapsedReads > 0) {
+        remainingCollapsedReads--;
+        keyring.omitFindOnceKey = journalKey;
+        throw new Error('injected collapsed keyring read failure');
+      }
+    };
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
+
+    expect(remainingCollapsedReads).toBe(0);
+    expect(currentChunkKeys().length).toBeGreaterThan(0);
+    expect(keyring.values.get(mainKey)).toBe('short-secret');
+    keyring.onGet = null;
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    expect(currentChunkKeys()).toEqual([]);
+    expectDeletionGuard();
+    expectDeletionMarker();
+  });
+
+  it('keeps a deletion journal when the final marker cannot be written', async () => {
+    await expect(saveProviderCredential(authRef, 'short-secret')).resolves.toBe(true);
+    keyring.values.set(
+      journalKey,
+      `${journalPrefix}${JSON.stringify({
+        mode: 'delete',
+        generations: [],
+        blockLegacy: true,
+      })}`,
+    );
+    keyring.failSetKey = journalKey;
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
+
+    expectDeletionGuard();
+    expect(keyring.values.get(journalKey)).toMatch(/^__relay_chunk_journal__:v1:/);
+    keyring.failSetKey = '';
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    expectDeletionGuard();
+    expectDeletionMarker();
+  });
+
+  it('keeps the credential published when the deletion guard cannot be written', async () => {
+    await expect(saveProviderCredential(authRef, 'short-secret')).resolves.toBe(true);
+    keyring.failSetKey = deletedKey;
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
+
+    expect(keyring.values.get(mainKey)).toBe('short-secret');
+    expect(keyring.values.has(journalKey)).toBe(true);
+    expect(keyring.values.has(deletedKey)).toBe(false);
+    keyring.failSetKey = '';
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    expectDeletionMarker();
   });
 
   it('persists an expanded same-generation count before unpublishing', async () => {
@@ -249,13 +832,14 @@ describe('keyring credential chunks', () => {
       generations: Array<{ count: number }>;
     };
     expect(pending.generations).toEqual([{ count: 2, generation }]);
-    expect(keyring.values.has(mainKey)).toBe(false);
+    expectDeletionGuard();
     expect(keyring.values.has(secondChunk)).toBe(true);
     keyring.failDeleteSuffix = '';
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
     expect(keyring.values.has(firstChunk)).toBe(false);
     expect(keyring.values.has(secondChunk)).toBe(false);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectDeletionGuard();
+    expectDeletionMarker();
   });
 
   it('keeps a credential inaccessible while a deletion journal cannot unpublish it', async () => {
@@ -269,19 +853,26 @@ describe('keyring credential chunks', () => {
 
     await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
 
-    expect(keyring.values.get(mainKey)).toBe('pending-delete-secret');
+    const tombstone = keyring.values.get(mainKey)!;
+    expect(tombstone).toMatch(/^__clodex_delete__:/);
+    expect(keyring.values.get(mainKey)).not.toBe('pending-delete-secret');
     expect(keyring.values.get(journalKey)).toBe(journal);
+    keyring.values.delete(journalKey);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+    expect(keyring.values.get(mainKey)).toBe(tombstone);
+    keyring.values.set(journalKey, journal);
     keyring.failDeleteKey = '';
     await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
     expect(keyring.values.has(mainKey)).toBe(false);
     expect(keyring.values.has(journalKey)).toBe(false);
+    expect(keyring.values.has(deletedKey)).toBe(false);
   });
 
   it('retries from the published marker when rotation removes chunks mid-read', async () => {
     await expect(saveProviderCredential(authRef, 'a'.repeat(2_500))).resolves.toBe(true);
     const oldChunks = currentChunkKeys();
     const generation = '11111111-1111-4111-8111-111111111111';
-    keyring.onGet = (key) => {
+    keyring.onGet = key => {
       if (key !== oldChunks[0]) return;
       keyring.onGet = null;
       keyring.values.set(mainKey, `__relay_chunked__:v2:${generation}:2`);
@@ -298,33 +889,35 @@ describe('keyring credential chunks', () => {
     keyring.values.set(mainKey, '__relay_chunked__:Infinity');
     await expect(resolveProviderCredential('test', authRef, message => {
       diagnostics.push(message);
-    })).resolves.toBeNull();
+      }),
+    ).resolves.toBeNull();
     expect(diagnostics.join('\n')).toContain('invalid chunk marker');
     await expect(deleteProviderCredential(authRef, message => {
       diagnostics.push(message);
-    })).resolves.toBe(false);
-    expect(keyring.values.has(mainKey)).toBe(false);
+      }),
+    ).resolves.toBe(false);
+    expectDeletionGuard();
     expect(keyring.values.has(journalKey)).toBe(true);
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
     expect(keyring.values.has(journalKey)).toBe(true);
 
-    keyring.values.clear();
+    clearMockKeyringState();
     diagnostics.length = 0;
     keyring.values.set(mainKey, '__relay_chunked__:2');
     keyring.values.set(`clodex:${account}::chunk::0`, 'partial');
     await expect(resolveProviderCredential('test', authRef, message => {
       diagnostics.push(message);
-    })).resolves.toBeNull();
+      }),
+    ).resolves.toBeNull();
     expect(diagnostics.join('\n')).toContain('chunk 2 of 2 is missing');
 
     diagnostics.length = 0;
-    keyring.values.set(
-      mainKey,
-      `__relay_chunked__:v2:${'-'.repeat(36)}:2`,
-    );
-    await expect(resolveProviderCredential('test', authRef, message => {
+    keyring.values.set(mainKey, `__relay_chunked__:v2:${'-'.repeat(36)}:2`);
+    await expect(
+      resolveProviderCredential('test', authRef, message => {
       diagnostics.push(message);
-    })).resolves.toBeNull();
+      }),
+    ).resolves.toBeNull();
     expect(diagnostics.join('\n')).toContain('invalid chunk marker');
   });
 
@@ -371,7 +964,7 @@ describe('keyring credential chunks', () => {
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe('old-secret');
     expect(newChunkKeys.every(key => !keyring.values.has(key))).toBe(true);
     expect(oldChunkKeys.every(key => keyring.values.has(key))).toBe(true);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectActiveInventory({ count: 2, generation: oldGeneration });
 
     keyring.values.set(mainKey, newMarker);
     keyring.values.set(newChunkKeys[0]!, 'new-');
@@ -380,7 +973,39 @@ describe('keyring credential chunks', () => {
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe('new-secret');
     expect(oldChunkKeys.every(key => !keyring.values.has(key))).toBe(true);
     expect(newChunkKeys.every(key => keyring.values.has(key))).toBe(true);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectActiveInventory({ count: 2, generation: newGeneration });
+  });
+
+  it('fails closed when the published generation is absent from the write journal', async () => {
+    const publishedGeneration = '11111111-1111-4111-8111-111111111111';
+    const recoveryGeneration = '22222222-2222-4222-8222-222222222222';
+    const publishedMarker = `__relay_chunked__:v2:${publishedGeneration}:1`;
+    const publishedChunk = `clodex:${account}::chunk::${publishedGeneration}::0`;
+    const recoveryChunk = `clodex:${account}::chunk::${recoveryGeneration}::0`;
+    const journal = `${journalPrefix}${JSON.stringify({
+      mode: 'write',
+      generations: [{ count: 1, generation: recoveryGeneration }],
+    })}`;
+    const diagnostics: string[] = [];
+    keyring.values.set(mainKey, publishedMarker);
+    keyring.values.set(publishedChunk, 'published-secret');
+    keyring.values.set(recoveryChunk, 'recovery-secret');
+    keyring.values.set(journalKey, journal);
+
+    await expect(
+      resolveProviderCredential('test', authRef, message => {
+        diagnostics.push(message);
+      }),
+    ).resolves.toBeNull();
+
+    expect(diagnostics.join('\n')).toContain(
+      'published credential generation is not represented by cleanup journal',
+    );
+    expect(keyring.values.get(mainKey)).toBe(publishedMarker);
+    expect(keyring.values.get(publishedChunk)).toBe('published-secret');
+    expect(keyring.values.get(recoveryChunk)).toBe('recovery-secret');
+    expect(keyring.values.get(journalKey)).toBe(journal);
+    await expect(saveProviderCredential(authRef, 'replacement-secret')).resolves.toBe(false);
   });
 
   it('rolls back before retiring the last complete generation', async () => {
@@ -396,10 +1021,7 @@ describe('keyring credential chunks', () => {
       generation: newGeneration,
       digest: createHash('sha256').update(newValue).digest('hex'),
     };
-    keyring.values.set(
-      mainKey,
-      `__relay_chunked__:v3:${newGeneration}:2:${newMarker.digest}`,
-    );
+    keyring.values.set(mainKey, `__relay_chunked__:v3:${newGeneration}:2:${newMarker.digest}`);
     keyring.values.set(`clodex:${account}::chunk::${oldGeneration}::0`, 'old-');
     keyring.values.set(`clodex:${account}::chunk::${oldGeneration}::1`, 'secret');
     keyring.values.set(`clodex-chunks:${account}::chunk::${newGeneration}::0`, 'new-');
@@ -413,12 +1035,10 @@ describe('keyring credential chunks', () => {
 
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe('old-secret');
 
-    expect(keyring.values.get(mainKey)).toBe(
-      `__relay_chunked__:v2:${oldGeneration}:2`,
-    );
+    expect(keyring.values.get(mainKey)).toBe(`__relay_chunked__:v2:${oldGeneration}:2`);
     expect(keyring.values.has(`clodex:${account}::chunk::${oldGeneration}::0`)).toBe(true);
     expect(keyring.values.has(`clodex-chunks:${account}::chunk::${newGeneration}::0`)).toBe(false);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectActiveInventory(oldMarker);
   });
 
   it('trusts the published digest over a stale journal digest', async () => {
@@ -436,10 +1056,7 @@ describe('keyring credential chunks', () => {
       generation: newGeneration,
       digest: staleDigest,
     };
-    keyring.values.set(
-      mainKey,
-      `__relay_chunked__:v3:${newGeneration}:2:${publishedDigest}`,
-    );
+    keyring.values.set(mainKey, `__relay_chunked__:v3:${newGeneration}:2:${publishedDigest}`);
     keyring.values.set(`clodex-chunks:${account}::chunk::${newGeneration}::0`, 'new-');
     keyring.values.set(`clodex-chunks:${account}::chunk::${newGeneration}::1`, 'secret');
     keyring.values.set(`clodex:${account}::chunk::${oldGeneration}::0`, 'old-');
@@ -459,7 +1076,11 @@ describe('keyring credential chunks', () => {
     );
     expect(keyring.values.has(`clodex-chunks:${account}::chunk::${newGeneration}::0`)).toBe(true);
     expect(keyring.values.has(`clodex:${account}::chunk::${oldGeneration}::0`)).toBe(false);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectActiveInventory({
+      count: 2,
+      generation: newGeneration,
+      digest: publishedDigest,
+    });
   });
 
   it('removes journal-only tail chunks from the published generation', async () => {
@@ -470,10 +1091,7 @@ describe('keyring credential chunks', () => {
     const journalDigest = createHash('sha256').update(journalValue).digest('hex');
     const firstChunk = `clodex-chunks:${account}::chunk::${generation}::0`;
     const secondChunk = `clodex-chunks:${account}::chunk::${generation}::1`;
-    keyring.values.set(
-      mainKey,
-      `__relay_chunked__:v3:${generation}:1:${publishedDigest}`,
-    );
+    keyring.values.set(mainKey, `__relay_chunked__:v3:${generation}:1:${publishedDigest}`);
     keyring.values.set(firstChunk, 'a');
     keyring.values.set(secondChunk, 'b');
     keyring.values.set(
@@ -491,7 +1109,7 @@ describe('keyring credential chunks', () => {
     );
     expect(keyring.values.has(firstChunk)).toBe(true);
     expect(keyring.values.has(secondChunk)).toBe(false);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectActiveInventory({ count: 1, digest: publishedDigest, generation });
   });
 
   it('repairs a stale published digest from a valid journal copy', async () => {
@@ -505,10 +1123,7 @@ describe('keyring credential chunks', () => {
       generation: newGeneration,
       digest: currentDigest,
     };
-    keyring.values.set(
-      mainKey,
-      `__relay_chunked__:v3:${newGeneration}:2:${staleDigest}`,
-    );
+    keyring.values.set(mainKey, `__relay_chunked__:v3:${newGeneration}:2:${staleDigest}`);
     keyring.values.set(`clodex-chunks:${account}::chunk::${newGeneration}::0`, 'new-');
     keyring.values.set(`clodex-chunks:${account}::chunk::${newGeneration}::1`, 'secret');
     keyring.values.set(`clodex:${account}::chunk::${oldGeneration}::0`, 'old-');
@@ -517,10 +1132,7 @@ describe('keyring credential chunks', () => {
       journalKey,
       `__relay_chunk_journal__:v1:${JSON.stringify({
         mode: 'write',
-        generations: [
-          currentMarker,
-          { count: 2, generation: oldGeneration },
-        ],
+        generations: [currentMarker, { count: 2, generation: oldGeneration }],
       })}`,
     );
 
@@ -531,7 +1143,7 @@ describe('keyring credential chunks', () => {
     );
     expect(keyring.values.has(`clodex-chunks:${account}::chunk::${newGeneration}::0`)).toBe(true);
     expect(keyring.values.has(`clodex:${account}::chunk::${oldGeneration}::0`)).toBe(false);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectActiveInventory(currentMarker);
   });
 
   it('removes published tail chunks before restoring a shorter journal marker', async () => {
@@ -541,10 +1153,7 @@ describe('keyring credential chunks', () => {
     const staleDigest = createHash('sha256').update('stale-value').digest('hex');
     const firstChunk = `clodex-chunks:${account}::chunk::${generation}::0`;
     const secondChunk = `clodex-chunks:${account}::chunk::${generation}::1`;
-    keyring.values.set(
-      mainKey,
-      `__relay_chunked__:v3:${generation}:2:${staleDigest}`,
-    );
+    keyring.values.set(mainKey, `__relay_chunked__:v3:${generation}:2:${staleDigest}`);
     keyring.values.set(firstChunk, 'a');
     keyring.values.set(secondChunk, 'b');
     keyring.values.set(
@@ -562,23 +1171,173 @@ describe('keyring credential chunks', () => {
     );
     expect(keyring.values.has(firstChunk)).toBe(true);
     expect(keyring.values.has(secondChunk)).toBe(false);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectActiveInventory({ count: 1, digest: recoveredDigest, generation });
   });
 
-  it('migrates under one account lock and deletes both keyring services', async () => {
+  it('requires an explicit save before replacing a relay-ai source', async () => {
     const legacyMainKey = `relay-ai:${account}`;
     keyring.values.set(legacyMainKey, 'legacy-secret');
 
-    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('legacy-secret');
-    expect(keyring.values.get(mainKey)).toBe('legacy-secret');
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+    expect(keyring.values.has(mainKey)).toBe(false);
+    expect(keyring.values.get(legacyMainKey)).toBe('legacy-secret');
+
+    await expect(saveProviderCredential(authRef, 'replacement-secret')).resolves.toBe(true);
+    expect(keyring.values.get(mainKey)).toBe('replacement-secret');
+    expectActiveShort('replacement-secret');
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('replacement-secret');
     expect(keyring.values.get(legacyMainKey)).toBe('legacy-secret');
 
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
-    expect(keyring.values.has(mainKey)).toBe(false);
-    expect(keyring.values.has(legacyMainKey)).toBe(false);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+    expect(keyring.values.get(legacyMainKey)).toBe('legacy-secret');
   });
 
-  it('keeps deletion journaled until current and legacy chunks are gone', async () => {
+  it('backfills active metadata for a pre-journal short credential', async () => {
+    const legacyMainKey = `relay-ai:${account}`;
+    keyring.values.set(mainKey, 'current-secret');
+    keyring.values.set(legacyMainKey, 'stale-legacy-secret');
+
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('current-secret');
+
+    expectActiveShort('current-secret');
+    expect(keyring.values.get(legacyMainKey)).toBe('stale-legacy-secret');
+  });
+
+  it('fails closed when the first pre-journal short read collapses', async () => {
+    const legacyMainKey = `relay-ai:${account}`;
+    keyring.values.set(mainKey, 'current-secret');
+    keyring.values.set(legacyMainKey, 'stale-legacy-secret');
+    keyring.omitFindKey = mainKey;
+    keyring.onGet = key => {
+      if (key === mainKey) throw new Error('injected collapsed keyring read failure');
+    };
+
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+
+    expect(keyring.values.get(mainKey)).toBe('current-secret');
+    expect(keyring.values.has(journalKey)).toBe(false);
+    expect(keyring.values.get(legacyMainKey)).toBe('stale-legacy-secret');
+
+    keyring.omitFindKey = '';
+    keyring.onGet = null;
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('current-secret');
+    expectActiveShort('current-secret');
+  });
+
+  it('round-trips and deletes short credentials that resemble chunk markers', async () => {
+    for (const secret of ['__relay_chunked__:legitimate-provider-secret', '__relay_chunked__:2']) {
+      clearMockKeyringState();
+
+      await expect(saveProviderCredential(authRef, secret)).resolves.toBe(true);
+      expectActiveShort(secret);
+      await expect(resolveProviderCredential('test', authRef)).resolves.toBe(secret);
+      await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+      expectDeletionGuard();
+      expectDeletionMarker();
+    }
+  });
+
+  it('removes all durable state after a disposable keyring probe', async () => {
+    await expect(probeProviderCredentialStore(authRef)).resolves.toBe(true);
+
+    expect([...keyring.values.entries()]).toEqual([]);
+    const stateDirectory = join(keyring.lockHome, '.clodex', 'keyring-state');
+    expect(existsSync(stateDirectory) ? readdirSync(stateDirectory) : []).toEqual([]);
+  });
+
+  it('blocks legacy migration when a deleted journal read collapses to null', async () => {
+    const legacyMainKey = `relay-ai:${account}`;
+    keyring.values.set(legacyMainKey, 'legacy-secret');
+    await expect(saveProviderCredential(authRef, 'current-secret')).resolves.toBe(true);
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    const deletionJournal = keyring.values.get(journalKey);
+    keyring.omitFindKey = journalKey;
+    keyring.onGet = key => {
+      if (key === journalKey) throw new Error('injected collapsed keyring read failure');
+    };
+
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+
+    expectDeletionGuard();
+    expect(keyring.values.get(journalKey)).toBe(deletionJournal);
+    expect(keyring.values.get(legacyMainKey)).toBe('legacy-secret');
+  });
+
+  it('restores deleted state when the first guard snapshot collapses', async () => {
+    await expect(saveProviderCredential(authRef, 'current-secret')).resolves.toBe(true);
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    keyring.values.delete(journalKey);
+    let guardReads = 0;
+    keyring.omitFindOnceKey = deletedKey;
+    keyring.onGet = key => {
+      if (key === deletedKey && ++guardReads === 1) {
+        throw new Error('injected collapsed keyring read failure');
+      }
+    };
+
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+
+    expectDeletionGuard();
+    expect(keyring.values.has(journalKey)).toBe(false);
+    keyring.onGet = null;
+    keyring.omitFindOnceKey = '';
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+    expectDeletionMarker();
+  });
+
+  it('clears restored deletion metadata when a replacement is explicitly saved', async () => {
+    await expect(saveProviderCredential(authRef, 'current-secret')).resolves.toBe(true);
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    const collapsed = new Set([deletedKey, journalKey]);
+    keyring.onGet = key => {
+      if (collapsed.delete(key)) {
+        keyring.omitFindOnceKey = key;
+        throw new Error('injected collapsed keyring read failure');
+      }
+    };
+
+    await expect(saveProviderCredential(authRef, 'replacement-secret')).resolves.toBe(true);
+
+    keyring.onGet = null;
+    expect(keyring.values.has(deletedKey)).toBe(false);
+    expectActiveShort('replacement-secret');
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('replacement-secret');
+  });
+
+  it('does not publish a replacement until the deletion guard is cleared', async () => {
+    await expect(saveProviderCredential(authRef, 'current-secret')).resolves.toBe(true);
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    keyring.failDeleteKey = deletedKey;
+
+    await expect(saveProviderCredential(authRef, 'replacement-secret')).resolves.toBe(false);
+
+    expect(keyring.values.has(mainKey)).toBe(false);
+    expectDeletionMarker();
+    keyring.values.delete(journalKey);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+    expectDeletionMarker();
+
+    keyring.failDeleteKey = '';
+    await expect(saveProviderCredential(authRef, 'replacement-secret')).resolves.toBe(true);
+    expect(keyring.values.has(deletedKey)).toBe(false);
+    expectActiveShort('replacement-secret');
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('replacement-secret');
+  });
+
+  it('retires a credential recreated behind a deleted marker', async () => {
+    await expect(saveProviderCredential(authRef, 'first-secret')).resolves.toBe(true);
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    keyring.values.set(mainKey, 'credential-written-by-older-release');
+
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+
+    expectDeletionGuard();
+    expectDeletionMarker();
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+  });
+
+  it('deletes Clodex chunks without touching relay-ai chunks', async () => {
     const currentGeneration = '11111111-1111-4111-8111-111111111111';
     const legacyGeneration = '22222222-2222-4222-8222-222222222222';
     const currentChunk = `clodex:${account}::chunk::${currentGeneration}::0`;
@@ -591,14 +1350,18 @@ describe('keyring credential chunks', () => {
 
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
     expect(keyring.values.has(journalKey)).toBe(true);
-    expect(keyring.values.has(mainKey)).toBe(false);
-    expect(keyring.values.has(`relay-ai:${account}`)).toBe(false);
+    expectDeletionGuard();
+    expect(keyring.values.get(`relay-ai:${account}`)).toBe(
+      `__relay_chunked__:v2:${legacyGeneration}:1`,
+    );
+    expect(keyring.values.get(legacyChunk)).toBe('legacy-secret');
 
     keyring.failDeleteSuffix = '';
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
     expect(keyring.values.has(currentChunk)).toBe(false);
-    expect(keyring.values.has(legacyChunk)).toBe(false);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expect(keyring.values.get(legacyChunk)).toBe('legacy-secret');
+    expectDeletionGuard();
+    expectDeletionMarker();
   });
 
   it('captures a published generation missing from an existing deletion journal', async () => {
@@ -624,10 +1387,10 @@ describe('keyring credential chunks', () => {
 
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
 
-    expect(keyring.values.has(mainKey)).toBe(false);
+    expectDeletionGuard();
     expect(keyring.values.has(v2ChunkKey)).toBe(false);
     expect(keyring.values.has(v3ChunkKey)).toBe(false);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectDeletionMarker();
   });
 
   it('compacts a full deletion journal before adding newly observed generations', async () => {
@@ -639,31 +1402,21 @@ describe('keyring credential chunks', () => {
       '55555555-5555-4555-8555-555555555555',
       '66666666-6666-4666-8666-666666666666',
     ];
-    const legacyGenerations = [
-      '77777777-7777-4777-8777-777777777777',
-      '88888888-8888-4888-8888-888888888888',
-      '99999999-9999-4999-8999-999999999999',
-      'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
-    ];
     const currentPublished = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
-    const legacyPublished = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
     for (const generation of currentGenerations) {
       keyring.values.set(`clodex:${account}::chunk::${generation}::0`, generation);
     }
-    for (const generation of legacyGenerations) {
-      keyring.values.set(`relay-ai:${account}::chunk::${generation}::0`, generation);
-    }
     keyring.values.set(mainKey, `__relay_chunked__:v2:${currentPublished}:1`);
     keyring.values.set(`clodex:${account}::chunk::${currentPublished}::0`, 'current');
-    keyring.values.set(`relay-ai:${account}`, `__relay_chunked__:v2:${legacyPublished}:1`);
-    keyring.values.set(`relay-ai:${account}::chunk::${legacyPublished}::0`, 'legacy');
     const journal = `${journalPrefix}${JSON.stringify({
       mode: 'delete',
-      generations: currentGenerations.map(generation => ({ count: 1, generation })),
-      legacyGenerations: legacyGenerations.map(generation => ({ count: 1, generation })),
+      generations: currentGenerations.map(generation => ({
+        count: 1,
+        generation,
+      })),
     })}`;
     keyring.values.set(journalKey, journal);
-    keyring.failDeleteKey = mainKey;
+    keyring.failSetKey = mainKey;
 
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
 
@@ -671,32 +1424,27 @@ describe('keyring credential chunks', () => {
     expect(expandedJournal.startsWith(journalPrefix)).toBe(true);
     const expanded = JSON.parse(expandedJournal.slice(journalPrefix.length)) as {
       generations: unknown[];
-      legacyGenerations: unknown[];
     };
     expect(expanded.generations).toHaveLength(1);
-    expect(expanded.legacyGenerations).toHaveLength(1);
-    expect(currentChunkKeys()).toHaveLength(2);
+    expect(currentChunkKeys()).toHaveLength(1);
     await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
-    keyring.failDeleteKey = '';
+    keyring.failSetKey = '';
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
     expect(currentChunkKeys()).toEqual([]);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectDeletionGuard();
+    expectDeletionMarker();
   });
 
-  it('compacts a size-bound v3 journal even when its generation counts fit', async () => {
+  it('compacts a full v3 deletion journal before adding the published generation', async () => {
     const currentGenerations = [
       '11111111-1111-4111-8111-111111111111',
       '22222222-2222-4222-8222-222222222222',
       '33333333-3333-4333-8333-333333333333',
       '44444444-4444-4444-8444-444444444444',
-    ];
-    const legacyGenerations = [
       '55555555-5555-4555-8555-555555555555',
       '66666666-6666-4666-8666-666666666666',
-      '77777777-7777-4777-8777-777777777777',
     ];
     const currentPublished = '88888888-8888-4888-8888-888888888888';
-    const legacyPublished = '99999999-9999-4999-8999-999999999999';
     const markerFor = (generation: string) => {
       const value = `secret-${generation}`;
       return {
@@ -709,43 +1457,35 @@ describe('keyring credential chunks', () => {
       };
     };
     const currentMarkers = currentGenerations.map(markerFor);
-    const legacyMarkers = legacyGenerations.map(markerFor);
     const current = markerFor(currentPublished);
-    const legacy = markerFor(legacyPublished);
-    for (const { marker, value } of [...currentMarkers, ...legacyMarkers, current, legacy]) {
+    for (const { marker, value } of [...currentMarkers, current]) {
       keyring.values.set(`clodex-chunks:${account}::chunk::${marker.generation}::0`, value);
     }
     keyring.values.set(
       mainKey,
       `__relay_chunked__:v3:${currentPublished}:1:${current.marker.digest}`,
     );
-    keyring.values.set(
-      `relay-ai:${account}`,
-      `__relay_chunked__:v3:${legacyPublished}:1:${legacy.marker.digest}`,
-    );
     const journal = `${journalPrefix}${JSON.stringify({
       mode: 'delete',
       generations: currentMarkers.map(({ marker }) => marker),
-      legacyGenerations: legacyMarkers.map(({ marker }) => marker),
     })}`;
     expect(journal.length).toBeLessThanOrEqual(1_200);
     keyring.values.set(journalKey, journal);
-    keyring.failDeleteKey = mainKey;
+    keyring.failSetKey = mainKey;
 
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
 
     const compactedJournal = keyring.values.get(journalKey)!;
     const compacted = JSON.parse(compactedJournal.slice(journalPrefix.length)) as {
       generations: unknown[];
-      legacyGenerations: unknown[];
     };
     expect(compacted.generations).toHaveLength(1);
-    expect(compacted.legacyGenerations).toHaveLength(1);
-    expect(currentChunkKeys()).toHaveLength(2);
-    keyring.failDeleteKey = '';
+    expect(currentChunkKeys()).toHaveLength(1);
+    keyring.failSetKey = '';
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
     expect(currentChunkKeys()).toEqual([]);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectDeletionGuard();
+    expectDeletionMarker();
   });
 
   it('preserves main markers when a deletion-journal expansion cannot be written', async () => {
@@ -768,9 +1508,21 @@ describe('keyring credential chunks', () => {
     await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
     keyring.failSetKey = '';
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
-    expect(keyring.values.has(mainKey)).toBe(false);
+    expectDeletionGuard();
     expect(keyring.values.has(chunkKey)).toBe(false);
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectDeletionMarker();
+  });
+
+  it('falls back to credential enumeration when getPassword returns null', async () => {
+    keyring.values.set(mainKey, 'stored-secret');
+    keyring.onGet = key => {
+      if (key !== mainKey) return;
+      keyring.onGet = null;
+      throw new Error('injected collapsed keyring read failure');
+    };
+
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('stored-secret');
+    expect(keyring.values.get(mainKey)).toBe('stored-secret');
   });
 
   it('does not replace a valid journal after a transient journal read failure', async () => {
@@ -784,8 +1536,10 @@ describe('keyring credential chunks', () => {
     keyring.values.set(mainKey, marker);
     keyring.values.set(chunkKey, 'pending-secret');
     keyring.values.set(journalKey, journal);
+    keyring.failFindService = 'clodex-journal';
+    keyring.failFindCount = 1;
     let journalReads = 0;
-    keyring.onGet = (key) => {
+    keyring.onGet = key => {
       if (key !== journalKey || ++journalReads !== 2) return;
       keyring.onGet = null;
       throw new Error('injected keyring read failure');
@@ -793,12 +1547,16 @@ describe('keyring credential chunks', () => {
 
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
 
-    expect(keyring.values.get(journalKey)).toBe(journal);
+    expect(JSON.parse(keyring.values.get(journalKey)!.slice(journalPrefix.length))).toEqual({
+      mode: 'delete',
+      generations: [],
+      blockLegacy: true,
+    });
     expect(keyring.values.get(mainKey)).toBe(marker);
     expect(keyring.values.get(chunkKey)).toBe('pending-secret');
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
-    expect(keyring.values.has(journalKey)).toBe(false);
-    expect(keyring.values.has(mainKey)).toBe(false);
+    expectDeletionMarker();
+    expectDeletionGuard();
     expect(keyring.values.has(chunkKey)).toBe(false);
   });
 
@@ -813,21 +1571,27 @@ describe('keyring credential chunks', () => {
     keyring.values.set(mainKey, marker);
     keyring.values.set(chunkKey, 'pending-secret');
     keyring.values.set(journalKey, journal);
+    keyring.failFindService = 'clodex';
+    keyring.failFindCount = 1;
     let mainReads = 0;
-    keyring.onGet = (key) => {
-      if (key !== mainKey || ++mainReads !== 2) return;
+    keyring.onGet = key => {
+      if (key !== mainKey || ++mainReads !== 1) return;
       keyring.onGet = null;
       throw new Error('injected keyring read failure');
     };
 
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
 
-    expect(keyring.values.get(journalKey)).toBe(journal);
+    expect(JSON.parse(keyring.values.get(journalKey)!.slice(journalPrefix.length))).toEqual({
+      mode: 'delete',
+      generations: [],
+      blockLegacy: true,
+    });
     expect(keyring.values.get(mainKey)).toBe(marker);
     expect(keyring.values.get(chunkKey)).toBe('pending-secret');
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
-    expect(keyring.values.has(journalKey)).toBe(false);
-    expect(keyring.values.has(mainKey)).toBe(false);
+    expectDeletionMarker();
+    expectDeletionGuard();
     expect(keyring.values.has(chunkKey)).toBe(false);
   });
 
@@ -843,7 +1607,9 @@ describe('keyring credential chunks', () => {
     keyring.values.set(mainKey, encodedMarker);
     keyring.values.set(chunkKey, 'published-secret');
     keyring.values.set(journalKey, journal);
-    keyring.onGet = (key) => {
+    keyring.failFindService = 'clodex-journal';
+    keyring.failFindCount = 1;
+    keyring.onGet = key => {
       if (key !== journalKey) return;
       keyring.onGet = null;
       throw new Error('injected keyring read failure');
@@ -855,7 +1621,7 @@ describe('keyring credential chunks', () => {
     expect(keyring.values.get(mainKey)).toBe(encodedMarker);
     expect(keyring.values.get(chunkKey)).toBe('published-secret');
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe('published-secret');
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectActiveInventory(marker);
   });
 
   it('fails closed with a durable tombstone after a malformed journal', async () => {
@@ -874,38 +1640,35 @@ describe('keyring credential chunks', () => {
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
     expect(keyring.values.has(mainKey)).toBe(false);
     expect(keyring.values.get(`relay-ai:${account}`)).toBe('legacy-secret');
-    const deleteTombstone = expectUnverifiableTombstone();
+    const deleteTombstone = expectUnverifiableTombstone(true);
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
-    expect(keyring.values.has(`relay-ai:${account}`)).toBe(false);
+    expect(keyring.values.get(`relay-ai:${account}`)).toBe('legacy-secret');
     expect(keyring.values.get(journalKey)).toBe(deleteTombstone);
   });
 
-  it.each([
-    { failedKey: mainKey, survivor: 'current-secret' },
-    { failedKey: `relay-ai:${account}`, survivor: 'legacy-secret' },
-  ])('keeps a tombstone while $failedKey cannot be unpublished', async ({ failedKey, survivor }) => {
+  it('keeps a tombstone while the Clodex credential cannot be unpublished', async () => {
     const legacyMainKey = `relay-ai:${account}`;
     const malformedJournal = '__relay_chunk_journal__:v1:{';
     keyring.values.set(mainKey, 'current-secret');
     keyring.values.set(legacyMainKey, 'legacy-secret');
     keyring.values.set(journalKey, malformedJournal);
-    keyring.failDeleteKey = failedKey;
+    keyring.failDeleteKey = mainKey;
 
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
 
     expect(keyring.values.get(mainKey)).toBe('current-secret');
     expect(keyring.values.get(legacyMainKey)).toBe('legacy-secret');
-    const tombstone = expectUnverifiableTombstone();
+    const tombstone = expectUnverifiableTombstone(true);
     await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
-    expect(keyring.values.get(failedKey)).toBe(survivor);
-    if (failedKey === mainKey) expect(keyring.values.get(legacyMainKey)).toBe('legacy-secret');
-    else expect(keyring.values.has(mainKey)).toBe(false);
+    expect(keyring.values.get(mainKey)).toMatch(/^__clodex_delete__:/);
+    expect(keyring.values.get(mainKey)).not.toBe('current-secret');
+    expect(keyring.values.get(legacyMainKey)).toBe('legacy-secret');
     expect(keyring.values.get(journalKey)).toBe(tombstone);
 
     keyring.failDeleteKey = '';
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
-    expect(keyring.values.has(mainKey)).toBe(false);
-    expect(keyring.values.has(legacyMainKey)).toBe(false);
+    expectDeletionGuard();
+    expect(keyring.values.get(legacyMainKey)).toBe('legacy-secret');
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
     expect(keyring.values.get(journalKey)).toBe(tombstone);
   });
@@ -927,28 +1690,34 @@ describe('keyring credential chunks', () => {
     expect(keyring.values.has(`relay-ai:${account}`)).toBe(true);
     expect(keyring.values.has(currentChunk)).toBe(true);
     expect(keyring.values.has(legacyChunk)).toBe(true);
-    const tombstone = expectUnverifiableTombstone();
+    const tombstone = expectUnverifiableTombstone(true);
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
-    expect(keyring.values.has(mainKey)).toBe(false);
-    expect(keyring.values.has(`relay-ai:${account}`)).toBe(false);
+    expectDeletionGuard();
+    expect(keyring.values.get(`relay-ai:${account}`)).toBe(
+      `__relay_chunked__:v2:${legacyGeneration}:1`,
+    );
     expect(keyring.values.has(currentChunk)).toBe(false);
-    expect(keyring.values.has(legacyChunk)).toBe(false);
+    expect(keyring.values.get(legacyChunk)).toBe('legacy-secret');
     const expandedTombstone = keyring.values.get(journalKey)!;
     expect(expandedTombstone).not.toBe(tombstone);
     expect(JSON.parse(expandedTombstone.slice(journalPrefix.length))).toEqual({
       mode: 'delete',
       generations: [{ count: 1, generation: currentGeneration }],
-      legacyGenerations: [{ count: 1, generation: legacyGeneration }],
+      blockLegacy: true,
       unverifiable: true,
     });
   });
 
   it('isolates the journal namespace from credential accounts', async () => {
     const journalCollisionAccount = `${account}::chunk-journal`;
-    const journalCollisionRef = `keyring:${journalCollisionAccount}`;
-    await expect(saveProviderCredential(journalCollisionRef, 'journal-account-secret')).resolves.toBe(true);
+    const journalCollisionRef = testCredentialAuthRef(journalCollisionAccount);
+    await expect(
+      saveProviderCredential(journalCollisionRef, 'journal-account-secret'),
+    ).resolves.toBe(true);
     await expect(saveProviderCredential(authRef, 'a'.repeat(2_500))).resolves.toBe(true);
-    await expect(resolveProviderCredential('test', journalCollisionRef)).resolves.toBe('journal-account-secret');
+    await expect(resolveProviderCredential('test', journalCollisionRef)).resolves.toBe(
+      'journal-account-secret',
+    );
   });
 
   it('reserves legacy chunk account forms from credential references', async () => {
@@ -958,7 +1727,9 @@ describe('keyring credential chunks', () => {
     const chunkCollisionAccount = `${account}::chunk::${generation}::0`;
     const chunkCollisionRef = `keyring:${chunkCollisionAccount}`;
 
-    await expect(saveProviderCredential(chunkCollisionRef, 'collision-secret')).resolves.toBe(false);
+    await expect(saveProviderCredential(chunkCollisionRef, 'collision-secret')).resolves.toBe(
+      false,
+    );
     await expect(resolveProviderCredential('test', chunkCollisionRef)).resolves.toBeNull();
     await expect(deleteProviderCredential(chunkCollisionRef)).resolves.toBe(false);
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe('legacy-secret');
@@ -967,8 +1738,8 @@ describe('keyring credential chunks', () => {
   it('allows non-canonical chunk-like account names that cannot collide', async () => {
     const generation = '11111111-1111-4111-8111-111111111111';
     const safeRefs = [
-      `keyring:${account}::chunk::00`,
-      `keyring:${account}::chunk::${generation}::00`,
+      testCredentialAuthRef(`${account}::chunk::00`),
+      testCredentialAuthRef(`${account}::chunk::${generation}::00`),
     ];
 
     for (const [index, safeRef] of safeRefs.entries()) {
@@ -976,6 +1747,36 @@ describe('keyring credential chunks', () => {
       await expect(saveProviderCredential(safeRef, value)).resolves.toBe(true);
       await expect(resolveProviderCredential('test', safeRef)).resolves.toBe(value);
     }
+  });
+
+  it('returns JSON-shaped non-OAuth credentials as opaque values', async () => {
+    const opaqueRef = testCredentialAuthRef('provider:test');
+    const opaqueValue = '{"type":"custom","access":"opaque"}';
+
+    await expect(saveProviderCredential(opaqueRef, opaqueValue)).resolves.toBe(true);
+    await expect(resolveProviderCredential('test', opaqueRef)).resolves.toBe(opaqueValue);
+  });
+
+  it('round-trips credentials that begin with the internal tombstone prefix', async () => {
+    const providerRef = testCredentialAuthRef('provider:test');
+    const opaqueValue = '__clodex_delete__:legitimate-provider-secret';
+
+    await expect(saveProviderCredential(providerRef, opaqueValue)).resolves.toBe(true);
+    await expect(resolveProviderCredential('test', providerRef)).resolves.toBe(opaqueValue);
+  });
+
+  it('decodes historical structured credentials for non-OAuth accounts', async () => {
+    const providerRef = testCredentialAuthRef('provider:test');
+
+    await expect(
+      saveProviderCredential(providerRef, '{"type":"wellknown","token":"wellknown-token"}'),
+    ).resolves.toBe(true);
+    await expect(resolveProviderCredential('test', providerRef)).resolves.toBe('wellknown-token');
+
+    await expect(
+      saveProviderCredential(providerRef, '{"type":"oauth","access":"oauth-access"}'),
+    ).resolves.toBe(true);
+    await expect(resolveProviderCredential('test', providerRef)).resolves.toBe('oauth-access');
   });
 
   it('does not reinterpret malformed structured values as bearer credentials', async () => {

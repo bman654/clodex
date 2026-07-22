@@ -1,8 +1,7 @@
 // src/registry/custom-endpoint.ts — add custom OpenAI/Anthropic-compatible providers
 
-import { randomUUID } from 'node:crypto';
-import { saveProviderCredential } from '../env.js';
-import { credentialAuthRef } from '../credential-helper.js';
+import { provisionProviderCredential } from '../env.js';
+import { credentialInstanceAuthRef } from '../credential-helper.js';
 import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
 import {
@@ -14,6 +13,7 @@ import { fetchTemplateModels } from './fetch-template-models.js';
 import { loadRegistryStrict, saveRegistry } from './io.js';
 import {
   withCredentialMutationLock,
+  withProviderMutationLock,
   withRegistryWriteLock,
 } from './lock.js';
 import type { CachedModel, RegistryProvider } from './types.js';
@@ -26,6 +26,8 @@ import {
 } from '../trace-log.js';
 
 export type CustomEndpointKind = 'openai' | 'anthropic';
+
+const CUSTOM_PROVIDER_ALLOCATION_SLOT = 'custom-provider-allocation';
 
 export interface AddCustomEndpointInput {
   displayName: string;
@@ -146,13 +148,12 @@ function uniqueProviderId(displayName: string, registry: { providers: RegistryPr
   if (!isValidProviderId(base)) base = 'custom-provider';
 
   if (!registry.providers.some(p => p.id === base)) return base;
-  for (let i = 2; i < 100; i++) {
+  for (let i = 2; ; i++) {
     const candidate = `${base}-${i}`;
     if (isValidProviderId(candidate) && !registry.providers.some(p => p.id === candidate)) {
       return candidate;
     }
   }
-  return `${base}-${Date.now()}`;
 }
 
 export async function addCustomEndpointProvider(input: AddCustomEndpointInput): Promise<AddCustomEndpointResult> {
@@ -196,68 +197,78 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
     return { added: false, error: fetched.error ?? 'No models returned.', hint: fetched.hint };
   }
 
-  const authRef = anonymous
-    ? 'none:anonymous'
-    : credentialAuthRef(`provider:${probeProviderId}:${randomUUID()}`);
-  const commitProvider = () => withRegistryWriteLock(async () => {
-    const registry = loadRegistryStrict();
-    const providerId = uniqueProviderId(displayName, registry);
-
-    const now = new Date().toISOString();
-    const entry: RegistryProvider = {
-      id: providerId,
-      templateId: input.kind === 'anthropic' ? 'custom-anthropic' : 'custom-openai',
-      name: displayName,
-      enabled: true,
-      authRef,
-      authType: anonymous ? 'none' : 'api',
-      api: { npm, url: fetched.baseUrl, ...(headers ? { headers } : {}) },
-      addedAt: now,
-      refreshedAt: now,
-      modelsCache: {
-        fetchedAt: now,
-        models: fetched.models.map(m => ({
-          ...m,
-          modelFormat: modelFormatForKind(input.kind),
-          npm,
-          apiUrl: fetched.baseUrl,
-        })),
-      },
-    };
-
-    registry.providers.push(entry);
-    saveRegistry(registry);
-    let credentialCleanupPending = false;
-    if (!anonymous) {
-      try {
-        await cancelCredentialDelete(authRef);
-      } catch {
-        credentialCleanupPending = true;
+  const result = await withProviderMutationLock(CUSTOM_PROVIDER_ALLOCATION_SLOT, async () => {
+    const providerId = await withRegistryWriteLock(() =>
+      uniqueProviderId(displayName, loadRegistryStrict()),
+    );
+    const account = `provider:${providerId}`;
+    const authRef = anonymous ? 'none:anonymous' : credentialInstanceAuthRef(account);
+    const persistAndCommit = async (): Promise<AddCustomEndpointResult> => {
+      if (!anonymous) {
+        await journalCredentialWrite(authRef);
+        const saved = await provisionProviderCredential(authRef, apiKey);
+        if (!saved) {
+          return {
+            added: false,
+            error: 'Could not save API key to the credential store.',
+            hint: 'Check credential-store access and try again.',
+          };
+        }
       }
-    }
 
-    return {
-      added: true,
-      provider: entry,
-      modelCount: fetched.models.length,
-      ...(credentialCleanupPending ? { credentialCleanupPending: true } : {}),
-    };
-  });
-
-  const result: AddCustomEndpointResult = anonymous
-    ? await commitProvider()
-    : await withCredentialMutationLock(authRef, async () => {
-      await journalCredentialWrite(authRef);
-      const saved = await saveProviderCredential(authRef, apiKey);
-      if (!saved) {
-        return {
-          added: false,
-          error: 'Could not save API key to the credential store.',
-          hint: 'Check credential-store access and try again.',
+      return withRegistryWriteLock(async () => {
+        const registry = loadRegistryStrict();
+        if (registry.providers.some(provider => provider.id === providerId)) {
+          return {
+            added: false,
+            error: `Provider ID ${providerId} changed while its credential was being saved.`,
+            hint: 'Retry adding the custom provider.',
+          };
+        }
+        const now = new Date().toISOString();
+        const entry: RegistryProvider = {
+          id: providerId,
+          templateId: input.kind === 'anthropic' ? 'custom-anthropic' : 'custom-openai',
+          name: displayName,
+          enabled: true,
+          authRef,
+          authType: anonymous ? 'none' : 'api',
+          api: { npm, url: fetched.baseUrl, ...(headers ? { headers } : {}) },
+          addedAt: now,
+          refreshedAt: now,
+          modelsCache: {
+            fetchedAt: now,
+            models: fetched.models.map(m => ({
+              ...m,
+              modelFormat: modelFormatForKind(input.kind),
+              npm,
+              apiUrl: fetched.baseUrl,
+            })),
+          },
         };
-      }
-      return commitProvider();
-    });
+
+        registry.providers.push(entry);
+        saveRegistry(registry);
+        let credentialCleanupPending = false;
+        if (!anonymous) {
+          try {
+            await cancelCredentialDelete(authRef);
+          } catch {
+            credentialCleanupPending = true;
+          }
+        }
+        return {
+          added: true,
+          provider: entry,
+          modelCount: fetched.models.length,
+          ...(credentialCleanupPending ? { credentialCleanupPending: true } : {}),
+        };
+      });
+    };
+
+    if (anonymous) return persistAndCommit();
+    return withCredentialMutationLock(authRef, persistAndCommit);
+  });
 
   if (result.added) {
     try {
@@ -269,9 +280,11 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
     }
   } else {
     try {
-      await reconcilePendingCredentialDeletes();
+      const cleanup = await reconcilePendingCredentialDeletes();
+      result.credentialCleanupPending =
+        cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
     } catch {
-      // The failed credential remains journaled for a later retry.
+      result.credentialCleanupPending = true;
     }
   }
   return result;

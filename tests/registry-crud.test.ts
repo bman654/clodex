@@ -8,7 +8,9 @@ const lockState = vi.hoisted(() => ({
   active: false,
   registryTail: Promise.resolve(),
   credentialActive: false,
+  providerActive: false,
   credentialTails: new Map<string, Promise<void>>(),
+  providerTails: new Map<string, Promise<void>>(),
 }));
 const journalState = vi.hoisted(() => ({
   pending: new Set<string>(),
@@ -78,6 +80,29 @@ vi.mock('../src/registry/lock.js', () => ({
       }
     }
   }),
+  withProviderMutationLock: vi.fn(async <T>(
+    providerSlot: string,
+    operation: () => Promise<T> | T,
+  ): Promise<T> => {
+    const previous = lockState.providerTails.get(providerSlot) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.then(() => gate);
+    lockState.providerTails.set(providerSlot, tail);
+    await previous;
+    lockState.providerActive = true;
+    try {
+      return await operation();
+    } finally {
+      lockState.providerActive = false;
+      release();
+      if (lockState.providerTails.get(providerSlot) === tail) {
+        lockState.providerTails.delete(providerSlot);
+      }
+    }
+  }),
   withRegistryWriteLockSync: vi.fn(),
 }));
 
@@ -85,6 +110,7 @@ import { deleteProviderCredential } from '../src/env.js';
 import { removeProviderFromRegistry } from '../src/registry/crud.js';
 import {
   withCredentialMutationLock,
+  withProviderMutationLock,
   withRegistryWriteLock,
 } from '../src/registry/lock.js';
 
@@ -93,7 +119,9 @@ describe('registry provider removal', () => {
     lockState.active = false;
     lockState.registryTail = Promise.resolve();
     lockState.credentialActive = false;
+    lockState.providerActive = false;
     lockState.credentialTails.clear();
+    lockState.providerTails.clear();
     journalState.pending.clear();
     registryState.current = {
       schemaVersion: 1,
@@ -114,6 +142,7 @@ describe('registry provider removal', () => {
       async () => {
         expect(lockState.active).toBe(false);
         expect(lockState.credentialActive).toBe(true);
+        expect(lockState.providerActive).toBe(true);
         return true;
       },
     );
@@ -137,6 +166,7 @@ describe('registry provider removal', () => {
     vi.mocked(deleteProviderCredential).mockImplementation(async () => {
       expect(lockState.active).toBe(false);
       expect(lockState.credentialActive).toBe(true);
+      expect(lockState.providerActive).toBe(true);
       return false;
     });
 
@@ -209,5 +239,48 @@ describe('registry provider removal', () => {
 
     expect(credentialValue).toBe('new-key');
     expect(registryState.current.providers).toHaveLength(1);
+  });
+
+  it('serializes removal against publishing a credential on another backend', async () => {
+    let startDelete!: () => void;
+    const deleteStarted = new Promise<void>(resolve => {
+      startDelete = resolve;
+    });
+    let finishDelete!: () => void;
+    const deleteGate = new Promise<void>(resolve => {
+      finishDelete = resolve;
+    });
+    vi.mocked(deleteProviderCredential).mockImplementation(async () => {
+      startDelete();
+      await deleteGate;
+      return true;
+    });
+
+    const removal = removeProviderFromRegistry('openai');
+    await deleteStarted;
+    let migrationEntered = false;
+    const migration = withProviderMutationLock('openai', async () => {
+      migrationEntered = true;
+      await withRegistryWriteLock(() => {
+        registryState.current.providers.push({
+          id: 'openai',
+          templateId: 'openai',
+          name: 'OpenAI',
+          enabled: true,
+          authRef: 'helper:v1:new-helper:provider:openai',
+          authType: 'api',
+          api: { npm: '@ai-sdk/openai', url: 'https://api.openai.com/v1' },
+          addedAt: '2026-07-21T01:00:00.000Z',
+        });
+      });
+    });
+
+    await Promise.resolve();
+    expect(migrationEntered).toBe(false);
+    finishDelete();
+    await Promise.all([removal, migration]);
+
+    expect(registryState.current.providers).toHaveLength(1);
+    expect(registryState.current.providers[0]?.authRef).toContain('new-helper');
   });
 });
