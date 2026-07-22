@@ -47,6 +47,8 @@ describe('oauth types', () => {
 
 describe('oauth refresh http', () => {
   afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -92,13 +94,22 @@ describe('oauth refresh http', () => {
     expect(text).not.toHaveBeenCalled();
   });
 
-  it('bounds the refresh request with an abort signal', async () => {
-    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
-      access_token: 'new-access',
-    }), { status: 200 }));
+  it('aborts a hung refresh request after 30 seconds', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, init?: RequestInit): Promise<Response> =>
+        new Promise((_resolve, reject) => {
+          const signal = init?.signal;
+          if (!signal) {
+            reject(new Error('missing abort signal'));
+            return;
+          }
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
     vi.stubGlobal('fetch', fetchMock);
 
-    await postOAuthRefresh(
+    const refresh = postOAuthRefresh(
       'https://auth/token',
       new URLSearchParams({ grant_type: 'refresh_token' }),
       {
@@ -106,11 +117,14 @@ describe('oauth refresh http', () => {
         errorPrefix: 'token refresh failed',
       },
     );
+    const signal = fetchMock.mock.calls[0]?.[1]?.signal as AbortSignal;
+    const rejection = refresh.catch((error: unknown) => error);
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      'https://auth/token',
-      expect.objectContaining({ signal: expect.any(AbortSignal) }),
-    );
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(signal.aborted).toBe(true);
+    await expect(rejection).resolves.toMatchObject({ name: 'TimeoutError' });
   });
 });
 

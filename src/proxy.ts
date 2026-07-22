@@ -16,7 +16,11 @@ import {
   writeInferenceResponseErrorLog,
   writeWebSocketDiagnosticLog,
 } from './trace-log.js';
-import { relayAnthropicMessages, UpstreamUnreachableError } from './upstream-forward.js';
+import {
+  relayAnthropicMessages,
+  resolveOAuthRetryReplacement,
+  UpstreamUnreachableError,
+} from './upstream-forward.js';
 import {
   CLAUDE_CODE_CLI_VERSION,
   injectClaudeCodeBillingSystemLine,
@@ -635,21 +639,20 @@ export async function startProxyCatalog(
           const message = formatUpstreamError(err);
           const details = sdkUpstreamErrorDetails(err);
           const upstreamStatus = details?.statusCode ?? upstreamHttpStatus(err, message);
-          if (
-            openAiOAuth &&
-            upstreamStatus === 401 &&
-            sdkAttempt === 0 &&
-            !res.headersSent &&
-            route.refreshToken
-          ) {
-            const replacement = await route.refreshToken(apiKey).catch(() => null);
-            if (replacement && replacement !== apiKey) {
-              apiKey = replacement;
-              route.apiKey = replacement;
-              sdkAttempt += 1;
-              plog(() => 'sdk oauth credential replaced after 401; retrying once');
-              return 'retry';
-            }
+          const replacement = await resolveOAuthRetryReplacement(
+            openAiOAuth,
+            upstreamStatus,
+            sdkAttempt,
+            res.headersSent,
+            apiKey,
+            route.refreshToken,
+          );
+          if (replacement) {
+            apiKey = replacement;
+            route.apiKey = replacement;
+            sdkAttempt += 1;
+            plog(() => 'sdk oauth credential replaced after 401; retrying once');
+            return 'retry';
           }
           translationLifecycle?.fail(
             err instanceof Error ? err.name : 'UpstreamError',

@@ -55,7 +55,7 @@ if (operation === 'get') {
     } catch {
       firstGet = false;
     }
-    if (firstGet) {
+    if (!firstGet) {
       const deadline = Date.now() + 5_000;
       while (!existsSync(secondSetPath) && Date.now() < deadline) {
         await new Promise(resolve => setTimeout(resolve, 5));

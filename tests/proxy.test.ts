@@ -1164,4 +1164,92 @@ describe('OAuth route credential resolution', () => {
       handle.close();
     }
   });
+
+  it('surfaces a second translated OAuth 401 without another retry', async () => {
+    const refreshToken = vi.fn(async (rejectedAccessToken?: string) =>
+      rejectedAccessToken === undefined
+        ? 'rejected-oauth-token'
+        : 'fresh-oauth-token',
+    );
+    const route: ProxyRoute = {
+      aliasId: 'anthropic-oauth-provider__gpt-3-5-turbo-second-401',
+      realModelId: 'gpt-3.5-turbo-instruct',
+      displayName: 'OAuth Second 401 Route',
+      upstreamUrl: '',
+      apiKey: 'launch-token',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      providerId: 'oauth-provider',
+      authType: 'oauth',
+      refreshToken,
+    };
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ error: { message: 'expired token' } }),
+      {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+
+      expect(response.status).toBe(401);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(refreshToken).toHaveBeenCalledTimes(2);
+      expect(route.apiKey).toBe('fresh-oauth-token');
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('refuses to retry a translated OAuth 401 with an unchanged token', async () => {
+    const refreshToken = vi.fn(async (rejectedAccessToken?: string) =>
+      rejectedAccessToken ?? 'rejected-oauth-token',
+    );
+    const route: ProxyRoute = {
+      aliasId: 'anthropic-oauth-provider__gpt-3-5-turbo-unchanged',
+      realModelId: 'gpt-3.5-turbo-instruct',
+      displayName: 'OAuth Unchanged Token Route',
+      upstreamUrl: '',
+      apiKey: 'launch-token',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      providerId: 'oauth-provider',
+      authType: 'oauth',
+      refreshToken,
+    };
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ error: { message: 'expired token' } }),
+      {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+
+      expect(response.status).toBe(401);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(refreshToken).toHaveBeenCalledTimes(2);
+      expect(route.apiKey).toBe('rejected-oauth-token');
+    } finally {
+      handle.close();
+    }
+  });
 });

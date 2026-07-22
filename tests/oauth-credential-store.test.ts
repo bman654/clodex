@@ -79,6 +79,7 @@ describe('OAuth credential-store refresh', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     delete process.env[CREDENTIAL_HELPER_ENV];
     delete process.env.CLODEX_TEST_CREDENTIAL_HELPER_STORE;
     delete process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE;
@@ -175,6 +176,26 @@ describe('OAuth credential-store refresh', () => {
     expect(refreshStoredOAuthCredential).toHaveBeenCalledTimes(1);
   });
 
+  it('revalidates a cached access token after the cross-process staleness bound', async () => {
+    let now = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    await writeCredentialHelperAccount(account, unexpiredCredential('account-a-access'));
+
+    await expect(resolveProviderCredential('openai-oauth', authRef)).resolves.toBe(
+      'account-a-access',
+    );
+    await writeCredentialHelperAccount(account, unexpiredCredential('account-b-access'));
+    await expect(resolveProviderCredential('openai-oauth', authRef)).resolves.toBe(
+      'account-a-access',
+    );
+
+    now += 30_000;
+    await expect(resolveProviderCredential('openai-oauth', authRef)).resolves.toBe(
+      'account-b-access',
+    );
+    expect(refreshStoredOAuthCredential).not.toHaveBeenCalled();
+  });
+
   it('fails when a rotated credential cannot be persisted', async () => {
     process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE = 'fail-set';
     await expect(resolveProviderCredential('openai-oauth', authRef)).rejects.toThrow(
@@ -209,6 +230,60 @@ describe('OAuth credential-store refresh', () => {
     await expect(first).resolves.toBe('new-access');
     await expect(second).resolves.toBe('new-access');
     expect(refreshStoredOAuthCredential).toHaveBeenCalledTimes(1);
+  });
+
+  it('rereads a credential replaced between refresh and compare-and-set readback', async () => {
+    process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE = 'interleave-readback';
+    const storePath = process.env.CLODEX_TEST_CREDENTIAL_HELPER_STORE!;
+    vi.mocked(refreshStoredOAuthCredential).mockImplementationOnce(async () => {
+      await waitForPath(`${storePath}.first-get`);
+      await writeCredentialHelperAccount(account, unexpiredCredential('external-access'));
+      writeFileSync(`${storePath}.second-set`, '', { encoding: 'utf8', mode: 0o600 });
+      return {
+        type: 'oauth',
+        access: 'discarded-refresh-access',
+        refresh: 'discarded-refresh-token',
+        expires: Date.now() + 3_600_000,
+      };
+    });
+
+    await expect(resolveProviderCredential('openai-oauth', authRef)).resolves.toBe(
+      'external-access',
+    );
+    await expect(readCredentialHelperAccount(account)).resolves.toContain('external-access');
+    await expect(readCredentialHelperAccount(account)).resolves.not.toContain(
+      'discarded-refresh-access',
+    );
+    expect(refreshStoredOAuthCredential).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails after three credentials replace consecutive refresh generations', async () => {
+    process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE = 'interleave-readback';
+    const storePath = process.env.CLODEX_TEST_CREDENTIAL_HELPER_STORE!;
+    let generation = 0;
+    vi.mocked(refreshStoredOAuthCredential).mockImplementation(async () => {
+      generation += 1;
+      await writeCredentialHelperAccount(account, oauthCredentialToKeychainJson({
+        type: 'oauth',
+        access: 'old-access',
+        refresh: `external-refresh-${generation}`,
+        expires: 0,
+        accountId: `generation-${generation}`,
+      }));
+      writeFileSync(`${storePath}.second-set`, '', { encoding: 'utf8', mode: 0o600 });
+      return {
+        type: 'oauth',
+        access: `discarded-access-${generation}`,
+        refresh: `discarded-refresh-${generation}`,
+        expires: Date.now() + 3_600_000,
+      };
+    });
+
+    await expect(resolveProviderCredential('openai-oauth', authRef)).rejects.toThrow(
+      'OAuth credential changed repeatedly while refresh was in progress',
+    );
+    expect(refreshStoredOAuthCredential).toHaveBeenCalledTimes(3);
+    await expect(readCredentialHelperAccount(account)).resolves.toContain('generation-3');
   });
 
   it('updates and clears the in-memory cache with explicit credential writes', async () => {
@@ -406,6 +481,45 @@ describe('OAuth credential-store refresh', () => {
       'new-access',
     ]);
     expect(refreshStoredOAuthCredential).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-resolves after an in-flight refresh returns the caller rejected token', async () => {
+    process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE = 'interleave-readback';
+    const storePath = process.env.CLODEX_TEST_CREDENTIAL_HELPER_STORE!;
+    let releaseRefresh!: () => void;
+    const refreshGate = new Promise<void>(resolve => { releaseRefresh = resolve; });
+    vi.mocked(refreshStoredOAuthCredential)
+      .mockImplementationOnce(async () => {
+        await refreshGate;
+        writeFileSync(`${storePath}.second-set`, '', { encoding: 'utf8', mode: 0o600 });
+        return {
+          type: 'oauth',
+          access: 'joined-rejected-access',
+          refresh: 'joined-refresh',
+          expires: Date.now() + 3_600_000,
+        };
+      })
+      .mockResolvedValueOnce({
+        type: 'oauth',
+        access: 'final-access',
+        refresh: 'final-refresh',
+        expires: Date.now() + 3_600_000,
+      });
+
+    const first = resolveProviderCredential('openai-oauth', authRef);
+    await waitForPath(`${storePath}.first-get`);
+    await vi.waitFor(() => expect(refreshStoredOAuthCredential).toHaveBeenCalledTimes(1));
+    const rejectedCaller = resolveProviderCredential(
+      'openai-oauth',
+      authRef,
+      undefined,
+      { rejectedAccessToken: 'joined-rejected-access' },
+    );
+    releaseRefresh();
+
+    await expect(first).resolves.toBe('joined-rejected-access');
+    await expect(rejectedCaller).resolves.toBe('final-access');
+    expect(refreshStoredOAuthCredential).toHaveBeenCalledTimes(2);
   });
 
   it('does not hold the provider registry lock while OAuth refresh awaits the network', async () => {

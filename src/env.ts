@@ -152,7 +152,18 @@ function oauthProviderIdFromAccount(account: string): string | null {
 }
 
 const oauthRefreshInflight = new Map<string, Promise<string | null>>();
-const oauthCredentialCache = new Map<string, StoredOAuthCredential>();
+interface CachedOAuthCredential {
+  access: string;
+  expires: number;
+  accessRejected?: true;
+  checkedAt: number;
+}
+
+// Another process can replace the shared credential without invalidating this
+// process. Keep only access-token metadata and bound that stale view to 30 seconds;
+// rejection and expiration bypass it immediately.
+const OAUTH_CREDENTIAL_CACHE_MAX_AGE_MS = 30_000;
+const oauthCredentialCache = new Map<string, CachedOAuthCredential>();
 const rejectedEnvCredentialFingerprints = new Map<string, string>();
 const OAUTH_REFRESH_LOCK_WAIT_MS = 150_000;
 const OAUTH_STATE_KEY_SEPARATOR = '\0';
@@ -453,6 +464,32 @@ function clearOAuthCredentialCache(authRef: string): void {
   }
 }
 
+function cacheOAuthCredential(
+  stateKey: string,
+  credential: StoredOAuthCredential,
+): void {
+  oauthCredentialCache.set(stateKey, {
+    access: credential.access,
+    expires: credential.expires,
+    ...(credential.accessRejected === true ? { accessRejected: true as const } : {}),
+    checkedAt: Date.now(),
+  });
+}
+
+function cachedOAuthCredentialIsUsable(
+  credential: CachedOAuthCredential | undefined,
+  providerId: string,
+  rejectedAccessToken?: string,
+): boolean {
+  if (!credential) return false;
+  const age = Date.now() - credential.checkedAt;
+  return age >= 0
+    && age < OAUTH_CREDENTIAL_CACHE_MAX_AGE_MS
+    && credential.access !== rejectedAccessToken
+    && credential.accessRejected !== true
+    && !oauthCredentialShouldRefresh(credential, providerId);
+}
+
 async function readOAuthProviderSecret(
   ref: StoredCredentialRef,
   providerId: string,
@@ -469,12 +506,7 @@ async function readOAuthProviderSecret(
   }
 
   const cached = oauthCredentialCache.get(stateKey);
-  if (
-    cached
-    && cached.access !== rejectedAccessToken
-    && cached.accessRejected !== true
-    && !oauthCredentialShouldRefresh(cached, providerId)
-  ) {
+  if (cached && cachedOAuthCredentialIsUsable(cached, providerId, rejectedAccessToken)) {
     return cached.access;
   }
   if (cached?.access === rejectedAccessToken) oauthCredentialCache.delete(stateKey);
@@ -483,9 +515,7 @@ async function readOAuthProviderSecret(
     const latestCached = oauthCredentialCache.get(stateKey);
     if (
       latestCached
-      && latestCached.access !== rejectedAccessToken
-      && latestCached.accessRejected !== true
-      && !oauthCredentialShouldRefresh(latestCached, providerId)
+      && cachedOAuthCredentialIsUsable(latestCached, providerId, rejectedAccessToken)
     ) {
       return latestCached.access;
     }
@@ -499,7 +529,7 @@ async function readOAuthProviderSecret(
         const decoded = decodeProviderSecret(raw);
         return decoded === rejectedAccessToken ? null : decoded;
       }
-      oauthCredentialCache.set(stateKey, cred);
+      cacheOAuthCredential(stateKey, cred);
 
       const forceRefresh = cred.access === rejectedAccessToken || cred.accessRejected === true;
       if (!forceRefresh && !oauthCredentialShouldRefresh(cred, providerId)) {
@@ -590,7 +620,7 @@ export async function saveProviderCredential(
       const oauth = parseStoredOAuthCredential(key);
       const oauthProviderId = oauthProviderIdFromAccount(parsed.account);
       if (oauth && oauthProviderId) {
-        oauthCredentialCache.set(oauthCredentialStateKey(oauthProviderId, cacheKey), oauth);
+        cacheOAuthCredential(oauthCredentialStateKey(oauthProviderId, cacheKey), oauth);
       }
       return true;
     }

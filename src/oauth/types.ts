@@ -85,7 +85,10 @@ export function parseStoredOAuthCredential(raw: string | null): StoredOAuthCrede
 
 export const OAUTH_REFRESH_SKEW_MS = 120_000;
 
-export function oauthCredentialNeedsRefresh(cred: StoredOAuthCredential, skewMs = OAUTH_REFRESH_SKEW_MS): boolean {
+export function oauthCredentialNeedsRefresh(
+  cred: Pick<StoredOAuthCredential, 'expires'>,
+  skewMs = OAUTH_REFRESH_SKEW_MS,
+): boolean {
   return cred.expires <= Date.now() + Math.max(0, skewMs);
 }
 

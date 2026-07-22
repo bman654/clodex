@@ -49,6 +49,21 @@ export class UpstreamUnreachableError extends Error {
   }
 }
 
+export async function resolveOAuthRetryReplacement(
+  enabled: boolean,
+  status: number,
+  attempt: number,
+  headersSent: boolean,
+  apiKey: string,
+  refreshToken?: (rejectedAccessToken: string) => Promise<string | null>,
+): Promise<string | null> {
+  if (!enabled || status !== 401 || attempt !== 0 || headersSent || !refreshToken) {
+    return null;
+  }
+  const replacement = await refreshToken(apiKey).catch(() => null);
+  return replacement && replacement !== apiKey ? replacement : null;
+}
+
 export async function fetchWithOAuthRetry<TResponse extends {
   status: number;
   body?: { cancel?: () => Promise<void> | void } | null;
@@ -58,12 +73,15 @@ export async function fetchWithOAuthRetry<TResponse extends {
   refreshToken?: (rejectedAccessToken: string) => Promise<string | null>,
 ): Promise<{ response: TResponse; apiKey: string; refreshed: boolean }> {
   let response = await request(apiKey);
-  if (response.status !== 401 || !refreshToken) {
-    return { response, apiKey, refreshed: false };
-  }
-
-  const refreshed = await refreshToken(apiKey).catch(() => null);
-  if (!refreshed || refreshed === apiKey) {
+  const refreshed = await resolveOAuthRetryReplacement(
+    true,
+    response.status,
+    0,
+    false,
+    apiKey,
+    refreshToken,
+  );
+  if (!refreshed) {
     return { response, apiKey, refreshed: false };
   }
 

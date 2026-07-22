@@ -18,7 +18,7 @@ import {
   type OpenAiRequest,
 } from '../openai-adapter.js';
 import { sendJson, readBody } from '../http-utils.js';
-import { relayAnthropicMessages } from '../upstream-forward.js';
+import { relayAnthropicMessages, resolveOAuthRetryReplacement } from '../upstream-forward.js';
 import {
   anthropicPromptTooLongMessage,
   estimateAnthropicInputTokens,
@@ -463,23 +463,19 @@ async function handleAnthropicMessages(
         const message = formatUpstreamError(err);
         const details = sdkUpstreamErrorDetails(err);
         const candidateStatus = details?.statusCode ?? upstreamHttpStatus(err, message);
-        if (
-          openAiOAuth &&
-          candidateStatus === 401 &&
-          sdkAttempt === 0 &&
-          !res.headersSent
-        ) {
-          const replacement = await resolveModelApiKey(
-            model,
-            options.apiKey,
-            apiKey,
-          ).catch(() => null);
-          if (replacement && replacement !== apiKey) {
-            apiKey = replacement;
-            sdkAttempt += 1;
-            plog('sdk oauth credential replaced after 401; retrying once');
-            continue;
-          }
+        const replacement = await resolveOAuthRetryReplacement(
+          openAiOAuth,
+          candidateStatus,
+          sdkAttempt,
+          res.headersSent,
+          apiKey,
+          rejectedAccessToken => resolveModelApiKey(model, options.apiKey, rejectedAccessToken),
+        );
+        if (replacement) {
+          apiKey = replacement;
+          sdkAttempt += 1;
+          plog('sdk oauth credential replaced after 401; retrying once');
+          continue;
         }
         const status = auditSdkError(options, body.model, model, err, message);
         const contextLengthExceeded = status === 400
@@ -657,23 +653,19 @@ async function handleOpenAIChatCompletions(
       const message = formatUpstreamError(err);
       const details = sdkUpstreamErrorDetails(err);
       const candidateStatus = details?.statusCode ?? upstreamHttpStatus(err, message);
-      if (
-        openAiOAuth &&
-        candidateStatus === 401 &&
-        sdkAttempt === 0 &&
-        !res.headersSent
-      ) {
-        const replacement = await resolveModelApiKey(
-          model,
-          options.apiKey,
-          apiKey,
-        ).catch(() => null);
-        if (replacement && replacement !== apiKey) {
-          apiKey = replacement;
-          sdkAttempt += 1;
-          plog('sdk oauth credential replaced after 401; retrying once');
-          continue;
-        }
+      const replacement = await resolveOAuthRetryReplacement(
+        openAiOAuth,
+        candidateStatus,
+        sdkAttempt,
+        res.headersSent,
+        apiKey,
+        rejectedAccessToken => resolveModelApiKey(model, options.apiKey, rejectedAccessToken),
+      );
+      if (replacement) {
+        apiKey = replacement;
+        sdkAttempt += 1;
+        plog('sdk oauth credential replaced after 401; retrying once');
+        continue;
       }
       const status = auditSdkError(options, body.model, model, err, message);
       plog(`sdk error npm=${model.npm} upstream=${upstreamModelId(model)}: ${message}`);
