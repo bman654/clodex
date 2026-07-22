@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { addProviderFromTemplate } from '../src/registry/add-template.js';
+import { credentialInstanceAuthRef } from '../src/credential-helper.js';
 import * as env from '../src/env.js';
 import * as providerFactory from '../src/provider-factory.js';
 import * as fetchTemplate from '../src/registry/fetch-template-models.js';
@@ -13,8 +14,10 @@ const lockState = vi.hoisted(() => ({
   active: false,
   registryTail: Promise.resolve(),
   credentialActive: false,
+  providerActive: false,
   credentialTails: new Map<string, Promise<void>>(),
   afterRegistryUnlock: null as null | (() => void),
+  providerTails: new Map<string, Promise<void>>(),
 }));
 const journalState = vi.hoisted(() => ({
   pending: new Set<string>(),
@@ -26,6 +29,7 @@ vi.mock('../src/env.js', async importOriginal => {
   return {
     ...actual,
     deleteProviderCredential: vi.fn(),
+    provisionProviderCredential: vi.fn(),
     saveProviderCredential: vi.fn(),
   };
 });
@@ -73,13 +77,10 @@ vi.mock('../src/registry/lock.js', () => ({
       afterUnlock?.();
     }
   }),
-  withCredentialMutationLock: vi.fn(async (
-    authRef: string,
-    operation: () => unknown,
-  ) => {
+  withCredentialMutationLock: vi.fn(async (authRef: string, operation: () => unknown) => {
     const previous = lockState.credentialTails.get(authRef) ?? Promise.resolve();
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
+    const gate = new Promise<void>(resolve => {
       release = resolve;
     });
     const tail = previous.then(() => gate);
@@ -96,9 +97,30 @@ vi.mock('../src/registry/lock.js', () => ({
       }
     }
   }),
+  withProviderMutationLock: vi.fn(async (providerSlot: string, operation: () => unknown) => {
+    const previous = lockState.providerTails.get(providerSlot) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    const tail = previous.then(() => gate);
+    lockState.providerTails.set(providerSlot, tail);
+    await previous;
+    lockState.providerActive = true;
+    try {
+      return await operation();
+    } finally {
+      lockState.providerActive = false;
+      release();
+      if (lockState.providerTails.get(providerSlot) === tail) {
+        lockState.providerTails.delete(providerSlot);
+      }
+    }
+  }),
 }));
 
 describe('registry/add-template', () => {
+  const credentialRef = credentialInstanceAuthRef('provider:test-template');
   const dummyTemplate: ProviderTemplate = {
     id: 'test-template',
     name: 'Test Provider',
@@ -113,12 +135,15 @@ describe('registry/add-template', () => {
     lockState.active = false;
     lockState.registryTail = Promise.resolve();
     lockState.credentialActive = false;
+    lockState.providerActive = false;
     lockState.credentialTails.clear();
     lockState.afterRegistryUnlock = null;
     journalState.pending.clear();
+    lockState.providerTails.clear();
 
     vi.mocked(providerFactory.isSdkMigratedNpm).mockReturnValue(true);
     vi.mocked(env.deleteProviderCredential).mockResolvedValue(true);
+    vi.mocked(env.provisionProviderCredential).mockResolvedValue(true);
     vi.mocked(env.saveProviderCredential).mockResolvedValue(true);
     vi.mocked(cleanupJournal.loadPendingCredentialDeletes).mockReset()
       .mockImplementation(async () => [...journalState.pending]);
@@ -138,11 +163,20 @@ describe('registry/add-template', () => {
     });
     
     vi.mocked(fetchTemplate.fetchTemplateModels).mockResolvedValue({
-      models: [{ id: 'model-1', name: 'Model 1', upstreamModelId: 'model-1', family: 'fam', brand: 'brand', modelFormat: 'openai' }],
+      models: [
+        {
+          id: 'model-1',
+          name: 'Model 1',
+          upstreamModelId: 'model-1',
+          family: 'fam',
+          brand: 'brand',
+          modelFormat: 'openai',
+        },
+      ],
       baseUrl: 'https://api.example.com',
     });
 
-    vi.mocked(pricing.enrichModelsWithPricing).mockImplementation((models) => models);
+    vi.mocked(pricing.enrichModelsWithPricing).mockImplementation(models => models);
   });
 
   afterEach(() => {
@@ -150,7 +184,11 @@ describe('registry/add-template', () => {
   });
 
   it('fails if template is not supported', async () => {
-    const tpl = { ...dummyTemplate, supported: false, unsupportedReason: 'Coming soon' };
+    const tpl = {
+      ...dummyTemplate,
+      supported: false,
+      unsupportedReason: 'Coming soon',
+    };
     const res = await addProviderFromTemplate(tpl, 'key');
     expect(res.added).toBe(false);
     expect(res.error).toBe('Coming soon');
@@ -170,7 +208,7 @@ describe('registry/add-template', () => {
   });
 
   it('fails if provider already exists and replaceExisting is not set', async () => {
-    vi.mocked(io.loadRegistryStrict).mockReturnValue({
+    registryState = {
       schemaVersion: 1,
       providers: [{
         id: 'test-template',
@@ -182,7 +220,7 @@ describe('registry/add-template', () => {
         api: {},
         addedAt: '2026-01-01T00:00:00.000Z',
       }],
-    });
+    };
 
     const res = await addProviderFromTemplate(dummyTemplate, 'key');
     expect(res.added).toBe(false);
@@ -204,16 +242,26 @@ describe('registry/add-template', () => {
     vi.mocked(fetchTemplate.fetchTemplateModels).mockImplementation(async () => {
       expect(lockState.active).toBe(false);
       return {
-        models: [{ id: 'model-1', name: 'Model 1', upstreamModelId: 'model-1', family: 'fam', brand: 'brand', modelFormat: 'openai' }],
+        models: [
+          {
+            id: 'model-1',
+            name: 'Model 1',
+            upstreamModelId: 'model-1',
+            family: 'fam',
+            brand: 'brand',
+            modelFormat: 'openai',
+          },
+        ],
         baseUrl: 'https://api.example.com',
       };
     });
     vi.mocked(pricing.enrichPricingAsync).mockImplementation(() => {
       expect(lockState.active).toBe(false);
     });
-    vi.mocked(env.saveProviderCredential).mockImplementation(async () => {
+    vi.mocked(env.provisionProviderCredential).mockImplementation(async () => {
       expect(lockState.active).toBe(false);
       expect(lockState.credentialActive).toBe(true);
+      expect(lockState.providerActive).toBe(true);
       return true;
     });
 
@@ -239,9 +287,9 @@ describe('registry/add-template', () => {
 
     expect(results.filter(result => result.added)).toHaveLength(1);
     expect(results.filter(result => !result.added)).toHaveLength(1);
-    expect(env.saveProviderCredential).toHaveBeenCalledOnce();
-    const [savedAuthRef, savedKey] = vi.mocked(env.saveProviderCredential).mock.calls[0]!;
-    expect(savedAuthRef).toBe('keyring:provider:test-template');
+    expect(env.provisionProviderCredential).toHaveBeenCalledOnce();
+    const [savedAuthRef, savedKey] = vi.mocked(env.provisionProviderCredential).mock.calls[0]!;
+    expect(savedAuthRef).toBe(credentialRef);
     expect(['first-key', 'second-key']).toContain(savedKey);
     expect(registry.providers).toHaveLength(1);
   });
@@ -260,7 +308,8 @@ describe('registry/add-template', () => {
           authRef: 'keyring:provider:test-template',
           api: {},
           addedAt: '2026-01-01T00:00:00.000Z',
-        }],
+          },
+        ],
       });
 
     const res = await addProviderFromTemplate(dummyTemplate, 'key');
@@ -268,20 +317,21 @@ describe('registry/add-template', () => {
     expect(res.added).toBe(false);
     expect(res.error).toContain('is already configured');
     expect(fetchTemplate.fetchTemplateModels).toHaveBeenCalledOnce();
+    expect(env.provisionProviderCredential).not.toHaveBeenCalled();
     expect(env.saveProviderCredential).not.toHaveBeenCalled();
     expect(io.saveRegistry).not.toHaveBeenCalled();
   });
 
   it('fails if credential cannot be saved', async () => {
-    vi.mocked(env.saveProviderCredential).mockResolvedValue(false);
+    vi.mocked(env.provisionProviderCredential).mockResolvedValue(false);
 
     const res = await addProviderFromTemplate(dummyTemplate, 'key');
     expect(res.added).toBe(false);
     expect(res.error).toContain('Could not save API key');
     expect(cleanupJournal.queueCredentialDelete).toHaveBeenCalledWith(
-      'keyring:provider:test-template',
+      credentialRef,
     );
-    expect(env.deleteProviderCredential).toHaveBeenCalledWith('keyring:provider:test-template');
+    expect(env.deleteProviderCredential).toHaveBeenCalledWith(credentialRef);
     expect(journalState.pending.size).toBe(0);
   });
 
@@ -294,7 +344,10 @@ describe('registry/add-template', () => {
     expect(res.provider?.modelsCache?.models).toHaveLength(1);
     expect(res.modelCount).toBe(1);
 
-    expect(env.saveProviderCredential).toHaveBeenCalledWith('keyring:provider:test-template', 'key_123');
+    expect(env.provisionProviderCredential).toHaveBeenCalledWith(
+      credentialRef,
+      'key_123',
+    );
     expect(io.saveRegistry).toHaveBeenCalled();
   });
 
@@ -308,6 +361,7 @@ describe('registry/add-template', () => {
       authRef: 'none:anonymous',
       authType: 'none',
     });
+    expect(env.provisionProviderCredential).not.toHaveBeenCalled();
     expect(env.saveProviderCredential).not.toHaveBeenCalled();
     const savedRegistry = vi.mocked(io.saveRegistry).mock.calls.at(-1)?.[0] as ProviderRegistry;
     expect(savedRegistry.providers[0]?.authRef).toBe('none:anonymous');
@@ -338,7 +392,8 @@ describe('registry/add-template', () => {
         brand: 'brand',
         modelFormat: 'openai',
         isFree: true,
-      }],
+        },
+      ],
       baseUrl: 'https://api.example.com',
     });
 
@@ -353,7 +408,7 @@ describe('registry/add-template', () => {
     expect(res.modelCount).toBe(1);
   });
 
-  it('replaces existing provider if replaceExisting is true', async () => {
+  it('moves an existing provider to the selected credential backend', async () => {
     registryState = {
       schemaVersion: 1,
       providers: [{
@@ -368,16 +423,21 @@ describe('registry/add-template', () => {
       }],
     };
 
-    const res = await addProviderFromTemplate(dummyTemplate, 'key_123', { replaceExisting: true });
+    const res = await addProviderFromTemplate(dummyTemplate, 'key_123', {
+      replaceExisting: true,
+    });
 
     expect(res.added).toBe(true);
+    expect(env.provisionProviderCredential).toHaveBeenCalledWith(
+      credentialRef,
+      'key_123',
+    );
+    expect(env.saveProviderCredential).not.toHaveBeenCalled();
     
     const savedRegistry = vi.mocked(io.saveRegistry).mock.calls.at(-1)?.[0] as ProviderRegistry;
     expect(savedRegistry.providers).toHaveLength(1); // Replaced, not duplicated
     expect(savedRegistry.providers[0]?.name).toBe('Test Provider');
-    expect(savedRegistry.providers[0]?.authRef).toMatch(
-      /^keyring:provider:test-template:replacement:/,
-    );
+    expect(savedRegistry.providers[0]?.authRef).toBe(credentialRef);
     expect(env.deleteProviderCredential).toHaveBeenCalledWith('keyring:provider:test-template');
   });
 
@@ -419,9 +479,7 @@ describe('registry/add-template', () => {
     const replacementRef = result.provider?.authRef;
 
     expect(cancellationLockStates).toEqual([true]);
-    expect(replacementRef).toMatch(
-      /^keyring:provider:test-template:replacement:/,
-    );
+    expect(replacementRef).toBe(credentialRef);
     expect(journalState.pending).toContain(replacementRef);
     expect(result.credentialCleanupPending).toBe(true);
   });
@@ -452,7 +510,7 @@ describe('registry/add-template', () => {
 
     expect(registryState.providers[0]?.authRef).toBe('keyring:provider:test-template');
     expect([...journalState.pending]).toEqual([
-      expect.stringMatching(/^keyring:provider:test-template:replacement:/),
+      credentialRef,
       'keyring:provider:test-template',
     ]);
     expect(env.deleteProviderCredential).not.toHaveBeenCalled();
@@ -468,5 +526,69 @@ describe('registry/add-template', () => {
     expect(result.added).toBe(true);
     expect(result.credentialCleanupPending).toBe(true);
     expect(registryState.providers).toHaveLength(1);
+  });
+
+  it('replaces the selected account instance in place', async () => {
+    const authRef = credentialRef;
+    registryState = {
+      schemaVersion: 1,
+      providers: [
+        {
+          id: 'test-template',
+          templateId: 'test-template',
+          name: 'Existing',
+          enabled: true,
+          authType: 'api',
+          authRef,
+          api: {},
+          addedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    };
+
+    const res = await addProviderFromTemplate(dummyTemplate, 'key_123', {
+      replaceExisting: true,
+    });
+
+    expect(res.added).toBe(true);
+    expect(env.saveProviderCredential).toHaveBeenCalledWith(authRef, 'key_123');
+    expect(env.provisionProviderCredential).not.toHaveBeenCalled();
+  });
+
+  it('serializes concurrent replacements before selecting write mode', async () => {
+    let registry: ProviderRegistry = {
+      schemaVersion: 1,
+      providers: [
+        {
+          id: 'test-template',
+          templateId: 'test-template',
+          name: 'Existing',
+          enabled: true,
+          authType: 'api',
+          authRef: 'keyring:provider:test-template',
+          api: {},
+          addedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    };
+    vi.mocked(io.loadRegistryStrict).mockImplementation(() => structuredClone(registry));
+    vi.mocked(io.saveRegistry).mockImplementation(next => {
+      registry = structuredClone(next);
+    });
+
+    const results = await Promise.all([
+      addProviderFromTemplate(dummyTemplate, 'first-key', {
+        replaceExisting: true,
+      }),
+      addProviderFromTemplate(dummyTemplate, 'second-key', {
+        replaceExisting: true,
+      }),
+    ]);
+
+    expect(results.every(result => result.added)).toBe(true);
+    expect(env.provisionProviderCredential).toHaveBeenCalledOnce();
+    expect(env.saveProviderCredential).toHaveBeenCalledOnce();
+    expect(registry.providers).toHaveLength(1);
+    expect(registry.providers[0]?.authRef).toBe(credentialRef);
   });
 });

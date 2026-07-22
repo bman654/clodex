@@ -6,8 +6,10 @@ import * as p from '@clack/prompts';
 import open from 'open';
 import {
   probeProviderCredentialStore,
+  provisionProviderCredential,
   saveProviderCredential,
 } from '../env.js';
+import { credentialInstanceAuthRef } from '../credential-helper.js';
 import { runOpenAiDeviceCodeFlow } from '../oauth/openai.js';
 import {
   supportsNativeOAuth,
@@ -27,6 +29,7 @@ import {
 import { loadRegistryStrict, saveRegistry } from './io.js';
 import {
   withCredentialMutationLock,
+  withProviderMutationLock,
   withRegistryWriteLock,
 } from './lock.js';
 import { refreshProviderModels } from './refresh-models.js';
@@ -87,9 +90,7 @@ export async function saveNativeOAuthCredential(
   providerData?: Record<string, unknown>,
 ): Promise<void> {
   const cred = tokensToStoredCredential(tokens, undefined, accountId, providerData);
-  const registryId = toOAuthRegistryId(providerId);
-  const authRef = oauthAuthRef(registryId);
-  await persistOAuthProvider(providerId, cred, authRef);
+  await persistNativeOAuthCredential(providerId, cred);
 }
 
 /**
@@ -101,78 +102,104 @@ function oauthDisplayName(registryId: string, fallbackName: string): string {
   return fallbackName;
 }
 
-async function persistOAuthProvider(
+async function upsertOAuthProvider(
   providerId: string,
-  cred: StoredOAuthCredential,
   authRef: string,
-): Promise<{ registryProvider: RegistryProvider; credentialCleanupPending: boolean }> {
-  const registryProvider = await withCredentialMutationLock(authRef, async () => {
+  expectedAuthRef: string | undefined,
+): Promise<RegistryProvider> {
+  return withRegistryWriteLock(async () => {
     const registryId = toOAuthRegistryId(providerId);
     const templateId = providerId.replace(/-oauth$/, '') || providerId;
-    await withRegistryWriteLock(() => {
-      const registry = loadRegistryStrict();
-      const previousEntry = registry.providers.find(provider => provider.id === registryId);
-      if (!previousEntry && !getTemplateById(templateId)) {
-        throw new Error(`Provider "${providerId}" is not in your registry and has no template`);
-      }
-    });
-    await journalCredentialWrite(authRef);
-
-    let diagMsg = '';
-    const saved = await saveProviderCredential(
-      authRef,
-      oauthCredentialToKeychainJson(cred),
-      (msg) => { diagMsg = msg; },
-    );
-    if (!saved) {
-      throw new Error(`Could not save OAuth tokens to the credential store${diagMsg ? ` — ${diagMsg}` : ' — check access and try again'}`);
+    const registry = loadRegistryStrict();
+    const template = getTemplateById(templateId);
+    let entry: RegistryProvider | undefined = registry.providers.find(pr => pr.id === registryId);
+    if (entry?.authRef !== expectedAuthRef) {
+      throw new Error(`Provider "${registryId}" changed while its credential was being saved`);
     }
 
-    const committed = await withRegistryWriteLock(async () => {
-      const registry = loadRegistryStrict();
-      const template = getTemplateById(templateId);
-      const previousEntry = registry.providers.find(provider => provider.id === registryId);
-      if (!previousEntry && !template) {
+    if (!entry) {
+      if (!template) {
         throw new Error(`Provider "${providerId}" is not in your registry and has no template`);
       }
+    }
 
-      let entry: RegistryProvider;
-      if (!previousEntry) {
-        if (!template) throw new Error(`Provider "${providerId}" has no template`);
-        const displayName = oauthDisplayName(registryId, template.name);
-        entry = {
-          id: registryId,
-          templateId,
-          name: displayName,
-          enabled: true,
-          authRef,
-          authType: 'oauth',
-          api: {
-            npm: template.npm,
-            url: template.defaultBaseUrl ?? '',
-            ...(template.headers ? { headers: template.headers } : {}),
-          },
-          addedAt: new Date().toISOString(),
-        };
-      } else {
-        entry = { ...previousEntry, authType: 'oauth', authRef, templateId };
-      }
+    const previousAuthRef = entry?.authRef;
+    if (!entry) {
+      if (!template) throw new Error(`Provider "${providerId}" has no template`);
+      const displayName = oauthDisplayName(registryId, template.name);
+      entry = {
+        id: registryId,
+        templateId,
+        name: displayName,
+        enabled: true,
+        authRef,
+        authType: 'oauth',
+        api: {
+          npm: template.npm,
+          url: template.defaultBaseUrl ?? '',
+          ...(template.headers ? { headers: template.headers } : {}),
+        },
+        addedAt: new Date().toISOString(),
+      };
+    } else {
+      entry = { ...entry, authType: 'oauth', authRef, templateId };
+    }
 
-      const idx = registry.providers.findIndex(provider => provider.id === registryId);
-      if (idx >= 0) registry.providers[idx] = entry;
-      else registry.providers.push(entry);
-      if (previousEntry?.authRef && previousEntry.authRef !== authRef) {
-        await queueCredentialDelete(previousEntry.authRef);
+    const idx = registry.providers.findIndex(provider => provider.id === registryId);
+    if (idx >= 0) registry.providers[idx] = entry;
+    else registry.providers.push(entry);
+    if (previousAuthRef && previousAuthRef !== authRef) {
+      await queueCredentialDelete(previousAuthRef);
+    }
+    saveRegistry(registry);
+    try {
+      await cancelCredentialDelete(authRef);
+    } catch {
+      // Reconciliation below reports and retries the committed marker.
+    }
+    return entry;
+  });
+}
+
+async function persistNativeOAuthCredential(
+  providerId: string,
+  cred: StoredOAuthCredential,
+): Promise<{ registryProvider: RegistryProvider; credentialCleanupPending: boolean }> {
+  const registryId = toOAuthRegistryId(providerId);
+  const account = `oauth:provider:${registryId}`;
+  const registryProvider = await withProviderMutationLock(registryId, async () => {
+    const existingAuthRef = await withRegistryWriteLock(
+      () => {
+        const registry = loadRegistryStrict();
+        const templateId = providerId.replace(/-oauth$/, '') || providerId;
+        const existing = registry.providers.find(provider => provider.id === registryId);
+        if (!existing && !getTemplateById(templateId)) {
+          throw new Error(`Provider "${providerId}" is not in your registry and has no template`);
+        }
+        return existing?.authRef;
+      },
+    );
+    const authRef = credentialInstanceAuthRef(account);
+    return withCredentialMutationLock(authRef, async () => {
+      await journalCredentialWrite(authRef);
+      let diagMsg = '';
+      const saved =
+        existingAuthRef === authRef
+          ? await saveProviderCredential(authRef, oauthCredentialToKeychainJson(cred), msg => {
+              diagMsg = msg;
+            })
+          : await provisionProviderCredential(authRef, oauthCredentialToKeychainJson(cred), msg => {
+              diagMsg = msg;
+            });
+      if (!saved) {
+        throw new Error(
+          `Could not save OAuth tokens to the credential store${
+            diagMsg ? ` — ${diagMsg}` : ' — check access and try again'
+          }`,
+        );
       }
-      saveRegistry(registry);
-      try {
-        await cancelCredentialDelete(authRef);
-      } catch {
-        // Reconciliation below reports and retries the committed marker.
-      }
-      return entry;
+      return upsertOAuthProvider(providerId, authRef, existingAuthRef);
     });
-    return committed;
   });
 
   let credentialCleanupPending = true;
@@ -199,9 +226,10 @@ export async function authenticateProvider(
     throw new Error('OAuth sign-in is only available for openai (ChatGPT Plus/Pro).');
   }
 
-  const authRef = oauthAuthRef(registryId);
   let storeDiagMsg = '';
-  const storeReady = await probeProviderCredentialStore(authRef, (msg) => { storeDiagMsg = msg; });
+  const storeReady = await probeProviderCredentialStore(oauthAuthRef(registryId), msg => {
+    storeDiagMsg = msg;
+  });
   if (!storeReady) {
     throw new Error(
       `Credential store is unavailable${storeDiagMsg ? `: ${storeDiagMsg}` : ''}. `
@@ -210,7 +238,7 @@ export async function authenticateProvider(
   }
 
   const cred = await runNativeDeviceCode(providerId);
-  const persisted = await persistOAuthProvider(providerId, cred, authRef);
+  const persisted = await persistNativeOAuthCredential(providerId, cred);
 
   const refreshSpinner = p.spinner();
   refreshSpinner.start('Refreshing model list...');

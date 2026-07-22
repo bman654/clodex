@@ -1,10 +1,21 @@
 // src/env.ts
 import { CONFLICTING_ENV_VARS } from './constants.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import {
+  credentialAccountBase,
   deleteCredentialHelperAccount,
+  isCredentialAccountInstance,
   readCredentialHelperAccount,
   writeCredentialHelperAccount,
 } from './credential-helper.js';
@@ -17,15 +28,18 @@ import {
 } from './oauth/types.js';
 import { refreshStoredOAuthCredential, oauthCredentialShouldRefresh } from './oauth/refresh.js';
 import {
+  getCredentialMutationLockPath,
+  getCredentialStateRoot,
   withCredentialMutationLock,
   withRegistryWriteLock,
 } from './registry/lock.js';
 import type { ConflictInfo } from './types.js';
 
 export function detectConflicts(): ConflictInfo[] {
-  return CONFLICTING_ENV_VARS
-    .filter(name => process.env[name] !== undefined)
-    .map(name => ({ name, value: process.env[name]! }));
+  return CONFLICTING_ENV_VARS.filter(name => process.env[name] !== undefined).map(name => ({
+    name,
+    value: process.env[name]!,
+  }));
 }
 
 /** Restore first-party-like Claude Code behavior when routing through a proxy or gateway. */
@@ -135,8 +149,9 @@ export function classifyKeyringError(err: unknown): string {
 const KEYRING_SERVICE = 'clodex';
 const KEYRING_CHUNK_SERVICE = 'clodex-chunks';
 const KEYRING_JOURNAL_SERVICE = 'clodex-journal';
-/** One-time silent migration source: credentials stored by relay-ai. */
-const LEGACY_KEYRING_SERVICE = 'relay-ai';
+const KEYRING_DELETED_SERVICE = 'clodex-deleted';
+const KEYRING_DELETED_VALUE = 'v1:deleted';
+const KEYRING_PENDING_DELETE_VALUE = 'v1:pending';
 // Windows Credential Manager caps a single credential blob at 2560 bytes (CredWriteW).
 // keyring-rs encodes the password as UTF-16 (2 bytes/char) before that check, so the
 // usable limit is 2560 / 2 = 1280 chars — long OAuth tokens (e.g. OpenAI's JWTs) exceed
@@ -144,13 +159,14 @@ const LEGACY_KEYRING_SERVICE = 'relay-ai';
 // Harmless on macOS/Linux, which have no such limit.
 const KEYRING_CHUNK_PREFIX = '__relay_chunked__:';
 const KEYRING_JOURNAL_PREFIX = '__relay_chunk_journal__:v1:';
+const KEYRING_DELETE_TOMBSTONE_PREFIX = '__clodex_delete__:';
 const KEYRING_MAX_ENTRY_CHARS = 1200;
 const KEYRING_CHUNK_SIZE = KEYRING_MAX_ENTRY_CHARS;
 const KEYRING_MAX_CHUNKS = 128;
 const KEYRING_MAX_WRITE_GENERATIONS = 2;
 const KEYRING_MAX_DELETE_GENERATIONS = 6;
-const KEYRING_MAX_LEGACY_GENERATIONS = 4;
-const KEYRING_GENERATION_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const KEYRING_GENERATION_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 interface KeyringChunkMarker {
   count: number;
@@ -159,11 +175,17 @@ interface KeyringChunkMarker {
 }
 
 interface KeyringChunkJournal {
-  mode: 'write' | 'delete';
+  mode: 'write' | 'short' | 'delete' | 'deleted';
   generations: KeyringChunkMarker[];
-  legacyGenerations?: KeyringChunkMarker[];
+  shortDigest?: string;
+  fallbackShortDigest?: string;
+  unpublished?: true;
+  publicationAttempted?: true;
+  blockLegacy?: true;
   unverifiable?: true;
 }
+
+type KeyringApi = Pick<typeof import('@napi-rs/keyring'), 'Entry' | 'findCredentials'>;
 
 export function providerKeyringAccount(providerId: string): string {
   return `provider:${providerId}`;
@@ -175,7 +197,8 @@ export function oauthProviderKeyringAccount(providerId: string): string {
 
 function oauthProviderIdFromAccount(account: string): string | null {
   const prefix = 'oauth:provider:';
-  return account.startsWith(prefix) ? account.slice(prefix.length) : null;
+  const baseAccount = credentialAccountBase(account);
+  return baseAccount.startsWith(prefix) ? baseAccount.slice(prefix.length) : null;
 }
 
 const oauthRefreshInflight = new Map<string, Promise<string | null>>();
@@ -214,10 +237,12 @@ function isReservedKeyringAccount(account: string): boolean {
   const indexText = parts.at(-1)!;
   if (!/^\d+$/.test(indexText)) return false;
   const index = Number(indexText);
-  return Number.isSafeInteger(index)
-    && indexText === String(index)
-    && index >= 0
-    && index < KEYRING_MAX_CHUNKS;
+  return (
+    Number.isSafeInteger(index) &&
+    indexText === String(index) &&
+    index >= 0 &&
+    index < KEYRING_MAX_CHUNKS
+  );
 }
 
 export interface ResolveCredentialOptions {
@@ -284,28 +309,79 @@ function usableEnvCredential(
   return value;
 }
 
+function readKeyringEntry(keyring: KeyringApi, service: string, account: string): string | null {
+  const value = new keyring.Entry(service, account).getPassword();
+  if (value !== null) return value;
+
+  const matches = keyring
+    .findCredentials(service)
+    .filter(credential => credential.account === account);
+  if (matches.length > 1) {
+    throw new Error(`keyring credential account is ambiguous: ${account}`);
+  }
+  return matches[0]?.password ?? null;
+}
+
+function deleteKeyringEntry(keyring: KeyringApi, service: string, account: string): boolean {
+  const entry = new keyring.Entry(service, account);
+  if (!persistKeyringDeletionTombstone(keyring, service, account)) return false;
+  return entry.deletePassword();
+}
+
+function hasUnjournaledKeyringChunks(keyring: KeyringApi, account: string): boolean {
+  const prefix = `${account}::chunk::`;
+  return [KEYRING_SERVICE, KEYRING_CHUNK_SERVICE].some(service =>
+    keyring
+      .findCredentials(service)
+      .some(
+        credential =>
+          credential.account.startsWith(prefix) && isReservedKeyringAccount(credential.account),
+      ),
+  );
+}
+
+function isDisposableCredentialProbeAccount(account: string): boolean {
+  const separator = '::probe::';
+  const separatorIndex = account.lastIndexOf(separator);
+  return (
+    separatorIndex > 0 &&
+    KEYRING_GENERATION_PATTERN.test(account.slice(separatorIndex + separator.length))
+  );
+}
+
+function persistKeyringDeletionTombstone(
+  keyring: KeyringApi,
+  service: string,
+  account: string,
+): boolean {
+  const existing = readKeyringEntry(keyring, service, account);
+  if (existing?.startsWith(KEYRING_DELETE_TOMBSTONE_PREFIX)) return true;
+  const tombstone = `${KEYRING_DELETE_TOMBSTONE_PREFIX}${randomUUID()}`;
+  new keyring.Entry(service, account).setPassword(tombstone);
+  return readKeyringEntry(keyring, service, account) === tombstone;
+}
+
 function readKeyringAccountFromService(
-  Entry: typeof import('@napi-rs/keyring').Entry,
+  keyring: KeyringApi,
   service: string,
   account: string,
   retries = 2,
 ): string | null {
-  const accountEntry = new Entry(service, account);
-  const value = accountEntry.getPassword() ?? null;
+  const value = readKeyringEntry(keyring, service, account);
   const marker = parseKeyringChunkMarker(value);
   if (!marker) return value;
   let combined: string;
   try {
-    combined = readKeyringMarkerChunks(Entry, service, account, marker);
+    combined = readKeyringMarkerChunks(keyring, service, account, marker);
   } catch (err) {
-    if (retries > 0 && accountEntry.getPassword() !== value) {
-      return readKeyringAccountFromService(Entry, service, account, retries - 1);
+    if (retries > 0 && readKeyringEntry(keyring, service, account) !== value) {
+      return readKeyringAccountFromService(keyring, service, account, retries - 1);
     }
     throw err;
   }
-  if (accountEntry.getPassword() !== value) {
+  if (readKeyringEntry(keyring, service, account) !== value) {
     if (retries > 0) {
-      return readKeyringAccountFromService(Entry, service, account, retries - 1);
+      return readKeyringAccountFromService(keyring, service, account, retries - 1);
     }
     throw new Error('keyring credential changed repeatedly while it was being read');
   }
@@ -313,7 +389,7 @@ function readKeyringAccountFromService(
 }
 
 function readKeyringMarkerChunks(
-  Entry: typeof import('@napi-rs/keyring').Entry,
+  keyring: KeyringApi,
   service: string,
   account: string,
   marker: KeyringChunkMarker,
@@ -321,7 +397,7 @@ function readKeyringMarkerChunks(
   let combined = '';
   const chunkService = keyringChunkService(service, marker);
   for (let i = 0; i < marker.count; i++) {
-    const chunk = new Entry(chunkService, keyringChunkAccount(account, marker, i)).getPassword();
+    const chunk = readKeyringEntry(keyring, chunkService, keyringChunkAccount(account, marker, i));
     if (chunk === null) {
       throw new Error(`keyring credential chunk ${i + 1} of ${marker.count} is missing`);
     }
@@ -415,39 +491,57 @@ function parseKeyringChunkJournal(value: string): KeyringChunkJournal {
     throw new InvalidKeyringJournalError();
   }
   try {
-    const parsed = JSON.parse(value.slice(KEYRING_JOURNAL_PREFIX.length)) as Partial<KeyringChunkJournal>;
+    const parsed = JSON.parse(
+      value.slice(KEYRING_JOURNAL_PREFIX.length),
+    ) as Partial<KeyringChunkJournal>;
     if (
-      (parsed.mode !== 'write' && parsed.mode !== 'delete')
-      || !Array.isArray(parsed.generations)
-      || parsed.generations.length > (
-        parsed.mode === 'write'
+      (parsed.mode !== 'write' &&
+        parsed.mode !== 'short' &&
+        parsed.mode !== 'delete' &&
+        parsed.mode !== 'deleted') ||
+      !Array.isArray(parsed.generations) ||
+      parsed.generations.length >
+        (parsed.mode === 'write' || parsed.mode === 'short'
           ? KEYRING_MAX_WRITE_GENERATIONS
-          : KEYRING_MAX_DELETE_GENERATIONS
-      )
-      || (
-        parsed.legacyGenerations !== undefined
-        && (
-          !Array.isArray(parsed.legacyGenerations)
-          || parsed.legacyGenerations.length > KEYRING_MAX_LEGACY_GENERATIONS
-        )
-      )
-      || (parsed.mode === 'write' && parsed.generations.length < 1)
-      || (
-        parsed.mode === 'write'
-        && ((parsed.legacyGenerations?.length ?? 0) > 0 || parsed.unverifiable !== undefined)
-      )
-      || (parsed.unverifiable !== undefined && parsed.unverifiable !== true)
+          : KEYRING_MAX_DELETE_GENERATIONS) ||
+      (parsed.mode === 'write' && parsed.generations.length < 1) ||
+      (parsed.mode === 'short' &&
+        (typeof parsed.shortDigest !== 'string' || !/^[0-9a-f]{64}$/.test(parsed.shortDigest))) ||
+      (parsed.mode !== 'short' && parsed.mode !== 'delete' && parsed.shortDigest !== undefined) ||
+      (parsed.mode === 'delete' &&
+        parsed.shortDigest !== undefined &&
+        (typeof parsed.shortDigest !== 'string' || !/^[0-9a-f]{64}$/.test(parsed.shortDigest))) ||
+      (parsed.fallbackShortDigest !== undefined &&
+        ((parsed.mode !== 'write' && parsed.mode !== 'short') ||
+          typeof parsed.fallbackShortDigest !== 'string' ||
+          !/^[0-9a-f]{64}$/.test(parsed.fallbackShortDigest))) ||
+      (parsed.unpublished !== undefined &&
+        ((parsed.mode !== 'write' && parsed.mode !== 'short') || parsed.unpublished !== true)) ||
+      (parsed.publicationAttempted !== undefined &&
+        ((parsed.mode !== 'write' && parsed.mode !== 'short') ||
+          parsed.publicationAttempted !== true ||
+          parsed.unpublished !== true)) ||
+      (parsed.unpublished === true && parsed.fallbackShortDigest !== undefined) ||
+      (parsed.mode === 'deleted' &&
+        (parsed.generations.length > 0 ||
+          parsed.shortDigest !== undefined ||
+          parsed.fallbackShortDigest !== undefined ||
+          parsed.unpublished !== undefined ||
+          parsed.publicationAttempted !== undefined ||
+          parsed.blockLegacy !== undefined ||
+          parsed.unverifiable !== undefined)) ||
+      (parsed.mode !== 'delete' &&
+        (parsed.blockLegacy !== undefined || parsed.unverifiable !== undefined)) ||
+      (parsed.blockLegacy !== undefined && parsed.blockLegacy !== true) ||
+      (parsed.unverifiable !== undefined && parsed.unverifiable !== true)
     ) {
       throw new Error('invalid');
     }
     const generations = parsed.generations.map(parseJournalMarker);
-    const legacyGenerations = parsed.legacyGenerations?.map(parseJournalMarker);
     if (
-      parsed.mode === 'write'
-      && generations.some((marker, index) =>
-        generations.slice(index + 1).some(candidate =>
-          sameKeyringGeneration(marker, candidate),
-        ),
+      (parsed.mode === 'write' || parsed.mode === 'short') &&
+      generations.some((marker, index) =>
+        generations.slice(index + 1).some(candidate => sameKeyringGeneration(marker, candidate)),
       )
     ) {
       throw new Error('invalid');
@@ -455,9 +549,11 @@ function parseKeyringChunkJournal(value: string): KeyringChunkJournal {
     return {
       mode: parsed.mode,
       generations,
-      ...(legacyGenerations
-        ? { legacyGenerations }
-        : {}),
+      ...(parsed.shortDigest ? { shortDigest: parsed.shortDigest } : {}),
+      ...(parsed.fallbackShortDigest ? { fallbackShortDigest: parsed.fallbackShortDigest } : {}),
+      ...(parsed.unpublished ? { unpublished: true } : {}),
+      ...(parsed.publicationAttempted ? { publicationAttempted: true } : {}),
+      ...(parsed.blockLegacy ? { blockLegacy: true } : {}),
       ...(parsed.unverifiable ? { unverifiable: true } : {}),
     };
   } catch {
@@ -469,24 +565,20 @@ function sameKeyringGeneration(
   left: KeyringChunkMarker | null,
   right: KeyringChunkMarker,
 ): boolean {
-  return left !== null
-    && left.generation === right.generation
-    && Boolean(left.digest) === Boolean(right.digest);
+  return (
+    left !== null &&
+    left.generation === right.generation &&
+    Boolean(left.digest) === Boolean(right.digest)
+  );
 }
 
-function sameKeyringMarker(
-  left: KeyringChunkMarker,
-  right: KeyringChunkMarker,
-): boolean {
-  return sameKeyringGeneration(left, right)
-    && left.count === right.count
-    && left.digest === right.digest;
+function sameKeyringMarker(left: KeyringChunkMarker, right: KeyringChunkMarker): boolean {
+  return (
+    sameKeyringGeneration(left, right) && left.count === right.count && left.digest === right.digest
+  );
 }
 
-function appendUniqueKeyringMarker(
-  target: KeyringChunkMarker[],
-  marker: KeyringChunkMarker,
-): void {
+function appendUniqueKeyringMarker(target: KeyringChunkMarker[], marker: KeyringChunkMarker): void {
   const existing = target.find(candidate => sameKeyringGeneration(candidate, marker));
   if (!existing) {
     target.push(marker);
@@ -502,42 +594,55 @@ function encodeKeyringJournal(journal: KeyringChunkJournal): string {
 
 function keyringDeleteJournalFits(
   generations: KeyringChunkMarker[],
-  legacyGenerations: KeyringChunkMarker[],
   unverifiable = false,
+  blockLegacy = false,
+  shortDigest?: string,
 ): boolean {
-  if (
-    generations.length > KEYRING_MAX_DELETE_GENERATIONS
-    || legacyGenerations.length > KEYRING_MAX_LEGACY_GENERATIONS
-  ) {
+  if (generations.length > KEYRING_MAX_DELETE_GENERATIONS) {
     return false;
   }
-  return encodeKeyringJournal({
-    mode: 'delete',
-    generations,
-    ...(legacyGenerations.length > 0 ? { legacyGenerations } : {}),
-    ...(unverifiable ? { unverifiable: true } : {}),
-  }).length <= KEYRING_MAX_ENTRY_CHARS;
+  return (
+    encodeKeyringJournal({
+      mode: 'delete',
+      generations,
+      ...(shortDigest ? { shortDigest } : {}),
+      ...(blockLegacy ? { blockLegacy: true } : {}),
+      ...(unverifiable ? { unverifiable: true } : {}),
+    }).length <= KEYRING_MAX_ENTRY_CHARS
+  );
 }
 
-function keyringChunkAccount(
-  account: string,
-  marker: KeyringChunkMarker,
-  index: number,
-): string {
+function keyringChunkAccount(account: string, marker: KeyringChunkMarker, index: number): string {
   return marker.generation
     ? `${account}::chunk::${marker.generation}::${index}`
     : `${account}::chunk::${index}`;
 }
 
-function keyringChunkService(
-  mainService: string,
-  marker: KeyringChunkMarker,
-): string {
+function keyringChunkService(mainService: string, marker: KeyringChunkMarker): string {
   return marker.digest ? KEYRING_CHUNK_SERVICE : mainService;
 }
 
+function splitKeyringCredential(value: string): string[] {
+  const chunks: string[] = [];
+  for (let start = 0; start < value.length; ) {
+    let end = Math.min(start + KEYRING_CHUNK_SIZE, value.length);
+    if (
+      end < value.length &&
+      value.charCodeAt(end - 1) >= 0xd800 &&
+      value.charCodeAt(end - 1) <= 0xdbff &&
+      value.charCodeAt(end) >= 0xdc00 &&
+      value.charCodeAt(end) <= 0xdfff
+    ) {
+      end -= 1;
+    }
+    chunks.push(value.slice(start, end));
+    start = end;
+  }
+  return chunks;
+}
+
 function removeKeyringChunkRange(
-  Entry: typeof import('@napi-rs/keyring').Entry,
+  keyring: KeyringApi,
   service: string,
   account: string,
   marker: KeyringChunkMarker,
@@ -548,8 +653,9 @@ function removeKeyringChunkRange(
   const chunkService = keyringChunkService(service, marker);
   for (let i = firstIndex; i < marker.count; i++) {
     try {
-      const entry = new Entry(chunkService, keyringChunkAccount(account, marker, i));
-      if (entry.getPassword() !== null) entry.deletePassword();
+      if (!deleteKeyringEntry(keyring, chunkService, keyringChunkAccount(account, marker, i))) {
+        removed = false;
+      }
     } catch (err) {
       removed = false;
       diag?.(classifyKeyringError(err));
@@ -559,121 +665,211 @@ function removeKeyringChunkRange(
 }
 
 function removeKeyringChunks(
-  Entry: typeof import('@napi-rs/keyring').Entry,
+  keyring: KeyringApi,
   service: string,
   account: string,
   marker: KeyringChunkMarker | null,
   diag?: (msg: string) => void,
 ): boolean {
   if (!marker) return true;
-  return removeKeyringChunkRange(Entry, service, account, marker, 0, diag);
+  return removeKeyringChunkRange(keyring, service, account, marker, 0, diag);
 }
 
 function writeKeyringJournal(
-  Entry: typeof import('@napi-rs/keyring').Entry,
+  keyring: KeyringApi,
   account: string,
   journal: KeyringChunkJournal,
 ): void {
-  const entry = new Entry(KEYRING_JOURNAL_SERVICE, account);
+  const entry = new keyring.Entry(KEYRING_JOURNAL_SERVICE, account);
   const encoded = encodeKeyringJournal(journal);
   if (encoded.length > KEYRING_MAX_ENTRY_CHARS) {
     throw new Error('keyring cleanup journal exceeds the credential entry limit');
   }
+  persistKeyringManagedState(account, { mode: 'preparing', journal });
   entry.setPassword(encoded);
-  if (entry.getPassword() !== encoded) {
+  if (readKeyringEntry(keyring, KEYRING_JOURNAL_SERVICE, account) !== encoded) {
     throw new Error('keyring cleanup journal verification failed');
   }
+  persistKeyringManagedState(account, { mode: 'managed' });
+}
+
+function readKeyringDeletionGuard(
+  keyring: KeyringApi,
+  account: string,
+): 'deleted' | 'pending' | null {
+  const value = readKeyringEntry(keyring, KEYRING_DELETED_SERVICE, account);
+  if (value === null) return null;
+  if (value === KEYRING_DELETED_VALUE) return 'deleted';
+  if (value === KEYRING_PENDING_DELETE_VALUE) return 'pending';
+  throw new Error('keyring credential has an invalid deletion guard');
+}
+
+function writeKeyringDeletionGuard(
+  keyring: KeyringApi,
+  account: string,
+  mode: 'deleted' | 'pending',
+): boolean {
+  const entry = new keyring.Entry(KEYRING_DELETED_SERVICE, account);
+  const value = mode === 'deleted' ? KEYRING_DELETED_VALUE : KEYRING_PENDING_DELETE_VALUE;
+  entry.setPassword(value);
+  return readKeyringEntry(keyring, KEYRING_DELETED_SERVICE, account) === value;
+}
+
+function clearKeyringDeletionGuard(keyring: KeyringApi, account: string): boolean {
+  return new keyring.Entry(KEYRING_DELETED_SERVICE, account).deletePassword();
 }
 
 function reconcileKeyringJournal(
-  Entry: typeof import('@napi-rs/keyring').Entry,
+  keyring: KeyringApi,
   account: string,
   diag?: (msg: string) => void,
 ): boolean {
-  const journalEntry = new Entry(KEYRING_JOURNAL_SERVICE, account);
-  const rawJournal = journalEntry.getPassword();
-  if (rawJournal === null) return true;
-  let journal = parseKeyringChunkJournal(rawJournal);
-  const accountEntry = new Entry(KEYRING_SERVICE, account);
-  const legacyAccountEntry = new Entry(LEGACY_KEYRING_SERVICE, account);
-
-  let activeMarker: KeyringChunkMarker | null = null;
-  if (journal.mode === 'delete') {
-    let currentMarker: KeyringChunkMarker | null = null;
-    let currentLegacyMarker: KeyringChunkMarker | null = null;
-    let unverifiable = journal.unverifiable === true;
-    let currentValue: string | null;
-    let currentLegacyValue: string | null;
+  let rawJournal = readKeyringEntry(keyring, KEYRING_JOURNAL_SERVICE, account);
+  let managedState = readKeyringManagedState(account);
+  if (managedState?.mode === 'preparing') {
     try {
-      currentValue = accountEntry.getPassword();
-      currentLegacyValue = legacyAccountEntry.getPassword();
+      writeKeyringJournal(keyring, account, managedState.journal);
+      rawJournal = encodeKeyringJournal(managedState.journal);
+      managedState = { mode: 'managed' };
     } catch (err) {
       diag?.(classifyKeyringError(err));
       return false;
     }
-    for (const [storedValue, assign] of [
-      [currentValue, (marker: KeyringChunkMarker | null) => {
-        currentMarker = marker;
-      }],
-      [currentLegacyValue, (marker: KeyringChunkMarker | null) => {
-        currentLegacyMarker = marker;
-      }],
-    ] as const) {
+  }
+  const deletionGuard = readKeyringDeletionGuard(keyring, account);
+  if (rawJournal === null) {
+    if (deletionGuard === null) {
+      if (managedState !== null) {
+        diag?.('managed keyring cleanup metadata is temporarily unavailable');
+        return false;
+      }
+      return true;
+    }
+    const restoredJournal: KeyringChunkJournal =
+      deletionGuard === 'deleted'
+        ? {
+            mode: 'deleted',
+            generations: [],
+          }
+        : {
+            mode: 'delete',
+            generations: [],
+          };
+    writeKeyringJournal(keyring, account, restoredJournal);
+    rawJournal = encodeKeyringJournal(restoredJournal);
+  } else if (managedState?.mode !== 'managed') {
+    try {
+      persistKeyringManagedState(account, { mode: 'managed' });
+    } catch (err) {
+      diag?.(classifyKeyringError(err));
+      return false;
+    }
+  }
+  let journal = parseKeyringChunkJournal(rawJournal);
+  const accountEntry = new keyring.Entry(KEYRING_SERVICE, account);
+
+  if (journal.mode === 'deleted') {
+    let currentValue: string | null;
+    let currentMarker: KeyringChunkMarker | null = null;
+    let unverifiable = false;
+    try {
+      currentValue = readKeyringEntry(keyring, KEYRING_SERVICE, account);
+      currentMarker = parseKeyringChunkMarker(currentValue);
+    } catch (err) {
+      unverifiable = true;
+      diag?.(classifyKeyringError(err));
+    }
+    const resumedJournal: KeyringChunkJournal = {
+      mode: 'delete',
+      generations: currentMarker ? [currentMarker] : [],
+      blockLegacy: true,
+      ...(unverifiable ? { unverifiable: true } : {}),
+    };
+    try {
+      writeKeyringJournal(keyring, account, resumedJournal);
+    } catch (err) {
+      diag?.(classifyKeyringError(err));
+      return false;
+    }
+    journal = resumedJournal;
+  }
+
+  let activeMarker: KeyringChunkMarker | null = null;
+  let activeShortDigest: string | null = null;
+  if (journal.mode === 'delete') {
+    let currentMarker: KeyringChunkMarker | null = null;
+    let activeShortDigest = journal.shortDigest;
+    let unverifiable = journal.unverifiable === true;
+    let currentValue: string | null;
+    try {
+      currentValue = readKeyringEntry(keyring, KEYRING_SERVICE, account);
+    } catch (err) {
+      diag?.(classifyKeyringError(err));
+      return false;
+    }
+    if (
+      currentValue === null ||
+      !activeShortDigest ||
+      createHash('sha256').update(currentValue).digest('hex') !== activeShortDigest
+    ) {
+      activeShortDigest = undefined;
       try {
-        assign(parseKeyringChunkMarker(storedValue));
+        currentMarker = parseKeyringChunkMarker(currentValue);
       } catch (err) {
         unverifiable = true;
         diag?.(classifyKeyringError(err));
       }
     }
 
-    let preparedGenerations = journal.generations.map(marker => ({ ...marker }));
-    let preparedLegacyGenerations = (journal.legacyGenerations ?? []).map(marker => ({
+    let preparedGenerations = journal.generations.map(marker => ({
       ...marker,
     }));
     if (currentMarker) appendUniqueKeyringMarker(preparedGenerations, currentMarker);
-    if (currentLegacyMarker) {
-      appendUniqueKeyringMarker(preparedLegacyGenerations, currentLegacyMarker);
-    }
-    if (!keyringDeleteJournalFits(
-      preparedGenerations,
-      preparedLegacyGenerations,
-      unverifiable,
-    )) {
+    if (
+      !keyringDeleteJournalFits(
+        preparedGenerations,
+        unverifiable,
+        journal.blockLegacy === true,
+        activeShortDigest,
+      )
+    ) {
+      const protectedMarker = currentMarker
+        ? (preparedGenerations.find(marker => sameKeyringGeneration(currentMarker, marker)) ??
+          currentMarker)
+        : null;
       let compacted = true;
       for (const marker of journal.generations) {
-        if (!removeKeyringChunks(Entry, KEYRING_SERVICE, account, marker, diag)) {
-          compacted = false;
+        if (protectedMarker && sameKeyringGeneration(protectedMarker, marker)) {
+          continue;
         }
-      }
-      for (const marker of journal.legacyGenerations ?? []) {
-        if (!removeKeyringChunks(Entry, LEGACY_KEYRING_SERVICE, account, marker, diag)) {
+        if (!removeKeyringChunks(keyring, KEYRING_SERVICE, account, marker, diag)) {
           compacted = false;
         }
       }
       if (!compacted) return false;
-      preparedGenerations = currentMarker ? [currentMarker] : [];
-      preparedLegacyGenerations = currentLegacyMarker ? [currentLegacyMarker] : [];
+      preparedGenerations = protectedMarker ? [protectedMarker] : [];
     }
-    if (!keyringDeleteJournalFits(
-      preparedGenerations,
-      preparedLegacyGenerations,
-      unverifiable,
-    )) {
+    if (
+      !keyringDeleteJournalFits(
+        preparedGenerations,
+        unverifiable,
+        journal.blockLegacy === true,
+        activeShortDigest,
+      )
+    ) {
       diag?.('keyring cleanup journal cannot represent the pending generations');
       return false;
     }
     const preparedJournal: KeyringChunkJournal = {
       mode: 'delete',
       generations: preparedGenerations,
-      ...(preparedLegacyGenerations.length > 0
-        ? { legacyGenerations: preparedLegacyGenerations }
-        : {}),
+      ...(activeShortDigest ? { shortDigest: activeShortDigest } : {}),
+      ...(journal.blockLegacy ? { blockLegacy: true } : {}),
       ...(unverifiable ? { unverifiable: true } : {}),
     };
     if (encodeKeyringJournal(preparedJournal) !== rawJournal) {
       try {
-        writeKeyringJournal(Entry, account, preparedJournal);
+        writeKeyringJournal(keyring, account, preparedJournal);
       } catch (err) {
         diag?.(classifyKeyringError(err));
         return false;
@@ -681,30 +877,89 @@ function reconcileKeyringJournal(
     }
     journal = preparedJournal;
     try {
-      if (accountEntry.getPassword() !== null) accountEntry.deletePassword();
-      if (legacyAccountEntry.getPassword() !== null) legacyAccountEntry.deletePassword();
+      if (
+        !writeKeyringDeletionGuard(
+          keyring,
+          account,
+          journal.blockLegacy === true ? 'deleted' : 'pending',
+        )
+      ) {
+        diag?.('keyring deletion guard could not be verified');
+        return false;
+      }
     } catch (err) {
       diag?.(classifyKeyringError(err));
       return false;
     }
-  } else {
     try {
-      activeMarker = parseKeyringChunkMarker(accountEntry.getPassword());
+      if (!deleteKeyringEntry(keyring, KEYRING_SERVICE, account)) {
+        diag?.('keyring credential deletion could not be verified');
+        return false;
+      }
     } catch (err) {
       diag?.(classifyKeyringError(err));
       return false;
+    }
+  } else if (journal.mode === 'write') {
+    let activeValue: string | null;
+    try {
+      activeValue = readKeyringEntry(keyring, KEYRING_SERVICE, account);
+    } catch (err) {
+      diag?.(classifyKeyringError(err));
+      return false;
+    }
+    if (activeValue === null) {
+      if (journal.unpublished !== true) {
+        diag?.('published credential state cannot be confirmed while cleanup metadata is active');
+        return false;
+      }
+      if (journal.publicationAttempted === true) {
+        const candidate = journal.generations[0];
+        if (!candidate) return false;
+        try {
+          readKeyringMarkerChunks(keyring, KEYRING_SERVICE, account, candidate);
+          const encodedCandidate = encodeKeyringChunkMarker(candidate);
+          accountEntry.setPassword(encodedCandidate);
+          if (readKeyringEntry(keyring, KEYRING_SERVICE, account) !== encodedCandidate) {
+            throw new Error('keyring credential recovery verification failed');
+          }
+          activeMarker = candidate;
+        } catch (err) {
+          diag?.(classifyKeyringError(err));
+          return false;
+        }
+      }
+    } else if (
+      journal.fallbackShortDigest &&
+      createHash('sha256').update(activeValue).digest('hex') === journal.fallbackShortDigest
+    ) {
+      activeShortDigest = journal.fallbackShortDigest;
+    } else {
+      try {
+        activeMarker = parseKeyringChunkMarker(activeValue);
+      } catch (err) {
+        diag?.(classifyKeyringError(err));
+        return false;
+      }
+      if (!activeMarker) {
+        diag?.('published credential kind is not represented by cleanup journal');
+        return false;
+      }
     }
 
     const activeJournalMarker = activeMarker
       ? journal.generations.find(marker => sameKeyringGeneration(activeMarker, marker))
       : undefined;
+    if (activeMarker && !activeJournalMarker) {
+      throw new Error('published credential generation is not represented by cleanup journal');
+    }
     if (activeMarker && activeJournalMarker) {
       try {
-        readKeyringMarkerChunks(Entry, KEYRING_SERVICE, account, activeMarker);
+        readKeyringMarkerChunks(keyring, KEYRING_SERVICE, account, activeMarker);
         if (
-          activeJournalMarker.count > activeMarker.count
-          && !removeKeyringChunkRange(
-            Entry,
+          activeJournalMarker.count > activeMarker.count &&
+          !removeKeyringChunkRange(
+            keyring,
             KEYRING_SERVICE,
             account,
             activeJournalMarker,
@@ -717,21 +972,17 @@ function reconcileKeyringJournal(
       } catch (err) {
         diag?.(classifyKeyringError(err));
         const recoveryCandidates = [
-          ...(!sameKeyringMarker(activeMarker, activeJournalMarker)
-            ? [activeJournalMarker]
-            : []),
-          ...journal.generations.filter(marker =>
-            !sameKeyringGeneration(activeMarker, marker),
-          ),
+          ...(!sameKeyringMarker(activeMarker, activeJournalMarker) ? [activeJournalMarker] : []),
+          ...journal.generations.filter(marker => !sameKeyringGeneration(activeMarker, marker)),
         ];
         let recovered = false;
         for (const candidate of recoveryCandidates) {
           try {
-            readKeyringMarkerChunks(Entry, KEYRING_SERVICE, account, candidate);
+            readKeyringMarkerChunks(keyring, KEYRING_SERVICE, account, candidate);
             if (
-              activeMarker.count > activeJournalMarker.count
-              && !removeKeyringChunkRange(
-                Entry,
+              activeMarker.count > activeJournalMarker.count &&
+              !removeKeyringChunkRange(
+                keyring,
                 KEYRING_SERVICE,
                 account,
                 activeMarker,
@@ -741,7 +992,11 @@ function reconcileKeyringJournal(
             ) {
               return false;
             }
-            accountEntry.setPassword(encodeKeyringChunkMarker(candidate));
+            const encodedCandidate = encodeKeyringChunkMarker(candidate);
+            accountEntry.setPassword(encodedCandidate);
+            if (readKeyringEntry(keyring, KEYRING_SERVICE, account) !== encodedCandidate) {
+              throw new Error('keyring credential recovery verification failed');
+            }
             activeMarker = candidate;
             recovered = true;
             break;
@@ -752,25 +1007,137 @@ function reconcileKeyringJournal(
         if (!recovered) return false;
       }
     }
+  } else {
+    let activeValue: string | null;
+    try {
+      activeValue = readKeyringEntry(keyring, KEYRING_SERVICE, account);
+    } catch (err) {
+      diag?.(classifyKeyringError(err));
+      return false;
+    }
+    if (activeValue === null) {
+      if (journal.unpublished !== true) {
+        diag?.('published credential state cannot be confirmed while cleanup metadata is active');
+        return false;
+      }
+      if (journal.publicationAttempted === true) return false;
+    } else {
+      const observedDigest = createHash('sha256').update(activeValue).digest('hex');
+      if (observedDigest === journal.shortDigest) {
+        activeShortDigest = observedDigest;
+      } else if (observedDigest === journal.fallbackShortDigest) {
+        activeShortDigest = observedDigest;
+      } else {
+        try {
+          activeMarker = parseKeyringChunkMarker(activeValue);
+        } catch (err) {
+          diag?.(classifyKeyringError(err));
+          return false;
+        }
+        if (
+          !activeMarker ||
+          !journal.generations.some(marker => sameKeyringGeneration(activeMarker, marker))
+        ) {
+          diag?.('published credential kind is not represented by cleanup journal');
+          return false;
+        }
+        try {
+          readKeyringMarkerChunks(keyring, KEYRING_SERVICE, account, activeMarker);
+        } catch (err) {
+          diag?.(classifyKeyringError(err));
+          return false;
+        }
+      }
+    }
   }
 
   let cleaned = true;
   for (const marker of journal.generations) {
-    if (journal.mode === 'write' && sameKeyringGeneration(activeMarker, marker)) continue;
-    if (!removeKeyringChunks(Entry, KEYRING_SERVICE, account, marker, diag)) {
-      cleaned = false;
-    }
-  }
-  for (const marker of journal.legacyGenerations ?? []) {
-    if (!removeKeyringChunks(Entry, LEGACY_KEYRING_SERVICE, account, marker, diag)) {
+    if (
+      (journal.mode === 'write' || journal.mode === 'short') &&
+      sameKeyringGeneration(activeMarker, marker)
+    )
+      continue;
+    if (!removeKeyringChunks(keyring, KEYRING_SERVICE, account, marker, diag)) {
       cleaned = false;
     }
   }
   if (!cleaned) return false;
   if (journal.unverifiable === true) return false;
 
+  if (journal.mode === 'delete' && journal.blockLegacy === true) {
+    try {
+      writeKeyringJournal(keyring, account, {
+        mode: 'deleted',
+        generations: [],
+      });
+      return true;
+    } catch (err) {
+      diag?.(classifyKeyringError(err));
+      return false;
+    }
+  }
+
+  if (journal.mode === 'delete') {
+    try {
+      if (!deleteKeyringEntry(keyring, KEYRING_JOURNAL_SERVICE, account)) {
+        diag?.('keyring cleanup journal could not be removed');
+        return false;
+      }
+      if (!clearKeyringDeletionGuard(keyring, account)) {
+        diag?.('keyring deletion guard could not be removed');
+        return false;
+      }
+      removeKeyringManagedState(account);
+      return true;
+    } catch (err) {
+      diag?.(classifyKeyringError(err));
+      return false;
+    }
+  }
+
+  if (activeShortDigest) {
+    const activeInventory: KeyringChunkJournal = {
+      mode: 'short',
+      generations: [],
+      shortDigest: activeShortDigest,
+    };
+    if (encodeKeyringJournal(activeInventory) !== rawJournal) {
+      try {
+        writeKeyringJournal(keyring, account, activeInventory);
+      } catch (err) {
+        diag?.(classifyKeyringError(err));
+        return false;
+      }
+    }
+    return true;
+  }
+
+  if (activeMarker) {
+    const activeInventory: KeyringChunkJournal = {
+      mode: 'write',
+      generations: [{ ...activeMarker }],
+    };
+    if (encodeKeyringJournal(activeInventory) !== rawJournal) {
+      try {
+        writeKeyringJournal(keyring, account, activeInventory);
+      } catch (err) {
+        diag?.(classifyKeyringError(err));
+        return false;
+      }
+    }
+    return true;
+  }
+
   try {
-    journalEntry.deletePassword();
+    if (!writeKeyringDeletionGuard(keyring, account, 'deleted')) {
+      diag?.('keyring deletion guard could not be verified');
+      return false;
+    }
+    writeKeyringJournal(keyring, account, {
+      mode: 'deleted',
+      generations: [],
+    });
     return true;
   } catch (err) {
     diag?.(classifyKeyringError(err));
@@ -778,9 +1145,118 @@ function reconcileKeyringJournal(
   }
 }
 
+const KEYRING_PREPARING_STATE_PREFIX = 'v1:preparing:';
+const KEYRING_MANAGED_STATE_VALUE = 'v1:managed\n';
+type KeyringManagedState =
+  | { mode: 'preparing'; journal: KeyringChunkJournal }
+  | { mode: 'managed' };
+
+function keyringAccountIdentity(account: string): string {
+  return createHash('sha256').update(account).digest('hex');
+}
+
+function keyringManagedStatePath(account: string): string {
+  return join(getCredentialStateRoot(), `${keyringAccountIdentity(account)}.managed`);
+}
+
+function readKeyringManagedState(account: string): KeyringManagedState | null {
+  try {
+    const value = readFileSync(keyringManagedStatePath(account), 'utf8');
+    if (value === KEYRING_MANAGED_STATE_VALUE) return { mode: 'managed' };
+    if (value.startsWith(KEYRING_PREPARING_STATE_PREFIX) && value.endsWith('\n')) {
+      const encodedJournal = value.slice(KEYRING_PREPARING_STATE_PREFIX.length, -1);
+      try {
+        const rawJournal = Buffer.from(encodedJournal, 'base64url').toString('utf8');
+        if (Buffer.from(rawJournal, 'utf8').toString('base64url') !== encodedJournal) {
+          throw new Error('non-canonical encoding');
+        }
+        return {
+          mode: 'preparing',
+          journal: parseKeyringChunkJournal(rawJournal),
+        };
+      } catch {
+        throw new Error('keyring managed-state marker is invalid');
+      }
+    }
+    throw new Error('keyring managed-state marker is invalid');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+function encodeKeyringManagedState(state: KeyringManagedState): string {
+  if (state.mode === 'managed') return KEYRING_MANAGED_STATE_VALUE;
+  const encodedJournal = Buffer.from(encodeKeyringJournal(state.journal), 'utf8').toString(
+    'base64url',
+  );
+  return `${KEYRING_PREPARING_STATE_PREFIX}${encodedJournal}\n`;
+}
+
+function syncDirectory(path: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'r');
+    fsyncSync(fd);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'EINVAL' && code !== 'ENOTSUP' && code !== 'EISDIR' && code !== 'EPERM') {
+      throw err;
+    }
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function persistKeyringManagedState(account: string, state: KeyringManagedState): void {
+  const currentState = readKeyringManagedState(account);
+  const encodedState = encodeKeyringManagedState(state);
+  if (currentState !== null && encodeKeyringManagedState(currentState) === encodedState) return;
+  const path = keyringManagedStatePath(account);
+  const directory = getCredentialStateRoot();
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const tempPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(tempPath, 'wx', 0o600);
+    writeFileSync(fd, encodedState, 'utf8');
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    try {
+      renameSync(tempPath, path);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'EEXIST' && code !== 'EPERM') {
+        throw err;
+      }
+      unlinkSync(path);
+      renameSync(tempPath, path);
+    }
+    syncDirectory(directory);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    try {
+      unlinkSync(tempPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+  }
+}
+
+function removeKeyringManagedState(account: string): void {
+  const path = keyringManagedStatePath(account);
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw err;
+  }
+  syncDirectory(getCredentialStateRoot());
+}
+
 function keyringAccountLockPath(account: string): string {
-  const identity = createHash('sha256').update(account).digest('hex');
-  return join(homedir(), '.clodex', 'keyring-locks', `${identity}.lock`);
+  return getCredentialMutationLockPath(`keyring:${account}`);
 }
 
 async function withKeyringAccountLock<T>(
@@ -799,30 +1275,52 @@ async function withKeyringAccountLock<T>(
   }
 }
 
-async function readKeyringAccount(account: string, diag?: (msg: string) => void): Promise<string | null> {
+async function readKeyringAccount(
+  account: string,
+  diag?: (msg: string) => void,
+): Promise<string | null> {
   return withKeyringAccountLock(account, null, diag, async () => {
     try {
-      const { Entry } = await import('@napi-rs/keyring');
-      const rawJournal = new Entry(KEYRING_JOURNAL_SERVICE, account).getPassword();
-      const pendingMode = rawJournal === null
-        ? null
-        : parseKeyringChunkJournal(rawJournal).mode;
-      const cleanupComplete = reconcileKeyringJournal(Entry, account, diag);
-      if (pendingMode === 'delete') return null;
-      const value = readKeyringAccountFromService(Entry, KEYRING_SERVICE, account);
-      if (value !== null || !cleanupComplete) return value;
-      // One-time silent migration: fall back to the relay-ai keychain service and
-      // copy the credential into the clodex service on first read.
-      let legacy: string | null = null;
-      try {
-        legacy = readKeyringAccountFromService(Entry, LEGACY_KEYRING_SERVICE, account);
-      } catch {
-        legacy = null;
+      const keyring = await import('@napi-rs/keyring');
+      const cleanupComplete = reconcileKeyringJournal(keyring, account, diag);
+      const finalJournalRaw = readKeyringEntry(keyring, KEYRING_JOURNAL_SERVICE, account);
+      const finalJournal =
+        finalJournalRaw === null ? null : parseKeyringChunkJournal(finalJournalRaw);
+      if (finalJournal?.mode === 'delete' || finalJournal?.mode === 'deleted') return null;
+      if (finalJournalRaw === null && readKeyringManagedState(account)?.mode === 'managed') {
+        return null;
       }
-      if (legacy !== null) {
-        writeKeyringAccountLocked(Entry, account, legacy, diag);
+      if (finalJournal?.mode === 'short') {
+        const value = readKeyringEntry(keyring, KEYRING_SERVICE, account);
+        if (
+          value === null ||
+          createHash('sha256').update(value).digest('hex') !== finalJournal.shortDigest
+        )
+          return null;
+        return value;
       }
-      return legacy;
+      if (finalJournal?.mode === 'write') {
+        return readKeyringAccountFromService(keyring, KEYRING_SERVICE, account);
+      }
+      if (!cleanupComplete) return null;
+
+      const rawValue = readKeyringEntry(keyring, KEYRING_SERVICE, account);
+      if (rawValue === null) return null;
+      const marker = parseKeyringChunkMarker(rawValue);
+      if (marker) {
+        const value = readKeyringAccountFromService(keyring, KEYRING_SERVICE, account);
+        writeKeyringJournal(keyring, account, {
+          mode: 'write',
+          generations: [marker],
+        });
+        return value;
+      }
+      writeKeyringJournal(keyring, account, {
+        mode: 'short',
+        generations: [],
+        shortDigest: createHash('sha256').update(rawValue).digest('hex'),
+      });
+      return rawValue;
     } catch (err) {
       diag?.(classifyKeyringError(err));
       return null;
@@ -831,14 +1329,16 @@ async function readKeyringAccount(account: string, diag?: (msg: string) => void)
 }
 
 function replaceMalformedKeyringJournalWithTombstone(
-  Entry: typeof import('@napi-rs/keyring').Entry,
+  keyring: KeyringApi,
   account: string,
   diag?: (msg: string) => void,
+  blockLegacy = false,
 ): boolean {
   try {
-    writeKeyringJournal(Entry, account, {
+    writeKeyringJournal(keyring, account, {
       mode: 'delete',
       generations: [],
+      ...(blockLegacy ? { blockLegacy: true } : {}),
       unverifiable: true,
     });
     diag?.('invalid keyring cleanup journal was replaced with a deletion tombstone');
@@ -850,48 +1350,164 @@ function replaceMalformedKeyringJournalWithTombstone(
 }
 
 function writeKeyringAccountLocked(
-  Entry: typeof import('@napi-rs/keyring').Entry,
+  keyring: KeyringApi,
   account: string,
   key: string,
+  intent: 'probe' | 'provision' | 'replace',
   diag?: (msg: string) => void,
 ): boolean {
   try {
     let reconciled: boolean;
+    let deletedMarkerActive = false;
     try {
-      reconciled = reconcileKeyringJournal(Entry, account, diag);
+      const deletionGuard = readKeyringDeletionGuard(keyring, account);
+      const rawJournal = readKeyringEntry(keyring, KEYRING_JOURNAL_SERVICE, account);
+      const initialJournal = rawJournal === null ? null : parseKeyringChunkJournal(rawJournal);
+      deletedMarkerActive = deletionGuard !== null || initialJournal?.mode === 'deleted';
+      if (
+        initialJournal?.mode === 'short' &&
+        initialJournal.unpublished === true &&
+        initialJournal.publicationAttempted === true
+      ) {
+        if (deletedMarkerActive) {
+          if (!clearKeyringDeletionGuard(keyring, account)) {
+            throw new Error('keyring deletion guard could not be cleared');
+          }
+          deletedMarkerActive = false;
+        }
+        const shortDigest = createHash('sha256').update(key).digest('hex');
+        if (shortDigest !== initialJournal.shortDigest) {
+          writeKeyringJournal(keyring, account, {
+            ...initialJournal,
+            shortDigest,
+          });
+        }
+        const accountEntry = new keyring.Entry(KEYRING_SERVICE, account);
+        accountEntry.setPassword(key);
+        if (readKeyringEntry(keyring, KEYRING_SERVICE, account) !== key) {
+          throw new Error('keyring credential write verification failed');
+        }
+        if (!reconcileKeyringJournal(keyring, account, diag)) return false;
+        return true;
+      }
+      reconciled = reconcileKeyringJournal(keyring, account, diag);
     } catch (err) {
       diag?.(classifyKeyringError(err));
       if (err instanceof InvalidKeyringJournalError) {
-        replaceMalformedKeyringJournalWithTombstone(Entry, account, diag);
+        replaceMalformedKeyringJournalWithTombstone(keyring, account, diag);
       }
       return false;
     }
     if (!reconciled) return false;
 
-    const accountEntry = new Entry(KEYRING_SERVICE, account);
-    const previousValue = accountEntry.getPassword() ?? null;
-    let previousMarker: KeyringChunkMarker | null = null;
-    try {
-      previousMarker = parseKeyringChunkMarker(previousValue);
-    } catch (err) {
-      diag?.(classifyKeyringError(err));
-      replaceMalformedKeyringJournalWithTombstone(Entry, account, diag);
+    const activeJournalRaw = readKeyringEntry(keyring, KEYRING_JOURNAL_SERVICE, account);
+    const activeJournal =
+      activeJournalRaw === null ? null : parseKeyringChunkJournal(activeJournalRaw);
+    const managedState = readKeyringManagedState(account);
+    deletedMarkerActive =
+      deletedMarkerActive ||
+      activeJournal?.mode === 'deleted' ||
+      readKeyringDeletionGuard(keyring, account) !== null;
+
+    const accountEntry = new keyring.Entry(KEYRING_SERVICE, account);
+    const previousValue = readKeyringEntry(keyring, KEYRING_SERVICE, account);
+    if (intent === 'probe') {
+      if (
+        !isDisposableCredentialProbeAccount(account) ||
+        activeJournal !== null ||
+        managedState !== null ||
+        deletedMarkerActive ||
+        previousValue !== null ||
+        hasUnjournaledKeyringChunks(keyring, account)
+      ) {
+        diag?.('credential account is not available for a new credential');
+        return false;
+      }
+    } else if (intent === 'provision') {
+      if (!isCredentialAccountInstance(account)) {
+        diag?.('provisioned credentials require a versioned account instance');
+        return false;
+      }
+    } else if (activeJournal === null && managedState === null && previousValue === null) {
+      diag?.('existing credential state could not be confirmed');
       return false;
     }
+    if (deletedMarkerActive) {
+      if (!clearKeyringDeletionGuard(keyring, account)) {
+        throw new Error('keyring deletion guard could not be cleared');
+      }
+      deletedMarkerActive = false;
+    }
+    let previousMarker =
+      activeJournal?.mode === 'write' ? (activeJournal.generations[0] ?? null) : null;
+    let previousShortDigest =
+      activeJournal?.mode === 'short' ? activeJournal.shortDigest : undefined;
+    try {
+      if (activeJournal?.mode === 'short') {
+        if (
+          previousValue !== null &&
+          createHash('sha256').update(previousValue).digest('hex') !== previousShortDigest
+        ) {
+          throw new Error('published short credential changed after reconciliation');
+        }
+      } else if (activeJournal?.mode === 'write') {
+        if (previousValue !== null) {
+          const observedMarker = parseKeyringChunkMarker(previousValue);
+          if (
+            !observedMarker ||
+            !previousMarker ||
+            !sameKeyringMarker(observedMarker, previousMarker)
+          ) {
+            throw new Error('published chunk credential changed after reconciliation');
+          }
+        }
+      } else if (activeJournal === null) {
+        previousMarker = parseKeyringChunkMarker(previousValue);
+        if (previousMarker) {
+          try {
+            readKeyringMarkerChunks(keyring, KEYRING_SERVICE, account, previousMarker);
+          } catch {
+            previousMarker = null;
+          }
+        }
+        if (previousValue !== null && !previousMarker) {
+          previousShortDigest = createHash('sha256').update(previousValue).digest('hex');
+        }
+      }
+    } catch (err) {
+      diag?.(classifyKeyringError(err));
+      replaceMalformedKeyringJournalWithTombstone(keyring, account, diag);
+      return false;
+    }
+    const unpublished =
+      activeJournal?.mode !== 'write' && activeJournal?.mode !== 'short' && previousValue === null;
     if (key.length <= KEYRING_CHUNK_SIZE) {
-      if (previousMarker) {
-        writeKeyringJournal(Entry, account, {
-          mode: 'write',
-          generations: [previousMarker],
+      const shortDigest = createHash('sha256').update(key).digest('hex');
+      const transitionJournal: KeyringChunkJournal = {
+        mode: 'short',
+        generations: previousMarker ? [previousMarker] : [],
+        shortDigest,
+        ...(previousShortDigest ? { fallbackShortDigest: previousShortDigest } : {}),
+        ...(unpublished ? { unpublished: true } : {}),
+      };
+      writeKeyringJournal(keyring, account, transitionJournal);
+      accountEntry.setPassword(key);
+      if (unpublished) {
+        writeKeyringJournal(keyring, account, {
+          ...transitionJournal,
+          publicationAttempted: true,
         });
       }
-      accountEntry.setPassword(key);
-      if (previousMarker && !reconcileKeyringJournal(Entry, account, diag)) {
+      if (readKeyringEntry(keyring, KEYRING_SERVICE, account) !== key) {
+        throw new Error('keyring credential write verification failed');
+      }
+      if (!reconcileKeyringJournal(keyring, account, diag)) {
         diag?.('keyring cleanup is pending and will be retried');
       }
       return true;
     }
-    const chunkCount = Math.ceil(key.length / KEYRING_CHUNK_SIZE);
+    const chunks = splitKeyringCredential(key);
+    const chunkCount = chunks.length;
     if (chunkCount > KEYRING_MAX_CHUNKS) {
       throw new Error('keyring credential exceeds the supported chunk count');
     }
@@ -900,16 +1516,30 @@ function writeKeyringAccountLocked(
       generation: randomUUID(),
       digest: createHash('sha256').update(key).digest('hex'),
     };
-    writeKeyringJournal(Entry, account, {
+    const transitionJournal: KeyringChunkJournal = {
       mode: 'write',
       generations: [marker, ...(previousMarker ? [previousMarker] : [])],
-    });
-    for (let i = 0; i < chunkCount; i++) {
-      const chunk = key.slice(i * KEYRING_CHUNK_SIZE, (i + 1) * KEYRING_CHUNK_SIZE);
-      new Entry(KEYRING_CHUNK_SERVICE, keyringChunkAccount(account, marker, i)).setPassword(chunk);
+      ...(previousShortDigest ? { fallbackShortDigest: previousShortDigest } : {}),
+      ...(unpublished ? { unpublished: true } : {}),
+    };
+    writeKeyringJournal(keyring, account, transitionJournal);
+    for (const [i, chunk] of chunks.entries()) {
+      new keyring.Entry(KEYRING_CHUNK_SERVICE, keyringChunkAccount(account, marker, i)).setPassword(
+        chunk,
+      );
     }
-    accountEntry.setPassword(encodeKeyringChunkMarker(marker));
-    if (!reconcileKeyringJournal(Entry, account, diag)) {
+    const encodedMarker = encodeKeyringChunkMarker(marker);
+    accountEntry.setPassword(encodedMarker);
+    if (unpublished) {
+      writeKeyringJournal(keyring, account, {
+        ...transitionJournal,
+        publicationAttempted: true,
+      });
+    }
+    if (readKeyringEntry(keyring, KEYRING_SERVICE, account) !== encodedMarker) {
+      throw new Error('keyring credential write verification failed');
+    }
+    if (!reconcileKeyringJournal(keyring, account, diag)) {
       diag?.('keyring cleanup is pending and will be retried');
     }
     return true;
@@ -922,12 +1552,13 @@ function writeKeyringAccountLocked(
 async function writeKeyringAccount(
   account: string,
   key: string,
+  intent: 'probe' | 'provision' | 'replace',
   diag?: (msg: string) => void,
 ): Promise<boolean> {
   return withKeyringAccountLock(account, false, diag, async () => {
     try {
-      const { Entry } = await import('@napi-rs/keyring');
-      return writeKeyringAccountLocked(Entry, account, key, diag);
+      const keyring = await import('@napi-rs/keyring');
+      return writeKeyringAccountLocked(keyring, account, key, intent, diag);
     } catch (err) {
       diag?.(classifyKeyringError(err));
       return false;
@@ -935,82 +1566,76 @@ async function writeKeyringAccount(
   });
 }
 
-async function deleteKeyringAccount(account: string, diag?: (msg: string) => void): Promise<boolean> {
+async function deleteKeyringAccount(
+  account: string,
+  diag?: (msg: string) => void,
+  blockLegacy = true,
+): Promise<boolean> {
   return withKeyringAccountLock(account, false, diag, async () => {
     try {
-      const { Entry } = await import('@napi-rs/keyring');
-      const journalEntry = new Entry(KEYRING_JOURNAL_SERVICE, account);
-      const accountEntry = new Entry(KEYRING_SERVICE, account);
-      const legacyAccountEntry = new Entry(LEGACY_KEYRING_SERVICE, account);
-      const pendingJournalRaw = journalEntry.getPassword();
-      const initialValue = accountEntry.getPassword();
-      const initialLegacyValue = legacyAccountEntry.getPassword();
+      const keyring = await import('@napi-rs/keyring');
+      let pendingJournalRaw = readKeyringEntry(keyring, KEYRING_JOURNAL_SERVICE, account);
+      if (pendingJournalRaw === null && readKeyringManagedState(account) !== null) {
+        if (!reconcileKeyringJournal(keyring, account, diag)) return false;
+        pendingJournalRaw = readKeyringEntry(keyring, KEYRING_JOURNAL_SERVICE, account);
+        if (pendingJournalRaw === null) return false;
+      }
       let pendingJournal: KeyringChunkJournal | null = null;
-      let pendingMode: KeyringChunkJournal['mode'] | null = null;
       try {
         if (pendingJournalRaw !== null) {
           pendingJournal = parseKeyringChunkJournal(pendingJournalRaw);
-          pendingMode = pendingJournal.mode;
+          if (pendingJournal.mode === 'deleted') {
+            return reconcileKeyringJournal(keyring, account, diag);
+          }
+          if (pendingJournal.mode === 'delete') {
+            if (blockLegacy && pendingJournal.blockLegacy !== true) {
+              pendingJournal = {
+                ...pendingJournal,
+                blockLegacy: true,
+              };
+              writeKeyringJournal(keyring, account, pendingJournal);
+            }
+            return reconcileKeyringJournal(keyring, account, diag);
+          }
         }
-        const cleanupComplete = reconcileKeyringJournal(Entry, account, diag);
-        if (pendingMode === 'delete' && !cleanupComplete) return false;
-        if (cleanupComplete) pendingJournal = null;
       } catch (err) {
         diag?.(classifyKeyringError(err));
         if (err instanceof InvalidKeyringJournalError) {
-          replaceMalformedKeyringJournalWithTombstone(Entry, account, diag);
+          replaceMalformedKeyringJournalWithTombstone(keyring, account, diag, blockLegacy);
         }
         return false;
       }
-      const value = accountEntry.getPassword();
-      const legacyValue = legacyAccountEntry.getPassword();
+      const value = readKeyringEntry(keyring, KEYRING_SERVICE, account);
+      if (pendingJournal === null && value === null) {
+        throw new Error('existing credential state could not be confirmed');
+      }
       const generations: KeyringChunkMarker[] = [];
-      const legacyGenerations: KeyringChunkMarker[] = [];
       for (const marker of pendingJournal?.generations ?? []) {
         appendUniqueKeyringMarker(generations, marker);
       }
-      for (const marker of pendingJournal?.legacyGenerations ?? []) {
-        appendUniqueKeyringMarker(legacyGenerations, marker);
-      }
-      let unverifiable = pendingJournal?.unverifiable === true;
-      for (const [storedValue, target] of [
-        ...(pendingMode === 'delete'
-          ? []
-          : [
-            [initialValue, generations],
-            [initialLegacyValue, legacyGenerations],
-          ] as const),
-        [value, generations],
-        [legacyValue, legacyGenerations],
-      ] as const) {
+      let unverifiable = false;
+      const shortDigest = pendingJournal?.mode === 'short' ? pendingJournal.shortDigest : undefined;
+      if (pendingJournal?.mode !== 'short') {
         try {
-          const marker = parseKeyringChunkMarker(storedValue);
-          if (marker) appendUniqueKeyringMarker(target, marker);
+          const marker = parseKeyringChunkMarker(value);
+          if (marker) appendUniqueKeyringMarker(generations, marker);
         } catch (err) {
           unverifiable = true;
           diag?.(classifyKeyringError(err));
         }
       }
-      if (
-        value === null
-        && legacyValue === null
-        && generations.length === 0
-        && legacyGenerations.length === 0
-        && !unverifiable
-      ) {
-        return true;
-      }
-      if (!keyringDeleteJournalFits(generations, legacyGenerations, unverifiable)) {
+      if (!keyringDeleteJournalFits(generations, unverifiable, blockLegacy, shortDigest)) {
         diag?.('keyring cleanup has too many pending generations');
         return false;
       }
-      writeKeyringJournal(Entry, account, {
+      writeKeyringJournal(keyring, account, {
         mode: 'delete',
         generations,
-        ...(legacyGenerations.length > 0 ? { legacyGenerations } : {}),
+        ...(shortDigest ? { shortDigest } : {}),
+        ...(blockLegacy ? { blockLegacy: true } : {}),
         ...(unverifiable ? { unverifiable: true } : {}),
       });
-      return reconcileKeyringJournal(Entry, account, diag);
+      return reconcileKeyringJournal(keyring, account, diag);
     } catch (err) {
       diag?.(classifyKeyringError(err));
       return false;
@@ -1042,9 +1667,12 @@ async function readStoredCredential(
 async function writeStoredCredential(
   ref: StoredCredentialRef,
   value: string,
+  intent: 'probe' | 'provision' | 'replace',
   diag?: (msg: string) => void,
 ): Promise<boolean> {
-  if (ref.kind === 'keyring') return writeKeyringAccount(ref.account, value, diag);
+  if (ref.kind === 'keyring') {
+    return writeKeyringAccount(ref.account, value, intent, diag);
+  }
   try {
     await writeCredentialHelperAccount(ref.account, value, ref.helperId);
     return true;
@@ -1057,8 +1685,11 @@ async function writeStoredCredential(
 async function deleteStoredCredential(
   ref: StoredCredentialRef,
   diag?: (msg: string) => void,
+  blockLegacy = true,
 ): Promise<boolean> {
-  if (ref.kind === 'keyring') return deleteKeyringAccount(ref.account, diag);
+  if (ref.kind === 'keyring') {
+    return deleteKeyringAccount(ref.account, diag, blockLegacy);
+  }
   try {
     await deleteCredentialHelperAccount(ref.account, ref.helperId);
     return true;
@@ -1304,17 +1935,22 @@ async function readProviderSecret(
   return decoded === rejectedAccessToken ? null : decoded;
 }
 
-export async function saveProviderCredential(
+async function persistProviderCredential(
   authRef: string,
   key: string,
+  intent: 'provision' | 'replace',
   diag?: (msg: string) => void,
 ): Promise<boolean> {
   const parsed = parseAuthRef(authRef);
   if (!parsed || parsed.kind === 'env' || parsed.kind === 'none') return false;
+  if (intent === 'provision' && !isCredentialAccountInstance(parsed.account)) {
+    diag?.('provisioned credentials require a versioned account instance');
+    return false;
+  }
   return withCredentialMutationLock(authRef, async () => {
     const cacheKey = storedCredentialAuthRef(parsed);
     clearOAuthCredentialCache(cacheKey);
-    const written = await writeStoredCredential(parsed, key, diag);
+    const written = await writeStoredCredential(parsed, key, intent, diag);
     if (!written) return false;
     const readBack = await readStoredCredential(parsed, diag);
     if (readBack === key) {
@@ -1328,6 +1964,24 @@ export async function saveProviderCredential(
     diag?.('credential store read-back verification failed');
     return false;
   });
+}
+
+/** Create or resume a credential at its provider-owned account reference. */
+export async function provisionProviderCredential(
+  authRef: string,
+  key: string,
+  diag?: (msg: string) => void,
+): Promise<boolean> {
+  return persistProviderCredential(authRef, key, 'provision', diag);
+}
+
+/** Replace a credential whose prior state can be confirmed. */
+export async function saveProviderCredential(
+  authRef: string,
+  key: string,
+  diag?: (msg: string) => void,
+): Promise<boolean> {
+  return persistProviderCredential(authRef, key, 'replace', diag);
 }
 
 /** Verify that a credential backend can durably round-trip a disposable secret. */
@@ -1344,7 +1998,7 @@ export async function probeProviderCredentialStore(
   const value = randomUUID();
   let verified = false;
   try {
-    const written = await writeStoredCredential(probeRef, value, diag);
+    const written = await writeStoredCredential(probeRef, value, 'probe', diag);
     if (!written) return false;
     const readBack = await readStoredCredential(probeRef, diag);
     if (readBack !== value) {
@@ -1353,7 +2007,7 @@ export async function probeProviderCredentialStore(
     }
     verified = true;
   } finally {
-    const deleted = await deleteStoredCredential(probeRef, diag);
+    const deleted = await deleteStoredCredential(probeRef, diag, false);
     if (!deleted) {
       diag?.('credential store probe cleanup failed');
       verified = false;

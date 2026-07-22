@@ -1,4 +1,12 @@
-import { chmodSync, copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,14 +15,18 @@ import {
   CREDENTIAL_HELPER_ENV,
   configuredCredentialHelper,
   configuredCredentialHelperPath,
+  credentialAccountBase,
   credentialAuthRef,
+  credentialInstanceAuthRef,
   deleteCredentialHelperAccount,
+  isCredentialAccountInstance,
   readCredentialHelperAccount,
   writeCredentialHelperAccount,
 } from '../src/credential-helper.js';
 import {
   deleteProviderCredential,
   probeProviderCredentialStore,
+  provisionProviderCredential,
   resolveProviderCredential,
   saveProviderCredential,
 } from '../src/env.js';
@@ -60,8 +72,30 @@ describe('external credential helper', () => {
     const authRef = credentialAuthRef('provider:openai');
     expect(authRef).toBe(`helper:v1:${helper!.id}:provider:openai`);
     expect(authRef).not.toContain(helperPath);
+    const newAuthRef = credentialInstanceAuthRef('provider:openai');
+    expect(newAuthRef).toMatch(
+      new RegExp(`^helper:v1:${helper!.id}:provider:openai::credential::v1:[0-9a-f]{32}$`),
+    );
+    const newAccount = newAuthRef.slice(`helper:v1:${helper!.id}:`.length);
+    expect(isCredentialAccountInstance(newAccount)).toBe(true);
+    expect(credentialAccountBase(newAccount)).toBe('provider:openai');
     delete process.env[CREDENTIAL_HELPER_ENV];
     expect(credentialAuthRef('provider:openai')).toBe('keyring:provider:openai');
+  });
+
+  it('scopes provider-owned accounts to the config home without exposing its path', () => {
+    const firstHome = join(tempDir, 'first-config');
+    const secondHome = join(tempDir, 'second-config');
+    process.env.CLODEX_HOME = firstHome;
+    const first = credentialInstanceAuthRef('provider:openai');
+    process.env.CLODEX_HOME = secondHome;
+    const second = credentialInstanceAuthRef('provider:openai');
+
+    expect(second).not.toBe(first);
+    expect(first).not.toContain(firstHome);
+    expect(second).not.toContain(secondHome);
+    expect(first).toMatch(/::credential::v1:[0-9a-f]{32}$/);
+    expect(second).toMatch(/::credential::v1:[0-9a-f]{32}$/);
   });
 
   it('rejects relative helper paths', () => {
@@ -77,7 +111,10 @@ describe('external credential helper', () => {
     expect(() => configuredCredentialHelperPath()).toThrow('must point to a file');
 
     const nonExecutable = join(tempDir, 'non-executable-helper');
-    writeFileSync(nonExecutable, '#!/bin/sh\n', { encoding: 'utf8', mode: 0o600 });
+    writeFileSync(nonExecutable, '#!/bin/sh\n', {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
     process.env[CREDENTIAL_HELPER_ENV] = nonExecutable;
     expect(() => configuredCredentialHelperPath()).toThrow('not an executable file');
   });
@@ -91,16 +128,16 @@ describe('external credential helper', () => {
   });
 
   it('writes and verifies helper-backed provider credentials', async () => {
-    const authRef = credentialAuthRef('provider:test');
-    await expect(saveProviderCredential(authRef, 'secret-value')).resolves.toBe(true);
+    const authRef = credentialInstanceAuthRef('provider:test');
+    await expect(provisionProviderCredential(authRef, 'secret-value')).resolves.toBe(true);
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe('secret-value');
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
     await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
   });
 
   it('removes a helper-backed credential with its provider', async () => {
-    const authRef = credentialAuthRef('provider:openai');
-    await expect(saveProviderCredential(authRef, 'secret-value')).resolves.toBe(true);
+    const authRef = credentialInstanceAuthRef('provider:openai');
+    await expect(provisionProviderCredential(authRef, 'secret-value')).resolves.toBe(true);
     const registry = emptyRegistry();
     registry.providers.push({
       id: 'openai',
@@ -121,11 +158,14 @@ describe('external credential helper', () => {
       credentialDeleted: true,
     });
     expect(loadRegistry().providers).toHaveLength(0);
-    await expect(readCredentialHelperAccount('provider:openai')).resolves.toBeNull();
+    const account = authRef.slice(authRef.lastIndexOf(':provider:') + 1);
+    await expect(readCredentialHelperAccount(account)).resolves.toBeNull();
   });
 
   it('probes the helper with a disposable round trip', async () => {
-    await expect(probeProviderCredentialStore(credentialAuthRef('oauth:provider:test'))).resolves.toBe(true);
+    await expect(
+      probeProviderCredentialStore(credentialAuthRef('oauth:provider:test')),
+    ).resolves.toBe(true);
   });
 
   it('fails the probe when its disposable credential cannot be removed', async () => {
@@ -133,48 +173,70 @@ describe('external credential helper', () => {
     const diagnostics: string[] = [];
     await expect(probeProviderCredentialStore(credentialAuthRef('oauth:provider:test'), message => {
       diagnostics.push(message);
-    })).resolves.toBe(false);
+      }),
+    ).resolves.toBe(false);
     expect(diagnostics).toContain('credential store probe cleanup failed');
   });
 
   it('rejects a helper write whose read-back does not match', async () => {
     process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE = 'mismatch';
     const diagnostics: string[] = [];
-    await expect(saveProviderCredential(credentialAuthRef('provider:test'), 'secret-value', message => {
+    await expect(
+      provisionProviderCredential(
+        credentialInstanceAuthRef('provider:test'),
+        'secret-value',
+        message => {
       diagnostics.push(message);
-    })).resolves.toBe(false);
+        },
+      ),
+    ).resolves.toBe(false);
     expect(diagnostics).toContain('credential store read-back verification failed');
+
+    delete process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE;
+    await expect(
+      provisionProviderCredential(credentialInstanceAuthRef('provider:test'), 'secret-value'),
+    ).resolves.toBe(true);
   });
 
   it('serializes concurrent writes to the same helper credential', async () => {
     process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE = 'detect-overlap';
-    const authRef = credentialAuthRef('provider:test');
+    const authRef = credentialInstanceAuthRef('provider:test');
     const storePath = process.env.CLODEX_TEST_CREDENTIAL_HELPER_STORE!;
 
-    const firstWrite = saveProviderCredential(authRef, 'first-value');
+    const firstWrite = provisionProviderCredential(authRef, 'first-value');
     await waitForPath(`${storePath}.set-started`);
     const secondWrite = saveProviderCredential(authRef, 'second-value');
     await new Promise(resolve => setTimeout(resolve, 50));
 
     expect(existsSync(`${storePath}.overlapping-set`)).toBe(false);
-    writeFileSync(`${storePath}.release-set`, '', { encoding: 'utf8', mode: 0o600 });
+    writeFileSync(`${storePath}.release-set`, '', {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
     await expect(firstWrite).resolves.toBe(true);
     await expect(secondWrite).resolves.toBe(true);
-    await expect(readCredentialHelperAccount('provider:test')).resolves.toBe('second-value');
+    const account = authRef.slice(authRef.lastIndexOf(':provider:') + 1);
+    await expect(readCredentialHelperAccount(account)).resolves.toBe('second-value');
   });
 
   it('does not silently fall back when the configured helper fails', async () => {
     process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE = 'fail';
     const diagnostics: string[] = [];
-    await expect(saveProviderCredential(credentialAuthRef('provider:test'), 'secret-value', message => {
+    await expect(
+      provisionProviderCredential(
+        credentialInstanceAuthRef('provider:test'),
+        'secret-value',
+        message => {
       diagnostics.push(message);
-    })).resolves.toBe(false);
+        },
+      ),
+    ).resolves.toBe(false);
     expect(diagnostics.join('\n')).toContain('credential helper set failed');
   });
 
   it('refuses to redirect a credential reference to a different helper path', async () => {
-    const authRef = credentialAuthRef('provider:test');
-    await expect(saveProviderCredential(authRef, 'secret-value')).resolves.toBe(true);
+    const authRef = credentialInstanceAuthRef('provider:test');
+    await expect(provisionProviderCredential(authRef, 'secret-value')).resolves.toBe(true);
 
     const replacementHelper = join(tempDir, 'replacement-helper.mjs');
     copyFileSync(helperPath, replacementHelper);
@@ -182,8 +244,12 @@ describe('external credential helper', () => {
     process.env[CREDENTIAL_HELPER_ENV] = replacementHelper;
     const diagnostics: string[] = [];
 
-    await expect(resolveProviderCredential('test', authRef, message => diagnostics.push(message))).resolves.toBeNull();
-    await expect(deleteProviderCredential(authRef, message => diagnostics.push(message))).resolves.toBe(false);
+    await expect(
+      resolveProviderCredential('test', authRef, message => diagnostics.push(message)),
+    ).resolves.toBeNull();
+    await expect(
+      deleteProviderCredential(authRef, message => diagnostics.push(message)),
+    ).resolves.toBe(false);
     expect(diagnostics.join('\n')).toContain('does not match the helper that owns this credential');
   });
 
@@ -198,7 +264,9 @@ describe('external credential helper', () => {
       const pid = Number.parseInt(readFileSync(`${storePath}.helper-pid`, 'utf8'), 10);
 
       await vi.advanceTimersByTimeAsync(10_001);
-      await expect(outcome).resolves.toMatchObject({ message: 'credential helper get timed out' });
+      await expect(outcome).resolves.toMatchObject({
+        message: 'credential helper get timed out',
+      });
 
       vi.useRealTimers();
       let running = true;

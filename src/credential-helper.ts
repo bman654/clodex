@@ -1,10 +1,14 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { accessSync, constants, statSync } from 'node:fs';
-import { isAbsolute, normalize } from 'node:path';
+import { isAbsolute, normalize, resolve } from 'node:path';
+import { getAppHome } from './paths.js';
 
 export const CREDENTIAL_HELPER_ENV = 'CLODEX_CREDENTIAL_HELPER';
 export const CREDENTIAL_HELPER_SERVICE = 'clodex';
+
+const CREDENTIAL_ACCOUNT_INSTANCE_SEPARATOR = '::credential::';
+const CREDENTIAL_ACCOUNT_INSTANCE_PATTERN = /^v1:[0-9a-f]{32}$/;
 
 const HELPER_TIMEOUT_MS = 10_000;
 const HELPER_MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -57,6 +61,30 @@ export function credentialAuthRef(account: string): string {
   return helper
     ? `helper:v1:${helper.id}:${account}`
     : `keyring:${account}`;
+}
+
+export function credentialInstanceAuthRef(account: string): string {
+  const configScope = createHash('sha256')
+    .update('clodex-credential-account\0')
+    .update(normalize(resolve(getAppHome())))
+    .digest('hex')
+    .slice(0, 32);
+  return credentialAuthRef(
+    `${account}${CREDENTIAL_ACCOUNT_INSTANCE_SEPARATOR}v1:${configScope}`,
+  );
+}
+
+export function isCredentialAccountInstance(account: string): boolean {
+  const separatorIndex = account.lastIndexOf(CREDENTIAL_ACCOUNT_INSTANCE_SEPARATOR);
+  if (separatorIndex <= 0) return false;
+  return CREDENTIAL_ACCOUNT_INSTANCE_PATTERN.test(
+    account.slice(separatorIndex + CREDENTIAL_ACCOUNT_INSTANCE_SEPARATOR.length),
+  );
+}
+
+export function credentialAccountBase(account: string): string {
+  if (!isCredentialAccountInstance(account)) return account;
+  return account.slice(0, account.lastIndexOf(CREDENTIAL_ACCOUNT_INSTANCE_SEPARATOR));
 }
 
 async function runCredentialHelper(

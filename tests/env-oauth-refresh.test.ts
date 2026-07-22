@@ -18,7 +18,9 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('../src/credential-helper.js', () => ({
+  credentialAccountBase: (account: string) => account,
   deleteCredentialHelperAccount: vi.fn(),
+  isCredentialAccountInstance: vi.fn(() => false),
   readCredentialHelperAccount: mocks.readCredential,
   writeCredentialHelperAccount: mocks.writeCredential,
 }));

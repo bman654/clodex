@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   existsSync,
   mkdtempSync,
@@ -15,7 +16,9 @@ import { build } from 'tsup';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   RegistryLockLostError,
+  getCredentialLockRoot,
   getCredentialMutationLockPath,
+  getCredentialStateRoot,
   tryAcquireRegistryLock,
   withCredentialMutationLock,
   withRegistryWriteLock,
@@ -59,23 +62,20 @@ function temporaryLockPath(): string {
 function workerEnvironment(
   root: string,
   role: WorkerRole,
+  options: {
+    clodexHome?: string;
+    overrides?: NodeJS.ProcessEnv;
+  } = {},
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
-    CLODEX_HOME: root,
+    CLODEX_HOME: options.clodexHome ?? root,
+    REGISTRY_LOCK_WORKER_ROOT: root,
     REGISTRY_LOCK_WORKER_ROLE: role,
   };
-  for (const key of [
-    'HOME',
-    'PATH',
-    'TMPDIR',
-    'TEMP',
-    'TMP',
-    'SystemRoot',
-    'ComSpec',
-    'PATHEXT',
-  ]) {
+  for (const key of ['HOME', 'PATH', 'TMPDIR', 'TEMP', 'TMP', 'SystemRoot', 'ComSpec', 'PATHEXT']) {
     if (process.env[key] !== undefined) environment[key] = process.env[key];
   }
+  Object.assign(environment, options.overrides);
   return environment;
 }
 
@@ -83,10 +83,14 @@ function spawnWorker(
   workerPath: string,
   root: string,
   role: WorkerRole,
+  options: {
+    clodexHome?: string;
+    overrides?: NodeJS.ProcessEnv;
+  } = {},
 ): WorkerProcess {
   const child = spawn(process.execPath, [workerPath], {
     cwd: process.cwd(),
-    env: workerEnvironment(root, role),
+    env: workerEnvironment(root, role, options),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';
@@ -117,11 +121,7 @@ function spawnWorker(
 async function buildWorker(root: string): Promise<string> {
   const outDir = join(root, 'worker-build');
   await build({
-    entry: [
-      fileURLToPath(
-        new URL('./fixtures/registry-lock-worker.ts', import.meta.url),
-      ),
-    ],
+    entry: [fileURLToPath(new URL('./fixtures/registry-lock-worker.ts', import.meta.url))],
     outDir,
     outExtension: () => ({ js: '.mjs' }),
     format: ['esm'],
@@ -146,14 +146,14 @@ async function waitForJson<T>(path: string, timeoutMs = 5_000): Promise<T> {
         // Retry while the creating process finishes its synchronous write.
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise(resolve => setTimeout(resolve, 10));
   }
   throw new Error(`Timed out waiting for JSON result: ${path}`);
 }
 
 function lockArtifacts(root: string): string[] {
   return readdirSync(root)
-    .filter((name) => name.includes('.lock') || name.endsWith('.tmp'))
+    .filter(name => name.includes('.lock') || name.endsWith('.tmp'))
     .sort();
 }
 
@@ -163,9 +163,8 @@ afterEach(async () => {
       worker.child.kill('SIGTERM');
     }
   }
-  await Promise.allSettled([...workers].map((worker) => worker.exit));
-  for (const root of roots.splice(0))
-    rmSync(root, { recursive: true, force: true });
+  await Promise.allSettled([...workers].map(worker => worker.exit));
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('provider registry lock', () => {
@@ -184,22 +183,15 @@ describe('provider registry lock', () => {
   it('retains a fresh lock owned by a live process and reaps a dead owner', () => {
     const lockPath = temporaryLockPath();
     const now = Date.now();
-    writeFileSync(
-      lockPath,
-      JSON.stringify({ pid: 1234, startedAt: now, token: 'first-owner' }),
-    );
+    writeFileSync(lockPath, JSON.stringify({ pid: 1234, startedAt: now, token: 'first-owner' }));
 
-    expect(
-      tryAcquireRegistryLock(lockPath, { now: () => now, isAlive: () => true }),
-    ).toBeNull();
+    expect(tryAcquireRegistryLock(lockPath, { now: () => now, isAlive: () => true })).toBeNull();
     const lease = tryAcquireRegistryLock(lockPath, {
       now: () => now,
       isAlive: () => false,
     });
     expect(lease).toMatchObject({ active: true });
-    expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).not.toBe(
-      'first-owner',
-    );
+    expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).not.toBe('first-owner');
     lease?.release();
   });
 
@@ -221,9 +213,7 @@ describe('provider registry lock', () => {
         isAlive: () => true,
       }),
     ).toBeNull();
-    expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).toBe(
-      'expired-owner',
-    );
+    expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).toBe('expired-owner');
   });
 
   it('does not remove a replacement created during stale-lock reclamation', () => {
@@ -241,7 +231,7 @@ describe('provider registry lock', () => {
     let competingLease: ReturnType<typeof tryAcquireRegistryLock> = null;
     let interleaved = false;
     const lease = tryAcquireRegistryLock(lockPath, {
-      isAlive: (pid) => {
+      isAlive: pid => {
         if (pid === stalePid && !interleaved) {
           interleaved = true;
           competingLease = tryAcquireRegistryLock(lockPath, {
@@ -282,12 +272,10 @@ describe('provider registry lock', () => {
 
     expect(
       tryAcquireRegistryLock(lockPath, {
-        isAlive: (pid) => pid === process.pid,
+        isAlive: pid => pid === process.pid,
       }),
     ).toBeNull();
-    expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).toBe(
-      'stale-owner',
-    );
+    expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).toBe('stale-owner');
   });
 
   it('recovers when a dead process leaves the reaper guard behind', () => {
@@ -303,9 +291,7 @@ describe('provider registry lock', () => {
     const lease = tryAcquireRegistryLock(lockPath, { isAlive: () => false });
 
     expect(lease).toMatchObject({ active: true });
-    expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).not.toBe(
-      'dead-owner',
-    );
+    expect(JSON.parse(readFileSync(lockPath, 'utf8')).token).not.toBe('dead-owner');
     lease?.release();
   });
 
@@ -334,7 +320,7 @@ describe('provider registry lock', () => {
     const lockPath = temporaryLockPath();
     const events: string[] = [];
     let releaseFirst!: () => void;
-    const firstGate = new Promise<void>((resolve) => {
+    const firstGate = new Promise<void>(resolve => {
       releaseFirst = resolve;
     });
 
@@ -346,14 +332,14 @@ describe('provider registry lock', () => {
       },
       { lockPath, waitMs: 1_000, retryMs: 5 },
     );
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise(resolve => setTimeout(resolve, 20));
     const second = withRegistryWriteLock(
       () => {
         events.push('second-enter');
       },
       { lockPath, waitMs: 1_000, retryMs: 5 },
     );
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise(resolve => setTimeout(resolve, 20));
 
     expect(events).toEqual(['first-enter']);
     releaseFirst();
@@ -367,7 +353,7 @@ describe('provider registry lock', () => {
     process.env.CLODEX_HOME = home;
     const events: string[] = [];
     let releaseFirst!: () => void;
-    const firstGate = new Promise<void>((resolve) => {
+    const firstGate = new Promise<void>(resolve => {
       releaseFirst = resolve;
     });
 
@@ -378,26 +364,53 @@ describe('provider registry lock', () => {
           events.push('first-enter');
           await firstGate;
           events.push('first-exit');
-        },
-      );
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      const second = withCredentialMutationLock(
-        'keyring:provider:openai',
-        () => {
+      });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      const second = withCredentialMutationLock('keyring:provider:openai', () => {
           events.push('second-enter');
-        },
-      );
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      });
+      await new Promise(resolve => setTimeout(resolve, 20));
 
       expect(events).toEqual(['first-enter']);
-      expect(getCredentialMutationLockPath('keyring:provider:openai')).not
-        .toContain('provider:openai');
+      expect(getCredentialMutationLockPath('keyring:provider:openai')).not.toContain(
+        'provider:openai',
+      );
       releaseFirst();
       await Promise.all([first, second]);
       expect(events).toEqual(['first-enter', 'first-exit', 'second-enter']);
     } finally {
       if (previousHome === undefined) delete process.env.CLODEX_HOME;
       else process.env.CLODEX_HOME = previousHome;
+    }
+  });
+
+  it('keeps credential lock paths independent of process environment homes', () => {
+    const keys = [
+      'CLODEX_HOME',
+      'HOME',
+      'USERPROFILE',
+      'XDG_RUNTIME_DIR',
+      'TMPDIR',
+      'TEMP',
+      'TMP',
+    ] as const;
+    const previous = new Map(keys.map(key => [key, process.env[key]]));
+    const authRef = `keyring:test:${randomUUID()}`;
+
+    try {
+      for (const key of keys) process.env[key] = `/tmp/credential-lock-a/${key}`;
+      const first = getCredentialMutationLockPath(authRef);
+      for (const key of keys) process.env[key] = `/tmp/credential-lock-b/${key}`;
+      const second = getCredentialMutationLockPath(authRef);
+
+      expect(second).toBe(first);
+      expect(dirname(first)).toBe(getCredentialLockRoot());
+      expect(first).not.toContain(authRef);
+    } finally {
+      for (const [key, value] of previous) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 
@@ -452,7 +465,7 @@ describe('provider registry lock', () => {
     const lockPath = temporaryLockPath();
     const events: string[] = [];
     let startDetached!: () => void;
-    const detachedGate = new Promise<void>((resolve) => {
+    const detachedGate = new Promise<void>(resolve => {
       startDetached = resolve;
     });
     let detached: Promise<void> | undefined;
@@ -473,11 +486,11 @@ describe('provider registry lock', () => {
     );
 
     let releaseSecond!: () => void;
-    const secondGate = new Promise<void>((resolve) => {
+    const secondGate = new Promise<void>(resolve => {
       releaseSecond = resolve;
     });
     let markSecondEntered!: () => void;
-    const secondEntered = new Promise<void>((resolve) => {
+    const secondEntered = new Promise<void>(resolve => {
       markSecondEntered = resolve;
     });
     const second = withRegistryWriteLock(
@@ -492,7 +505,7 @@ describe('provider registry lock', () => {
 
     await secondEntered;
     startDetached();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await new Promise(resolve => setTimeout(resolve, 20));
     expect(events).toEqual(['second-enter']);
 
     releaseSecond();
@@ -505,7 +518,7 @@ describe('provider registry lock', () => {
     const events: string[] = [];
     let detachedError: unknown;
     let finishDetached!: () => void;
-    const detachedFinished = new Promise<void>((resolve) => {
+    const detachedFinished = new Promise<void>(resolve => {
       finishDetached = resolve;
     });
 
@@ -566,9 +579,7 @@ describe('provider registry lock', () => {
   it('rejects registry writes without an active matching lease', () => {
     const registryPath = temporaryLockPath().replace(/\.lock$/, '');
 
-    expect(() => saveRegistry(emptyRegistry(), registryPath)).toThrow(
-      RegistryLockLostError,
-    );
+    expect(() => saveRegistry(emptyRegistry(), registryPath)).toThrow(RegistryLockLostError);
   });
 
   it('does not use a lease to authorize a different registry path', () => {
@@ -577,9 +588,9 @@ describe('provider registry lock', () => {
 
     withRegistryWriteLockSync(
       () => {
-        expect(() =>
-          saveRegistry(emptyRegistry(), otherRegistryPath),
-        ).toThrow(RegistryLockLostError);
+        expect(() => saveRegistry(emptyRegistry(), otherRegistryPath)).toThrow(
+          RegistryLockLostError,
+        );
       },
       { lockPath },
     );
@@ -622,9 +633,7 @@ describe('provider registry lock', () => {
         error?: string;
       }>(join(root, 'contender-result.json'));
       expect(contenderResult.acquired).toBe(false);
-      expect(contenderResult.error).toContain(
-        'Timed out after 250ms waiting for lock',
-      );
+      expect(contenderResult.error).toContain('Timed out after 250ms waiting for lock');
       expect(contenderResult.error).toContain(String(ready.pid));
 
       const retainedOwner = JSON.parse(readFileSync(lockPath, 'utf8')) as {
@@ -632,9 +641,7 @@ describe('provider registry lock', () => {
         token: string;
       };
       expect(retainedOwner).toMatchObject(ready);
-      expect(JSON.parse(readFileSync(registryPath, 'utf8')).importedAt).toBe(
-        'holder-initial',
-      );
+      expect(JSON.parse(readFileSync(registryPath, 'utf8')).importedAt).toBe('holder-initial');
 
       writeFileSync(releasePath, 'release\n');
       const holderExit = await holder.exit;
@@ -645,9 +652,7 @@ describe('provider registry lock', () => {
       expect(await waitForJson(join(root, 'holder-result.json'))).toEqual({
         ok: true,
       });
-      expect(JSON.parse(readFileSync(registryPath, 'utf8')).importedAt).toBe(
-        'holder-final',
-      );
+      expect(JSON.parse(readFileSync(registryPath, 'utf8')).importedAt).toBe('holder-final');
       expect(lockArtifacts(root)).toEqual([]);
     } finally {
       if (!existsSync(releasePath)) writeFileSync(releasePath, 'release\n');
@@ -680,9 +685,7 @@ describe('provider registry lock', () => {
         workerExit.code,
         `worker stderr:\n${workerExit.stderr}\nstdout:\n${workerExit.stdout}`,
       ).toBe(0);
-      expect(
-        await waitForJson(join(root, 'atomic-acquire-result.json')),
-      ).toEqual({
+      expect(await waitForJson(join(root, 'atomic-acquire-result.json'))).toEqual({
         acquired: true,
         ownerPid: ready.pid,
         ownerToken: expect.any(String),
@@ -696,34 +699,58 @@ describe('provider registry lock', () => {
     }
   }, 10_000);
 
-  it('serializes the same credential reference across processes', async () => {
+  it('serializes a credential across processes with different environment homes', async () => {
     const root = temporaryRoot();
+    const holderHome = temporaryRoot();
+    const contenderHome = temporaryRoot();
+    const holderRuntime = temporaryRoot();
+    const contenderRuntime = temporaryRoot();
+    const credentialRef = `keyring:test:${randomUUID()}`;
     const workerPath = await buildWorker(root);
     const releasePath = join(root, 'release-credential-holder');
     const enteredPath = join(root, 'credential-contender-entered.json');
-    const holder = spawnWorker(workerPath, root, 'credential-holder');
+    const holder = spawnWorker(workerPath, root, 'credential-holder', {
+      clodexHome: holderHome,
+      overrides: {
+        HOME: holderHome,
+        XDG_RUNTIME_DIR: holderRuntime,
+        TMPDIR: holderRuntime,
+        REGISTRY_LOCK_CREDENTIAL_REF: credentialRef,
+      },
+    });
     let contender: WorkerProcess | undefined;
 
     try {
       const holderReady = await waitForJson<{
         pid: number;
         lockPath: string;
+        stateRoot: string;
       }>(join(root, 'credential-holder-ready.json'));
       expect(existsSync(holderReady.lockPath)).toBe(true);
 
-      contender = spawnWorker(workerPath, root, 'credential-contender');
-      const contenderReady = await waitForJson<{ pid: number }>(
-        join(root, 'credential-contender-ready.json'),
-      );
-      await new Promise((resolve) => setTimeout(resolve, 125));
+      contender = spawnWorker(workerPath, root, 'credential-contender', {
+        clodexHome: contenderHome,
+        overrides: {
+          HOME: contenderHome,
+          XDG_RUNTIME_DIR: contenderRuntime,
+          TMPDIR: contenderRuntime,
+          REGISTRY_LOCK_CREDENTIAL_REF: credentialRef,
+        },
+      });
+      const contenderReady = await waitForJson<{
+        pid: number;
+        lockPath: string;
+        stateRoot: string;
+      }>(join(root, 'credential-contender-ready.json'));
+      expect(contenderReady.lockPath).toBe(holderReady.lockPath);
+      expect(contenderReady.stateRoot).toBe(holderReady.stateRoot);
+      expect(contenderReady.stateRoot).toBe(getCredentialStateRoot());
+      await new Promise(resolve => setTimeout(resolve, 125));
       expect(existsSync(enteredPath)).toBe(false);
       expect(contender.child.exitCode).toBeNull();
 
       writeFileSync(releasePath, 'release\n');
-      const [holderExit, contenderExit] = await Promise.all([
-        holder.exit,
-        contender.exit,
-      ]);
+      const [holderExit, contenderExit] = await Promise.all([holder.exit, contender.exit]);
       expect(
         holderExit.code,
         `holder stderr:\n${holderExit.stderr}\nstdout:\n${holderExit.stdout}`,
@@ -735,12 +762,11 @@ describe('provider registry lock', () => {
       expect(await waitForJson(enteredPath)).toEqual({
         pid: contenderReady.pid,
       });
-      expect(
-        await waitForJson(join(root, 'credential-holder-result.json')),
-      ).toEqual({ ok: true });
-      expect(
-        await waitForJson(join(root, 'credential-contender-result.json')),
-      ).toEqual({ ok: true });
+      expect(await waitForJson(join(root, 'credential-holder-result.json'))).toEqual({ ok: true });
+      expect(await waitForJson(join(root, 'credential-contender-result.json'))).toEqual({
+        ok: true,
+      });
+      expect(existsSync(holderReady.lockPath)).toBe(false);
       expect(lockArtifacts(root)).toEqual([]);
     } finally {
       if (!existsSync(releasePath)) writeFileSync(releasePath, 'release\n');

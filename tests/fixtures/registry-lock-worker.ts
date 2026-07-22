@@ -22,7 +22,7 @@ async function waitForFile(path: string, timeoutMs: number): Promise<void> {
     if (Date.now() >= deadline) {
       throw new Error(`Timed out waiting for signal: ${path}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise(resolve => setTimeout(resolve, 10));
   }
 }
 
@@ -38,8 +38,8 @@ function waitForFileSync(path: string, timeoutMs: number): void {
 }
 
 const role = requiredEnv('REGISTRY_LOCK_WORKER_ROLE');
-const root = requiredEnv('CLODEX_HOME');
-const registryPath = join(root, 'providers.json');
+const root = process.env.REGISTRY_LOCK_WORKER_ROOT ?? requiredEnv('CLODEX_HOME');
+const registryPath = join(requiredEnv('CLODEX_HOME'), 'providers.json');
 const lockPath = `${registryPath}.lock`;
 
 async function runHolder(): Promise<void> {
@@ -53,20 +53,14 @@ async function runHolder(): Promise<void> {
   try {
     await withRegistryWriteLock(
       async () => {
-        saveRegistry(
-          { ...emptyRegistry(), importedAt: 'holder-initial' },
-          registryPath,
-        );
+        saveRegistry({ ...emptyRegistry(), importedAt: 'holder-initial' }, registryPath);
         const owner = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as {
           pid: number;
           token: string;
         };
         writeJson(readyPath, { pid: owner.pid, token: owner.token });
         await waitForFile(releasePath, 10_000);
-        saveRegistry(
-          { ...emptyRegistry(), importedAt: 'holder-final' },
-          registryPath,
-        );
+        saveRegistry({ ...emptyRegistry(), importedAt: 'holder-final' }, registryPath);
       },
       { lockPath, waitMs: 2_000, retryMs: 10 },
     );
@@ -86,10 +80,7 @@ async function runContender(): Promise<void> {
   try {
     await withRegistryWriteLock(
       () => {
-        saveRegistry(
-          { ...emptyRegistry(), importedAt: 'contender' },
-          registryPath,
-        );
+        saveRegistry({ ...emptyRegistry(), importedAt: 'contender' }, registryPath);
       },
       { lockPath, waitMs: 250, retryMs: 10 },
     );
@@ -147,17 +138,16 @@ async function runLeaseLoss(): Promise<void> {
   fs.writeFileSync(
     registryPath,
     `${JSON.stringify({ ...emptyRegistry(), importedAt: 'sentinel' })}\n`,
-    { mode: 0o600 },
+    {
+      mode: 0o600,
+    },
   );
 
   let error: unknown;
   try {
     withRegistryWriteLockSync(
       () => {
-        saveRegistry(
-          { ...emptyRegistry(), importedAt: 'unwanted' },
-          registryPath,
-        );
+        saveRegistry({ ...emptyRegistry(), importedAt: 'unwanted' }, registryPath);
       },
       { lockPath },
     );
@@ -171,9 +161,7 @@ async function runLeaseLoss(): Promise<void> {
   const replacement = JSON.parse(fs.readFileSync(lockPath, 'utf8')) as {
     token?: string;
   };
-  const temporaryArtifacts = fs
-    .readdirSync(root)
-    .filter((name) => name.endsWith('.tmp'));
+  const temporaryArtifacts = fs.readdirSync(root).filter(name => name.endsWith('.tmp'));
   writeJson(resultPath, {
     errorName: error instanceof Error ? error.name : null,
     error: errorMessage(error),
@@ -234,19 +222,26 @@ async function runAtomicAcquire(): Promise<void> {
   });
 }
 
-const credentialAuthRef = 'keyring:provider:openai';
+function credentialAuthRef(): string {
+  return requiredEnv('REGISTRY_LOCK_CREDENTIAL_REF');
+}
 
 async function runCredentialHolder(): Promise<void> {
-  const { getCredentialMutationLockPath, withCredentialMutationLock } =
-    await import('../../src/registry/lock.js');
+  const {
+    getCredentialMutationLockPath,
+    getCredentialStateRoot,
+    withCredentialMutationLock,
+  } = await import('../../src/registry/lock.js');
+  const authRef = credentialAuthRef();
   const readyPath = join(root, 'credential-holder-ready.json');
   const releasePath = join(root, 'release-credential-holder');
   const resultPath = join(root, 'credential-holder-result.json');
 
-  await withCredentialMutationLock(credentialAuthRef, async () => {
+  await withCredentialMutationLock(authRef, async () => {
     writeJson(readyPath, {
       pid: process.pid,
-      lockPath: getCredentialMutationLockPath(credentialAuthRef),
+      lockPath: getCredentialMutationLockPath(authRef),
+      stateRoot: getCredentialStateRoot(),
     });
     await waitForFile(releasePath, 5_000);
   });
@@ -254,14 +249,22 @@ async function runCredentialHolder(): Promise<void> {
 }
 
 async function runCredentialContender(): Promise<void> {
-  const { withCredentialMutationLock } =
-    await import('../../src/registry/lock.js');
+  const {
+    getCredentialMutationLockPath,
+    getCredentialStateRoot,
+    withCredentialMutationLock,
+  } = await import('../../src/registry/lock.js');
+  const authRef = credentialAuthRef();
   const readyPath = join(root, 'credential-contender-ready.json');
   const enteredPath = join(root, 'credential-contender-entered.json');
   const resultPath = join(root, 'credential-contender-result.json');
 
-  writeJson(readyPath, { pid: process.pid });
-  await withCredentialMutationLock(credentialAuthRef, () => {
+  writeJson(readyPath, {
+    pid: process.pid,
+    lockPath: getCredentialMutationLockPath(authRef),
+    stateRoot: getCredentialStateRoot(),
+  });
+  await withCredentialMutationLock(authRef, () => {
     writeJson(enteredPath, { pid: process.pid });
   });
   writeJson(resultPath, { ok: true });
