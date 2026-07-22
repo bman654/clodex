@@ -186,7 +186,12 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   function extendAliasArray(arrLiteral: string): string {
     const toAdd = IDENTITIES.filter((a) => !new RegExp('"' + reEsc(a) + '"').test(arrLiteral));
     if (toAdd.length === 0) return arrLiteral; // idempotent
-    return arrLiteral.replace(/\]\s*$/, ',' + toAdd.map(q).join(',') + ']');
+    // Function replacement, not a string one: a string replacement re-reads
+    // `$&`/`` $` ``/`$'` in the payload as insertion patterns, which would undo
+    // q()'s escaping. Identity aliases are validated upstream but the canonical
+    // model ids they are built from are not.
+    const addition = ',' + toAdd.map(q).join(',') + ']';
+    return arrLiteral.replace(/\]\s*$/, () => addition);
   }
 
   // ---------------------------------------------------------------------------
