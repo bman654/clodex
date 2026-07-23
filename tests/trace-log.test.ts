@@ -339,7 +339,9 @@ describe('inference request log', () => {
         provider: 'openai',
         route: 'translated',
         errorType: 'Error',
+        errorCode: 'ECONNRESET',
         errorSignature: 'reasoning_part_not_found',
+        failureSource: 'adapter_response_error',
         terminationSource: 'upstream_failure',
       });
       writeInferenceResponseLifecycleLog(path, {
@@ -381,7 +383,9 @@ describe('inference request log', () => {
       expect(failure).toMatchObject({
         event: 'response_failed',
         errorType: 'Error',
+        errorCode: 'ECONNRESET',
         errorSignature: 'reasoning_part_not_found',
+        failureSource: 'adapter_response_error',
         terminationSource: 'upstream_failure',
       });
       expect(failure).not.toHaveProperty('claudeSessionId');

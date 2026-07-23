@@ -6,7 +6,7 @@ import * as https from 'node:https';
 import * as http from 'node:http';
 import * as net from 'node:net';
 import * as tls from 'node:tls';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { gzipSync } from 'node:zlib';
 import { ensureHttpProxyCaBundle, ensureHttpProxyCertificates } from '../src/http-proxy/ca.js';
 import { shouldInterceptConnect, startHttpProxy } from '../src/http-proxy/server.js';
@@ -1054,6 +1054,126 @@ describe('selective HTTP proxy', () => {
     }
   }, 20_000);
 
+  it('logs adapter request errno and source when the adapter is unavailable before headers', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    const inferenceLogPath = join(testHome, 'adapter-request-error-inference.jsonl');
+    const unavailableAdapter = http.createServer();
+    const unavailableAdapterPort = await listen(unavailableAdapter);
+    await new Promise<void>(resolve => unavailableAdapter.close(() => resolve()));
+    const route = {
+      aliasId: 'clodex:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai' as const,
+      npm: '@ai-sdk/openai-compatible',
+      providerId: 'test-provider',
+    };
+    const proxy = await startHttpProxy({
+      routes: [route],
+      adapterHandle: {
+        port: unavailableAdapterPort,
+        token: 'adapter-local-token',
+        close: () => {},
+      },
+      inferenceLogPath,
+    });
+
+    try {
+      const response = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/v1/messages',
+        JSON.stringify({
+          model: route.aliasId,
+          messages: [{ role: 'user', content: 'test unavailable adapter' }],
+          stream: true,
+        }),
+      );
+
+      expect(response).toContain('502');
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const requestEntry = entries.find(entry => !entry.event);
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'response_failed',
+        requestId: requestEntry.requestId,
+        route: 'translated',
+        statusCode: 502,
+        phase: 'waiting_for_headers',
+        errorType: 'Error',
+        errorCode: expect.stringMatching(/^ECONN(?:REFUSED|RESET)$/),
+        failureSource: 'adapter_request_error',
+        terminationSource: 'upstream_failure',
+      }));
+    } finally {
+      await proxy.close();
+    }
+  }, 20_000);
+
+  it('logs a distinct source when the adapter request closes before headers', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    const inferenceLogPath = join(testHome, 'adapter-request-close-inference.jsonl');
+    const route = {
+      aliasId: 'clodex:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai' as const,
+      npm: '@ai-sdk/openai-compatible',
+      providerId: 'test-provider',
+    };
+    const adapterRequest = () => {
+      const request = new EventEmitter() as EventEmitter & {
+        end(body: Buffer): void;
+        destroy(error?: Error): void;
+      };
+      request.end = () => queueMicrotask(() => request.emit('close'));
+      request.destroy = () => {};
+      return request;
+    };
+    const proxy = await startHttpProxy({
+      routes: [route],
+      adapterHandle: {
+        port: 1,
+        token: 'adapter-local-token',
+        close: () => {},
+      },
+      inferenceLogPath,
+      adapterRequest,
+    } as Parameters<typeof startHttpProxy>[0]);
+
+    try {
+      const response = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/v1/messages',
+        JSON.stringify({
+          model: route.aliasId,
+          messages: [{ role: 'user', content: 'test closed adapter request' }],
+          stream: true,
+        }),
+      );
+
+      expect(response).toContain('502');
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const requestEntry = entries.find(entry => !entry.event);
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'response_failed',
+        requestId: requestEntry.requestId,
+        route: 'translated',
+        statusCode: 502,
+        phase: 'waiting_for_headers',
+        errorType: 'Error',
+        failureSource: 'adapter_request_close',
+        terminationSource: 'upstream_failure',
+      }));
+    } finally {
+      await proxy.close();
+    }
+  }, 20_000);
+
   it('terminates and logs a translated response when the adapter closes before end', async () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'adapter-abort-inference.jsonl');
@@ -1123,6 +1243,7 @@ describe('selective HTTP proxy', () => {
         requestId: requestEntry.requestId,
         statusCode: 200,
         phase: 'streaming',
+        failureSource: 'adapter_response_aborted',
         terminationSource: 'upstream_failure',
       }));
       expect(entries.some(entry => entry.event === 'response_completed')).toBe(false);
