@@ -24,9 +24,8 @@ export async function postOAuthRefresh(
     ));
   }, OAUTH_REFRESH_TIMEOUT_MS);
   timeout.unref();
-  let response: Response;
   try {
-    response = await fetch(url, {
+    const response = await fetch(url, {
       method: 'POST',
       signal: abortController.signal,
       headers: {
@@ -36,24 +35,24 @@ export async function postOAuthRefresh(
       },
       body: isJson ? JSON.stringify(body) : (body as URLSearchParams).toString(),
     });
+
+    if (!response.ok) {
+      let detail = '';
+      if (options.includeBody) {
+        detail = await response.text().catch(() => '');
+      } else {
+        try {
+          await response.body?.cancel();
+        } catch {
+          // Preserve the refresh failure when transport cleanup also fails.
+        }
+      }
+      const status = options.includeStatus ? ` (${response.status})` : '';
+      throw new Error(`${options.errorPrefix}${status}${detail ? `: ${detail}` : ''}`);
+    }
+
+    return await response.json() as OAuthTokenResponse;
   } finally {
     clearTimeout(timeout);
   }
-
-  if (!response.ok) {
-    let detail = '';
-    if (options.includeBody) {
-      detail = await response.text().catch(() => '');
-    } else {
-      try {
-        await response.body?.cancel();
-      } catch {
-        // Preserve the refresh failure when transport cleanup also fails.
-      }
-    }
-    const status = options.includeStatus ? ` (${response.status})` : '';
-    throw new Error(`${options.errorPrefix}${status}${detail ? `: ${detail}` : ''}`);
-  }
-
-  return response.json() as Promise<OAuthTokenResponse>;
 }

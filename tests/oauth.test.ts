@@ -126,6 +126,40 @@ describe('oauth refresh http', () => {
     expect(signal.aborted).toBe(true);
     await expect(rejection).resolves.toMatchObject({ name: 'TimeoutError' });
   });
+
+  it('keeps the 30-second timeout active while reading the response body', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(
+      async (_url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const signal = init?.signal;
+        if (!signal) throw new Error('missing abort signal');
+        return {
+          ok: true,
+          json: () => new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+          }),
+        } as Response;
+      },
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const refresh = postOAuthRefresh(
+      'https://auth/token',
+      new URLSearchParams({ grant_type: 'refresh_token' }),
+      {
+        contentType: 'form',
+        errorPrefix: 'token refresh failed',
+      },
+    );
+    const signal = fetchMock.mock.calls[0]?.[1]?.signal as AbortSignal;
+    const rejection = refresh.catch((error: unknown) => error);
+
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(signal.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(signal.aborted).toBe(true);
+    await expect(rejection).resolves.toMatchObject({ name: 'TimeoutError' });
+  });
 });
 
 
