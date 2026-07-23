@@ -12,6 +12,61 @@ import {
 } from '../src/provider-factory.js';
 import { VERTEX_ANTHROPIC_NPM } from '../src/constants.js';
 
+async function expectCredentialHeadersStripped(
+  fetchImpl: typeof fetch,
+  extraHeaders: Record<string, string> = {},
+): Promise<void> {
+  const transport = vi.fn(async () => new Response(null, { status: 204 }));
+  vi.stubGlobal('fetch', transport);
+  try {
+    await fetchImpl('https://anonymous.example/v1/messages', {
+      headers: {
+        Authorization: 'Bearer configured-value',
+        'X-API-Key': 'configured-value',
+        Cookie: 'session=configured-value',
+        'Proxy-Authorization': 'Bearer configured-value',
+        'X-Auth-Token': 'configured-value',
+        'X-Client-Secret': 'configured-value',
+        'X-Credential-Id': 'configured-value',
+        'Content-Type': 'application/json',
+        'X-Custom': 'preserved',
+        ...extraHeaders,
+      },
+    });
+
+    const [, init] = transport.mock.calls[0] as unknown as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    for (const name of [
+      'authorization',
+      'x-api-key',
+      'cookie',
+      'proxy-authorization',
+      'x-auth-token',
+      'x-client-secret',
+      'x-credential-id',
+    ]) {
+      expect(headers.has(name)).toBe(false);
+    }
+    expect(headers.get('content-type')).toBe('application/json');
+    expect(headers.get('x-custom')).toBe('preserved');
+    for (const [name, value] of Object.entries(extraHeaders)) {
+      if (![
+        'authorization',
+        'x-api-key',
+        'cookie',
+        'proxy-authorization',
+        'x-auth-token',
+        'x-client-secret',
+        'x-credential-id',
+      ].includes(name.toLowerCase())) {
+        expect(headers.get(name)).toBe(value);
+      }
+    }
+  } finally {
+    vi.unstubAllGlobals();
+  }
+}
+
 describe('isSdkMigratedNpm', () => {
   it('returns true for any OpenCode-assigned npm except anthropic', () => {
     expect(isSdkMigratedNpm('@ai-sdk/openai')).toBe(true);
@@ -259,6 +314,64 @@ describe('createLanguageModel', () => {
     vi.doUnmock('@ai-sdk/openai');
   });
 
+  it('installs credential-header stripping for anonymous OpenAI providers', async () => {
+    const responses = vi.fn((modelId: string) => ({ modelId, provider: 'openai-responses' }));
+    const chat = vi.fn((modelId: string) => ({ modelId, provider: 'openai-chat' }));
+    const createOpenAI = vi.fn(() => ({ responses, chat }));
+    vi.doMock('@ai-sdk/openai', () => ({ createOpenAI }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai',
+      modelId: 'anonymous-model',
+      apiKey: '',
+      authType: 'none',
+      headers: {
+        Authorization: 'Bearer configured-value',
+        'X-Plan': 'free',
+      },
+    });
+
+    expect(createOpenAI).toHaveBeenCalledWith({
+      apiKey: '',
+      headers: {
+        Authorization: 'Bearer configured-value',
+        'X-Plan': 'free',
+      },
+      fetch: expect.any(Function),
+    });
+    expect(responses).toHaveBeenCalledWith('anonymous-model');
+    const options = createOpenAI.mock.calls[0]?.[0] as {
+      fetch: typeof fetch;
+      headers: Record<string, string>;
+    };
+    await expectCredentialHeadersStripped(options.fetch, options.headers);
+    vi.doUnmock('@ai-sdk/openai');
+  });
+
+  it('forwards configured headers for authenticated OpenAI providers', async () => {
+    const responses = vi.fn((modelId: string) => ({ modelId, provider: 'openai-responses' }));
+    const chat = vi.fn((modelId: string) => ({ modelId, provider: 'openai-chat' }));
+    const createOpenAI = vi.fn(() => ({ responses, chat }));
+    vi.doMock('@ai-sdk/openai', () => ({ createOpenAI }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai',
+      modelId: 'authenticated-model',
+      apiKey: 'provider-key',
+      authType: 'api',
+      headers: { 'X-Plan': 'paid' },
+    });
+
+    expect(createOpenAI).toHaveBeenCalledWith({
+      apiKey: 'provider-key',
+      headers: { 'X-Plan': 'paid' },
+    });
+    expect(responses).toHaveBeenCalledWith('authenticated-model');
+    vi.doUnmock('@ai-sdk/openai');
+  });
+
   it('ignores discovery baseURL for @ai-sdk/anthropic (SDK default includes /v1)', async () => {
     const anthropicFactory = vi.fn((modelId: string) => ({ modelId, provider: 'anthropic' }));
     const createAnthropic = vi.fn(() => anthropicFactory);
@@ -363,6 +476,7 @@ describe('createLanguageModel', () => {
       npm: '@ai-sdk/openai-compatible',
       modelId: 'tencent/hy3:free',
       apiKey: '',
+      authType: 'none',
       baseURL: 'https://api.kilo.ai/api/gateway',
       providerId: 'kilo',
     });
@@ -370,8 +484,37 @@ describe('createLanguageModel', () => {
     expect(createOpenAICompatible).toHaveBeenCalledWith({
       name: 'kilo',
       baseURL: 'https://api.kilo.ai/api/gateway',
+      fetch: expect.any(Function),
     });
+    const options = createOpenAICompatible.mock.calls[0]?.[0] as { fetch: typeof fetch };
+    await expectCredentialHeadersStripped(options.fetch);
     vi.doUnmock('@ai-sdk/openai-compatible');
+  });
+
+  it('strips generated credential headers for anonymous Anthropic providers', async () => {
+    const anthropicFactory = vi.fn((modelId: string) => ({ modelId }));
+    const createAnthropic = vi.fn(() => anthropicFactory);
+    vi.doMock('@ai-sdk/anthropic', () => ({ createAnthropic }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/anthropic',
+      modelId: 'anonymous-model',
+      apiKey: '',
+      authType: 'none',
+      baseURL: 'https://anonymous.example',
+    });
+
+    expect(createAnthropic).toHaveBeenCalledWith({
+      apiKey: '',
+      baseURL: 'https://anonymous.example/v1',
+      fetch: expect.any(Function),
+    });
+    expect(anthropicFactory).toHaveBeenCalledWith('anonymous-model');
+
+    const options = createAnthropic.mock.calls[0]?.[0] as { fetch: typeof fetch };
+    await expectCredentialHeadersStripped(options.fetch);
+    vi.doUnmock('@ai-sdk/anthropic');
   });
 
   it('merges custom headers into a non-OAuth custom anthropic endpoint', async () => {

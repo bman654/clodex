@@ -26,6 +26,10 @@ function credentialStillReferenced(authRef: string, remaining: RegistryProvider[
   return remaining.some(p => p.authRef === authRef);
 }
 
+function isStoredCredentialRef(authRef: string): boolean {
+  return authRef.startsWith('keyring:') || authRef.startsWith('helper:');
+}
+
 /** Remove a provider from the registry; delete per-provider keychain entry when safe. */
 export async function removeProviderFromRegistry(
   id: string,
@@ -58,6 +62,7 @@ export async function removeProviderFromRegistry(
       },
       authRefToDelete:
         opts?.deleteCredential !== false &&
+        isStoredCredentialRef(removedProvider.authRef) &&
         !credentialStillReferenced(removedProvider.authRef, registry.providers)
           ? removedProvider.authRef
           : null,

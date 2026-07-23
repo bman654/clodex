@@ -176,16 +176,18 @@ export async function authenticateProvider(
       oauthCredentialToKeychainJson(cred),
       (msg) => { nativeDiagMsg = msg; },
     );
+    if (!saved) {
+      throw new Error(
+        `Could not save OAuth tokens to the credential store${nativeDiagMsg ? ` — ${nativeDiagMsg}` : ' — check access and try again'}`,
+      );
+    }
     const registryProvider = await upsertOAuthProvider(
       providerId,
       cred,
       authRef,
     );
-    return { saved, nativeDiagMsg, registryProvider };
+    return { registryProvider };
   });
-  if (!persisted.saved) {
-    p.log.warn(`Could not save OAuth tokens to the credential store — ${persisted.nativeDiagMsg || 'session may not persist.'}`);
-  }
   const { registryProvider } = persisted;
 
   const refreshSpinner = p.spinner();

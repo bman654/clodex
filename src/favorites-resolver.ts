@@ -99,7 +99,11 @@ export async function buildFavoritesList(
   const capacitySkippedFavorites: FavoriteModel[] = [];
   for (let i = 0; i < uniqueFavorites.length; i++) {
     const resolved = resolutions[i];
-    if (!resolved || (options.dropEmptyApiKey && !resolved.apiKey.trim())) {
+    if (!resolved || (
+      options.dropEmptyApiKey &&
+      !resolved.apiKey.trim() &&
+      resolved.authType !== 'none'
+    )) {
       droppedFavorites.push(uniqueFavorites[i]!);
       continue;
     }

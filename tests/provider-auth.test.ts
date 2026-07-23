@@ -65,7 +65,7 @@ describe('authenticateProvider', () => {
     vi.mocked(probeProviderCredentialStore).mockReset().mockResolvedValue(true);
     lockState.active = false;
     lockState.credentialActive = false;
-    vi.mocked(saveProviderCredential).mockClear();
+    vi.mocked(saveProviderCredential).mockReset().mockResolvedValue(false);
     vi.mocked(saveRegistry).mockClear();
     vi.mocked(runOpenAiDeviceCodeFlow).mockClear();
     vi.mocked(refreshProviderModels).mockClear();
@@ -106,15 +106,23 @@ describe('authenticateProvider', () => {
     expect(saveRegistry).not.toHaveBeenCalled();
   });
 
-  it('warns and continues when token persistence fails (graceful degradation)', async () => {
-    const result = await authenticateProvider('openai');
+  it('rejects before updating the registry or refreshing models when token persistence fails', async () => {
+    vi.mocked(saveProviderCredential).mockImplementationOnce(async (_authRef, _credential, diagnostic) => {
+      diagnostic?.('credential write failed');
+      return false;
+    });
+
+    await expect(authenticateProvider('openai')).rejects.toThrow(
+      'Could not save OAuth tokens to the credential store',
+    );
     expect(saveProviderCredential).toHaveBeenCalled();
-    expect(saveRegistry).toHaveBeenCalled();
-    expect(result.providerId).toBe('openai-oauth');
+    expect(saveRegistry).not.toHaveBeenCalled();
+    expect(refreshProviderModels).not.toHaveBeenCalled();
   });
 
   it('holds the registry lock only while persisting the provider entry', async () => {
     const observations: Array<[string, boolean]> = [];
+    vi.mocked(saveProviderCredential).mockResolvedValueOnce(true);
     vi.mocked(runOpenAiDeviceCodeFlow).mockImplementationOnce(async () => {
       observations.push(['authorization', lockState.active]);
       return {

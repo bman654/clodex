@@ -29,6 +29,52 @@ describe('anthropicUpstreamHeaders', () => {
       'X-Claude-Code-Session-Id': 'session-123',
     });
   });
+
+  it('omits authentication headers for anonymous requests', () => {
+    const headers = anthropicUpstreamHeaders('', false, undefined, 'none', undefined, {
+      authorization: 'Bearer configured-secret',
+      'X-API-Key': 'configured-secret',
+      Cookie: 'session=configured-secret',
+      'Proxy-Authorization': 'Bearer configured-secret',
+      'X-Auth-Token': 'configured-secret',
+      'X-Client-Secret': 'configured-secret',
+      'X-Credential-Id': 'configured-secret',
+      'X-Custom': 'preserved',
+    });
+
+    for (const name of [
+      'Authorization',
+      'authorization',
+      'x-api-key',
+      'X-API-Key',
+      'Cookie',
+      'Proxy-Authorization',
+      'X-Auth-Token',
+      'X-Client-Secret',
+      'X-Credential-Id',
+    ]) {
+      expect(headers).not.toHaveProperty(name);
+    }
+    expect(headers).toMatchObject({
+      'Content-Type': 'application/json',
+      'anthropic-version': '2023-06-01',
+      'X-Custom': 'preserved',
+    });
+  });
+
+  it('preserves configured provider headers for authenticated requests', () => {
+    expect(anthropicUpstreamHeaders(
+      'oauth-token',
+      false,
+      undefined,
+      'oauth',
+      undefined,
+      { 'X-Plan': 'coding' },
+    )).toMatchObject({
+      Authorization: 'Bearer oauth-token',
+      'X-Plan': 'coding',
+    });
+  });
 });
 
 describe('fetchWithOAuthRetry', () => {

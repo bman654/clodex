@@ -7,6 +7,7 @@ import {
   providerHubChoiceValue,
   providersHelpText,
   runProvidersAdd,
+  runProvidersAuth,
   runProvidersRemove,
 } from '../src/providers-command.js';
 import {
@@ -22,6 +23,7 @@ import * as env from '../src/env.js';
 const selectMock = vi.hoisted(() => vi.fn());
 const logErrorMock = vi.hoisted(() => vi.fn());
 const logSuccessMock = vi.hoisted(() => vi.fn());
+const authenticateProviderMock = vi.hoisted(() => vi.fn());
 
 vi.mock('@clack/prompts', async importOriginal => {
   const actual = await importOriginal<typeof import('@clack/prompts')>();
@@ -33,6 +35,14 @@ vi.mock('@clack/prompts', async importOriginal => {
       error: logErrorMock,
       success: logSuccessMock,
     },
+  };
+});
+
+vi.mock('../src/registry/provider-auth.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/registry/provider-auth.js')>();
+  return {
+    ...actual,
+    authenticateProvider: authenticateProviderMock,
   };
 });
 
@@ -189,6 +199,45 @@ describe('registry crud', () => {
     expect(result.credentialDeleted).toBe(false);
     expect(deleteSpy).not.toHaveBeenCalled();
     expect(loadRegistry().providers).toHaveLength(1);
+  });
+
+  it.each([
+    { authRef: 'none:anonymous', authType: 'none' as const },
+    { authRef: 'env:LOCAL_PROVIDER_API_KEY', authType: 'api' as const },
+  ])('removes a provider using $authRef without attempting credential deletion', async ({ authRef, authType }) => {
+    const registry = emptyRegistry();
+    registry.providers.push(openaiEntry({ authRef, authType }));
+    withRegistryWriteLockSync(() => saveRegistry(registry));
+
+    const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(false);
+    const code = await runProvidersRemove('openai');
+
+    expect(code).toBe(0);
+    expect(loadRegistry().providers).toHaveLength(0);
+    expect(deleteSpy).not.toHaveBeenCalled();
+    expect(logErrorMock).not.toHaveBeenCalled();
+    expect(logSuccessMock).toHaveBeenCalledWith('Removed OpenAI.');
+  });
+});
+
+describe('providers auth command', () => {
+  beforeEach(() => {
+    authenticateProviderMock.mockReset();
+    logErrorMock.mockReset();
+    logSuccessMock.mockReset();
+  });
+
+  it('does not report success when credential persistence rejects authentication', async () => {
+    authenticateProviderMock.mockRejectedValueOnce(
+      new Error('Could not save OAuth tokens to the credential store: credential write failed'),
+    );
+
+    await expect(runProvidersAuth('openai')).resolves.toBe(1);
+
+    expect(logErrorMock).toHaveBeenCalledWith(
+      'Could not save OAuth tokens to the credential store: credential write failed',
+    );
+    expect(logSuccessMock).not.toHaveBeenCalled();
   });
 });
 

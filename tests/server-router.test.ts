@@ -51,6 +51,8 @@ interface UpstreamRequest {
   method: string;
   url: string;
   authorization: string | undefined;
+  xApiKey: string | undefined;
+  xPlan?: string;
   body: any;
 }
 
@@ -70,6 +72,12 @@ async function startUpstream(responseBody: any): Promise<{ baseUrl: string; requ
       authorization: Array.isArray(req.headers.authorization)
         ? req.headers.authorization[0]
         : req.headers.authorization,
+      xApiKey: Array.isArray(req.headers['x-api-key'])
+        ? req.headers['x-api-key'][0]
+        : req.headers['x-api-key'],
+      xPlan: Array.isArray(req.headers['x-plan'])
+        ? req.headers['x-plan'][0]
+        : req.headers['x-plan'],
       body: await readRequestBody(req),
     });
 
@@ -274,6 +282,95 @@ describe('server router', () => {
       url: '/v1/messages',
       authorization: 'Bearer real-opencode-key',
       body: { model: 'claude-native', messages: [{ role: 'user', content: 'hi' }] },
+    });
+  });
+
+  it('forwards anonymous Anthropic-native messages without authentication headers', async () => {
+    const upstream = await startUpstream({
+      id: 'msg-anonymous',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'text', text: 'anonymous ok' }],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        id: 'anonymous-model',
+        name: 'Anonymous Model',
+        isFree: true,
+        brand: 'Other',
+        providerId: 'local',
+        sourceBackend: 'local',
+        modelFormat: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: '',
+        authType: 'none',
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'anonymous-model',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ id: 'msg-anonymous' });
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0]).toMatchObject({
+      method: 'POST',
+      url: '/v1/messages',
+      authorization: undefined,
+      xApiKey: undefined,
+    });
+  });
+
+  it('forwards anonymous OpenAI chat completions without authentication headers', async () => {
+    const upstream = await startUpstream({
+      id: 'chatcmpl-anonymous',
+      choices: [{ message: { content: 'anonymous ok' }, finish_reason: 'stop' }],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        id: 'anonymous-chat-model',
+        name: 'Anonymous Chat Model',
+        isFree: true,
+        brand: 'Other',
+        providerId: 'local',
+        sourceBackend: 'go',
+        modelFormat: 'openai',
+        completionsUrl: `${upstream.baseUrl}/v1/chat/completions`,
+        apiKey: '',
+        authType: 'none',
+        headers: {
+          Authorization: 'Bearer configured-value',
+          'X-Plan': 'free',
+        },
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'anonymous-chat-model',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ id: 'chatcmpl-anonymous' });
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0]).toMatchObject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      authorization: undefined,
+      xApiKey: undefined,
+      xPlan: 'free',
     });
   });
 

@@ -219,8 +219,13 @@ clodex --version    # version
   FAT, exFAT, or a network mount that rejects hard links. An abrupt process kill
   during lock publication can leave a `providers.json.lock.*.tmp` file; it does
   not block later lock acquisition and can be removed when no Clodex process is
-  running.
+  running. A canonical `providers.json.lock` whose recorded PID is no longer
+  running is reclaimed automatically on the next lock acquisition. If it remains
+  while that PID is active, stop every Clodex process and verify the recorded PID
+  before removing the lock manually. Never remove the canonical lock while a
+  Clodex process is active.
 - Credentials live in the OS credential store (Keychain / Windows Credential Manager / Secret Service) under the `clodex` service. Set `CLODEX_CREDENTIAL_HELPER` to an absolute executable path to use an external secure store instead; see [credential helpers](docs/credential-helpers.md).
+- Proxied routes forward configured provider headers for API-key and OAuth authentication. Anonymous routes preserve non-credential headers while removing authorization, API-key, cookie, token, secret, and credential-bearing header names before dispatch.
 - `CLODEX_CLAUDE_PATH` overrides Claude Code binary discovery.
 - **Outbound proxy:** when `HTTP_PROXY`/`HTTPS_PROXY` (and optionally `NO_PROXY`) are set in clodex's environment, all clodex-originated network calls honor them — OAuth sign-in and token refresh, model-list and models.dev refreshes, upstream OpenAI API calls, and the ChatGPT/Codex OAuth WebSocket transport (tunneled via HTTP CONNECT).
 

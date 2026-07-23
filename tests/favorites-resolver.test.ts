@@ -197,6 +197,68 @@ describe('buildFavoritesList', () => {
     expect(resolved).toHaveLength(0);
     expect(droppedFavorites).toEqual(favorites);
   });
+
+  it('retains anonymous favorites while dropping ordinary empty-key providers', async () => {
+    const anonymousProvider: LocalProvider = {
+      id: 'anonymous',
+      name: 'Anonymous',
+      apiKey: '',
+      authType: 'none',
+      models: [{
+        id: 'anonymous-model',
+        name: 'Anonymous Model',
+        family: 'test',
+        brand: 'Test',
+        modelFormat: 'openai',
+        upstreamModelId: 'anonymous-model',
+      }],
+    };
+    const emptyKeyProvider: LocalProvider = {
+      id: 'empty-key',
+      name: 'Empty Key',
+      apiKey: '',
+      authType: 'api',
+      models: [{
+        id: 'empty-key-model',
+        name: 'Empty Key Model',
+        family: 'test',
+        brand: 'Test',
+        modelFormat: 'openai',
+        upstreamModelId: 'empty-key-model',
+      }],
+    };
+    const localProviders = [anonymousProvider, emptyKeyProvider];
+    const favorites: FavoriteModel[] = [
+      { providerId: 'anonymous', modelId: 'anonymous-model' },
+      { providerId: 'empty-key', modelId: 'empty-key-model' },
+    ];
+    const mixedCtx: ResolveContext = {
+      localProviders,
+      findLocalModel: (providerId, modelId) => {
+        const provider = localProviders.find(candidate => candidate.id === providerId);
+        const model = provider?.models.find(candidate => candidate.id === modelId);
+        return provider && model ? { provider, model } : undefined;
+      },
+    };
+
+    const { resolved, droppedFavorites } = await buildFavoritesList(
+      undefined,
+      favorites,
+      mixedCtx,
+      20,
+      { dropEmptyApiKey: true },
+    );
+
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0]).toMatchObject({
+      providerId: 'anonymous',
+      apiKey: '',
+      authType: 'none',
+    });
+    expect(droppedFavorites).toEqual([
+      { providerId: 'empty-key', modelId: 'empty-key-model' },
+    ]);
+  });
 });
 
 describe('resolveFirstAvailableFavorite', () => {

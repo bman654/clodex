@@ -72,9 +72,9 @@ describe('provider-catalog-display', () => {
       expect(env.resolveProviderCredential).toHaveBeenCalledWith('groq', 'keyring:provider:groq');
     });
 
-    it('returns "anonymous" for providers declared authType none', async () => {
+    it('returns an empty credential for providers declared authType none', async () => {
       const provider = { id: 'local', name: 'Local', apiKey: '', authType: 'none', models: [] } as any;
-      expect(await resolveLocalProviderApiKey(provider)).toBe('anonymous');
+      expect(await resolveLocalProviderApiKey(provider)).toBe('');
     });
 
     it('does not resurrect a direct key for an explicitly anonymous provider', async () => {
@@ -86,7 +86,7 @@ describe('provider-catalog-display', () => {
         authType: 'none',
         models: [],
       } as any;
-      expect(await resolveLocalProviderApiKey(provider)).toBe('anonymous');
+      expect(await resolveLocalProviderApiKey(provider)).toBe('');
     });
 
     it('falls back to the OAuth keyring ref when there is no registry authRef and no zen/go/anonymous special case', async () => {
