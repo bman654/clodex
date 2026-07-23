@@ -410,6 +410,7 @@ describe('selective HTTP proxy', () => {
         event: 'response_failed',
         requestId: entries[0].requestId,
         statusCode: 503,
+        terminationSource: 'upstream_failure',
       }));
     } finally {
       if (previousRequestPreview === undefined) delete process.env['CLODEX_LOG_REQUEST_PREVIEW'];
@@ -465,6 +466,7 @@ describe('selective HTTP proxy', () => {
         statusCode: 502,
         phase: 'waiting_for_headers',
         errorType: expect.stringMatching(/^ECONN(?:REFUSED|RESET)$/),
+        terminationSource: 'upstream_failure',
       }));
       expect(entries).toContainEqual(expect.objectContaining({
         event: 'upstream_error',
@@ -820,12 +822,90 @@ describe('selective HTTP proxy', () => {
         requestId: requestEntry.requestId,
         claudeSessionId,
         phase: 'waiting_for_headers',
-        disconnectSource: 'downstream_client',
+        terminationSource: 'downstream_client',
       }));
       expect(entries.some(entry => entry.event === 'response_completed')).toBe(false);
       expect(entries.some(entry => entry.event === 'response_failed')).toBe(false);
     } finally {
       await proxy.close();
+    }
+  }, 20_000);
+
+  it('attributes an in-flight response termination to local proxy shutdown', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    const inferenceLogPath = join(testHome, 'local-shutdown-inference.jsonl');
+    let adapterReceivedResolve!: () => void;
+    const adapterReceived = new Promise<void>(resolve => {
+      adapterReceivedResolve = resolve;
+    });
+    let adapterClosedResolve!: () => void;
+    const adapterClosed = new Promise<void>(resolve => {
+      adapterClosedResolve = resolve;
+    });
+    const adapterServer = http.createServer(req => {
+      req.resume();
+      req.once('end', adapterReceivedResolve);
+      req.socket.once('close', adapterClosedResolve);
+    });
+    const adapterPort = await listen(adapterServer);
+    const route = {
+      aliasId: 'clodex:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai' as const,
+      npm: '@ai-sdk/openai-compatible',
+      providerId: 'test-provider',
+    };
+    const proxy = await startHttpProxy({
+      routes: [route],
+      adapterHandle: {
+        port: adapterPort,
+        token: 'adapter-local-token',
+        close: () => {
+          adapterServer.closeAllConnections();
+          adapterServer.close();
+        },
+      },
+      inferenceLogPath,
+    });
+    let proxyClosed = false;
+
+    try {
+      const body = JSON.stringify({
+        model: route.aliasId,
+        messages: [{ role: 'user', content: 'wait for local shutdown' }],
+        stream: false,
+      });
+      const secure = await connectMitm(proxy.port, certificates.caCert);
+      secure.on('error', () => {});
+      secure.resume();
+      secure.write([
+        'POST /v1/messages HTTP/1.1',
+        'Host: api.anthropic.com',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        '',
+        '',
+      ].join('\r\n') + body);
+      await adapterReceived;
+      await proxy.close();
+      proxyClosed = true;
+      await adapterClosed;
+      await new Promise(resolve => setImmediate(resolve));
+
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const requestEntry = entries.find(entry => !entry.event);
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'response_client_disconnected',
+        requestId: requestEntry.requestId,
+        phase: 'waiting_for_headers',
+        terminationSource: 'local_shutdown',
+      }));
+      expect(entries.some(entry => entry.terminationSource === 'downstream_client')).toBe(false);
+    } finally {
+      if (!proxyClosed) await proxy.close();
     }
   }, 20_000);
 
@@ -898,6 +978,7 @@ describe('selective HTTP proxy', () => {
         requestId: requestEntry.requestId,
         statusCode: 200,
         phase: 'streaming',
+        terminationSource: 'upstream_failure',
       }));
       expect(entries.some(entry => entry.event === 'response_completed')).toBe(false);
     } finally {

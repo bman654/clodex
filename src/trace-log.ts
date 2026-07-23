@@ -228,6 +228,11 @@ export type InferenceResponsePhase =
   | 'streaming'
   | 'delivering';
 
+export type InferenceTerminationSource =
+  | 'downstream_client'
+  | 'local_shutdown'
+  | 'upstream_failure';
+
 export interface InferenceResponseLifecycleLogEntry {
   event: InferenceResponseLifecycleEvent;
   requestId: string;
@@ -255,7 +260,7 @@ export interface InferenceResponseLifecycleLogEntry {
   lastPartType?: string;
   errorType?: string;
   errorSignature?: string;
-  disconnectSource?: 'downstream_client';
+  terminationSource?: InferenceTerminationSource;
 }
 
 export type ProxyLifecycleEvent =
@@ -455,9 +460,7 @@ export function writeInferenceResponseLifecycleLog(
     ...(entry.lastPartType ? { lastPartType: compactLogValue(entry.lastPartType, 100) } : {}),
     ...(entry.errorType ? { errorType: compactLogValue(entry.errorType, 200) } : {}),
     ...(entry.errorSignature ? { errorSignature: compactLogValue(entry.errorSignature, 100) } : {}),
-    ...(entry.event === 'response_client_disconnected' && entry.disconnectSource
-      ? { disconnectSource: entry.disconnectSource }
-      : {}),
+    ...(entry.terminationSource ? { terminationSource: entry.terminationSource } : {}),
   }));
 }
 

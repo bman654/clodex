@@ -271,6 +271,7 @@ function forwardRawAnthropicRequest(
     provider: string;
     progressIntervalMs: number;
   },
+  isLocalShutdown: () => boolean = () => false,
 ): Promise<void> {
   return new Promise(resolve => {
     const startedAt = Date.now();
@@ -378,6 +379,7 @@ function forwardRawAnthropicRequest(
           bytes,
           chunks,
           errorType: errorType(err),
+          terminationSource: 'upstream_failure',
         });
         done();
       });
@@ -407,7 +409,7 @@ function forwardRawAnthropicRequest(
         idleMs: now - lastActivityAt,
         bytes,
         chunks,
-        disconnectSource: 'downstream_client',
+        terminationSource: isLocalShutdown() ? 'local_shutdown' : 'downstream_client',
       });
       upstream.destroy(new Error('Client disconnected'));
       done();
@@ -428,6 +430,7 @@ function forwardRawAnthropicRequest(
         bytes,
         chunks,
         errorType: errorType(err),
+        terminationSource: 'upstream_failure',
       });
       onErrorResponse?.(502, `Anthropic upstream unreachable: ${err.message}`);
       if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
@@ -451,6 +454,7 @@ function forwardToAdapter(
     provider: string;
     progressIntervalMs: number;
   },
+  isLocalShutdown: () => boolean = () => false,
 ): Promise<void> {
   return new Promise(resolve => {
     const startedAt = Date.now();
@@ -530,7 +534,7 @@ function forwardToAdapter(
         idleMs: now - lastActivityAt,
         bytes,
         chunks,
-        disconnectSource: 'downstream_client',
+        terminationSource: isLocalShutdown() ? 'local_shutdown' : 'downstream_client',
       });
       adapterResponse?.destroy(new Error('Client disconnected'));
       upstream?.destroy(new Error('Client disconnected'));
@@ -554,6 +558,7 @@ function forwardToAdapter(
         bytes,
         chunks,
         errorType: err.name,
+        terminationSource: 'upstream_failure',
       });
       if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
       res.end(`Relay adapter unreachable: ${err.message}`);
@@ -614,6 +619,7 @@ function forwardToAdapter(
           bytes,
           chunks,
           errorType: err.name,
+          terminationSource: 'upstream_failure',
         });
         if (!res.writableEnded) res.destroy(err);
         resolve();
@@ -688,6 +694,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       options.modelAliases,
     );
   }
+  let shuttingDown = false;
 
   const mitmServer = https.createServer({
     key: certificates.serverKey,
@@ -758,16 +765,23 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         // Claude Code resolves context windows from the response model field, so
         // substituting the canonical route id here breaks its window lookup for
         // patched/alias model ids (wrong auto-compact threshold → agent death).
-        await forwardToAdapter(req, res, rawBody, adapter, messagesEndpoint === 'messages' && options.inferenceLogPath
-          ? {
-              logPath: options.inferenceLogPath,
-              requestId,
-              claudeSessionId,
-              modelId: typeof parsed?.model === 'string' ? parsed.model : 'unknown',
-              provider: route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown',
-              progressIntervalMs: options.responseProgressIntervalMs ?? INFERENCE_PROGRESS_INTERVAL_MS,
-            }
-          : undefined);
+        await forwardToAdapter(
+          req,
+          res,
+          rawBody,
+          adapter,
+          messagesEndpoint === 'messages' && options.inferenceLogPath
+            ? {
+                logPath: options.inferenceLogPath,
+                requestId,
+                claudeSessionId,
+                modelId: typeof parsed?.model === 'string' ? parsed.model : 'unknown',
+                provider: route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown',
+                progressIntervalMs: options.responseProgressIntervalMs ?? INFERENCE_PROGRESS_INTERVAL_MS,
+              }
+            : undefined,
+          () => shuttingDown,
+        );
         return;
       }
 
@@ -808,6 +822,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
               progressIntervalMs: options.responseProgressIntervalMs ?? INFERENCE_PROGRESS_INTERVAL_MS,
             }
           : undefined,
+        () => shuttingDown,
       );
       return;
     }
@@ -893,6 +908,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     inferenceLogPath: options.inferenceLogPath,
     webSocketDiagnosticsLogPath: options.webSocketDiagnosticsLogPath,
     close: async () => {
+      shuttingDown = true;
       for (const socket of sockets) socket.destroy();
       await new Promise<void>(resolve => proxyServer.close(() => resolve()));
       mitmServer.close();

@@ -307,7 +307,7 @@ describe('inference request log', () => {
         lastPartType: 'text-delta',
       });
       writeInferenceResponseLifecycleLog(path, {
-        event: 'translation_failed',
+        event: 'response_failed',
         requestId: 'req-123',
         claudeSessionId: 'not-a-session-id',
         modelId: 'clodex:openai:gpt-test',
@@ -315,7 +315,7 @@ describe('inference request log', () => {
         route: 'translated',
         errorType: 'Error',
         errorSignature: 'reasoning_part_not_found',
-        disconnectSource: 'downstream_client',
+        terminationSource: 'upstream_failure',
       });
       writeInferenceResponseLifecycleLog(path, {
         event: 'response_client_disconnected',
@@ -324,10 +324,18 @@ describe('inference request log', () => {
         modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
-        disconnectSource: 'downstream_client',
+        terminationSource: 'downstream_client',
+      });
+      writeInferenceResponseLifecycleLog(path, {
+        event: 'response_client_disconnected',
+        requestId: 'req-456',
+        modelId: 'clodex:openai:gpt-test',
+        provider: 'openai',
+        route: 'translated',
+        terminationSource: 'local_shutdown',
       });
 
-      const [entry, failure, disconnect] = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const [entry, failure, disconnect, shutdown] = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       expect(entry).toMatchObject({
         event: 'translation_progress',
         requestId: 'req-123',
@@ -346,16 +354,21 @@ describe('inference request log', () => {
       });
       expect(entry).not.toHaveProperty('responseContent');
       expect(failure).toMatchObject({
-        event: 'translation_failed',
+        event: 'response_failed',
         errorType: 'Error',
         errorSignature: 'reasoning_part_not_found',
+        terminationSource: 'upstream_failure',
       });
       expect(failure).not.toHaveProperty('claudeSessionId');
-      expect(failure).not.toHaveProperty('disconnectSource');
       expect(disconnect).toMatchObject({
         event: 'response_client_disconnected',
         claudeSessionId: '00000000-0000-4000-8000-000000000001',
-        disconnectSource: 'downstream_client',
+        terminationSource: 'downstream_client',
+      });
+      expect(shutdown).toMatchObject({
+        event: 'response_client_disconnected',
+        requestId: 'req-456',
+        terminationSource: 'local_shutdown',
       });
     } finally {
       rmSync(dir, { recursive: true, force: true });
