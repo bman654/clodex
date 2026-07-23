@@ -33,7 +33,6 @@ const addTemplateMock = vi.hoisted(() => vi.fn());
 const authenticateProviderMock = vi.hoisted(() => vi.fn());
 const logErrorMock = vi.hoisted(() => vi.fn());
 const logSuccessMock = vi.hoisted(() => vi.fn());
-const authenticateProviderMock = vi.hoisted(() => vi.fn());
 const warnMock = vi.hoisted(() => vi.fn());
 const TEST_HELPER_ID = 'a'.repeat(64);
 const helperRef = (account: string): string => `helper:v1:${TEST_HELPER_ID}:${account}`;
