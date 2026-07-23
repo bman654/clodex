@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/bman654/clodex/compare/v1.2.0...v1.2.1) (2026-07-23)
+
+
+### Bug Fixes
+
+* **patcher:** pin node-gyp-build directly to unbreak fresh installs ([94aeab8](https://github.com/bman654/clodex/commit/94aeab8910d93da8dc3fa1dd0402b24b1faa3601))
+
 ## [1.2.0](https://github.com/bman654/clodex/compare/v1.1.0...v1.2.0) (2026-07-22)
 
 
