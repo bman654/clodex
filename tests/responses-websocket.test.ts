@@ -209,18 +209,83 @@ describe('createResponsesWebSocketFetch', () => {
     }));
   });
 
-  it('surfaces a socket error as SSE and logs privacy-safe diagnostics', async () => {
+  it('retries a pre-frame socket error once on a fresh socket with full context', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
       onDiagnostic: event => diagnostics.push(event),
     });
+    const input = [
+      { role: 'user', content: [{ type: 'input_text', text: 'retry this request' }] },
+    ];
+    const payload = sessionPayload(input);
     const res = await withResponsesWebSocketDiagnosticContext(
       { requestId: 'req-socket-error' },
-      () => wsFetch('https://x', { method: 'POST', headers: {}, body: '{}' }),
+      () => wsFetch('https://x', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(payload),
+      }),
     );
     const socket = lastSocket();
     const error = Object.assign(new Error('secret socket failure'), { code: 'ECONNRESET' });
     socket.emit('error', error);
+
+    expect(fakeSockets).toHaveLength(2);
+    expect(socket.close).toHaveBeenCalledOnce();
+    const replacement = lastSocket();
+    replacement.emit('open');
+    expect(JSON.parse(replacement.send.mock.calls[0]![0] as string)).toEqual({
+      type: 'response.create',
+      ...payload,
+    });
+    emitTextResponse(replacement, 'resp_transport_retry', 'recovered');
+    expect(await readAll(res)).toContain('recovered');
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'started',
+      requestId: 'req-socket-error',
+      connectionId: 1,
+      generation: 'nursery',
+      source: 'socket_error',
+      socketErrorName: 'Error',
+      socketErrorCode: 'ECONNRESET',
+      frameCount: 0,
+      emittedModelData: false,
+      errorMessageBytes: 21,
+      errorMessageHash: expect.stringMatching(/^[a-f0-9]{16}$/),
+    }));
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'recovered',
+      requestId: 'req-socket-error',
+      connectionId: 2,
+      frameCount: 1,
+      emittedModelData: false,
+    }));
+    expect(JSON.stringify(diagnostics)).not.toContain('secret socket failure');
+  });
+
+  it('shares one retry budget across pre-frame socket errors and closes', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([])),
+    });
+
+    const first = lastSocket();
+    first.emit(
+      'error',
+      Object.assign(new Error('first private failure'), { code: 'ECONNRESET' }),
+    );
+    const replacement = lastSocket();
+    replacement.emit('close', 1006, Buffer.from('second private failure'));
+
+    expect(fakeSockets).toHaveLength(2);
     const body = await readAll(res);
     expect(JSON.parse(body.replace(/^data: /, '').trim())).toEqual({
       type: 'error',
@@ -228,23 +293,294 @@ describe('createResponsesWebSocketFetch', () => {
       error: {
         type: 'transport_error',
         code: 'websocket_transport_error',
-        message: 'secret socket failure',
+        message: 'WebSocket closed (1006): second private failure',
         param: null,
       },
     });
     expect(diagnostics).toContainEqual(expect.objectContaining({
-      event: 'ws_response_error',
-      requestId: 'req-socket-error',
-      connectionId: 1,
-      generation: 'isolated',
-      source: 'socket_error',
-      socketErrorName: 'Error',
-      socketErrorCode: 'ECONNRESET',
+      event: 'ws_transport_retry',
+      outcome: 'exhausted',
+      connectionId: 2,
+      source: 'socket_close',
+      closeCode: 1006,
+      frameCount: 0,
       emittedModelData: false,
-      errorMessageBytes: 21,
-      errorMessageHash: expect.stringMatching(/^[a-f0-9]{16}$/),
     }));
-    expect(JSON.stringify(diagnostics)).not.toContain('secret socket failure');
+    const serialized = JSON.stringify(diagnostics);
+    expect(serialized).not.toContain('first private failure');
+    expect(serialized).not.toContain('second private failure');
+  });
+
+  it('retries a synchronous send failure once on a fresh socket', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const payload = sessionPayload([
+      { role: 'user', content: [{ type: 'input_text', text: 'send this request' }] },
+    ]);
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(payload),
+    });
+    const first = lastSocket();
+    first.send.mockImplementationOnce(() => {
+      throw Object.assign(new Error('private synchronous send failure'), { code: 'EPIPE' });
+    });
+
+    expect(() => first.emit('open')).not.toThrow();
+    expect(fakeSockets).toHaveLength(2);
+    const replacement = lastSocket();
+    replacement.emit('open');
+    expect(JSON.parse(replacement.send.mock.calls[0]![0] as string)).toEqual({
+      type: 'response.create',
+      ...payload,
+    });
+    emitTextResponse(replacement, 'resp_sync_send_retry', 'recovered');
+    await readAll(res);
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'started',
+      source: 'socket_send',
+      failureMode: 'synchronous',
+      socketErrorCode: 'EPIPE',
+      frameCount: 0,
+    }));
+    expect(JSON.stringify(diagnostics)).not.toContain('private synchronous send failure');
+  });
+
+  it('retries a callback-reported send failure through the same transport path', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([])),
+    });
+    const first = lastSocket();
+    first.send.mockImplementationOnce((
+      _data: string,
+      callback?: (error?: Error) => void,
+    ) => {
+      callback?.(Object.assign(new Error('private callback send failure'), { code: 'ECONNRESET' }));
+    });
+
+    first.emit('open');
+    expect(fakeSockets).toHaveLength(2);
+    const replacement = lastSocket();
+    replacement.emit('open');
+    emitTextResponse(replacement, 'resp_callback_send_retry', 'recovered');
+    await readAll(res);
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'started',
+      source: 'socket_send',
+      failureMode: 'callback',
+      socketErrorCode: 'ECONNRESET',
+      frameCount: 0,
+    }));
+    expect(JSON.stringify(diagnostics)).not.toContain('private callback send failure');
+  });
+
+  it('does not create a replacement when cancellation occurs while retiring the failed socket', async () => {
+    const controller = new AbortController();
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([])),
+      signal: controller.signal,
+    });
+    const socket = lastSocket();
+    socket.close.mockImplementationOnce(() => controller.abort());
+
+    socket.emit(
+      'error',
+      Object.assign(new Error('private cancelled failure'), { code: 'ECONNRESET' }),
+    );
+
+    expect(fakeSockets).toHaveLength(1);
+    expect(await readAll(res)).toBe('');
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'cancelled',
+      connectionId: 1,
+      frameCount: 0,
+    }));
+    expect(JSON.stringify(diagnostics)).not.toContain('private cancelled failure');
+  });
+
+  it('does not retry after any upstream response frame has arrived', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.created',
+      response: { id: 'resp_started' },
+    })));
+    socket.emit(
+      'error',
+      Object.assign(new Error('private post-frame failure'), { code: 'ECONNRESET' }),
+    );
+
+    expect(fakeSockets).toHaveLength(1);
+    expect(await readAll(res)).toContain('websocket_transport_error');
+    expect(diagnostics).not.toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'started',
+    }));
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_error',
+      connectionId: 1,
+      frameCount: 1,
+      emittedModelData: false,
+    }));
+  });
+
+  it('does not retry after model output has reached the downstream stream', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_text.delta',
+      delta: 'partial output',
+    })));
+    socket.emit(
+      'error',
+      Object.assign(new Error('post-output failure'), { code: 'ECONNRESET' }),
+    );
+
+    expect(fakeSockets).toHaveLength(1);
+    const body = await readAll(res);
+    expect(body).toContain('partial output');
+    expect(body).toContain('websocket_transport_error');
+  });
+
+  it('retries a failed incremental continuation with the complete original context', async () => {
+    const initialInput = [
+      { role: 'user', content: [{ type: 'input_text', text: 'first turn' }] },
+    ];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-transport-continuation',
+    });
+    const first = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload(initialInput)),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    emitTextResponse(socket, 'resp_transport_base', 'first answer');
+    await readAll(first);
+
+    const fullInput = [
+      ...initialInput,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'first answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'second turn' }] },
+    ];
+    const continued = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload(fullInput)),
+    });
+    const incremental = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(incremental.previous_response_id).toBe('resp_transport_base');
+    expect(incremental.input).toEqual([fullInput[2]]);
+
+    socket.emit(
+      'error',
+      Object.assign(new Error('continuation transport failure'), { code: 'ECONNRESET' }),
+    );
+    expect(fakeSockets).toHaveLength(2);
+    const replacement = lastSocket();
+    replacement.emit('open');
+    const replay = JSON.parse(replacement.send.mock.calls[0]![0] as string);
+    expect(replay.previous_response_id).toBeUndefined();
+    expect(replay.input).toEqual(fullInput);
+    emitTextResponse(replacement, 'resp_transport_recovered', 'second answer');
+    await readAll(continued);
+  });
+
+  it('keeps a retried parallel auxiliary request isolated from reusable heads', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-parallel-transport',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const mainInput = [
+      { role: 'user', content: [{ type: 'input_text', text: 'main request' }] },
+    ];
+    const main = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload(mainInput)),
+    });
+    const mainSocket = lastSocket();
+    mainSocket.emit('open');
+
+    const auxiliaryInput = [
+      { role: 'user', content: [{ type: 'input_text', text: 'auxiliary request' }] },
+    ];
+    const auxiliary = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload(auxiliaryInput)),
+    });
+    const failedAuxiliarySocket = lastSocket();
+    failedAuxiliarySocket.emit(
+      'error',
+      Object.assign(new Error('auxiliary transport failure'), { code: 'ECONNRESET' }),
+    );
+    const auxiliaryReplacement = lastSocket();
+    auxiliaryReplacement.emit('open');
+    emitTextResponse(auxiliaryReplacement, 'resp_auxiliary', 'auxiliary answer');
+    await readAll(auxiliary);
+    emitTextResponse(mainSocket, 'resp_main', 'main answer');
+    await readAll(main);
+
+    const nextAuxiliaryInput = [
+      ...auxiliaryInput,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'auxiliary answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'continue auxiliary' }] },
+    ];
+    const nextAuxiliary = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload(nextAuxiliaryInput)),
+    });
+    expect(fakeSockets).toHaveLength(4);
+    const nextAuxiliarySocket = lastSocket();
+    expect(nextAuxiliarySocket).not.toBe(auxiliaryReplacement);
+    nextAuxiliarySocket.emit('open');
+    emitTextResponse(nextAuxiliarySocket, 'resp_auxiliary_next', 'done');
+    await readAll(nextAuxiliary);
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'recovered',
+      generation: 'isolated',
+    }));
   });
 
   it('terminates an unexpected HTTP upgrade response with a schema-valid stream error', async () => {
