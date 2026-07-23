@@ -172,6 +172,7 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
           apiKey,
           baseURL: 'https://chatgpt.com/backend-api/codex',
           headers: {
+            ...spec.headers,
             ...(accountId ? { 'ChatGPT-Account-Id': accountId } : {}),
             originator: 'clodex',
             // Responses-Lite models (backend prefer_websockets/use_responses_lite,
@@ -195,8 +196,12 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
             : {}),
         }
       : spec.authType === 'none'
-        ? { apiKey: '', fetch: fetchWithoutCredentialHeaders }
-        : { apiKey };
+        ? {
+            apiKey: '',
+            ...(spec.headers ? { headers: spec.headers } : {}),
+            fetch: fetchWithoutCredentialHeaders,
+          }
+        : { apiKey, ...(spec.headers ? { headers: spec.headers } : {}) };
     const openai = createOpenAI(oauthOptions);
     return useResponsesEndpoint ? openai.responses(modelId) : openai.chat(modelId);
   }

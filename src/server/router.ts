@@ -483,6 +483,7 @@ async function handleOpenAIChatCompletions(
     });
     await relayAnthropicMessages(res, completionsUrl, forwardBody, apiKey, Boolean(body.stream), {
       authType: model.authType ?? 'api',
+      extraHeaders: model.headers,
       onUpstreamError: options.inferenceLogPath
         ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
             modelId: body.model,

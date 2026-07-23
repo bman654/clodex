@@ -12,7 +12,10 @@ import {
 } from '../src/provider-factory.js';
 import { VERTEX_ANTHROPIC_NPM } from '../src/constants.js';
 
-async function expectCredentialHeadersStripped(fetchImpl: typeof fetch): Promise<void> {
+async function expectCredentialHeadersStripped(
+  fetchImpl: typeof fetch,
+  extraHeaders: Record<string, string> = {},
+): Promise<void> {
   const transport = vi.fn(async () => new Response(null, { status: 204 }));
   vi.stubGlobal('fetch', transport);
   try {
@@ -27,6 +30,7 @@ async function expectCredentialHeadersStripped(fetchImpl: typeof fetch): Promise
         'X-Credential-Id': 'configured-value',
         'Content-Type': 'application/json',
         'X-Custom': 'preserved',
+        ...extraHeaders,
       },
     });
 
@@ -45,6 +49,19 @@ async function expectCredentialHeadersStripped(fetchImpl: typeof fetch): Promise
     }
     expect(headers.get('content-type')).toBe('application/json');
     expect(headers.get('x-custom')).toBe('preserved');
+    for (const [name, value] of Object.entries(extraHeaders)) {
+      if (![
+        'authorization',
+        'x-api-key',
+        'cookie',
+        'proxy-authorization',
+        'x-auth-token',
+        'x-client-secret',
+        'x-credential-id',
+      ].includes(name.toLowerCase())) {
+        expect(headers.get(name)).toBe(value);
+      }
+    }
   } finally {
     vi.unstubAllGlobals();
   }
@@ -309,15 +326,49 @@ describe('createLanguageModel', () => {
       modelId: 'anonymous-model',
       apiKey: '',
       authType: 'none',
+      headers: {
+        Authorization: 'Bearer configured-value',
+        'X-Plan': 'free',
+      },
     });
 
     expect(createOpenAI).toHaveBeenCalledWith({
       apiKey: '',
+      headers: {
+        Authorization: 'Bearer configured-value',
+        'X-Plan': 'free',
+      },
       fetch: expect.any(Function),
     });
     expect(responses).toHaveBeenCalledWith('anonymous-model');
-    const options = createOpenAI.mock.calls[0]?.[0] as { fetch: typeof fetch };
-    await expectCredentialHeadersStripped(options.fetch);
+    const options = createOpenAI.mock.calls[0]?.[0] as {
+      fetch: typeof fetch;
+      headers: Record<string, string>;
+    };
+    await expectCredentialHeadersStripped(options.fetch, options.headers);
+    vi.doUnmock('@ai-sdk/openai');
+  });
+
+  it('forwards configured headers for authenticated OpenAI providers', async () => {
+    const responses = vi.fn((modelId: string) => ({ modelId, provider: 'openai-responses' }));
+    const chat = vi.fn((modelId: string) => ({ modelId, provider: 'openai-chat' }));
+    const createOpenAI = vi.fn(() => ({ responses, chat }));
+    vi.doMock('@ai-sdk/openai', () => ({ createOpenAI }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai',
+      modelId: 'authenticated-model',
+      apiKey: 'provider-key',
+      authType: 'api',
+      headers: { 'X-Plan': 'paid' },
+    });
+
+    expect(createOpenAI).toHaveBeenCalledWith({
+      apiKey: 'provider-key',
+      headers: { 'X-Plan': 'paid' },
+    });
+    expect(responses).toHaveBeenCalledWith('authenticated-model');
     vi.doUnmock('@ai-sdk/openai');
   });
 

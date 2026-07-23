@@ -52,6 +52,7 @@ interface UpstreamRequest {
   url: string;
   authorization: string | undefined;
   xApiKey: string | undefined;
+  xPlan?: string;
   body: any;
 }
 
@@ -74,6 +75,9 @@ async function startUpstream(responseBody: any): Promise<{ baseUrl: string; requ
       xApiKey: Array.isArray(req.headers['x-api-key'])
         ? req.headers['x-api-key'][0]
         : req.headers['x-api-key'],
+      xPlan: Array.isArray(req.headers['x-plan'])
+        ? req.headers['x-plan'][0]
+        : req.headers['x-plan'],
       body: await readRequestBody(req),
     });
 
@@ -342,6 +346,10 @@ describe('server router', () => {
         completionsUrl: `${upstream.baseUrl}/v1/chat/completions`,
         apiKey: '',
         authType: 'none',
+        headers: {
+          Authorization: 'Bearer configured-value',
+          'X-Plan': 'free',
+        },
       }]),
     });
 
@@ -362,6 +370,7 @@ describe('server router', () => {
       url: '/v1/chat/completions',
       authorization: undefined,
       xApiKey: undefined,
+      xPlan: 'free',
     });
   });
 
