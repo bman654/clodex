@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.2.2](https://github.com/bman654/clodex/compare/v1.2.1...v1.2.2) (2026-07-23)
+
+
+### Bug Fixes
+
+* **auth:** enforce anonymous credential boundaries ([#21](https://github.com/bman654/clodex/issues/21)) ([d4ec9e2](https://github.com/bman654/clodex/commit/d4ec9e2b02f5203efad77eb21cf735c13feab8a0))
+* **server:** wait for listener readiness ([#23](https://github.com/bman654/clodex/issues/23)) ([77ae2bf](https://github.com/bman654/clodex/commit/77ae2bf57e92dce4adb61efe4be3b79323b060d8))
+
 ## [1.2.1](https://github.com/bman654/clodex/compare/v1.2.0...v1.2.1) (2026-07-23)
 
 
