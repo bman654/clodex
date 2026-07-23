@@ -178,14 +178,18 @@ describe('selective HTTP proxy', () => {
       expect(receivedPath).toBe('/v1/messages?beta=true');
       expect(receivedAuth).toBe('Bearer subscription-oauth-token');
       expect(receivedBody.equals(body)).toBe(true);
-      // The proxy flushes response_usage/response_completed log lines as it drains
-      // the upstream SSE stream, which can lag slightly behind the client socket
-      // close (reliable locally, flaky in CI). Wait for the terminal event before
-      // asserting instead of reading the log once right after close.
+      // Usage decoding and downstream completion are logged by independent
+      // asynchronous paths. Wait for every asserted lifecycle event instead of
+      // assuming that response_completed is always recorded last.
       const logDeadline = Date.now() + 5000;
       let inferenceLog = readFileSync(inferenceLogPath, 'utf8');
       let entries = inferenceLog.trim().split('\n').map(line => JSON.parse(line));
-      while (!entries.some(entry => entry.event === 'response_completed') && Date.now() < logDeadline) {
+      while (
+        (!entries.some(entry => entry.event === 'response_completed') ||
+          !entries.some(entry => entry.event === 'response_usage' && entry.usageStage === 'message_start') ||
+          !entries.some(entry => entry.event === 'response_usage' && entry.usageStage === 'message_delta')) &&
+        Date.now() < logDeadline
+      ) {
         await new Promise(resolve => setTimeout(resolve, 20));
         inferenceLog = readFileSync(inferenceLogPath, 'utf8');
         entries = inferenceLog.trim().split('\n').map(line => JSON.parse(line));
