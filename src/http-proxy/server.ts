@@ -266,6 +266,7 @@ function forwardRawAnthropicRequest(
   lifecycle?: {
     logPath: string;
     requestId: string;
+    claudeSessionId?: string;
     modelId: string;
     provider: string;
     progressIntervalMs: number;
@@ -291,6 +292,7 @@ function forwardRawAnthropicRequest(
       writeInferenceResponseLifecycleLog(lifecycle.logPath, {
         event,
         requestId: lifecycle.requestId,
+        claudeSessionId: lifecycle.claudeSessionId,
         modelId: lifecycle.modelId,
         provider: lifecycle.provider,
         route: 'passthrough',
@@ -405,6 +407,7 @@ function forwardRawAnthropicRequest(
         idleMs: now - lastActivityAt,
         bytes,
         chunks,
+        disconnectSource: 'downstream_client',
       });
       upstream.destroy(new Error('Client disconnected'));
       done();
@@ -443,6 +446,7 @@ function forwardToAdapter(
   lifecycle?: {
     logPath: string;
     requestId: string;
+    claudeSessionId?: string;
     modelId: string;
     provider: string;
     progressIntervalMs: number;
@@ -470,6 +474,7 @@ function forwardToAdapter(
       writeInferenceResponseLifecycleLog(lifecycle.logPath, {
         event,
         requestId: lifecycle.requestId,
+        claudeSessionId: lifecycle.claudeSessionId,
         modelId: lifecycle.modelId,
         provider: lifecycle.provider,
         route: 'translated',
@@ -525,6 +530,7 @@ function forwardToAdapter(
         idleMs: now - lastActivityAt,
         bytes,
         chunks,
+        disconnectSource: 'downstream_client',
       });
       adapterResponse?.destroy(new Error('Client disconnected'));
       upstream?.destroy(new Error('Client disconnected'));
@@ -756,6 +762,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
           ? {
               logPath: options.inferenceLogPath,
               requestId,
+              claudeSessionId,
               modelId: typeof parsed?.model === 'string' ? parsed.model : 'unknown',
               provider: route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown',
               progressIntervalMs: options.responseProgressIntervalMs ?? INFERENCE_PROGRESS_INTERVAL_MS,
@@ -784,6 +791,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
           ? usage => writeInferenceResponseLifecycleLog(options.inferenceLogPath!, {
               event: 'response_usage',
               requestId,
+              claudeSessionId,
               modelId: typeof parsed?.model === 'string' ? parsed.model : 'unknown',
               provider: 'anthropic',
               route: 'passthrough',
@@ -794,6 +802,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
           ? {
               logPath: options.inferenceLogPath,
               requestId,
+              claudeSessionId,
               modelId: typeof parsed?.model === 'string' ? parsed.model : 'unknown',
               provider: 'anthropic',
               progressIntervalMs: options.responseProgressIntervalMs ?? INFERENCE_PROGRESS_INTERVAL_MS,

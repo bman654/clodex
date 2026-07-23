@@ -70,6 +70,7 @@ const STREAM_KEEPALIVE_PING = 'event: ping\ndata: {"type":"ping"}\n\n';
 function createTranslationLifecycle(
   logPath: string | undefined,
   requestId: string | undefined,
+  claudeSessionId: string | undefined,
   modelId: string,
   provider: string,
 ) {
@@ -92,6 +93,7 @@ function createTranslationLifecycle(
   ) => writeInferenceResponseLifecycleLog(logPath, {
     event,
     requestId,
+    claudeSessionId,
     modelId,
     provider,
     route: 'translated',
@@ -498,17 +500,18 @@ export async function startProxyCatalog(
       // format, endpoint selection, and provider quirks.
       if (usesSdkAdapter) {
         const openAiOAuth = route.npm === '@ai-sdk/openai' && route.authType === 'oauth';
+        const claudeSessionIdHeader = Array.isArray(req.headers['x-claude-code-session-id'])
+          ? req.headers['x-claude-code-session-id'][0]
+          : req.headers['x-claude-code-session-id'];
+        const claudeSessionId = extractClaudeSessionId(anthropicBody, claudeSessionIdHeader);
         const translationLifecycle = createTranslationLifecycle(
           inferenceLogPath,
           relayRequestId,
+          claudeSessionId,
           originalModel,
           route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown',
         );
         const runSdkRequest = async (): Promise<void> => {
-          const claudeSessionIdHeader = Array.isArray(req.headers['x-claude-code-session-id'])
-            ? req.headers['x-claude-code-session-id'][0]
-            : req.headers['x-claude-code-session-id'];
-          const claudeSessionId = extractClaudeSessionId(anthropicBody, claudeSessionIdHeader);
           const params = sdkTranslateRequest(anthropicBody, route.npm!, {
             openAiOAuth,
             claudeSessionId,

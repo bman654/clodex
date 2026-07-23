@@ -115,6 +115,7 @@ describe('selective HTTP proxy', () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'anthropic-inference.jsonl');
     const webSocketDiagnosticsLogPath = join(testHome, 'websocket-diagnostics.jsonl');
+    const claudeSessionId = '00000000-0000-4000-8000-000000000004';
     const previousRequestPreview = process.env['CLODEX_LOG_REQUEST_PREVIEW'];
     process.env['CLODEX_LOG_REQUEST_PREVIEW'] = '1';
     let receivedBody = Buffer.alloc(0);
@@ -166,6 +167,7 @@ describe('selective HTTP proxy', () => {
         'POST /v1/messages?beta=true HTTP/1.1',
         'Host: api.anthropic.com',
         'Authorization: Bearer subscription-oauth-token',
+        `x-claude-code-session-id: ${claudeSessionId}`,
         'Content-Type: application/json',
         `Content-Length: ${body.length}`,
         'Connection: close',
@@ -199,6 +201,7 @@ describe('selective HTTP proxy', () => {
         effort: 'high',
         provider: 'anthropic',
         route: 'passthrough',
+        claudeSessionId,
         requestPreview: 'user: identify this Sonnet request',
       });
       const responseStarted = entries.find(entry => entry.event === 'response_started');
@@ -209,6 +212,7 @@ describe('selective HTTP proxy', () => {
         requestId: entries[0].requestId,
         statusCode: 200,
         route: 'passthrough',
+        claudeSessionId,
       });
       expect(messageStartUsage).toMatchObject({
         event: 'response_usage',
@@ -216,6 +220,7 @@ describe('selective HTTP proxy', () => {
         modelId: 'claude-sonnet-4-6',
         provider: 'anthropic',
         route: 'passthrough',
+        claudeSessionId,
         usageStage: 'message_start',
         inputTokens: 321,
         outputTokens: 1,
@@ -228,6 +233,7 @@ describe('selective HTTP proxy', () => {
         modelId: 'claude-sonnet-4-6',
         provider: 'anthropic',
         route: 'passthrough',
+        claudeSessionId,
         usageStage: 'message_delta',
         inputTokens: 19,
         outputTokens: 8,
@@ -238,6 +244,7 @@ describe('selective HTTP proxy', () => {
         requestId: entries[0].requestId,
         statusCode: 200,
         route: 'passthrough',
+        claudeSessionId,
       });
       expect(inferenceLog).not.toContain('private-image-data');
       expect(inferenceLog).not.toContain('private response text');
@@ -749,6 +756,7 @@ describe('selective HTTP proxy', () => {
   it('closes the adapter request and logs a terminal client disconnect', async () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'client-disconnect-inference.jsonl');
+    const claudeSessionId = '00000000-0000-4000-8000-000000000002';
     let adapterReceivedResolve!: () => void;
     const adapterReceived = new Promise<void>(resolve => { adapterReceivedResolve = resolve; });
     let adapterClosedResolve!: () => void;
@@ -794,6 +802,7 @@ describe('selective HTTP proxy', () => {
         'POST /v1/messages HTTP/1.1',
         'Host: api.anthropic.com',
         'Content-Type: application/json',
+        `x-claude-code-session-id: ${claudeSessionId}`,
         `Content-Length: ${Buffer.byteLength(body)}`,
         '',
         '',
@@ -805,10 +814,13 @@ describe('selective HTTP proxy', () => {
 
       const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       const requestEntry = entries.find(entry => !entry.event);
+      expect(requestEntry.claudeSessionId).toBe(claudeSessionId);
       expect(entries).toContainEqual(expect.objectContaining({
         event: 'response_client_disconnected',
         requestId: requestEntry.requestId,
+        claudeSessionId,
         phase: 'waiting_for_headers',
+        disconnectSource: 'downstream_client',
       }));
       expect(entries.some(entry => entry.event === 'response_completed')).toBe(false);
       expect(entries.some(entry => entry.event === 'response_failed')).toBe(false);

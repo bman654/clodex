@@ -231,6 +231,7 @@ export type InferenceResponsePhase =
 export interface InferenceResponseLifecycleLogEntry {
   event: InferenceResponseLifecycleEvent;
   requestId: string;
+  claudeSessionId?: string;
   modelId: string;
   provider: string;
   route: 'passthrough' | 'translated';
@@ -254,6 +255,7 @@ export interface InferenceResponseLifecycleLogEntry {
   lastPartType?: string;
   errorType?: string;
   errorSignature?: string;
+  disconnectSource?: 'downstream_client';
 }
 
 export type ProxyLifecycleEvent =
@@ -409,6 +411,7 @@ export function writeInferenceResponseLifecycleLog(
   path: string,
   entry: InferenceResponseLifecycleLogEntry,
 ): void {
+  const claudeSessionId = safeClaudeSessionId(entry.claudeSessionId);
   const statusCode = nonNegativeInteger(entry.statusCode);
   const durationMs = nonNegativeInteger(entry.durationMs);
   const timeToFirstByteMs = nonNegativeInteger(entry.timeToFirstByteMs);
@@ -428,6 +431,7 @@ export function writeInferenceResponseLifecycleLog(
     timestamp: new Date().toISOString(),
     event: entry.event,
     requestId: compactLogValue(entry.requestId, 100),
+    ...(claudeSessionId ? { claudeSessionId } : {}),
     modelId: compactLogValue(entry.modelId),
     provider: compactLogValue(entry.provider, 200),
     route: entry.route,
@@ -451,6 +455,9 @@ export function writeInferenceResponseLifecycleLog(
     ...(entry.lastPartType ? { lastPartType: compactLogValue(entry.lastPartType, 100) } : {}),
     ...(entry.errorType ? { errorType: compactLogValue(entry.errorType, 200) } : {}),
     ...(entry.errorSignature ? { errorSignature: compactLogValue(entry.errorSignature, 100) } : {}),
+    ...(entry.event === 'response_client_disconnected' && entry.disconnectSource
+      ? { disconnectSource: entry.disconnectSource }
+      : {}),
   }));
 }
 

@@ -293,6 +293,7 @@ describe('inference request log', () => {
       writeInferenceResponseLifecycleLog(path, {
         event: 'translation_progress',
         requestId: 'req-123',
+        claudeSessionId: '00000000-0000-4000-8000-000000000001',
         modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
@@ -308,17 +309,29 @@ describe('inference request log', () => {
       writeInferenceResponseLifecycleLog(path, {
         event: 'translation_failed',
         requestId: 'req-123',
+        claudeSessionId: 'not-a-session-id',
         modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
         errorType: 'Error',
         errorSignature: 'reasoning_part_not_found',
+        disconnectSource: 'downstream_client',
+      });
+      writeInferenceResponseLifecycleLog(path, {
+        event: 'response_client_disconnected',
+        requestId: 'req-123',
+        claudeSessionId: '00000000-0000-4000-8000-000000000001',
+        modelId: 'clodex:openai:gpt-test',
+        provider: 'openai',
+        route: 'translated',
+        disconnectSource: 'downstream_client',
       });
 
-      const [entry, failure] = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const [entry, failure, disconnect] = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       expect(entry).toMatchObject({
         event: 'translation_progress',
         requestId: 'req-123',
+        claudeSessionId: '00000000-0000-4000-8000-000000000001',
         modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
@@ -336,6 +349,13 @@ describe('inference request log', () => {
         event: 'translation_failed',
         errorType: 'Error',
         errorSignature: 'reasoning_part_not_found',
+      });
+      expect(failure).not.toHaveProperty('claudeSessionId');
+      expect(failure).not.toHaveProperty('disconnectSource');
+      expect(disconnect).toMatchObject({
+        event: 'response_client_disconnected',
+        claudeSessionId: '00000000-0000-4000-8000-000000000001',
+        disconnectSource: 'downstream_client',
       });
     } finally {
       rmSync(dir, { recursive: true, force: true });

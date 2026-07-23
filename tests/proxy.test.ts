@@ -15,6 +15,7 @@ function postToProxy(
   body: unknown,
   relayRequestId?: string,
   path = '/v1/messages',
+  claudeSessionId?: string,
 ): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
@@ -30,6 +31,7 @@ function postToProxy(
           'anthropic-version': '2023-06-01',
           'Content-Length': Buffer.byteLength(payload),
           ...(relayRequestId ? { 'x-relay-request-id': relayRequestId } : {}),
+          ...(claudeSessionId ? { 'x-claude-code-session-id': claudeSessionId } : {}),
         },
       },
       (res) => {
@@ -779,7 +781,15 @@ describe('SDK translated error logging', () => {
         '/v1/messages/count_tokens',
       );
       const expectedInputTokens = JSON.parse(countResponse.body).input_tokens;
-      const res = await postToProxy(handle.port, handle.token, requestBody, 'req-success-1');
+      const claudeSessionId = '00000000-0000-4000-8000-000000000003';
+      const res = await postToProxy(
+        handle.port,
+        handle.token,
+        requestBody,
+        'req-success-1',
+        '/v1/messages',
+        claudeSessionId,
+      );
 
       expect(res.status).toBe(200);
       expect(res.body).toContain('event: message_stop');
@@ -797,15 +807,18 @@ describe('SDK translated error logging', () => {
       expect(entries).toContainEqual(expect.objectContaining({
         event: 'translation_dispatched',
         requestId: 'req-success-1',
+        claudeSessionId,
         phase: 'waiting_for_sdk',
       }));
       expect(entries).toContainEqual(expect.objectContaining({
         event: 'translation_started',
         requestId: 'req-success-1',
+        claudeSessionId,
       }));
       expect(entries).toContainEqual(expect.objectContaining({
         event: 'translation_completed',
         requestId: 'req-success-1',
+        claudeSessionId,
         lastPartType: 'finish',
       }));
       const completed = entries.find(entry => entry.event === 'translation_completed');
