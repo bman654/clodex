@@ -2,6 +2,7 @@
 // Adapted from cucoleadan/opencode-cowork-proxy (MIT)
 import { createServer } from 'node:http';
 import type { ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { appendFileSync, openSync, writeSync, closeSync } from 'node:fs';
 import { readBody, extractApiKey, sendJson } from './http-utils.js';
 import { formatAnthropicModelEntry, formatAnthropicModelList } from './server/models.js';
@@ -46,6 +47,7 @@ import {
 } from './anthropic-endpoints.js';
 import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-websocket.js';
 import { resolveContextWindow } from './context-window.js';
+import { listenTcpServer } from './listener-ready.js';
 
 type ProxyLog = (message: string | (() => string)) => void;
 
@@ -261,7 +263,7 @@ export interface ProxyModelAlias {
 }
 
 /** Multi-model proxy: routes each request by body.model to the correct upstream. */
-export function startProxyCatalog(
+export async function startProxyCatalog(
   routes: ProxyRoute[],
   defaultAliasId: string,
   debug = false,
@@ -274,7 +276,7 @@ export function startProxyCatalog(
   silenceSdkWarnings();
 
   if (routes.length === 0) {
-    return Promise.reject(new Error('Proxy catalog requires at least one route'));
+    throw new Error('Proxy catalog requires at least one route');
   }
 
   const byAlias = new Map(routes.map(r => [r.aliasId, r]));
@@ -667,26 +669,26 @@ export function startProxyCatalog(
     anthropicError(res, 404, `Unknown endpoint: ${req.method} ${req.url}`);
   });
 
-  return new Promise((resolve, reject) => {
-    server.on('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address();
-      if (!addr || typeof addr === 'string') {
-        reject(new Error('Failed to bind proxy'));
-        return;
-      }
-      plog(() => `started on port ${addr.port}, catalog=${routes.length} model(s), default=${defaultRoute.aliasId}`);
-      resolve({
-        port: addr.port,
-        token: proxyToken,
-        close: () => {
-          process.off('unhandledRejection', onRejection);
-          process.off('uncaughtException', onException);
-          server.close();
-        },
-      });
-    });
-  });
+  let address: AddressInfo;
+  try {
+    address = await listenTcpServer(server, 0, '127.0.0.1');
+  } catch (error) {
+    process.off('unhandledRejection', onRejection);
+    process.off('uncaughtException', onException);
+    throw error;
+  }
+  plog(() =>
+    `started on port ${address.port}, catalog=${routes.length} model(s), default=${defaultRoute.aliasId}`,
+  );
+  return {
+    port: address.port,
+    token: proxyToken,
+    close: () => {
+      process.off('unhandledRejection', onRejection);
+      process.off('uncaughtException', onException);
+      server.close();
+    },
+  };
 }
 
 /** Single-model proxy — backward-compatible wrapper around startProxyCatalog. */

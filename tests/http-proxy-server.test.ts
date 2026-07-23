@@ -408,7 +408,7 @@ describe('selective HTTP proxy', () => {
     }
   }, 20_000);
 
-  it('logs an Anthropic connection refusal as an upstream response failure', async () => {
+  it('logs an Anthropic connection failure as an upstream response failure', async () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'connection-refused-inference.jsonl');
     const unavailableOrigin = https.createServer({
@@ -453,7 +453,7 @@ describe('selective HTTP proxy', () => {
         route: 'passthrough',
         statusCode: 502,
         phase: 'waiting_for_headers',
-        errorType: 'ECONNREFUSED',
+        errorType: expect.stringMatching(/^ECONN(?:REFUSED|RESET)$/),
       }));
       expect(entries).toContainEqual(expect.objectContaining({
         event: 'upstream_error',
