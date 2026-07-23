@@ -20,6 +20,7 @@ import {
   writeInferenceResponseLifecycleLog,
   writeInferenceResponseErrorLog,
   writeWebSocketDiagnosticRequestLog,
+  type InferenceFailureSource,
   type InferenceResponsePhase,
 } from '../trace-log.js';
 
@@ -156,6 +157,8 @@ export interface HttpProxyOptions {
   anthropicRejectUnauthorized?: boolean;
   /** Test hook for observing relay-route isolation without calling an AI provider. */
   adapterHandle?: ProxyHandle;
+  /** Test hook for exercising adapter request transport failures. */
+  adapterRequest?: typeof http.request;
   /** Test hook; production emits a progress record every 30 seconds. */
   responseProgressIntervalMs?: number;
 }
@@ -446,6 +449,7 @@ function forwardToAdapter(
   res: http.ServerResponse,
   rawBody: Buffer,
   adapter: ProxyHandle,
+  adapterRequest: typeof http.request = http.request,
   lifecycle?: {
     logPath: string;
     requestId: string;
@@ -541,7 +545,10 @@ function forwardToAdapter(
       resolve();
     });
 
-    const failAdapterRequest = (err: Error) => {
+    const failAdapterRequest = (
+      err: Error,
+      failureSource: InferenceFailureSource,
+    ) => {
       if (clientDisconnected) {
         resolve();
         return;
@@ -558,6 +565,8 @@ function forwardToAdapter(
         bytes,
         chunks,
         errorType: err.name,
+        errorCode: (err as NodeJS.ErrnoException).code,
+        failureSource,
         terminationSource: 'upstream_failure',
       });
       if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
@@ -565,7 +574,7 @@ function forwardToAdapter(
       resolve();
     };
 
-    upstream = http.request({
+    upstream = adapterRequest({
       hostname: '127.0.0.1',
       port: adapter.port,
       method: 'POST',
@@ -601,7 +610,10 @@ function forwardToAdapter(
       copyResponse(upstreamRes, res, undefined, lifecycle
         ? usage => writeLifecycle('response_usage', usage)
         : undefined);
-      const failAdapterResponse = (err: Error) => {
+      const failAdapterResponse = (
+        err: Error,
+        failureSource: InferenceFailureSource,
+      ) => {
         if (clientDisconnected) {
           resolve();
           return;
@@ -619,6 +631,8 @@ function forwardToAdapter(
           bytes,
           chunks,
           errorType: err.name,
+          errorCode: (err as NodeJS.ErrnoException).code,
+          failureSource,
           terminationSource: 'upstream_failure',
         });
         if (!res.writableEnded) res.destroy(err);
@@ -629,16 +643,27 @@ function forwardToAdapter(
         lastActivityAt = Date.now();
         resolve();
       });
-      upstreamRes.once('error', failAdapterResponse);
-      upstreamRes.once('aborted', () => failAdapterResponse(new Error('Relay adapter response aborted')));
+      upstreamRes.once('error', err => failAdapterResponse(err, 'adapter_response_error'));
+      upstreamRes.once('aborted', () => failAdapterResponse(
+        new Error('Relay adapter response aborted'),
+        'adapter_response_aborted',
+      ));
       upstreamRes.once('close', () => {
-        if (!upstreamRes.complete) failAdapterResponse(new Error('Relay adapter response closed before completion'));
+        if (!upstreamRes.complete) {
+          failAdapterResponse(
+            new Error('Relay adapter response closed before completion'),
+            'adapter_response_close',
+          );
+        }
       });
     });
-    upstream.once('error', failAdapterRequest);
+    upstream.once('error', err => failAdapterRequest(err, 'adapter_request_error'));
     upstream.once('close', () => {
       if (!headersReceived && !failed) {
-        failAdapterRequest(new Error('Relay adapter connection closed before a response'));
+        failAdapterRequest(
+          new Error('Relay adapter connection closed before a response'),
+          'adapter_request_close',
+        );
       }
     });
     upstream.end(rawBody);
@@ -770,6 +795,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
           res,
           rawBody,
           adapter,
+          options.adapterRequest,
           messagesEndpoint === 'messages' && options.inferenceLogPath
             ? {
                 logPath: options.inferenceLogPath,

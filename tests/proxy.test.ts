@@ -672,6 +672,65 @@ describe('SDK translated error logging', () => {
     }
   }, 20_000);
 
+  it('records the bounded WebSocket transport code in the translation lifecycle', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-sdk-transport-error-'));
+    const inferenceLogPath = join(dir, 'inference.jsonl');
+    const upstream = http.createServer((req, res) => {
+      req.resume();
+      res.writeHead(400, {
+        'Content-Type': 'application/json',
+        'Connection': 'close',
+      });
+      res.end(JSON.stringify({
+        error: {
+          type: 'transport_error',
+          code: 'websocket_transport_error',
+          message: 'transport unavailable',
+        },
+      }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstream.once('error', reject);
+      upstream.listen(0, '127.0.0.1', () => resolve());
+    });
+    const address = upstream.address();
+    if (!address || typeof address === 'string') throw new Error('test upstream did not bind');
+
+    const route: ProxyRoute = {
+      aliasId: 'clodex:test:translated-model',
+      realModelId: 'gpt-5.6-test',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: `http://127.0.0.1:${address.port}/v1`,
+      providerId: 'test-provider',
+    };
+    const handle = await startProxyCatalog([route], route.aliasId, false, inferenceLogPath);
+
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'test transport failure' }],
+        stream: true,
+      }, 'req-transport-error');
+
+      expect(res.status).toBe(400);
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'translation_failed',
+        requestId: 'req-transport-error',
+        errorCode: 'websocket_transport_error',
+      }));
+    } finally {
+      handle.close();
+      await new Promise<void>(resolve => upstream.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it('translates an OpenAI context overflow into an Anthropic prompt-too-long error', async () => {
     const upstream = http.createServer((req, res) => {
       req.resume();

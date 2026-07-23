@@ -155,11 +155,16 @@ function createTranslationLifecycle(
       clearInterval(timer);
       write('translation_cancelled', snapshot(Date.now()));
     },
-    fail(errorType: string, errorSignature?: string) {
+    fail(errorType: string, errorSignature?: string, errorCode?: string) {
       if (stopped) return;
       stopped = true;
       clearInterval(timer);
-      write('translation_failed', { ...snapshot(Date.now()), errorType, errorSignature });
+      write('translation_failed', {
+        ...snapshot(Date.now()),
+        errorType,
+        errorSignature,
+        errorCode,
+      });
     },
   };
 }
@@ -660,6 +665,7 @@ export async function startProxyCatalog(
           translationLifecycle?.fail(
             err instanceof Error ? err.name : 'UpstreamError',
             sdkTranslationErrorSignature(err),
+            details?.transportCode,
           );
           const contextLengthExceeded = upstreamStatus === 400
             && isContextLengthExceededError(err, message);
