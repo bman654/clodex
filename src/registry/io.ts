@@ -119,6 +119,41 @@ function parseProvider(raw: unknown): RegistryProvider | null {
   return provider;
 }
 
+function hasOwn(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function hasValidStrictProviderFields(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  const provider = raw as Record<string, unknown>;
+  if (hasOwn(provider, 'subscriptionFilter') && provider.subscriptionFilter !== 'free') {
+    return false;
+  }
+  if (
+    hasOwn(provider, 'authType')
+    && provider.authType !== 'api'
+    && provider.authType !== 'oauth'
+    && provider.authType !== 'none'
+  ) {
+    return false;
+  }
+  if (hasOwn(provider, 'refreshedAt') && typeof provider.refreshedAt !== 'string') {
+    return false;
+  }
+  if (hasOwn(provider, 'modelsCache')) {
+    const cache = provider.modelsCache;
+    if (!cache || typeof cache !== 'object' || Array.isArray(cache)) return false;
+    const fields = cache as Record<string, unknown>;
+    if (typeof fields.fetchedAt !== 'string' || !Array.isArray(fields.models)) {
+      return false;
+    }
+    if (fields.models.some(model => !model || typeof model !== 'object' || Array.isArray(model))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function parseRegistry(raw: unknown): ProviderRegistry {
   const empty: ProviderRegistry = { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
   if (!raw || typeof raw !== 'object') return empty;
@@ -152,7 +187,7 @@ function parseRegistryStrict(raw: unknown): ProviderRegistry {
     throw new Error('Provider registry is missing its providers list.');
   }
   for (const entry of data.providers) {
-    if (!parseProvider(entry)) {
+    if (!parseProvider(entry) || !hasValidStrictProviderFields(entry)) {
       throw new Error('Provider registry contains an invalid provider entry.');
     }
   }

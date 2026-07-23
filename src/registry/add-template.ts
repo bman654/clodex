@@ -34,6 +34,7 @@ export interface AddTemplateResult {
   error?: string;
   hint?: string;
   credentialCleanupPending?: boolean;
+  credentialCleanupReconciled?: boolean;
 }
 
 async function probeTemplatePackage(template: ProviderTemplate): Promise<string | null> {
@@ -228,11 +229,14 @@ export async function addProviderFromTemplate(
     }
   } else {
     try {
-      await reconcilePendingCredentialDeletes();
+      const cleanup = await reconcilePendingCredentialDeletes();
+      result.credentialCleanupPending =
+        cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
     } catch {
-      // The failed credential remains journaled for a later retry.
+      result.credentialCleanupPending = true;
     }
   }
+  result.credentialCleanupReconciled = true;
 
   if (result.added) enrichPricingAsync();
   return result;

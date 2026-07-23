@@ -30,6 +30,7 @@ const passwordMock = vi.hoisted(() => vi.fn());
 const spinnerStartMock = vi.hoisted(() => vi.fn());
 const spinnerStopMock = vi.hoisted(() => vi.fn());
 const addTemplateMock = vi.hoisted(() => vi.fn());
+const authenticateProviderMock = vi.hoisted(() => vi.fn());
 const logErrorMock = vi.hoisted(() => vi.fn());
 const logSuccessMock = vi.hoisted(() => vi.fn());
 const authenticateProviderMock = vi.hoisted(() => vi.fn());
@@ -69,6 +70,14 @@ vi.mock('../src/registry/add-template.js', async importOriginal => {
   return {
     ...actual,
     addProviderFromTemplate: addTemplateMock,
+  };
+});
+
+vi.mock('../src/registry/provider-auth.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/registry/provider-auth.js')>();
+  return {
+    ...actual,
+    authenticateProvider: authenticateProviderMock,
   };
 });
 
@@ -300,6 +309,11 @@ describe('provider command cleanup reconciliation', () => {
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'clodex-provider-cleanup-'));
     process.env.CLODEX_HOME = home;
+    selectMock.mockReset();
+    passwordMock.mockReset();
+    addTemplateMock.mockReset();
+    authenticateProviderMock.mockReset();
+    logErrorMock.mockReset();
     warnMock.mockReset();
   });
 
@@ -342,7 +356,7 @@ describe('provider command cleanup reconciliation', () => {
     const registry = emptyRegistry();
     registry.providers.push(openaiEntry({ authRef }));
     withRegistryWriteLockSync(() => saveRegistry(registry));
-    vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(false);
+    const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(false);
 
     await expect(runProvidersCommand(['remove', 'openai'])).resolves.toBe(0);
 
@@ -350,7 +364,85 @@ describe('provider command cleanup reconciliation', () => {
     expect(warnMock).toHaveBeenCalledWith(
       'Credential cleanup is pending and will be retried by the next provider command.',
     );
+    expect(deleteSpy).toHaveBeenCalledTimes(1);
     await expect(loadPendingCredentialDeletes()).resolves.toEqual([authRef]);
+  });
+
+  it('retries queued cleanup when the add picker is cancelled', async () => {
+    const authRef = helperRef('provider:retired');
+    await queueCredentialDelete(authRef);
+    const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(true);
+    selectMock.mockResolvedValue(Symbol('cancel'));
+
+    await expect(runProvidersCommand(['add'])).resolves.toBe(0);
+
+    expect(deleteSpy).toHaveBeenCalledOnce();
+    expect(deleteSpy).toHaveBeenCalledWith(authRef);
+    await expect(loadPendingCredentialDeletes()).resolves.toEqual([]);
+    expect(warnMock).not.toHaveBeenCalled();
+  });
+
+  it('retries queued cleanup when an add flow returns before mutation', async () => {
+    const authRef = helperRef('provider:retired');
+    await queueCredentialDelete(authRef);
+    const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(true);
+    selectMock.mockResolvedValue('apikey');
+    passwordMock.mockResolvedValue('test-key');
+    addTemplateMock.mockResolvedValue({
+      added: false,
+      error: 'Provider package is unavailable.',
+    });
+
+    await expect(runProvidersCommand(['add'])).resolves.toBe(1);
+
+    expect(deleteSpy).toHaveBeenCalledOnce();
+    expect(deleteSpy).toHaveBeenCalledWith(authRef);
+    await expect(loadPendingCredentialDeletes()).resolves.toEqual([]);
+    expect(warnMock).not.toHaveBeenCalled();
+  });
+
+  it('retries queued cleanup when remove returns before mutation', async () => {
+    const authRef = helperRef('provider:retired');
+    await queueCredentialDelete(authRef);
+    const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(true);
+
+    await expect(runProvidersCommand(['remove', 'missing-provider'])).resolves.toBe(1);
+
+    expect(deleteSpy).toHaveBeenCalledOnce();
+    expect(deleteSpy).toHaveBeenCalledWith(authRef);
+    await expect(loadPendingCredentialDeletes()).resolves.toEqual([]);
+    expect(warnMock).not.toHaveBeenCalled();
+  });
+
+  it('retries queued cleanup when authorization is cancelled', async () => {
+    const authRef = helperRef('provider:retired');
+    await queueCredentialDelete(authRef);
+    const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(true);
+    authenticateProviderMock.mockRejectedValue(new Error('Cancelled'));
+
+    await expect(runProvidersCommand(['auth', 'openai'])).resolves.toBe(0);
+
+    expect(deleteSpy).toHaveBeenCalledOnce();
+    expect(deleteSpy).toHaveBeenCalledWith(authRef);
+    await expect(loadPendingCredentialDeletes()).resolves.toEqual([]);
+    expect(warnMock).not.toHaveBeenCalled();
+  });
+
+  it('warns once when authorization fails and queued cleanup remains', async () => {
+    const authRef = helperRef('provider:retired');
+    await queueCredentialDelete(authRef);
+    const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(false);
+    authenticateProviderMock.mockRejectedValue(new Error('Authorization failed.'));
+
+    await expect(runProvidersCommand(['auth', 'openai'])).resolves.toBe(1);
+
+    expect(deleteSpy).toHaveBeenCalledOnce();
+    expect(deleteSpy).toHaveBeenCalledWith(authRef);
+    await expect(loadPendingCredentialDeletes()).resolves.toEqual([authRef]);
+    expect(warnMock).toHaveBeenCalledTimes(1);
+    expect(warnMock).toHaveBeenCalledWith(
+      'Credential cleanup is pending and will be retried by the next provider command.',
+    );
   });
 });
 

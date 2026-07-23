@@ -16,6 +16,7 @@ export interface RemoveProviderResult {
   name?: string;
   credentialDeleted: boolean;
   credentialCleanupPending?: boolean;
+  credentialCleanupReconciled?: boolean;
   error?: string;
 }
 
@@ -70,6 +71,7 @@ export async function removeProviderFromRegistry(
     } catch {
       removal.result.credentialCleanupPending = true;
     }
+    removal.result.credentialCleanupReconciled = true;
   }
   return removal.result;
 }

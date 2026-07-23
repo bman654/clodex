@@ -151,6 +151,74 @@ describe('registry io', () => {
     expect(readFileSync(path, 'utf8')).toBe(serialized);
   });
 
+  it.each([
+    ['subscriptionFilter', { subscriptionFilter: 'paid' }],
+    ['authType', { authType: 'token' }],
+    ['refreshedAt', { refreshedAt: 42 }],
+    ['modelsCache metadata', { modelsCache: { fetchedAt: 42, models: [] } }],
+    ['modelsCache entries', { modelsCache: {
+      fetchedAt: '2026-06-09T00:00:00.000Z',
+      models: [{ id: 'model-a' }, null],
+    } }],
+  ])('rejects malformed present %s without rewriting the registry', (_field, malformed) => {
+    const path = join(home, 'providers.json');
+    const raw = {
+      schemaVersion: 1,
+      providers: [{
+        id: 'example',
+        templateId: 'example',
+        name: 'Example',
+        enabled: true,
+        authRef: 'keyring:provider:example',
+        api: { npm: '@example/sdk' },
+        addedAt: '2026-06-09T00:00:00.000Z',
+        ...malformed,
+      }],
+    };
+    const serialized = JSON.stringify(raw);
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path, serialized);
+
+    expect(() => loadRegistryStrict(path)).toThrow(
+      'Provider registry contains an invalid provider entry.',
+    );
+    expect(() => toggleProviderEnabled('example')).toThrow(
+      'Provider registry contains an invalid provider entry.',
+    );
+    expect(readFileSync(path, 'utf8')).toBe(serialized);
+  });
+
+  it('accepts unknown provider and model fields during strict loading', () => {
+    const path = join(home, 'providers.json');
+    const raw = {
+      schemaVersion: 1,
+      providers: [{
+        id: 'example',
+        templateId: 'example',
+        name: 'Example',
+        enabled: true,
+        authRef: 'keyring:provider:example',
+        api: { npm: '@example/sdk' },
+        addedAt: '2026-06-09T00:00:00.000Z',
+        futureProviderField: { revision: 2 },
+        modelsCache: {
+          fetchedAt: '2026-06-09T00:00:00.000Z',
+          models: [{
+            id: 'model-a',
+            name: 'Model A',
+            upstreamModelId: 'model-a',
+            modelFormat: 'openai',
+            futureModelField: 'supported',
+          }],
+        },
+      }],
+    };
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path, JSON.stringify(raw));
+
+    expect(loadRegistryStrict(path).providers[0]?.id).toBe('example');
+  });
+
   it('applies supported migrations only after strict validation', () => {
     const path = join(home, 'providers.json');
     const raw = {
