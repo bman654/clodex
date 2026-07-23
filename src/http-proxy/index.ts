@@ -9,7 +9,11 @@ import { buildHttpProxyRoutes, type HttpProxyRouteResult } from './routes.js';
 import { startHttpProxy, type HttpProxyHandle } from './server.js';
 import { ensureHttpProxyCaBundle } from './ca.js';
 import { registerServerRuntimeState, unregisterServerRuntimeState } from '../server-runtime.js';
-import { getInferenceRequestLogPath, getSessionLogPath } from '../trace-log.js';
+import {
+  getInferenceRequestLogPath,
+  getSessionLogPath,
+  writeProxyLifecycleLog,
+} from '../trace-log.js';
 
 export interface LoadedHttpProxyRoutes extends HttpProxyRouteResult {
   favoriteCount: number;
@@ -135,12 +139,13 @@ export async function runHttpProxyServerCommand(
   const webSocketDiagnosticsLogPath = webSocketDiagnostics
     ? getSessionLogPath('server-websocket-diagnostics', 'jsonl')
     : undefined;
+  const inferenceLogPath = getInferenceRequestLogPath();
   let started: Awaited<ReturnType<typeof startConfiguredHttpProxy>>;
   try {
     started = await startConfiguredHttpProxy(
       port ?? DEFAULT_SERVER_PORT,
       debug,
-      getInferenceRequestLogPath(),
+      inferenceLogPath,
       undefined,
       webSocketDiagnosticsLogPath,
     );
@@ -150,6 +155,13 @@ export async function runHttpProxyServerCommand(
   }
 
   const { handle, loaded } = started;
+  writeProxyLifecycleLog(inferenceLogPath, {
+    event: 'proxy_started',
+    pid: process.pid,
+    parentPid: process.ppid,
+    host: handle.host,
+    port: handle.port,
+  });
   console.log('');
   console.log(pc.bold(pc.green('clodex proxy-mode server running')));
   console.log(`  HTTPS_PROXY=http://127.0.0.1:${handle.port}`);
@@ -183,7 +195,22 @@ export async function runHttpProxyServerCommand(
   }
 
   await waitForShutdown();
+  writeProxyLifecycleLog(inferenceLogPath, {
+    event: 'proxy_stopping',
+    pid: process.pid,
+    parentPid: process.ppid,
+    host: handle.host,
+    port: handle.port,
+    reason: 'shutdown signal received',
+  });
   if (!noDiscovery) unregisterServerRuntimeState();
   await handle.close();
+  writeProxyLifecycleLog(inferenceLogPath, {
+    event: 'proxy_stopped',
+    pid: process.pid,
+    parentPid: process.ppid,
+    host: handle.host,
+    port: handle.port,
+  });
   return 0;
 }
