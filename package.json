@@ -52,6 +52,7 @@
     "https-proxy-agent": "9.1.0",
     "ipaddr.js": "2.4.0",
     "node-forge": "1.4.0",
+    "node-gyp-build": "4.8.4",
     "open": "11.0.0",
     "picocolors": "1.1.1",
     "tweakcc": "4.3.0",
