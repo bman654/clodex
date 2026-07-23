@@ -5,6 +5,7 @@ import type { ProviderRegistry } from '../src/registry/types.js';
 
 vi.mock('../src/registry/io.js', () => ({
   loadRegistry: vi.fn(),
+  loadRegistryStrict: vi.fn(),
   saveRegistry: vi.fn(),
 }));
 
@@ -43,7 +44,7 @@ describe('registry/refresh-models', () => {
           api: {},
         }],
       };
-      vi.mocked(io.loadRegistry).mockReturnValue(mockRegistry);
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
 
       // Codex endpoint returns valid models
       vi.mocked(global.fetch).mockResolvedValueOnce({
@@ -79,7 +80,7 @@ describe('registry/refresh-models', () => {
           api: {},
         }],
       };
-      vi.mocked(io.loadRegistry).mockReturnValue(mockRegistry);
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
 
       // 1. Codex endpoint 404s
       vi.mocked(global.fetch).mockResolvedValueOnce({
@@ -125,7 +126,7 @@ describe('registry/refresh-models', () => {
           api: {},
         }],
       };
-      vi.mocked(io.loadRegistry).mockReturnValue(mockRegistry);
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
 
       // Both endpoints fail
       vi.mocked(global.fetch).mockResolvedValue({
@@ -167,7 +168,7 @@ describe('registry/refresh-models', () => {
           },
         }],
       };
-      vi.mocked(io.loadRegistry).mockReturnValue(mockRegistry);
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
 
       // Both live endpoints fail — would normally fall back to the static seed.
       vi.mocked(global.fetch).mockResolvedValue({
@@ -199,7 +200,7 @@ describe('registry/refresh-models', () => {
           api: {},
         }],
       };
-      vi.mocked(io.loadRegistry).mockReturnValue(mockRegistry);
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
 
       vi.mocked(global.fetch).mockResolvedValueOnce({
         ok: true,
@@ -239,7 +240,7 @@ describe('registry/refresh-models', () => {
           api: {},
         }],
       };
-      vi.mocked(io.loadRegistry).mockReturnValue(mockRegistry);
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
 
       // Both live endpoints fail → static seed.
       vi.mocked(global.fetch).mockResolvedValue({ ok: false, status: 500 } as Response);

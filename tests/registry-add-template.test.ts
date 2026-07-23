@@ -170,7 +170,7 @@ describe('registry/add-template', () => {
   });
 
   it('fails if provider already exists and replaceExisting is not set', async () => {
-    vi.mocked(io.loadRegistry).mockReturnValue({
+    vi.mocked(io.loadRegistryStrict).mockReturnValue({
       schemaVersion: 1,
       providers: [{
         id: 'test-template',
@@ -226,7 +226,7 @@ describe('registry/add-template', () => {
 
   it('serializes concurrent writes to the same provider credential', async () => {
     let registry: ProviderRegistry = { schemaVersion: 1, providers: [] };
-    vi.mocked(io.loadRegistry).mockImplementation(() =>
+    vi.mocked(io.loadRegistryStrict).mockImplementation(() =>
       structuredClone(registry));
     vi.mocked(io.saveRegistry).mockImplementation((next) => {
       registry = structuredClone(next);
@@ -247,7 +247,7 @@ describe('registry/add-template', () => {
   });
 
   it('revalidates provider existence after model discovery', async () => {
-    vi.mocked(io.loadRegistry)
+    vi.mocked(io.loadRegistryStrict)
       .mockReturnValueOnce({ schemaVersion: 1, providers: [] })
       .mockReturnValueOnce({
         schemaVersion: 1,

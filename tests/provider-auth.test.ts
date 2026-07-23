@@ -112,7 +112,7 @@ import { credentialAuthRef } from '../src/credential-helper.js';
 import { runOpenAiDeviceCodeFlow } from '../src/oauth/openai.js';
 import { reconcilePendingCredentialDeletes } from '../src/registry/credential-lifecycle.js';
 import * as cleanupJournal from '../src/registry/credential-cleanup-journal.js';
-import { saveRegistry } from '../src/registry/io.js';
+import { loadRegistryStrict, saveRegistry } from '../src/registry/io.js';
 import { authenticateProvider } from '../src/registry/provider-auth.js';
 import { refreshProviderModels } from '../src/registry/refresh-models.js';
 import * as prompts from '@clack/prompts';
@@ -136,6 +136,9 @@ describe('authenticateProvider', () => {
     lockState.credentialTails.clear();
     lockState.afterRegistryUnlock = null;
     vi.mocked(saveProviderCredential).mockReset().mockResolvedValue(true);
+    vi.mocked(loadRegistryStrict).mockReset().mockImplementation(
+      () => structuredClone(registryState.current),
+    );
     vi.mocked(cleanupJournal.loadPendingCredentialDeletes).mockReset()
       .mockImplementation(async () => [...journalState.pending]);
     vi.mocked(cleanupJournal.queueCredentialDelete).mockReset()
@@ -219,6 +222,21 @@ describe('authenticateProvider', () => {
       'keyring:oauth:provider:openai-oauth',
     ]);
     expect(deleteProviderCredential).not.toHaveBeenCalled();
+    expect(refreshProviderModels).not.toHaveBeenCalled();
+  });
+
+  it('does not persist credentials when the registry cannot be validated', async () => {
+    vi.mocked(loadRegistryStrict).mockImplementationOnce(() => {
+      throw new Error('Provider registry contains an invalid provider entry.');
+    });
+
+    await expect(authenticateProvider('openai')).rejects.toThrow(
+      'Provider registry contains an invalid provider entry.',
+    );
+
+    expect(saveProviderCredential).not.toHaveBeenCalled();
+    expect(saveRegistry).not.toHaveBeenCalled();
+    expect(cleanupJournal.loadPendingCredentialDeletes).not.toHaveBeenCalled();
     expect(refreshProviderModels).not.toHaveBeenCalled();
   });
 

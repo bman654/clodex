@@ -4,7 +4,7 @@ import {
   queueCredentialDelete,
   reconcilePendingCredentialDeletes,
 } from './credential-lifecycle.js';
-import { loadRegistry, saveRegistry } from './io.js';
+import { loadRegistryStrict, saveRegistry } from './io.js';
 import {
   withRegistryWriteLock,
   withRegistryWriteLockSync,
@@ -30,7 +30,7 @@ export async function removeProviderFromRegistry(
   opts?: { deleteCredential?: boolean },
 ): Promise<RemoveProviderResult> {
   const removal = await withRegistryWriteLock<PendingProviderRemoval>(async () => {
-    const registry = loadRegistry();
+    const registry = loadRegistryStrict();
     const index = registry.providers.findIndex(p => p.id === id);
     if (index < 0) {
       return {
@@ -76,7 +76,7 @@ export async function removeProviderFromRegistry(
 
 export function toggleProviderEnabled(id: string): { toggled: boolean; enabled?: boolean; error?: string } {
   return withRegistryWriteLockSync(() => {
-    const registry = loadRegistry();
+    const registry = loadRegistryStrict();
     const provider = registry.providers.find(p => p.id === id);
     if (!provider) return { toggled: false, error: `Provider not found: ${id}` };
     provider.enabled = !provider.enabled;

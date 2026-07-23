@@ -9,7 +9,9 @@ import {
   materializeRegistry,
   saveRegistry,
   slugifyProviderId,
+  toggleProviderEnabled,
 } from '../src/registry/index.js';
+import { loadRegistryStrict } from '../src/registry/io.js';
 import { withRegistryWriteLockSync } from '../src/registry/lock.js';
 
 describe('provider id validation', () => {
@@ -107,6 +109,69 @@ describe('registry io', () => {
     const loaded = loadRegistry(path);
     expect(loaded.providers).toHaveLength(1);
     expect(loaded.providers[0]?.id).toBe('groq');
+  });
+
+  it('does not publish a migration from partially invalid registry data', () => {
+    const path = join(home, 'providers.json');
+    const raw = {
+      schemaVersion: 1,
+      providers: [
+        {
+          id: 'openai',
+          templateId: 'openai',
+          name: 'OpenAI',
+          enabled: true,
+          authRef: 'keyring:oauth:provider:openai',
+          authType: 'oauth',
+          api: { npm: '@ai-sdk/openai' },
+          addedAt: '2026-06-09T00:00:00.000Z',
+        },
+        {
+          id: 'BAD ID',
+          templateId: 'invalid',
+          name: 'Invalid',
+          enabled: true,
+          authRef: 'keyring:provider:invalid',
+          api: {},
+          addedAt: '2026-06-09T00:00:00.000Z',
+        },
+      ],
+    };
+    const serialized = JSON.stringify(raw);
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path, serialized);
+
+    expect(loadRegistry(path).providers[0]?.id).toBe('openai-oauth');
+    expect(() => loadRegistryStrict(path)).toThrow(
+      'Provider registry contains an invalid provider entry.',
+    );
+    expect(() => toggleProviderEnabled('openai-oauth')).toThrow(
+      'Provider registry contains an invalid provider entry.',
+    );
+    expect(readFileSync(path, 'utf8')).toBe(serialized);
+  });
+
+  it('applies supported migrations only after strict validation', () => {
+    const path = join(home, 'providers.json');
+    const raw = {
+      schemaVersion: 1,
+      providers: [{
+        id: 'openai',
+        templateId: 'openai',
+        name: 'OpenAI',
+        enabled: true,
+        authRef: 'keyring:oauth:provider:openai',
+        authType: 'oauth',
+        api: { npm: '@ai-sdk/openai' },
+        addedAt: '2026-06-09T00:00:00.000Z',
+      }],
+    };
+    const serialized = JSON.stringify(raw);
+    mkdirSync(home, { recursive: true });
+    writeFileSync(path, serialized);
+
+    expect(loadRegistryStrict(path).providers[0]?.id).toBe('openai-oauth');
+    expect(readFileSync(path, 'utf8')).toBe(serialized);
   });
 
   it('serializes migration writes and reloads state after acquiring the lock', () => {

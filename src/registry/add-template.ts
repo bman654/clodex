@@ -13,7 +13,7 @@ import {
   reconcilePendingCredentialDeletes,
 } from './credential-lifecycle.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
-import { loadRegistry, saveRegistry } from './io.js';
+import { loadRegistryStrict, saveRegistry } from './io.js';
 import {
   withCredentialMutationLock,
   withRegistryWriteLock,
@@ -79,7 +79,7 @@ export async function addProviderFromTemplate(
   }
 
   const existingState = await withRegistryWriteLock(() => {
-    const registry = loadRegistry();
+    const registry = loadRegistryStrict();
     const existing = registry.providers.find(p => p.id === template.id);
     if (existing && !opts?.replaceExisting) {
       return {
@@ -129,7 +129,7 @@ export async function addProviderFromTemplate(
     )
     : 'none:anonymous';
   const commitProvider = () => withRegistryWriteLock(async () => {
-    const registry = loadRegistry();
+    const registry = loadRegistryStrict();
     const existing = registry.providers.find(p => p.id === template.id);
     if (existing && !opts?.replaceExisting) {
       return {
@@ -191,7 +191,7 @@ export async function addProviderFromTemplate(
   const result: AddTemplateResult = trimmedKey
     ? await withCredentialMutationLock(authRef, async () => {
       const prepareError = await withRegistryWriteLock(() => {
-        const registry = loadRegistry();
+        const registry = loadRegistryStrict();
         const existing = registry.providers.find(p => p.id === template.id);
         if (existing && !opts?.replaceExisting) {
           return {

@@ -176,7 +176,7 @@ export function loadRegistry(path = getProvidersPath()): ProviderRegistry {
       try {
         withRegistryWriteLockSync(() => {
           if (!existsSync(path)) return;
-          const current = parseRegistry(JSON.parse(readFileSync(path, 'utf8')));
+          const current = readRegistryStrict(path);
           if (migrateOAuthOpenAiProvider(current)) saveRegistry(current, path);
         }, { lockPath: `${path}.lock` });
       } catch {
@@ -199,7 +199,9 @@ export function loadRegistryStrict(path = getProvidersPath()): ProviderRegistry 
   if (!existsSync(path)) {
     return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
   }
-  return readRegistryStrict(path);
+  const registry = readRegistryStrict(path);
+  migrateOAuthOpenAiProvider(registry);
+  return registry;
 }
 
 export function saveRegistry(registry: ProviderRegistry, path = getProvidersPath()): void {

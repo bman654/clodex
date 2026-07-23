@@ -24,7 +24,7 @@ import {
   queueCredentialDelete,
   reconcilePendingCredentialDeletes,
 } from './credential-lifecycle.js';
-import { loadRegistry, saveRegistry } from './io.js';
+import { loadRegistryStrict, saveRegistry } from './io.js';
 import {
   withCredentialMutationLock,
   withRegistryWriteLock,
@@ -110,7 +110,7 @@ async function persistOAuthProvider(
     const registryId = toOAuthRegistryId(providerId);
     const templateId = providerId.replace(/-oauth$/, '') || providerId;
     await withRegistryWriteLock(() => {
-      const registry = loadRegistry();
+      const registry = loadRegistryStrict();
       const previousEntry = registry.providers.find(provider => provider.id === registryId);
       if (!previousEntry && !getTemplateById(templateId)) {
         throw new Error(`Provider "${providerId}" is not in your registry and has no template`);
@@ -129,7 +129,7 @@ async function persistOAuthProvider(
     }
 
     const committed = await withRegistryWriteLock(async () => {
-      const registry = loadRegistry();
+      const registry = loadRegistryStrict();
       const template = getTemplateById(templateId);
       const previousEntry = registry.providers.find(provider => provider.id === registryId);
       if (!previousEntry && !template) {
