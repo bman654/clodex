@@ -1,7 +1,7 @@
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as net from 'node:net';
-import type { Socket } from 'node:net';
+import type { AddressInfo, Socket } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { URL } from 'node:url';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
@@ -10,6 +10,7 @@ import { startProxyCatalog } from '../proxy.js';
 import { ensureHttpProxyCertificates } from './ca.js';
 import { routeLookupIds } from '../context-model-id.js';
 import type { ResolvedHttpProxyAlias } from './routes.js';
+import { listenTcpServer } from '../listener-ready.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
 import {
@@ -860,23 +861,16 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     });
   });
 
+  let address: AddressInfo;
   try {
-    await new Promise<void>((resolve, reject) => {
-      proxyServer.once('error', reject);
-      proxyServer.listen(options.port ?? 0, options.host ?? '127.0.0.1', () => {
-        proxyServer.off('error', reject);
-        resolve();
-      });
-    });
+    address = await listenTcpServer(
+      proxyServer,
+      options.port ?? 0,
+      options.host ?? '127.0.0.1',
+    );
   } catch (err) {
     adapter?.close();
     throw err;
-  }
-
-  const address = proxyServer.address();
-  if (!address || typeof address === 'string') {
-    adapter?.close();
-    throw new Error('HTTP proxy did not bind to a TCP port');
   }
 
   return {

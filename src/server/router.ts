@@ -60,6 +60,7 @@ import {
   type AnthropicRequest,
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
+import { listenTcpServer, tcpListenerUrlHost } from '../listener-ready.js';
 
 export interface ServerOptions {
   host: string;
@@ -153,23 +154,12 @@ export async function startServer(options: ServerOptions): Promise<ServerHandle>
     void routeRequest(req, res, options, languageModelCache, plog);
   });
 
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(options.port, options.host, () => {
-      server.off('error', reject);
-      resolve();
-    });
-  });
-
-  const address = server.address();
-  if (!address || typeof address === 'string') {
-    throw new Error('Server did not bind to a TCP port');
-  }
+  const address = await listenTcpServer(server, options.port, options.host);
 
   return {
     host: options.host,
     port: address.port,
-    url: `http://${options.host}:${address.port}`,
+    url: `http://${tcpListenerUrlHost(address.address)}:${address.port}`,
     server,
     inferenceLogPath: options.inferenceLogPath,
     close: () => new Promise<void>((resolve, reject) => {
