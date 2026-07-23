@@ -175,6 +175,7 @@ describe('openai oauth helpers', () => {
 
 describe('oauth refresh', () => {
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
