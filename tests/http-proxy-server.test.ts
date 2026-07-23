@@ -698,7 +698,9 @@ describe('selective HTTP proxy', () => {
         { model: 'missing-route[1m]', path: '/v1/messages' },
         { model: 'missing-route[1M]', path: '/v1/messages' },
         { model: 'models/missing-route[1m]', path: '/v1/messages' },
+        { model: 'models/clodex:test:unavailable-model[1M]', path: '/v1/messages' },
         { model: 'missing-route', path: '/v1/messages/count_tokens' },
+        { model: 'models/clodex:test:unavailable-model[1M]', path: '/v1/messages/count_tokens' },
       ];
       for (const testCase of rejectedCases) {
         const response = await requestMitm(

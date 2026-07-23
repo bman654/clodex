@@ -746,7 +746,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         : undefined;
       const requestedModel = typeof parsed?.model === 'string' ? parsed.model : undefined;
       const unresolvedRoutedModel = !route && requestedModel !== undefined && (
-        requestedModel.startsWith(HTTP_PROXY_MODEL_PREFIX)
+        normalizeRouteLookupId(requestedModel).startsWith(HTTP_PROXY_MODEL_PREFIX)
         || reservedModelIds.has(normalizeRouteLookupId(requestedModel))
       );
 

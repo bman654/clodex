@@ -381,7 +381,7 @@ export async function startProxyCatalog(
         : undefined;
       const configuredModelUnavailable = typeof originalModel === 'string'
         && (
-          originalModel.startsWith('clodex:')
+          normalizeRouteLookupId(originalModel).startsWith('clodex:')
           || configuredAliasNames.has(normalizeRouteLookupId(originalModel))
         );
       if (!resolvedRoute && configuredModelUnavailable) {
