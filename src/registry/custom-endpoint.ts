@@ -5,8 +5,13 @@ import { saveProviderCredential } from '../env.js';
 import { credentialAuthRef } from '../credential-helper.js';
 import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
+import {
+  cancelCredentialDelete,
+  journalCredentialWrite,
+  reconcilePendingCredentialDeletes,
+} from './credential-lifecycle.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
-import { loadRegistry, saveRegistry } from './io.js';
+import { loadRegistryStrict, saveRegistry } from './io.js';
 import {
   withCredentialMutationLock,
   withRegistryWriteLock,
@@ -34,6 +39,7 @@ export interface AddCustomEndpointResult {
   modelCount?: number;
   error?: string;
   hint?: string;
+  credentialCleanupPending?: boolean;
 }
 
 function npmForKind(kind: CustomEndpointKind): string {
@@ -188,8 +194,8 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
   const authRef = anonymous
     ? 'none:anonymous'
     : credentialAuthRef(`provider:${probeProviderId}:${randomUUID()}`);
-  const commitProvider = () => withRegistryWriteLock(() => {
-    const registry = loadRegistry();
+  const commitProvider = () => withRegistryWriteLock(async () => {
+    const registry = loadRegistryStrict();
     const providerId = uniqueProviderId(displayName, registry);
 
     const now = new Date().toISOString();
@@ -216,20 +222,52 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
 
     registry.providers.push(entry);
     saveRegistry(registry);
-
-    return { added: true, provider: entry, modelCount: fetched.models.length };
-  });
-
-  if (anonymous) return commitProvider();
-  return withCredentialMutationLock(authRef, async () => {
-    const saved = await saveProviderCredential(authRef, apiKey);
-    if (!saved) {
-      return {
-        added: false,
-        error: 'Could not save API key to the credential store.',
-        hint: 'Check credential-store access and try again.',
-      };
+    let credentialCleanupPending = false;
+    if (!anonymous) {
+      try {
+        await cancelCredentialDelete(authRef);
+      } catch {
+        credentialCleanupPending = true;
+      }
     }
-    return commitProvider();
+
+    return {
+      added: true,
+      provider: entry,
+      modelCount: fetched.models.length,
+      ...(credentialCleanupPending ? { credentialCleanupPending: true } : {}),
+    };
   });
+
+  const result: AddCustomEndpointResult = anonymous
+    ? await commitProvider()
+    : await withCredentialMutationLock(authRef, async () => {
+      await journalCredentialWrite(authRef);
+      const saved = await saveProviderCredential(authRef, apiKey);
+      if (!saved) {
+        return {
+          added: false,
+          error: 'Could not save API key to the credential store.',
+          hint: 'Check credential-store access and try again.',
+        };
+      }
+      return commitProvider();
+    });
+
+  if (result.added) {
+    try {
+      const cleanup = await reconcilePendingCredentialDeletes();
+      result.credentialCleanupPending =
+        cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
+    } catch {
+      result.credentialCleanupPending = true;
+    }
+  } else {
+    try {
+      await reconcilePendingCredentialDeletes();
+    } catch {
+      // The failed credential remains journaled for a later retry.
+    }
+  }
+  return result;
 }

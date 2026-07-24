@@ -6,29 +6,52 @@ const registryState = vi.hoisted(() => ({
 }));
 const lockState = vi.hoisted(() => ({
   active: false,
+  registryTail: Promise.resolve(),
   credentialActive: false,
   credentialTails: new Map<string, Promise<void>>(),
 }));
+const journalState = vi.hoisted(() => ({
+  pending: new Set<string>(),
+}));
 
-vi.mock('../src/env.js', () => ({
+vi.mock('../src/env.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/env.js')>(),
   deleteProviderCredential: vi.fn(),
 }));
 vi.mock('../src/registry/io.js', () => ({
   loadRegistry: vi.fn(() => structuredClone(registryState.current)),
+  loadRegistryStrict: vi.fn(() => structuredClone(registryState.current)),
   saveRegistry: vi.fn((registry: ProviderRegistry) => {
     if (!lockState.active) throw new Error('registry write escaped its lock');
     registryState.current = structuredClone(registry);
   }),
 }));
+vi.mock('../src/registry/credential-cleanup-journal.js', () => ({
+  isStoredCredentialRef: vi.fn((authRef: string) =>
+    authRef.startsWith('keyring:') || authRef.startsWith('helper:v1:')),
+  loadPendingCredentialDeletes: vi.fn(async () => [...journalState.pending]),
+  queueCredentialDelete: vi.fn(async (authRef: string) => {
+    if (!authRef.startsWith('keyring:') && !authRef.startsWith('helper:v1:')) return false;
+    journalState.pending.add(authRef);
+    return true;
+  }),
+  cancelCredentialDelete: vi.fn(async (authRef: string) =>
+    journalState.pending.delete(authRef)),
+}));
 vi.mock('../src/registry/lock.js', () => ({
   withRegistryWriteLock: vi.fn(
     async <T>(operation: () => Promise<T> | T): Promise<T> => {
-      if (lockState.active) throw new Error('registry lock re-entered');
+      const previous = lockState.registryTail;
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      lockState.registryTail = previous.then(() => gate);
+      await previous;
       lockState.active = true;
       try {
         return await operation();
       } finally {
         lockState.active = false;
+        release();
       }
     },
   ),
@@ -68,8 +91,10 @@ import {
 describe('registry provider removal', () => {
   beforeEach(() => {
     lockState.active = false;
+    lockState.registryTail = Promise.resolve();
     lockState.credentialActive = false;
     lockState.credentialTails.clear();
+    journalState.pending.clear();
     registryState.current = {
       schemaVersion: 1,
       providers: [
@@ -108,7 +133,7 @@ describe('registry provider removal', () => {
     expect(lockState.active).toBe(false);
   });
 
-  it('reports a credential cleanup failure with the credential reference', async () => {
+  it('keeps a failed credential deletion queued for retry', async () => {
     vi.mocked(deleteProviderCredential).mockImplementation(async () => {
       expect(lockState.active).toBe(false);
       expect(lockState.credentialActive).toBe(true);
@@ -120,11 +145,13 @@ describe('registry provider removal', () => {
     expect(result).toMatchObject({
       removed: true,
       credentialDeleted: false,
-      error: expect.stringContaining('keyring:provider:openai'),
+      credentialCleanupPending: true,
     });
-    expect(result.error).toMatch(/credential.*(?:cleanup|deletion).*failed/i);
-    expect(result.error).toContain('must be removed manually');
+    expect(result.error).toBeUndefined();
     expect(registryState.current.providers).toHaveLength(0);
+    expect([...journalState.pending]).toEqual([
+      'keyring:provider:openai',
+    ]);
     expect(deleteProviderCredential).toHaveBeenCalledWith(
       'keyring:provider:openai',
     );

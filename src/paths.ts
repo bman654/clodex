@@ -71,6 +71,10 @@ export function getProvidersPath(env: HomeEnv = process.env): string {
   return join(getAppHome(env), 'providers.json');
 }
 
+export function getCredentialCleanupPath(env: HomeEnv = process.env): string {
+  return join(getAppHome(env), 'credential-cleanup.json');
+}
+
 export function getLogsPath(env: HomeEnv = process.env): string {
   return join(getAppHome(env), 'logs');
 }

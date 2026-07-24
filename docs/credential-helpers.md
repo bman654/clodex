@@ -32,6 +32,27 @@ diagnostic in the error instead of continuing with tokens that cannot be
 durably stored. Set `CLODEX_CREDENTIAL_HELPER` to the absolute path of an
 external helper, then run the authorization command again.
 
+Provider creation, replacement, and removal use the durable cleanup journal at
+`~/.clodex/credential-cleanup.json` (under `CLODEX_HOME` when set). Keeping the
+journal separate from `providers.json` prevents registry writers that only know
+schema 1 provider fields from dropping pending cleanup. A new unreferenced
+credential is journaled before it is written, provider changes are saved before
+superseded credentials are deleted, and uncertain deletion outcomes remain
+queued. Per-credential cross-process locks serialize writes, activation,
+removal, and reconciliation for the same reference. Reconciliation is
+best-effort and sequential: a contended credential can delay later entries
+until its lock attempt times out, but the timeout does not turn an already-saved
+provider into a failed creation. The next `clodex providers` command retries
+queued deletions idempotently and never deletes a credential that is referenced
+by an active provider. If the registry cannot be read and validated, cleanup
+stays queued instead of treating the registry as empty.
+
+The cleanup journal accepts only credential accounts generated for Clodex
+provider and OAuth records, including replacement, custom-provider, and scoped
+credential instances. It rejects symbolic links, foreign ownership, broad
+permissions on POSIX, files over 1 MiB, and more than 1,024 queued entries
+before attempting any credential-store deletion.
+
 ## Protocol
 
 The helper receives one of these invocations:

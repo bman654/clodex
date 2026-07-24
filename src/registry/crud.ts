@@ -1,42 +1,37 @@
 // src/registry/crud.ts — add/remove providers in the native registry
 
-import { deleteProviderCredential } from '../env.js';
-import { loadRegistry, saveRegistry } from './io.js';
 import {
-  withCredentialMutationLock,
+  queueCredentialDelete,
+  reconcilePendingCredentialDeletes,
+} from './credential-lifecycle.js';
+import { loadRegistryStrict, saveRegistry } from './io.js';
+import {
   withRegistryWriteLock,
   withRegistryWriteLockSync,
 } from './lock.js';
-import type { RegistryProvider } from './types.js';
 
 export interface RemoveProviderResult {
   removed: boolean;
   id: string;
   name?: string;
   credentialDeleted: boolean;
+  credentialCleanupPending?: boolean;
+  credentialCleanupReconciled?: boolean;
   error?: string;
 }
 
 interface PendingProviderRemoval {
   result: RemoveProviderResult;
-  authRefToDelete: string | null;
+  authRef: string | null;
 }
 
-function credentialStillReferenced(authRef: string, remaining: RegistryProvider[]): boolean {
-  return remaining.some(p => p.authRef === authRef);
-}
-
-function isStoredCredentialRef(authRef: string): boolean {
-  return authRef.startsWith('keyring:') || authRef.startsWith('helper:');
-}
-
-/** Remove a provider from the registry; delete per-provider keychain entry when safe. */
+/** Remove a provider from the registry; delete its stored credential when safe. */
 export async function removeProviderFromRegistry(
   id: string,
   opts?: { deleteCredential?: boolean },
 ): Promise<RemoveProviderResult> {
-  const removal = await withRegistryWriteLock<PendingProviderRemoval>(() => {
-    const registry = loadRegistry();
+  const removal = await withRegistryWriteLock<PendingProviderRemoval>(async () => {
+    const registry = loadRegistryStrict();
     const index = registry.providers.findIndex(p => p.id === id);
     if (index < 0) {
       return {
@@ -46,11 +41,14 @@ export async function removeProviderFromRegistry(
           credentialDeleted: false,
           error: `Provider not found: ${id}`,
         },
-        authRefToDelete: null,
+        authRef: null,
       };
     }
 
     const [removedProvider] = registry.providers.splice(index, 1);
+    const cleanupQueued = opts?.deleteCredential !== false
+      ? await queueCredentialDelete(removedProvider.authRef)
+      : false;
     saveRegistry(registry);
 
     return {
@@ -60,41 +58,27 @@ export async function removeProviderFromRegistry(
         name: removedProvider.name,
         credentialDeleted: false,
       },
-      authRefToDelete:
-        opts?.deleteCredential !== false &&
-        isStoredCredentialRef(removedProvider.authRef) &&
-        !credentialStillReferenced(removedProvider.authRef, registry.providers)
-          ? removedProvider.authRef
-          : null,
+      authRef: cleanupQueued ? removedProvider.authRef : null,
     };
   });
 
-  const authRefToDelete = removal.authRefToDelete;
-  if (authRefToDelete) {
-    await withCredentialMutationLock(authRefToDelete, async () => {
-      const referencedAgain = await withRegistryWriteLock(() =>
-        credentialStillReferenced(
-          authRefToDelete,
-          loadRegistry().providers,
-        ));
-      if (referencedAgain) return;
-      removal.result.credentialDeleted = await deleteProviderCredential(
-        authRefToDelete,
-      );
-      if (!removal.result.credentialDeleted) {
-        removal.result.error =
-          `Provider ${removal.result.name ?? id} was removed, but credential ` +
-          `cleanup failed for ${authRefToDelete}. The credential remains in ` +
-          'the configured store and must be removed manually.';
-      }
-    });
+  if (removal.authRef) {
+    try {
+      const cleanup = await reconcilePendingCredentialDeletes();
+      removal.result.credentialDeleted = cleanup.deleted.includes(removal.authRef);
+      removal.result.credentialCleanupPending =
+        cleanup.pending.includes(removal.authRef) || cleanup.persistenceError !== undefined;
+    } catch {
+      removal.result.credentialCleanupPending = true;
+    }
+    removal.result.credentialCleanupReconciled = true;
   }
   return removal.result;
 }
 
 export function toggleProviderEnabled(id: string): { toggled: boolean; enabled?: boolean; error?: string } {
   return withRegistryWriteLockSync(() => {
-    const registry = loadRegistry();
+    const registry = loadRegistryStrict();
     const provider = registry.providers.find(p => p.id === id);
     if (!provider) return { toggled: false, error: `Provider not found: ${id}` };
     provider.enabled = !provider.enabled;

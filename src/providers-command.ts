@@ -18,6 +18,7 @@ import {
   removeProviderFromRegistry,
   toggleProviderEnabled,
 } from './registry/crud.js';
+import { reconcilePendingCredentialDeletes } from './registry/credential-lifecycle.js';
 import { loadRegistry } from './registry/io.js';
 import { refreshAllProviderModels, refreshProviderModels } from './registry/refresh-models.js';
 import { resolveRefreshCredential } from './registry/refresh-credentials.js';
@@ -38,6 +39,55 @@ import {
 } from './ui.js';
 
 export type ProvidersSubcommand = 'hub' | 'add' | 'list' | 'remove' | 'refresh-models' | 'auth' | 'help';
+
+const CREDENTIAL_CLEANUP_PENDING_MESSAGE =
+  'Credential cleanup is pending and will be retried by the next provider command.';
+
+interface ProviderCommandCleanupState {
+  reconciled: boolean;
+  pending: boolean;
+}
+
+function reportCredentialCleanup(
+  pending: boolean,
+  state?: ProviderCommandCleanupState,
+  reconciled = false,
+): void {
+  if (state) {
+    state.reconciled ||= reconciled;
+    state.pending ||= pending;
+    return;
+  }
+  if (pending) {
+    p.log.warn(CREDENTIAL_CLEANUP_PENDING_MESSAGE);
+  }
+}
+
+async function reconcileCredentialCleanup(): Promise<boolean> {
+  try {
+    const cleanup = await reconcilePendingCredentialDeletes();
+    return cleanup.pending.length > 0 || cleanup.persistenceError !== undefined;
+  } catch {
+    return true;
+  }
+}
+
+async function runWithCredentialCleanup(
+  run: (state: ProviderCommandCleanupState) => Promise<number>,
+): Promise<number> {
+  const state: ProviderCommandCleanupState = {
+    reconciled: false,
+    pending: false,
+  };
+  try {
+    return await run(state);
+  } finally {
+    if (!state.reconciled) {
+      state.pending = await reconcileCredentialCleanup();
+    }
+    reportCredentialCleanup(state.pending);
+  }
+}
 
 export function parseProvidersArgs(args: string[]): {
   subcommand: ProvidersSubcommand;
@@ -111,10 +161,15 @@ function providerLabel(name: string, modelCount: number, enabled: boolean): stri
   return `${fmtEnabledStar(enabled)} ${fmtProvider(name)} ${pc.dim(`(${modelCount} model${modelCount === 1 ? '' : 's'})`)}`;
 }
 
-export async function runProvidersAuth(providerId: string, method?: ProviderAuthMethod): Promise<number> {
+async function runProvidersAuthWithCleanupState(
+  providerId: string,
+  method?: ProviderAuthMethod,
+  cleanupState?: ProviderCommandCleanupState,
+): Promise<number> {
   try {
     const result = await authenticateProvider(providerId, { method });
     p.log.success(`Signed in to ${result.registryProvider.name} — credential saved to the credential store.`);
+    reportCredentialCleanup(result.credentialCleanupPending, cleanupState, true);
     return 0;
   } catch (err) {
     if (err instanceof Error && err.message === 'Cancelled') {
@@ -124,6 +179,10 @@ export async function runProvidersAuth(providerId: string, method?: ProviderAuth
     p.log.error(err instanceof Error ? err.message : String(err));
     return 1;
   }
+}
+
+export async function runProvidersAuth(providerId: string, method?: ProviderAuthMethod): Promise<number> {
+  return runProvidersAuthWithCleanupState(providerId, method);
 }
 
 export async function runProvidersRefreshModels(providerId?: string): Promise<number> {
@@ -220,7 +279,7 @@ export async function runProvidersList(): Promise<number> {
 }
 
 /** Add the OpenAI API-key provider (the only addable template in clodex). */
-async function runTemplateAddFlow(): Promise<number> {
+async function runTemplateAddFlow(cleanupState?: ProviderCommandCleanupState): Promise<number> {
   const registry = loadRegistry();
   const configuredIds = registry.providers.map(p => p.id);
   const template = listAddableTemplates(configuredIds).find(t => t.id === 'openai')
@@ -251,6 +310,11 @@ async function runTemplateAddFlow(): Promise<number> {
   spinner.start(`Testing connection to ${template.name}...`);
   const result = await addProviderFromTemplate(template, apiKey);
   spinner.stop('');
+  reportCredentialCleanup(
+    result.credentialCleanupPending === true,
+    cleanupState,
+    result.credentialCleanupReconciled === true,
+  );
 
   if (!result.added) {
     p.log.error(result.error ?? 'Could not add provider.');
@@ -262,7 +326,9 @@ async function runTemplateAddFlow(): Promise<number> {
   return 0;
 }
 
-export async function runProvidersAdd(): Promise<number> {
+async function runProvidersAddWithCleanupState(
+  cleanupState?: ProviderCommandCleanupState,
+): Promise<number> {
   const choice = await p.select({
     message: 'Add a provider',
     options: [
@@ -283,12 +349,22 @@ export async function runProvidersAdd(): Promise<number> {
     return 0;
   }
 
-  if (choice === 'oauth') return runProvidersAuth('openai');
-  if (choice === 'apikey') return runTemplateAddFlow();
+  if (choice === 'oauth') {
+    return runProvidersAuthWithCleanupState('openai', undefined, cleanupState);
+  }
+  if (choice === 'apikey') return runTemplateAddFlow(cleanupState);
   return 0;
 }
 
-export async function runProvidersRemove(id: string, interactive = false): Promise<number> {
+export async function runProvidersAdd(): Promise<number> {
+  return runProvidersAddWithCleanupState();
+}
+
+async function runProvidersRemoveWithCleanupState(
+  id: string,
+  interactive = false,
+  cleanupState?: ProviderCommandCleanupState,
+): Promise<number> {
   const registry = loadRegistry();
   const provider = registry.providers.find(pr => pr.id === id);
   if (!provider) {
@@ -308,6 +384,11 @@ export async function runProvidersRemove(id: string, interactive = false): Promi
   }
 
   const result = await removeProviderFromRegistry(id);
+  reportCredentialCleanup(
+    result.credentialCleanupPending === true,
+    cleanupState,
+    result.credentialCleanupReconciled === true,
+  );
   if (!result.removed) {
     p.log.error(result.error ?? `Could not remove ${id}`);
     return 1;
@@ -322,6 +403,10 @@ export async function runProvidersRemove(id: string, interactive = false): Promi
     p.log.info('Provider API key removed from the credential store.');
   }
   return 0;
+}
+
+export async function runProvidersRemove(id: string, interactive = false): Promise<number> {
+  return runProvidersRemoveWithCleanupState(id, interactive);
 }
 
 export function providerHubChoiceValue(entry: ProviderDisplayEntry): string {
@@ -474,16 +559,34 @@ export async function runProvidersCommand(args: string[]): Promise<number> {
     return 0;
   }
 
+  const reconcilesDuringMutation =
+    parsed.subcommand === 'add'
+    || parsed.subcommand === 'remove'
+    || (
+      parsed.subcommand === 'auth'
+      && !parsed.showHelp
+      && parsed.removeId !== undefined
+    );
+  if (!reconcilesDuringMutation) {
+    reportCredentialCleanup(await reconcileCredentialCleanup());
+  }
+
   if (parsed.subcommand === 'list') return runProvidersList();
-  if (parsed.subcommand === 'add') return runProvidersAdd();
-  if (parsed.subcommand === 'remove' && parsed.removeId) return runProvidersRemove(parsed.removeId);
+  if (parsed.subcommand === 'add') {
+    return runWithCredentialCleanup(state => runProvidersAddWithCleanupState(state));
+  }
+  if (parsed.subcommand === 'remove' && parsed.removeId) {
+    return runWithCredentialCleanup(state =>
+      runProvidersRemoveWithCleanupState(parsed.removeId!, false, state));
+  }
   if (parsed.subcommand === 'refresh-models') return runProvidersRefreshModels(parsed.removeId);
   if (parsed.subcommand === 'auth') {
     if (parsed.showHelp || !parsed.removeId) {
       console.log(providerAuthHelpText());
       return 0;
     }
-    return runProvidersAuth(parsed.removeId, parsed.authMethod);
+    return runWithCredentialCleanup(state =>
+      runProvidersAuthWithCleanupState(parsed.removeId!, parsed.authMethod, state));
   }
 
   relayIntro('Your OpenAI providers');
