@@ -57,15 +57,21 @@ describe('HTTP proxy startup model list', () => {
       ]);
       expect(entries[0]).toMatchObject({
         pid: process.pid,
+        parentPid: process.ppid,
         host: '127.0.0.1',
         port: expect.any(Number),
       });
       expect(entries[1]).toMatchObject({
         pid: process.pid,
+        parentPid: entries[0].parentPid,
+        host: entries[0].host,
         port: entries[0].port,
+        reason: 'shutdown signal received',
       });
       expect(entries[2]).toMatchObject({
         pid: process.pid,
+        parentPid: entries[0].parentPid,
+        host: entries[0].host,
         port: entries[0].port,
       });
     } finally {
