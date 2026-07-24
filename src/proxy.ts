@@ -680,6 +680,9 @@ export async function startProxyCatalog(
             });
           }
           if (!res.headersSent) {
+            if (details?.retryAfterSeconds !== undefined) {
+              res.setHeader('retry-after', String(details.retryAfterSeconds));
+            }
             anthropicError(
               res,
               upstreamStatus === 500 ? 502 : upstreamStatus,

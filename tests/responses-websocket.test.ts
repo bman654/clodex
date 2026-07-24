@@ -60,6 +60,54 @@ const sessionPayload = (input: unknown[], extra: Record<string, unknown> = {}) =
   ...extra,
 });
 
+/** Drive a failed WebSocket upgrade by emitting `unexpected-response`. */
+function rejectUpgrade(
+  socket: FakeWebSocket,
+  statusCode: number,
+  opts: { headers?: Record<string, string>; statusMessage?: string } = {},
+): { resume: ReturnType<typeof vi.fn> } {
+  const response = Object.assign(new EventEmitter(), {
+    statusCode,
+    statusMessage: opts.statusMessage ?? '',
+    headers: opts.headers ?? {},
+    resume: vi.fn(),
+  });
+  socket.emit('unexpected-response', {}, response);
+  return response;
+}
+
+/** Parse the single SSE error frame produced by a failed request. */
+async function readErrorFrame(res: Response): Promise<{
+  type: string;
+  sequence_number: number;
+  error: Record<string, unknown>;
+}> {
+  const body = await readAll(res);
+  return JSON.parse(body.replace(/^data: /, '').trim());
+}
+
+/** Run the SSE error body through the real AI SDK and classify the surfaced error. */
+async function classifyThroughSdk(sseBody: string): Promise<ReturnType<typeof sdkUpstreamErrorDetails>> {
+  const provider = createOpenAI({
+    apiKey: 'test-only',
+    fetch: async () => new Response(sseBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    }),
+  });
+  const streamed = streamText({
+    model: provider.responses('gpt-5.6-sol'),
+    prompt: 'test',
+    maxRetries: 0,
+    onError: () => {},
+  });
+  let upstreamError: unknown;
+  for await (const part of streamed.stream) {
+    if (part.type === 'error') upstreamError = part.error;
+  }
+  return sdkUpstreamErrorDetails(upstreamError);
+}
+
 function emitTextResponse(socket: FakeWebSocket, responseId: string, text: string): void {
   socket.emit('message', Buffer.from(JSON.stringify({
     type: 'response.created', response: { id: responseId },
@@ -604,17 +652,10 @@ describe('createResponsesWebSocketFetch', () => {
       }),
     );
     const socket = lastSocket();
-    const resume = vi.fn();
-    socket.emit(
-      'unexpected-response',
-      {},
-      {
-        statusCode: 401,
-        statusMessage: 'private response status',
-        headers: { 'x-private': 'private response header' },
-        resume,
-      },
-    );
+    const { resume } = rejectUpgrade(socket, 401, {
+      statusMessage: 'private response status',
+      headers: { 'x-private': 'private response header' },
+    });
 
     const body = await readAll(res);
     const frame = JSON.parse(body.replace(/^data: /, '').trim());
@@ -628,23 +669,7 @@ describe('createResponsesWebSocketFetch', () => {
         param: null,
       },
     });
-    const provider = createOpenAI({
-      apiKey: 'test-only',
-      fetch: async () => new Response(body, {
-        status: 200,
-        headers: { 'content-type': 'text/event-stream' },
-      }),
-    });
-    const streamed = streamText({
-      model: provider.responses('gpt-5.6-sol'),
-      prompt: 'test',
-      onError: () => {},
-    });
-    let upstreamError: unknown;
-    for await (const part of streamed.stream) {
-      if (part.type === 'error') upstreamError = part.error;
-    }
-    expect(sdkUpstreamErrorDetails(upstreamError)?.statusCode).toBe(401);
+    expect((await classifyThroughSdk(body))?.statusCode).toBe(401);
     expect(resume).toHaveBeenCalledOnce();
     expect(socket.close).toHaveBeenCalledOnce();
     expect(diagnostics).toContainEqual(
@@ -679,6 +704,116 @@ describe('createResponsesWebSocketFetch', () => {
     replacement.emit('open');
     emitTextResponse(replacement, 'resp_after_401', 'recovered');
     await readAll(next);
+  });
+
+  it('maps a 403 upgrade rejection (edge throttle) to a retryable 429 rate limit without reading the body', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await withResponsesWebSocketDiagnosticContext(
+      { requestId: 'req-upgrade-403' },
+      () => wsFetch('https://x', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tok' },
+        body: JSON.stringify(sessionPayload([
+          { role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+        ])),
+      }),
+    );
+    // Emit only `unexpected-response` — never body data or `end`. The mapping
+    // must be synchronous and status-only.
+    const { resume } = rejectUpgrade(lastSocket(), 403);
+
+    const body = await readAll(res);
+    const frame = JSON.parse(body.replace(/^data: /, '').trim());
+    expect(frame.error.type).toBe('rate_limit_error');
+    expect(frame.error.code).toBe('429');
+    expect(frame.error.retry_after_seconds).toBe(5);
+    expect(frame.error.message).toMatch(/retry after 5s/i);
+    expect(resume).toHaveBeenCalledOnce();
+
+    // Through the real AI SDK the failure surfaces as a retryable 429 with the
+    // backoff hint — never as the permission error hosts relabel "Please run
+    // /login".
+    const details = await classifyThroughSdk(body);
+    expect(details).toMatchObject({
+      statusCode: 429,
+      isRetryable: true,
+      retryAfterSeconds: 5,
+    });
+
+    // Diagnostics keep the real upstream status alongside the mapping.
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_error',
+      requestId: 'req-upgrade-403',
+      source: 'unexpected_response',
+      httpStatusCode: 403,
+      mappedStatusCode: 429,
+      retryAfterSeconds: 5,
+    }));
+  });
+
+  it('honors an upstream retry-after header on a 403 rejection', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer tok' },
+      body: JSON.stringify({ model: 'gpt-5.6-luna', input: [] }),
+    });
+    rejectUpgrade(lastSocket(), 403, { headers: { 'retry-after': '12' } });
+
+    const frame = await readErrorFrame(res);
+    expect(frame.error.type).toBe('rate_limit_error');
+    expect(frame.error.retry_after_seconds).toBe(12);
+  });
+
+  it('clamps an oversized retry-after header and defaults a malformed one', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+
+    const oversized = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify({ model: 'gpt-5.6-luna', input: [] }),
+    });
+    rejectUpgrade(lastSocket(), 403, { headers: { 'retry-after': '3600' } });
+    expect((await readErrorFrame(oversized)).error.retry_after_seconds).toBe(60);
+
+    const malformed = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify({ model: 'gpt-5.6-luna', input: [] }),
+    });
+    rejectUpgrade(lastSocket(), 403, { headers: { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' } });
+    expect((await readErrorFrame(malformed)).error.retry_after_seconds).toBe(5);
+  });
+
+  it('handles the 403 synchronously so later socket error/close events cannot retry or double-handle', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([
+        { role: 'user', content: [{ type: 'input_text', text: 'throttled' }] },
+      ])),
+    });
+    const socket = lastSocket();
+    rejectUpgrade(socket, 403);
+    // ws surfaces transport teardown after a failed upgrade; the pre-frame
+    // transport retry (PR #29) must see a finished request and stand down.
+    socket.emit('error', Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }));
+    socket.emit('close', 1006, Buffer.from(''));
+
+    expect(fakeSockets).toHaveLength(1);
+    const frames = (await readAll(res)).split('\n\n').filter(Boolean);
+    expect(frames).toHaveLength(1);
+    expect(JSON.parse(frames[0]!.replace(/^data: /, '')).error.type).toBe('rate_limit_error');
+    expect(diagnostics).not.toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+    }));
   });
 
   it('logs sanitized upstream response failure details after partial output', async () => {

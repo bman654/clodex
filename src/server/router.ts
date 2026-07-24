@@ -148,7 +148,7 @@ function auditSdkError(
   model: ServerModelInfo,
   err: unknown,
   message: string,
-): number {
+): { statusCode: number; retryAfterSeconds?: number } {
   const details = sdkUpstreamErrorDetails(err);
   const statusCode = details?.statusCode ?? upstreamHttpStatus(err, message);
   if (options.inferenceLogPath && statusCode >= 400) {
@@ -162,7 +162,7 @@ function auditSdkError(
       attemptCount: details?.attemptCount,
     });
   }
-  return statusCode;
+  return { statusCode, retryAfterSeconds: details?.retryAfterSeconds };
 }
 
 function openAiEffort(body: JsonBody): string | undefined {
@@ -477,7 +477,7 @@ async function handleAnthropicMessages(
           plog('sdk oauth credential replaced after 401; retrying once');
           continue;
         }
-        const status = auditSdkError(options, body.model, model, err, message);
+        const { statusCode: status, retryAfterSeconds } = auditSdkError(options, body.model, model, err, message);
         const contextLengthExceeded = status === 400
           && isContextLengthExceededError(err, message);
         const clientMessage = contextLengthExceeded
@@ -495,6 +495,7 @@ async function handleAnthropicMessages(
               request_id: requestId,
             });
           } else {
+            if (retryAfterSeconds !== undefined) res.setHeader('retry-after', String(retryAfterSeconds));
             sendJson(res, status === 500 ? 502 : status, { error: { message: clientMessage } });
           }
         } else {
@@ -667,9 +668,10 @@ async function handleOpenAIChatCompletions(
         plog('sdk oauth credential replaced after 401; retrying once');
         continue;
       }
-      const status = auditSdkError(options, body.model, model, err, message);
+      const { statusCode: status, retryAfterSeconds } = auditSdkError(options, body.model, model, err, message);
       plog(`sdk error npm=${model.npm} upstream=${upstreamModelId(model)}: ${message}`);
       if (!res.headersSent) {
+        if (retryAfterSeconds !== undefined) res.setHeader('retry-after', String(retryAfterSeconds));
         sendJson(res, status === 500 ? 502 : status, { error: { message } });
       } else {
         res.write(`data: ${JSON.stringify({ error: { message, type: 'upstream_error', code: status } })}\n\n`);
