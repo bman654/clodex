@@ -16,6 +16,41 @@ export interface SdkUpstreamErrorDetails {
   errorContent: string;
   isRetryable: boolean;
   attemptCount: number;
+  /** Client backoff hint (seconds); only present on rate-limit (429) failures. */
+  retryAfterSeconds?: number;
+}
+
+/** Default downstream backoff hint when the upstream throttle gives none. */
+export const DEFAULT_RETRY_AFTER_SECONDS = 5;
+/**
+ * Upper bound for any retry-after hint clodex produces or forwards. Keeps the
+ * AI SDK's bounded backoff (default maxRetries=2) and downstream clients well
+ * clear of clodex's 120s no-event stream abort.
+ */
+export const MAX_RETRY_AFTER_SECONDS = 60;
+
+/** Clamp a retry-after hint to [0, 60]s; missing/invalid values become the 5s default. */
+export function clampRetryAfterSeconds(value?: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return DEFAULT_RETRY_AFTER_SECONDS;
+  }
+  return Math.min(Math.round(value), MAX_RETRY_AFTER_SECONDS);
+}
+
+function numericRetryAfterSeconds(inner: InstanceType<typeof APICallError>): number | undefined {
+  const data = inner.data as { error?: { retry_after_seconds?: unknown; message?: unknown } } | undefined;
+  const fromBody = data?.error?.retry_after_seconds;
+  if (typeof fromBody === 'number' && Number.isFinite(fromBody) && fromBody >= 0) return fromBody;
+  const fromHeader = inner.responseHeaders?.['retry-after'];
+  if (typeof fromHeader === 'string' && /^\d+$/.test(fromHeader.trim())) return Number(fromHeader.trim());
+  // The OAuth WebSocket transport's synthetic error frames can only carry the
+  // hint in message text — the AI SDK's chunk schema strips unknown fields.
+  for (const message of [data?.error?.message, inner.message]) {
+    if (typeof message !== 'string') continue;
+    const match = /retry after (\d+)s\b/i.exec(message);
+    if (match) return Number(match[1]);
+  }
+  return undefined;
 }
 
 /** Extract the real HTTP failure from an AI SDK retry wrapper without relying on instanceof. */
@@ -33,11 +68,17 @@ export function sdkUpstreamErrorDetails(err: unknown): SdkUpstreamErrorDetails |
     }
   }
 
+  const rawRetryAfter = inner.statusCode === 429 ? numericRetryAfterSeconds(inner) : undefined;
+  const retryAfterSeconds = rawRetryAfter === undefined
+    ? undefined
+    : clampRetryAfterSeconds(rawRetryAfter);
+
   return {
     statusCode: inner.statusCode,
     errorContent: errorContent || inner.message,
     isRetryable: inner.isRetryable,
     attemptCount: retry?.errors.length ?? 1,
+    ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
   };
 }
 

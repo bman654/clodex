@@ -15,7 +15,7 @@ function postToProxy(
   body: unknown,
   relayRequestId?: string,
   path = '/v1/messages',
-): Promise<{ status: number; body: string }> {
+): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
     const req = http.request(
@@ -35,7 +35,7 @@ function postToProxy(
       (res) => {
         let data = '';
         res.on('data', (chunk) => { data += chunk; });
-        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data }));
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: data, headers: res.headers }));
       },
     );
     req.on('error', reject);
@@ -580,6 +580,7 @@ describe('SDK translated error logging', () => {
       }, 'req-error-1');
 
       expect(res.status).toBe(400);
+      expect(res.headers['retry-after']).toBeUndefined();
       expect(res.body).toContain('translated request rejected');
       const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       const errorEntry = entries.find(entry => entry.event === 'upstream_error');
@@ -615,6 +616,57 @@ describe('SDK translated error logging', () => {
       handle.close();
       await new Promise<void>(resolve => upstream.close(() => resolve()));
       rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('returns HTTP 429 with a clamped retry-after header after upstream rate limiting', async () => {
+    const upstream = http.createServer((req, res) => {
+      req.resume();
+      res.writeHead(429, {
+        'Content-Type': 'application/json',
+        // retry-after-ms drives the AI SDK's internal backoff (1ms keeps the
+        // SDK's own retries fast); retry-after is what clodex forwards to the
+        // client, and 3600 must come out clamped to 60.
+        'retry-after-ms': '1',
+        'retry-after': '3600',
+        'Connection': 'close',
+      });
+      res.end(JSON.stringify({ error: { message: 'rate limited, slow down', type: 'rate_limit_error' } }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstream.once('error', reject);
+      upstream.listen(0, '127.0.0.1', () => resolve());
+    });
+    const address = upstream.address();
+    if (!address || typeof address === 'string') throw new Error('test upstream did not bind');
+
+    const route: ProxyRoute = {
+      aliasId: 'clodex:test:rate-limited-model',
+      realModelId: 'rate-limited-model',
+      displayName: 'Rate Limited Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: `http://127.0.0.1:${address.port}/v1`,
+      providerId: 'test-provider',
+    };
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      });
+
+      expect(res.status).toBe(429);
+      expect(res.headers['retry-after']).toBe('60');
+      expect(res.body).toContain('rate limited');
+    } finally {
+      handle.close();
+      await new Promise<void>(resolve => upstream.close(() => resolve()));
     }
   }, 20_000);
 

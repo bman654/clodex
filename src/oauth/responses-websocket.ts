@@ -12,7 +12,7 @@ import type { FetchFunction } from '@ai-sdk/provider-utils';
 import type { RawData, WebSocket as WsWebSocket } from 'ws';
 import { CODEX_RESPONSES_WEBSOCKETS_BETA } from '../constants.js';
 import { outboundWsProxyAgent } from '../outbound-proxy.js';
-import { anthropicErrorType } from '../upstream-error.js';
+import { anthropicErrorType, clampRetryAfterSeconds } from '../upstream-error.js';
 
 const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite';
 const TERMINAL_EVENT_TYPES = new Set(['response.completed', 'response.failed', 'response.incomplete']);
@@ -814,6 +814,7 @@ function failContext(
   message: string,
   diagnosticDetails: Record<string, unknown>,
   statusCode?: number,
+  retryAfterSeconds?: number,
 ): void {
   if (ctx.closed || entry.current !== ctx) return;
   entry.debug(`fail: ${message}`);
@@ -830,6 +831,7 @@ function failContext(
       code: statusCode === undefined ? 'websocket_transport_error' : String(statusCode),
       message,
       param: null,
+      ...(retryAfterSeconds !== undefined ? { retry_after_seconds: retryAfterSeconds } : {}),
     },
   });
   deleteEntry(entry);
@@ -1117,6 +1119,13 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   }
 }
 
+function numericRetryAfterHeader(value: string | string[] | undefined): number | undefined {
+  const single = Array.isArray(value) ? value[0] : value;
+  return typeof single === 'string' && /^\d+$/.test(single.trim())
+    ? Number(single.trim())
+    : undefined;
+}
+
 function createConnection(
   WebSocket: WebSocketConstructor,
   wsUrl: string,
@@ -1160,16 +1169,41 @@ function createConnection(
   socket.on('unexpected-response', (_request, response) => {
     const statusCode = response.statusCode ?? 502;
     debug(`unexpected-response status=${statusCode}`);
+    // Fire-and-forget drain. Upgrade failures are classified by status alone —
+    // the body is never read, so nothing here is deferred into a callback.
     response.resume();
     const ctx = entry.current;
-    if (ctx && !ctx.closed) {
-      failContext(entry, ctx, `WebSocket upgrade failed (HTTP ${statusCode})`, {
+    if (!ctx || ctx.closed) {
+      deleteEntry(entry);
+      return;
+    }
+    if (statusCode === 403) {
+      // OpenAI's edge/WAF rejects the upgrade with HTTP 403 when the ChatGPT
+      // account's concurrency/usage throttle trips, before the request ever
+      // reaches the application. Terminal conditions are 401 (re-auth) or a
+      // 429 with a JSON body; the only application 403 is a geo restriction,
+      // and the official codex client retries ALL 403s. Map every upgrade 403
+      // to a retryable Anthropic 429 synchronously; failContext closes the
+      // context here, so the socket error/close transport-retry path sees a
+      // finished request and cannot double-handle this failure.
+      const retryAfterSeconds = clampRetryAfterSeconds(
+        numericRetryAfterHeader(response.headers['retry-after']),
+      );
+      // "retry after Ns" is load-bearing: the AI SDK strips unknown frame
+      // fields, so sdkUpstreamErrorDetails recovers the hint from this text.
+      failContext(entry, ctx, 'OpenAI edge throttled the Responses WebSocket upgrade '
+        + `(HTTP 403); retry after ${retryAfterSeconds}s`, {
         source: 'unexpected_response',
         httpStatusCode: statusCode,
-      }, statusCode);
-    } else {
-      deleteEntry(entry);
+        mappedStatusCode: 429,
+        retryAfterSeconds,
+      }, 429, retryAfterSeconds);
+      return;
     }
+    failContext(entry, ctx, `WebSocket upgrade failed (HTTP ${statusCode})`, {
+      source: 'unexpected_response',
+      httpStatusCode: statusCode,
+    }, statusCode);
   });
   socket.on('message', (data: RawData) => handleSocketMessage(entry, data));
   socket.on('error', (error: Error) => {
