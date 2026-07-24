@@ -1273,15 +1273,201 @@ describe('keyring credential chunks', () => {
     await expect(
       resolveProviderCredential('test', authRef, message => diagnostics.push(message)),
     ).resolves.toBeNull();
-    expect(diagnostics).toContain('removed stale keyring managed-state marker');
-    expect(existsSync(managedStatePath())).toBe(false);
+    expect(diagnostics).toContain('restored keyring cleanup journal from managed state');
+    expect(existsSync(managedStatePath())).toBe(true);
 
+    await expect(provisionProviderCredential(authRef, 'replacement-secret')).resolves.toBe(false);
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    expectDeletionMarker();
     await expect(provisionProviderCredential(authRef, 'replacement-secret')).resolves.toBe(true);
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe('replacement-secret');
 
     keyring.values.clear();
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
-    expect(existsSync(managedStatePath())).toBe(false);
+    expect(existsSync(managedStatePath())).toBe(true);
+    expectDeletionMarker();
+  });
+
+  it('fails closed while a managed journal remains persistently hidden', async () => {
+    const diagnostics: string[] = [];
+    await expect(saveProviderCredential(authRef, 'current-secret')).resolves.toBe(true);
+    const originalJournal = keyring.values.get(journalKey);
+    keyring.operations = [];
+    keyring.omitFindKey = journalKey;
+    keyring.onGet = key => {
+      if (key === journalKey) throw new Error('injected collapsed keyring read failure');
+    };
+
+    await expect(
+      resolveProviderCredential('test', authRef, message => diagnostics.push(message)),
+    ).resolves.toBeNull();
+    await expect(
+      provisionProviderCredential(authRef, 'replacement-secret', message =>
+        diagnostics.push(message),
+      ),
+    ).resolves.toBe(false);
+    await expect(
+      deleteProviderCredential(authRef, message => diagnostics.push(message)),
+    ).resolves.toBe(false);
+
+    expect(diagnostics.join('\n')).toContain('keyring cleanup journal verification failed');
+    expect(keyring.values.get(journalKey)).toBe(originalJournal);
+    expect(keyring.values.get(mainKey)).toBe('current-secret');
+    expect(existsSync(managedStatePath())).toBe(true);
+    expect(keyring.operations.every(operation => operation.key === journalKey)).toBe(true);
+
+    keyring.omitFindKey = '';
+    keyring.onGet = null;
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('current-secret');
+  });
+
+  it('keeps a journal-less managed marker while the keyring journal is hidden', async () => {
+    const currentSecret = 'a'.repeat(2_500);
+    await expect(saveProviderCredential(authRef, currentSecret)).resolves.toBe(true);
+    const originalJournal = keyring.values.get(journalKey);
+    const originalMarker = keyring.values.get(mainKey);
+    const originalChunks = currentChunkKeys().sort();
+    writeFileSync(managedStatePath(), 'v1:managed\n', 'utf8');
+    keyring.omitFindKey = journalKey;
+    keyring.onGet = key => {
+      if (key === journalKey) throw new Error('injected collapsed keyring read failure');
+    };
+
+    await expect(provisionProviderCredential(authRef, 'replacement-secret')).resolves.toBe(false);
+    expect(keyring.values.get(journalKey)).toBe(originalJournal);
+    expect(keyring.values.get(mainKey)).toBe(originalMarker);
+    expect(currentChunkKeys().sort()).toEqual(originalChunks);
+    expect(existsSync(managedStatePath())).toBe(true);
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
+    expectDeletionMarker();
+    expect(currentChunkKeys()).toEqual([]);
+    expect(existsSync(managedStatePath())).toBe(true);
+
+    keyring.omitFindKey = '';
+    keyring.onGet = null;
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+  });
+
+  it('does not delete a journal-less long credential from an incomplete inventory', async () => {
+    const currentSecret = 'a'.repeat(2_500);
+    await expect(saveProviderCredential(authRef, currentSecret)).resolves.toBe(true);
+    const originalJournal = keyring.values.get(journalKey);
+    const originalMarker = keyring.values.get(mainKey);
+    const originalChunks = currentChunkKeys().sort();
+    writeFileSync(managedStatePath(), 'v1:managed\n', 'utf8');
+    keyring.omitFindKey = journalKey;
+    keyring.omitFindAccount = account;
+    keyring.onGet = key => {
+      if (key === journalKey) throw new Error('injected collapsed keyring read failure');
+    };
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
+
+    expect(keyring.values.get(journalKey)).toBe(originalJournal);
+    expect(keyring.values.get(mainKey)).toBe(originalMarker);
+    expect(currentChunkKeys().sort()).toEqual(originalChunks);
+    expect(keyring.values.has(deletedKey)).toBe(false);
+    expect(existsSync(managedStatePath())).toBe(true);
+
+    keyring.omitFindKey = '';
+    keyring.omitFindAccount = '';
+    keyring.onGet = null;
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    expectDeletionMarker();
+    expect(currentChunkKeys()).toEqual([]);
+  });
+
+  it('removes an inventory sentinel when direct verification collapses', async () => {
+    let collapsed = false;
+    await expect(saveProviderCredential(authRef, 'current-secret')).resolves.toBe(true);
+    writeFileSync(managedStatePath(), 'v1:managed\n', 'utf8');
+    keyring.values.delete(journalKey);
+    keyring.onGet = key => {
+      if (
+        !collapsed &&
+        keyring.values.get(key)?.startsWith('__clodex_inventory__:')
+      ) {
+        collapsed = true;
+        keyring.omitFindOnceKey = key;
+        throw new Error('injected collapsed sentinel read');
+      }
+    };
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
+
+    expect(collapsed).toBe(true);
+    expect(
+      [...keyring.values.values()].filter(value => value.startsWith('__clodex_inventory__:')),
+    ).toEqual([]);
+    expect(keyring.values.get(mainKey)).toBe('current-secret');
+    expect(keyring.values.has(deletedKey)).toBe(false);
+
+    keyring.onGet = null;
+    keyring.omitFindOnceKey = '';
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    expectDeletionMarker();
+  });
+
+  it('does not trust an incomplete retired-chunk inventory for a short credential', async () => {
+    const retiredGeneration = '11111111-1111-4111-8111-111111111111';
+    const retiredChunk = `clodex-chunks:${account}::chunk::${retiredGeneration}::0`;
+    await expect(saveProviderCredential(authRef, 'current-secret')).resolves.toBe(true);
+    keyring.values.set(retiredChunk, 'retired-secret');
+    writeFileSync(managedStatePath(), 'v1:managed\n', 'utf8');
+    keyring.values.delete(journalKey);
+    keyring.omitFindAccount = account;
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
+
+    expect(keyring.values.get(mainKey)).toBe('current-secret');
+    expect(keyring.values.get(retiredChunk)).toBe('retired-secret');
+    expect(keyring.values.has(deletedKey)).toBe(false);
+
+    keyring.omitFindAccount = '';
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    expectDeletionMarker();
+    expect(keyring.values.has(retiredChunk)).toBe(false);
+  });
+
+  it('does not trust an incomplete chunk inventory when the main entry is absent', async () => {
+    const currentSecret = 'a'.repeat(2_500);
+    await expect(saveProviderCredential(authRef, currentSecret)).resolves.toBe(true);
+    const orphanedChunks = currentChunkKeys().sort();
+    writeFileSync(managedStatePath(), 'v1:managed\n', 'utf8');
+    keyring.values.delete(journalKey);
+    keyring.values.delete(mainKey);
+    keyring.omitFindAccount = account;
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
+
+    expect(currentChunkKeys().sort()).toEqual(orphanedChunks);
+    expect(keyring.values.has(deletedKey)).toBe(false);
+
+    keyring.omitFindAccount = '';
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    expectDeletionMarker();
+    expect(currentChunkKeys()).toEqual([]);
+  });
+
+  it('requires explicit deletion to recover a journal-less managed marker', async () => {
+    const currentSecret = 'a'.repeat(2_500);
+    await expect(saveProviderCredential(authRef, currentSecret)).resolves.toBe(true);
+    expect(currentChunkKeys().length).toBeGreaterThan(0);
+    writeFileSync(managedStatePath(), 'v1:managed\n', 'utf8');
+    keyring.values.delete(journalKey);
+
+    await expect(provisionProviderCredential(authRef, 'replacement-secret')).resolves.toBe(false);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+    expect(keyring.values.get(mainKey)).toBeDefined();
+    expect(existsSync(managedStatePath())).toBe(true);
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    expectDeletionMarker();
+    expect(currentChunkKeys()).toEqual([]);
+    await expect(provisionProviderCredential(authRef, 'replacement-secret')).resolves.toBe(true);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('replacement-secret');
   });
 
   it('fails closed when the first pre-journal short read collapses', async () => {
@@ -1359,7 +1545,7 @@ describe('keyring credential chunks', () => {
     await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
 
     expectDeletionGuard();
-    expect(keyring.values.has(journalKey)).toBe(false);
+    expectDeletionMarker();
     keyring.onGet = null;
     keyring.omitFindOnceKey = '';
     await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
