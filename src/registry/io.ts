@@ -15,7 +15,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
-import { ensureLegacyAppHomeMigrated, getAppHome, getProvidersPath } from '../paths.js';
+import { getAppHome, getProvidersPath } from '../paths.js';
 import type { ProviderRegistry, RegistryProvider } from './types.js';
 import { REGISTRY_SCHEMA_VERSION } from './types.js';
 import {
@@ -199,7 +199,6 @@ function readRegistryStrict(path: string): ProviderRegistry {
 }
 
 export function loadRegistry(path = getProvidersPath()): ProviderRegistry {
-  ensureLegacyAppHomeMigrated();
   if (!existsSync(path)) {
     return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
   }
@@ -230,7 +229,6 @@ export function loadRegistry(path = getProvidersPath()): ProviderRegistry {
  * unreadable registry with an empty one.
  */
 export function loadRegistryStrict(path = getProvidersPath()): ProviderRegistry {
-  ensureLegacyAppHomeMigrated();
   if (!existsSync(path)) {
     return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
   }

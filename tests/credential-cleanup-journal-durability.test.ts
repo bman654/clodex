@@ -66,7 +66,7 @@ import {
   rmSync,
 } from 'node:fs';
 import { queueCredentialDelete } from '../src/registry/credential-cleanup-journal.js';
-import { getCredentialCleanupPath, resetLegacyMigrationForTests } from '../src/paths.js';
+import { getCredentialCleanupPath } from '../src/paths.js';
 
 describe('credential cleanup journal durability', () => {
   const previousHome = process.env.CLODEX_HOME;
@@ -75,7 +75,6 @@ describe('credential cleanup journal durability', () => {
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'clodex-journal-durability-'));
     process.env.CLODEX_HOME = home;
-    resetLegacyMigrationForTests();
     fsState.journalPath = getCredentialCleanupPath();
     fsState.openPaths.clear();
     fsState.tempOpenFlags = [];
@@ -87,7 +86,6 @@ describe('credential cleanup journal durability', () => {
   afterEach(() => {
     if (previousHome === undefined) delete process.env.CLODEX_HOME;
     else process.env.CLODEX_HOME = previousHome;
-    resetLegacyMigrationForTests();
     rmSync(home, { recursive: true, force: true });
   });
 

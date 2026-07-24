@@ -14,10 +14,7 @@ import {
 } from 'node:fs';
 import { dirname } from 'node:path';
 import { parseAuthRef } from '../env.js';
-import {
-  ensureLegacyAppHomeMigrated,
-  getCredentialCleanupPath,
-} from '../paths.js';
+import { getCredentialCleanupPath } from '../paths.js';
 import { ensureSecureAppHome } from './io.js';
 import {
   assertRegistryWriteOwnership,
@@ -204,7 +201,6 @@ function journalLockPath(path: string): string {
 export async function loadPendingCredentialDeletes(
   path = getCredentialCleanupPath(),
 ): Promise<string[]> {
-  ensureLegacyAppHomeMigrated();
   return withRegistryWriteLock(
     () => [...readJournalUnlocked(path).pendingCredentialDeletes],
     { lockPath: journalLockPath(path) },
@@ -215,7 +211,6 @@ async function updatePendingCredentialDeletes(
   update: (pending: string[]) => string[],
   path = getCredentialCleanupPath(),
 ): Promise<{ before: string[]; after: string[] }> {
-  ensureLegacyAppHomeMigrated();
   return withRegistryWriteLock(() => {
     const journal = readJournalUnlocked(path);
     const before = [...journal.pendingCredentialDeletes];

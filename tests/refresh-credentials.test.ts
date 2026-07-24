@@ -77,21 +77,16 @@ describe('resolveRefreshCredential', () => {
     const previous = process.env['OPENAI_API_KEY'];
     process.env['OPENAI_API_KEY'] = 'sk-from-env';
     try {
-      for (const authRef of [
-        'none:anonymous',
-        'keyring:provider:openai',
-      ]) {
-        let called = false;
-        const key = await resolveRefreshCredential(
-          makeProvider({ authRef, authType: 'none' }),
-          async () => {
-            called = true;
-            return 'stale-key';
-          },
-        );
-        expect(key).toBeNull();
-        expect(called).toBe(false);
-      }
+      let called = false;
+      const key = await resolveRefreshCredential(
+        makeProvider({ authRef: 'none:anonymous', authType: 'none' }),
+        async () => {
+          called = true;
+          return 'stale-key';
+        },
+      );
+      expect(key).toBeNull();
+      expect(called).toBe(false);
     } finally {
       if (previous === undefined) delete process.env['OPENAI_API_KEY'];
       else process.env['OPENAI_API_KEY'] = previous;

@@ -128,8 +128,6 @@ export function classifyKeyringError(err: unknown): string {
 }
 
 const KEYRING_SERVICE = 'clodex';
-/** One-time silent migration source: credentials stored by relay-ai. */
-const LEGACY_KEYRING_SERVICE = 'relay-ai';
 // Windows Credential Manager caps a single credential blob at 2560 bytes (CredWriteW).
 // keyring-rs encodes the password as UTF-16 (2 bytes/char) before that check, so the
 // usable limit is 2560 / 2 = 1280 chars — long OAuth tokens (e.g. OpenAI's JWTs) exceed
@@ -254,20 +252,7 @@ function readKeyringAccountFromService(
 async function readKeyringAccount(account: string, diag?: (msg: string) => void): Promise<string | null> {
   try {
     const { Entry } = await import('@napi-rs/keyring');
-    const value = readKeyringAccountFromService(Entry, KEYRING_SERVICE, account);
-    if (value !== null) return value;
-    // One-time silent migration: fall back to the relay-ai keychain service and
-    // copy the credential into the clodex service on first read.
-    let legacy: string | null = null;
-    try {
-      legacy = readKeyringAccountFromService(Entry, LEGACY_KEYRING_SERVICE, account);
-    } catch {
-      legacy = null;
-    }
-    if (legacy !== null) {
-      await writeKeyringAccount(account, legacy, diag);
-    }
-    return legacy;
+    return readKeyringAccountFromService(Entry, KEYRING_SERVICE, account);
   } catch (err) {
     diag?.(classifyKeyringError(err));
     return null;

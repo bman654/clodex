@@ -1,7 +1,7 @@
 import type { UserPreferences } from './types.js';
 import { dirname } from 'node:path';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { ensureLegacyAppHomeMigrated, getConfigPath } from './paths.js';
+import { getConfigPath } from './paths.js';
 
 function readJsonFile(path: string): UserPreferences | null {
   try {
@@ -13,7 +13,6 @@ function readJsonFile(path: string): UserPreferences | null {
 }
 
 function readConfig(): UserPreferences {
-  ensureLegacyAppHomeMigrated();
   return readJsonFile(getConfigPath()) ?? {};
 }
 

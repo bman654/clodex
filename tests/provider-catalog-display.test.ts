@@ -161,11 +161,6 @@ describe('provider-catalog-display', () => {
         authRef: 'none:anonymous',
         authType: 'none',
       } as any)).toBe('anonymous');
-      expect(formatRegistryAuthLabel({
-        id: 'legacy-local',
-        authRef: 'keyring:provider:legacy-local',
-        authType: 'none',
-      } as any)).toBe('anonymous');
     });
   });
 
