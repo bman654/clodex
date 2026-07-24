@@ -24,7 +24,13 @@ previous store; remove that credential with the previous backend's tooling.
 
 Clodex verifies the selected store with a disposable write, read, and delete
 before starting device authorization. It also reads back real credential
-writes.
+writes. OAuth refresh returns the new access token only after the rotated
+credential has been stored and verified. An environment override rejected by
+the upstream service remains bypassed until its value changes or the process
+restarts, preventing the same stale value from causing a 401 on every request.
+For stored OAuth credentials, a rejected-access marker is cleared when refresh
+returns a different access token. If the identity provider keeps returning the
+same rejected token, run `clodex providers auth <provider>` to reauthenticate.
 
 Credential storage is fail-closed. If the selected credential store fails its
 probe, Clodex stops before device authorization and includes the backend
@@ -77,9 +83,16 @@ contents are never passed in arguments or environment variables. Helper
 standard error is not copied into Clodex diagnostics, and output and runtime
 are bounded.
 
+The helper protocol transports credential bytes without interpreting them.
+For non-OAuth provider references, Clodex preserves valid opaque JSON secrets.
+OAuth references accept only complete OAuth records or well-known token
+records; malformed or unknown JSON is never used as a bearer token.
+
 ## Security responsibilities
 
-The helper owns storage and its security properties. A helper should:
+Clodex owns OAuth parsing, refresh decisions, replacement-token serialization,
+and in-process refresh deduplication per provider and credential reference. The
+helper owns storage and its security properties. A helper should:
 
 - encrypt credentials at rest using a system or user trust root;
 - serialize concurrent updates when its backend requires it;

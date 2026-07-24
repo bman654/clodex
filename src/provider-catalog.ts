@@ -113,6 +113,7 @@ export function localProvidersToServerModels(localProviders: LocalProvider[]): S
       npm: model.modelFormat === 'openai' ? (model.npm || '@ai-sdk/openai-compatible') : model.npm,
       apiBaseUrl: model.apiBaseUrl,
       apiKey: provider.apiKey,
+      authRef: provider.authRef,
       authType: provider.authType,
       oauthAccountId: provider.oauthAccountId,
       contextWindow: model.contextWindow,

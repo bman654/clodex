@@ -125,6 +125,28 @@ describe('provider credentials', () => {
     expect(key).toBe('sk-openai');
     delete process.env['OPENAI_API_KEY'];
   });
+
+  it('scopes rejected shared env credentials to the provider that rejected them', async () => {
+    process.env['CLODEX_TEST_SHARED_KEY'] = 'shared-access';
+    try {
+      await expect(resolveProviderCredential(
+        'first-provider',
+        'env:CLODEX_TEST_SHARED_KEY',
+        undefined,
+        { rejectedAccessToken: 'shared-access' },
+      )).resolves.toBeNull();
+      await expect(resolveProviderCredential(
+        'second-provider',
+        'env:CLODEX_TEST_SHARED_KEY',
+      )).resolves.toBe('shared-access');
+      await expect(resolveProviderCredential(
+        'first-provider',
+        'env:CLODEX_TEST_SHARED_KEY',
+      )).resolves.toBeNull();
+    } finally {
+      delete process.env['CLODEX_TEST_SHARED_KEY'];
+    }
+  });
 });
 
 describe('buildChildEnv', () => {

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import * as env from '../src/env.js';
 import {
   formatRegistryAuthLabel,
+  localProvidersToServerModels,
   providersForPicker,
   resolveLocalProviderApiKey,
   resolveProvidersForDisplay,
@@ -113,6 +114,26 @@ describe('provider-catalog-display', () => {
         'keyring:oauth:provider:openai-oauth',
       );
     });
+  });
+
+  it('propagates exact credential references to server models for OAuth retry', () => {
+    const models = localProvidersToServerModels([{
+      id: 'openai-oauth',
+      name: 'OpenAI (ChatGPT)',
+      apiKey: 'access-token',
+      authRef: TEST_HELPER_REF,
+      authType: 'oauth',
+      models: [{
+        id: 'gpt-oauth-route',
+        name: 'OAuth Route',
+        family: 'gpt',
+        brand: 'GPT',
+        modelFormat: 'openai',
+        upstreamModelId: 'gpt-oauth-route',
+      }],
+    }]);
+
+    expect(models[0]?.authRef).toBe(TEST_HELPER_REF);
   });
 
   describe('formatRegistryAuthLabel', () => {

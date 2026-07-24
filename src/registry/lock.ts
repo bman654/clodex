@@ -16,6 +16,7 @@ import { dirname } from 'node:path';
 import { getProvidersPath } from '../paths.js';
 
 const DEFAULT_WAIT_MS = 30_000;
+const DEFAULT_CREDENTIAL_MUTATION_WAIT_MS = 150_000;
 const DEFAULT_RETRY_MS = 25;
 
 interface RegistryLockOwner {
@@ -421,8 +422,11 @@ export function getCredentialMutationLockPath(authRef: string): string {
 export function withCredentialMutationLock<T>(
   authRef: string,
   operation: () => Promise<T> | T,
+  options: Pick<RegistryLockOptions, 'waitMs' | 'retryMs'> = {},
 ): Promise<T> {
   return withRegistryWriteLock(operation, {
+    ...options,
     lockPath: getCredentialMutationLockPath(authRef),
+    waitMs: options.waitMs ?? DEFAULT_CREDENTIAL_MUTATION_WAIT_MS,
   });
 }

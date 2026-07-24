@@ -16,7 +16,11 @@ import {
   writeInferenceResponseErrorLog,
   writeWebSocketDiagnosticLog,
 } from './trace-log.js';
-import { fetchWithOAuthRetry, relayAnthropicMessages, UpstreamUnreachableError } from './upstream-forward.js';
+import {
+  relayAnthropicMessages,
+  resolveOAuthRetryReplacement,
+  UpstreamUnreachableError,
+} from './upstream-forward.js';
 import {
   CLAUDE_CODE_CLI_VERSION,
   injectClaudeCodeBillingSystemLine,
@@ -222,8 +226,8 @@ export interface ProxyRoute {
   authType?: 'api' | 'oauth' | 'none';
   oauthAccountId?: string;
   providerData?: Record<string, unknown>;
-  /** Called once on upstream HTTP 401 to get a refreshed OAuth token. Retry happens only if token differs from current apiKey. */
-  refreshToken?: () => Promise<string | null>;
+  /** Resolves the current OAuth token before dispatch and once more after an upstream HTTP 401. */
+  refreshToken?: (rejectedAccessToken?: string) => Promise<string | null>;
   supportedParameters?: string[];
   reasoning?: boolean;
   interleavedReasoningField?: string;
@@ -368,7 +372,29 @@ export async function startProxyCatalog(
 
       // Per-request route resolution: look up the alias, fall back to default
       const route = lookupRoute(byAlias, originalModel) ?? defaultRoute;
-      const apiKey = route.apiKey;
+      if (messagesEndpoint === 'count_tokens' && route.modelFormat !== 'anthropic') {
+        const inputTokens = estimateAnthropicInputTokens(anthropicBody);
+        plog(() => `token-count: local estimate model=${originalModel} input_tokens=${inputTokens}`);
+        res.setHeader('x-relay-token-count-source', 'local-estimate');
+        sendJson(res, 200, { input_tokens: inputTokens });
+        return;
+      }
+
+      let apiKey = route.apiKey;
+      if (route.authType === 'oauth' && route.refreshToken) {
+        try {
+          const current = await route.refreshToken();
+          if (!current) throw new Error('credential is missing');
+          apiKey = current;
+          route.apiKey = current;
+        } catch (err) {
+          plog(() =>
+            `oauth credential unavailable: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          anthropicError(res, 401, 'OAuth credential is unavailable');
+          return;
+        }
+      }
       const upstreamUrl = route.upstreamUrl;
       const routeAuthType = route.authType ?? 'api';
 
@@ -379,14 +405,6 @@ export async function startProxyCatalog(
       const usesSdkAdapter = isSdkMigratedNpm(route.npm);
 
       if (messagesEndpoint === 'count_tokens') {
-        if (route.modelFormat !== 'anthropic') {
-          const inputTokens = estimateAnthropicInputTokens(anthropicBody);
-          plog(() => `token-count: local estimate model=${originalModel} input_tokens=${inputTokens}`);
-          res.setHeader('x-relay-token-count-source', 'local-estimate');
-          sendJson(res, 200, { input_tokens: inputTokens });
-          return;
-        }
-
         if (!apiKey && routeAuthType !== 'none') {
           anthropicError(res, 401, 'Missing API key');
           return;
@@ -486,7 +504,7 @@ export async function startProxyCatalog(
           originalModel,
           route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown',
         );
-        try {
+        const runSdkRequest = async (): Promise<void> => {
           const claudeSessionIdHeader = Array.isArray(req.headers['x-claude-code-session-id'])
             ? req.headers['x-claude-code-session-id'][0]
             : req.headers['x-claude-code-session-id'];
@@ -608,18 +626,38 @@ export async function startProxyCatalog(
             translationLifecycle?.complete();
             sendJson(res, 200, anthropicResponse);
           }
-        } catch (err) {
+        };
+
+        let sdkAttempt = 0;
+        const handleSdkError = async (
+          err: unknown,
+        ): Promise<'retry' | 'cancelled' | 'done'> => {
           if (clientAbort.signal.aborted) {
             translationLifecycle?.cancel();
-            return;
+            return 'cancelled';
+          }
+          const message = formatUpstreamError(err);
+          const details = sdkUpstreamErrorDetails(err);
+          const upstreamStatus = details?.statusCode ?? upstreamHttpStatus(err, message);
+          const replacement = await resolveOAuthRetryReplacement(
+            openAiOAuth,
+            upstreamStatus,
+            sdkAttempt,
+            res.headersSent,
+            apiKey,
+            route.refreshToken,
+          );
+          if (replacement) {
+            apiKey = replacement;
+            route.apiKey = replacement;
+            sdkAttempt += 1;
+            plog(() => 'sdk oauth credential replaced after 401; retrying once');
+            return 'retry';
           }
           translationLifecycle?.fail(
             err instanceof Error ? err.name : 'UpstreamError',
             sdkTranslationErrorSignature(err),
           );
-          const message = formatUpstreamError(err);
-          const details = sdkUpstreamErrorDetails(err);
-          const upstreamStatus = details?.statusCode ?? upstreamHttpStatus(err, message);
           const contextLengthExceeded = upstreamStatus === 400
             && isContextLengthExceededError(err, message);
           const clientMessage = contextLengthExceeded
@@ -656,6 +694,19 @@ export async function startProxyCatalog(
               ...(contextLengthExceeded ? { request_id: relayRequestId ?? randomUUID() } : {}),
             })}\n\n`);
             res.end();
+          }
+          return 'done';
+        };
+
+        for (;;) {
+          try {
+            await runSdkRequest();
+            break;
+          } catch (err) {
+            const outcome = await handleSdkError(err);
+            if (outcome === 'retry') continue;
+            if (outcome === 'cancelled') return;
+            break;
           }
         }
         return;
