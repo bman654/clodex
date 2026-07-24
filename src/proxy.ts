@@ -6,7 +6,12 @@ import type { AddressInfo } from 'node:net';
 import { appendFileSync, openSync, writeSync, closeSync } from 'node:fs';
 import { readBody, extractApiKey, sendJson } from './http-utils.js';
 import { formatAnthropicModelEntry, formatAnthropicModelList } from './server/models.js';
-import { claudeCodeClientModelId, routeLookupIds, stripOneMContextSuffix } from './context-model-id.js';
+import {
+  claudeCodeClientModelId,
+  normalizeRouteLookupId,
+  stripOneMContextSuffix,
+} from './context-model-id.js';
+import { routeUnavailableMessage } from './route-unavailable.js';
 import {
   getProxyDebugLogPath,
   INFERENCE_PROGRESS_INTERVAL_MS,
@@ -253,11 +258,7 @@ export function aliasModelId(realId: string, providerId: string): string {
 
 /** Resolve catalog alias when Claude Code or legacy registry ids differ by prefix/suffix. */
 function lookupRoute(byAlias: Map<string, ProxyRoute>, id: string): ProxyRoute | undefined {
-  for (const key of routeLookupIds(id)) {
-    const route = byAlias.get(key);
-    if (route) return route;
-  }
-  return undefined;
+  return byAlias.get(normalizeRouteLookupId(id));
 }
 
 /** Short alias name → route id, resolvable in request bodies alongside route aliasIds. */
@@ -283,12 +284,16 @@ export async function startProxyCatalog(
     throw new Error('Proxy catalog requires at least one route');
   }
 
-  const byAlias = new Map(routes.map(r => [r.aliasId, r]));
+  const byAlias = new Map(routes.map(r => [normalizeRouteLookupId(r.aliasId), r]));
+  const configuredAliasNames = new Set(
+    (modelAliases ?? []).map(alias => normalizeRouteLookupId(alias.name)),
+  );
   for (const alias of modelAliases ?? []) {
-    const route = byAlias.get(alias.routeId);
-    if (route && !byAlias.has(alias.name)) byAlias.set(alias.name, route);
+    const route = lookupRoute(byAlias, alias.routeId);
+    const aliasId = normalizeRouteLookupId(alias.name);
+    if (route && !byAlias.has(aliasId)) byAlias.set(aliasId, route);
   }
-  const defaultRoute = byAlias.get(defaultAliasId) ?? routes[0]!;
+  const defaultRoute = lookupRoute(byAlias, defaultAliasId) ?? routes[0]!;
 
   const plog = makeProxyLog(debug, debugLogPath);
 
@@ -371,7 +376,19 @@ export async function startProxyCatalog(
       const relayRequestId = Array.isArray(relayRequestIdRaw) ? relayRequestIdRaw[0] : relayRequestIdRaw;
 
       // Per-request route resolution: look up the alias, fall back to default
-      const route = lookupRoute(byAlias, originalModel) ?? defaultRoute;
+      const resolvedRoute = typeof originalModel === 'string'
+        ? lookupRoute(byAlias, originalModel)
+        : undefined;
+      const configuredModelUnavailable = typeof originalModel === 'string'
+        && (
+          normalizeRouteLookupId(originalModel).startsWith('clodex:')
+          || configuredAliasNames.has(normalizeRouteLookupId(originalModel))
+        );
+      if (!resolvedRoute && configuredModelUnavailable) {
+        anthropicError(res, 400, routeUnavailableMessage(originalModel));
+        return;
+      }
+      const route = resolvedRoute ?? defaultRoute;
       if (messagesEndpoint === 'count_tokens' && route.modelFormat !== 'anthropic') {
         const inputTokens = estimateAnthropicInputTokens(anthropicBody);
         plog(() => `token-count: local estimate model=${originalModel} input_tokens=${inputTokens}`);

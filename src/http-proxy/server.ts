@@ -7,16 +7,19 @@ import { URL } from 'node:url';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import type { ProxyHandle, ProxyRoute } from '../proxy.js';
 import { startProxyCatalog } from '../proxy.js';
+import { decodeRequestBody } from '../http-utils.js';
 import { ensureHttpProxyCertificates } from './ca.js';
-import { routeLookupIds } from '../context-model-id.js';
-import type { ResolvedHttpProxyAlias } from './routes.js';
+import { normalizeRouteLookupId } from '../context-model-id.js';
 import { listenTcpServer } from '../listener-ready.js';
+import { routeUnavailableMessage } from '../route-unavailable.js';
+import { HTTP_PROXY_MODEL_PREFIX, type ResolvedHttpProxyAlias } from './routes.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
 import {
   getLatestMessagePreview,
   INFERENCE_PROGRESS_INTERVAL_MS,
   writeInferenceRequestLog,
+  writeInferenceRouteUnavailableLog,
   writeInferenceResponseLifecycleLog,
   writeInferenceResponseErrorLog,
   writeWebSocketDiagnosticRequestLog,
@@ -143,6 +146,8 @@ export interface HttpProxyOptions {
   routes: ProxyRoute[];
   /** Short incoming model names mapped to canonical adapter route ids. */
   modelAliases?: ResolvedHttpProxyAlias[];
+  /** Configured local model ids that must never fall through to Anthropic. */
+  reservedModelIds?: string[];
   debug?: boolean;
   /** Per-process translated-adapter debug log used when debug is enabled. */
   debugLogPath?: string;
@@ -661,13 +666,19 @@ function forwardPlainHttp(req: http.IncomingMessage, res: http.ServerResponse): 
 export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpProxyHandle> {
   const certificates = ensureHttpProxyCertificates();
   const routesById = new Map<string, ProxyRoute>();
+  const reservedModelIds = new Set<string>();
   for (const route of options.routes) {
-    for (const id of routeLookupIds(route.aliasId)) routesById.set(id, route);
+    routesById.set(normalizeRouteLookupId(route.aliasId), route);
   }
   for (const alias of options.modelAliases ?? []) {
-    const route = routesById.get(alias.routeId);
+    const aliasId = normalizeRouteLookupId(alias.name);
+    reservedModelIds.add(aliasId);
+    const route = routesById.get(normalizeRouteLookupId(alias.routeId));
     if (!route) continue;
-    for (const id of routeLookupIds(alias.name)) routesById.set(id, route);
+    routesById.set(aliasId, route);
+  }
+  for (const modelId of options.reservedModelIds ?? []) {
+    reservedModelIds.add(normalizeRouteLookupId(modelId));
   }
   const anthropicOrigin = new URL(options.anthropicOrigin ?? 'https://api.anthropic.com');
   let adapter: ProxyHandle | null = options.adapterHandle ?? null;
@@ -702,11 +713,30 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       const requestId = randomUUID();
       let parsed: AnthropicRequest | null = null;
       let route: ProxyRoute | undefined;
+      let adapterBody = rawBody;
+      const contentEncoding = (Array.isArray(req.headers['content-encoding'])
+        ? req.headers['content-encoding'].join(',')
+        : req.headers['content-encoding'] ?? '').trim().toLowerCase();
+      const encodedRequestBody = contentEncoding !== '' && contentEncoding !== 'identity';
       try {
-        parsed = JSON.parse(rawBody.toString('utf8')) as AnthropicRequest;
-        if (typeof parsed.model === 'string') route = routesById.get(parsed.model);
+        const decodedBody = decodeRequestBody(rawBody, req.headers['content-encoding']);
+        parsed = JSON.parse(decodedBody) as AnthropicRequest;
+        if (encodedRequestBody) adapterBody = Buffer.from(decodedBody);
+        if (typeof parsed.model === 'string') {
+          route = routesById.get(normalizeRouteLookupId(parsed.model));
+        }
       } catch {
-        // Fail safe: an unreadable body is Anthropic traffic, never a relay route.
+        if (encodedRequestBody) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            type: 'error',
+            error: {
+              type: 'invalid_request_error',
+              message: 'Unable to inspect compressed request body',
+            },
+          }));
+          return;
+        }
       }
       const claudeSessionIdHeader = Array.isArray(req.headers['x-claude-code-session-id'])
         ? req.headers['x-claude-code-session-id'][0]
@@ -714,6 +744,28 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       const claudeSessionId = parsed
         ? extractClaudeSessionId(parsed, claudeSessionIdHeader)
         : undefined;
+      const requestedModel = typeof parsed?.model === 'string' ? parsed.model : undefined;
+      const unresolvedRoutedModel = !route && requestedModel !== undefined && (
+        normalizeRouteLookupId(requestedModel).startsWith(HTTP_PROXY_MODEL_PREFIX)
+        || reservedModelIds.has(normalizeRouteLookupId(requestedModel))
+      );
+
+      if (unresolvedRoutedModel) {
+        const message = routeUnavailableMessage(requestedModel);
+        if (messagesEndpoint === 'messages' && options.inferenceLogPath) {
+          writeInferenceRouteUnavailableLog(options.inferenceLogPath, {
+            requestId,
+            modelId: requestedModel,
+            statusCode: 400,
+          });
+        }
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          type: 'error',
+          error: { type: 'invalid_request_error', message },
+        }));
+        return;
+      }
 
       if (messagesEndpoint === 'messages' && options.inferenceLogPath) {
         const provider = route
@@ -746,13 +798,13 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       }
 
       if (route && adapter) {
-        // Forward the body untouched — the adapter resolves alias names itself
-        // (it is built from the same routes + modelAliases as routesById above)
-        // and must echo the client's requested model id in response messages.
+        // The adapter resolves alias names itself and must echo the client's
+        // requested model id in response messages. Encoded bodies are decoded
+        // for this local hop, but their JSON model value is not rewritten.
         // Claude Code resolves context windows from the response model field, so
         // substituting the canonical route id here breaks its window lookup for
         // patched/alias model ids (wrong auto-compact threshold → agent death).
-        await forwardToAdapter(req, res, rawBody, adapter, messagesEndpoint === 'messages' && options.inferenceLogPath
+        await forwardToAdapter(req, res, adapterBody, adapter, messagesEndpoint === 'messages' && options.inferenceLogPath
           ? {
               logPath: options.inferenceLogPath,
               requestId,

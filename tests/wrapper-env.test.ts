@@ -41,6 +41,41 @@ describe('computeWrapperEnv', () => {
     expect(env['PATH']).toBe('/usr/bin');
   });
 
+  it('proxy-mode server removes Anthropic bypasses while preserving unrelated hosts', () => {
+    const state: ServerRuntimeState = {
+      mode: 'proxy',
+      port: 17645,
+      pid: process.pid,
+      caPath: '/home/u/.clodex/http-proxy/clodex-ca.pem',
+      startedAt: '2026-07-20T00:00:00.000Z',
+    };
+    const env = computeWrapperEnv({
+      ...baseEnv,
+      NO_PROXY: 'localhost,api.anthropic.com,.anthropic.com,.internal.example,*',
+    }, state);
+
+    expect(env['NO_PROXY']).toBe('localhost,.internal.example');
+    expect(env['no_proxy']).toBe('localhost,.internal.example');
+  });
+
+  it('merges uppercase and lowercase bypass lists before filtering', () => {
+    const state: ServerRuntimeState = {
+      mode: 'proxy',
+      port: 17645,
+      pid: process.pid,
+      caPath: '/home/u/.clodex/http-proxy/clodex-ca.pem',
+      startedAt: '2026-07-20T00:00:00.000Z',
+    };
+    const env = computeWrapperEnv({
+      ...baseEnv,
+      NO_PROXY: 'localhost,api.anthropic.com',
+      no_proxy: 'corp.internal,.anthropic.com',
+    }, state);
+
+    expect(env['NO_PROXY']).toBe('localhost,corp.internal');
+    expect(env['no_proxy']).toBe('localhost,corp.internal');
+  });
+
   it('endpoint-mode server: points ANTHROPIC_BASE_URL at the gateway and clears proxy vars', () => {
     const state: ServerRuntimeState = {
       mode: 'endpoint',
