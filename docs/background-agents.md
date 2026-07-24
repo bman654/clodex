@@ -6,7 +6,7 @@ This page explains how to bridge **every** Claude Code process on your machine �
 
 - One global **`clodex server --proxy`** runs in the background (proxy mode is the recommended mode for this setup: your existing Anthropic login keeps working, and only `clodex:` models / aliases are rerouted to OpenAI).
 - On startup the server adds its own record to `~/.clodex/server-runtime.json` (`mode`, `port`, `pid`, and in proxy mode the CA certificate path). The file holds one record per running server — several `clodex server` instances (say a proxy server for Claude Code plus a separate endpoint server for another tool) can be advertised at once — and each server removes only its own record on shutdown. Start a server with `--no-discovery` (or `CLODEX_NO_DISCOVERY=1`) to keep it out of the file entirely so `clodex-claude` never bridges to it.
-- The **`clodex-claude`** bin (installed alongside `clodex`) reads that file, checks each server is actually alive (pid + bounded retrying TCP probe), picks one — proxy-mode servers are preferred over endpoint-mode (bridging keeps Claude Code's own auth), newest first within a mode — and launches the real `claude` binary with the right env injected:
+- The **`clodex-claude`** bin (installed alongside `clodex`) reads that file, filters for live pids, and runs one fast TCP probe across all ordered candidates. It picks the highest-priority candidate that answers — proxy-mode servers are preferred over endpoint-mode (bridging keeps Claude Code's own auth), newest first within a mode. Only when none answers does it briefly retry all candidates under one shared 500 ms deadline, then it launches the real `claude` binary with the right env injected:
   - proxy-mode server: `HTTPS_PROXY`/`HTTP_PROXY` + `NODE_EXTRA_CA_CERTS`, with `ANTHROPIC_BASE_URL` removed;
   - endpoint-mode server: `ANTHROPIC_BASE_URL` pointing at the gateway;
   - **no live server: env untouched** — `claude` always launches normally, a stopped server never breaks anything.
@@ -85,8 +85,10 @@ Port and CA discovery are automatic via `~/.clodex/server-runtime.json` — do n
 
 For service-manager readiness checks, `clodex-claude --check` exits `0` when an
 advertised server passes the process and TCP checks, and exits `1` otherwise.
-The TCP check briefly retries transient loopback refusals before deciding the
-server is unavailable. It does not launch Claude.
+Servers advertise themselves only after their listener has passed readiness.
+The wrapper retry handles a transient loopback refusal from an
+already-advertised live process; it is not a registration-before-listen delay.
+The check does not launch Claude.
 
 ## Troubleshooting
 

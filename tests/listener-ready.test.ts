@@ -1,10 +1,10 @@
 import { createServer } from 'node:net';
-import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
 import {
   listenTcpServer,
   tcpListenerUrlHost,
   waitForTcpListener,
+  waitForTcpListenerCandidate,
 } from '../src/listener-ready.js';
 
 describe('tcp listener readiness', () => {
@@ -41,22 +41,98 @@ describe('tcp listener readiness', () => {
   });
 
   it('retries transient connection failures until a listener is reachable', async () => {
-    const reservation = createServer();
-    const address = await listenTcpServer(reservation, 0, '127.0.0.1');
-    await new Promise<void>(resolve => reservation.close(() => resolve()));
+    let elapsedMs = 0;
+    let attempts = 0;
 
-    const delayedServer = createServer(socket => socket.end());
-    const readiness = waitForTcpListener('127.0.0.1', address.port, 500);
-    await delay(25);
-    await new Promise<void>((resolve, reject) => {
-      delayedServer.once('error', reject);
-      delayedServer.listen(address.port, '127.0.0.1', resolve);
+    const readiness = waitForTcpListener('127.0.0.1', 17_645, 20, {
+      now: () => elapsedMs,
+      probe: async () => {
+        attempts += 1;
+        return attempts === 3;
+      },
+      delay: async (ms: number) => {
+        elapsedMs += ms;
+      },
     });
 
-    try {
-      await expect(readiness).resolves.toBe(true);
-    } finally {
-      await new Promise<void>(resolve => delayedServer.close(() => resolve()));
-    }
+    await expect(readiness).resolves.toBe(true);
+    expect(attempts).toBe(3);
+    expect(elapsedMs).toBe(10);
+  });
+
+  it('returns false at the shared deadline when a listener stays unreachable', async () => {
+    let elapsedMs = 0;
+    const probeTimeouts: number[] = [];
+
+    const readiness = waitForTcpListener('127.0.0.1', 17_645, 12, {
+      now: () => elapsedMs,
+      probe: async (_host: string, _port: number, timeoutMs: number) => {
+        probeTimeouts.push(timeoutMs);
+        return false;
+      },
+      delay: async (ms: number) => {
+        elapsedMs += ms;
+      },
+    });
+
+    await expect(readiness).resolves.toBe(false);
+    expect(elapsedMs).toBe(12);
+    expect(probeTimeouts).toEqual([12, 7, 2]);
+  });
+
+  it('probes every candidate once and chooses the first reachable candidate', async () => {
+    const candidates = [{ port: 17_645 }, { port: 17_646 }];
+    const probedPorts: number[] = [];
+
+    const selected = await waitForTcpListenerCandidate(
+      '127.0.0.1',
+      candidates,
+      20,
+      {
+        now: () => 0,
+        probe: async (_host: string, port: number) => {
+          probedPorts.push(port);
+          return true;
+        },
+        delay: async () => {
+          throw new Error('reachable fast pass must not retry');
+        },
+      },
+    );
+
+    expect(selected).toBe(candidates[0]);
+    expect(probedPorts).toEqual([17_645, 17_646]);
+  });
+
+  it('shares one exact deadline across all unreachable candidates', async () => {
+    let elapsedMs = 0;
+    const probes: Array<{ port: number; timeoutMs: number }> = [];
+
+    const selected = await waitForTcpListenerCandidate(
+      '127.0.0.1',
+      [{ port: 17_645 }, { port: 17_646 }],
+      12,
+      {
+        now: () => elapsedMs,
+        probe: async (_host: string, port: number, timeoutMs: number) => {
+          probes.push({ port, timeoutMs });
+          return false;
+        },
+        delay: async (ms: number) => {
+          elapsedMs += ms;
+        },
+      },
+    );
+
+    expect(selected).toBeNull();
+    expect(elapsedMs).toBe(12);
+    expect(probes).toEqual([
+      { port: 17_645, timeoutMs: 12 },
+      { port: 17_646, timeoutMs: 12 },
+      { port: 17_645, timeoutMs: 7 },
+      { port: 17_646, timeoutMs: 7 },
+      { port: 17_645, timeoutMs: 2 },
+      { port: 17_646, timeoutMs: 2 },
+    ]);
   });
 });

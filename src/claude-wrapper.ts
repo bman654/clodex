@@ -25,7 +25,7 @@ import { spawn } from 'node:child_process';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { constants as osConstants } from 'node:os';
 import { findClaudeBinary } from './launch.js';
-import { waitForTcpListener } from './listener-ready.js';
+import { waitForTcpListenerCandidate } from './listener-ready.js';
 import {
   orderWrapperServerCandidates,
   readLiveServerRuntimeStates,
@@ -71,21 +71,16 @@ async function main(): Promise<void> {
   // Selection policy (see orderWrapperServerCandidates): proxy-mode servers
   // are preferred over endpoint-mode ones — bridging keeps Claude Code's own
   // Anthropic auth — with newest startedAt breaking ties within a mode. The
-  // first candidate whose port answers the TCP probe wins; if only an
-  // endpoint server is live it is used; with none, claude launches untouched.
-  let state: ServerRuntimeState | null = null;
-  for (const candidate of orderWrapperServerCandidates(readLiveServerRuntimeStates())) {
-    if (
-      await waitForTcpListener(
-        '127.0.0.1',
-        candidate.port,
-        WRAPPER_SERVER_READY_TIMEOUT_MS,
-      )
-    ) {
-      state = candidate;
-      break;
-    }
-  }
+  // A fast probe round covers every candidate so an unreachable preferred
+  // record cannot delay a reachable fallback. If none answer, retry rounds
+  // tolerate transient refusal from an already-advertised live process under
+  // one shared deadline, then claude launches untouched when none recover.
+  const candidates = orderWrapperServerCandidates(readLiveServerRuntimeStates());
+  const state: ServerRuntimeState | null = await waitForTcpListenerCandidate(
+    '127.0.0.1',
+    candidates,
+    WRAPPER_SERVER_READY_TIMEOUT_MS,
+  );
   if (checkOnly) process.exit(state ? 0 : 1);
   if (!state && wrapperRequiresServer(process.env)) {
     process.stderr.write('clodex-claude: no live clodex server is available\n');

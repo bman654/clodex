@@ -1,8 +1,16 @@
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { rootCertificates } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { build } from 'tsup';
@@ -21,6 +29,7 @@ let testRoot: string;
 let clodexHome: string;
 let helperPath: string;
 let launchMarker: string;
+let caPath: string;
 
 async function runWrapper(
   args: string[],
@@ -64,11 +73,20 @@ async function runWrapper(
   });
 }
 
-async function openLoopbackServer(): Promise<{ server: Server; port: number }> {
+async function openLoopbackServer(
+  host = '127.0.0.1',
+): Promise<{ server: Server; port: number }> {
   const server = createServer((socket) => socket.end());
   await new Promise<void>((resolveListen, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => resolveListen());
+    const onError = (error: Error) => {
+      server.off('error', onError);
+      reject(error);
+    };
+    server.once('error', onError);
+    server.listen(0, host, () => {
+      server.off('error', onError);
+      resolveListen();
+    });
   });
   const address = server.address();
   if (!address || typeof address === 'string') {
@@ -87,23 +105,42 @@ async function closeServer(server: Server): Promise<void> {
   });
 }
 
-function advertiseEndpoint(port: number, pid = process.pid): void {
+interface AdvertisedServer {
+  mode: 'endpoint' | 'proxy';
+  port: number;
+  pid: number;
+  caPath?: string;
+  startedAt: string;
+}
+
+function advertiseServers(records: AdvertisedServer[]): void {
   mkdirSync(clodexHome, { recursive: true });
   writeFileSync(
     join(clodexHome, 'server-runtime.json'),
-    `${JSON.stringify([
-      {
-        mode: 'endpoint',
-        port,
-        pid,
-        startedAt: new Date().toISOString(),
-      },
-    ])}\n`,
+    `${JSON.stringify(records)}\n`,
   );
+}
+
+function advertiseEndpoint(port: number, pid = process.pid): void {
+  advertiseServers([
+    {
+      mode: 'endpoint',
+      port,
+      pid,
+      startedAt: new Date().toISOString(),
+    },
+  ]);
 }
 
 function claudeInvocation(exitCode = 0): string[] {
   return [process.execPath, helperPath, launchMarker, String(exitCode)];
+}
+
+function readLaunchEnv(): { baseUrl: string | null; httpProxy: string | null } {
+  return JSON.parse(readFileSync(launchMarker, 'utf8')) as {
+    baseUrl: string | null;
+    httpProxy: string | null;
+  };
 }
 
 beforeAll(async () => {
@@ -135,11 +172,16 @@ beforeEach(() => {
   clodexHome = join(testRoot, 'clodex-home');
   helperPath = join(testRoot, 'fake-claude.mjs');
   launchMarker = join(testRoot, 'claude-launched');
+  caPath = join(testRoot, 'proxy-ca.pem');
+  writeFileSync(caPath, `${rootCertificates[0]}\n`);
   writeFileSync(
     helperPath,
     [
       "import { writeFileSync } from 'node:fs';",
-      "writeFileSync(process.argv[2], 'launched\\n');",
+      'writeFileSync(process.argv[2], JSON.stringify({',
+      '  baseUrl: process.env.ANTHROPIC_BASE_URL ?? null,',
+      '  httpProxy: process.env.HTTP_PROXY ?? null,',
+      '}));',
       "process.stdout.write('fake-claude-launched\\n');",
       'process.exit(Number(process.argv[3]));',
       '',
@@ -188,5 +230,127 @@ describe('clodex-claude process wrapper', () => {
     expect(result).toMatchObject({ code: 23, signal: null });
     expect(result.stdout).toBe('fake-claude-launched\n');
     expect(existsSync(launchMarker)).toBe(true);
+  });
+
+  it('uses a live endpoint when the preferred proxy record is stale', async () => {
+    const staleProxyReservation = await openLoopbackServer('127.0.0.2');
+    const endpoint = await openLoopbackServer();
+    advertiseServers([
+      {
+        mode: 'proxy',
+        port: staleProxyReservation.port,
+        pid: process.pid,
+        caPath,
+        startedAt: '2026-07-24T12:00:00.000Z',
+      },
+      {
+        mode: 'endpoint',
+        port: endpoint.port,
+        pid: process.pid,
+        startedAt: '2026-07-24T13:00:00.000Z',
+      },
+    ]);
+
+    try {
+      const result = await runWrapper(claudeInvocation());
+
+      expect(result).toMatchObject({ code: 0, signal: null });
+      expect(readLaunchEnv()).toEqual({
+        baseUrl: `http://127.0.0.1:${endpoint.port}/anthropic`,
+        httpProxy: null,
+      });
+    } finally {
+      await Promise.all([
+        closeServer(staleProxyReservation.server),
+        closeServer(endpoint.server),
+      ]);
+    }
+  });
+
+  it('probes all live candidates once and preserves proxy-first ordering', async () => {
+    const proxy = await openLoopbackServer();
+    const endpoint = await openLoopbackServer();
+    let proxyConnections = 0;
+    let endpointConnections = 0;
+    proxy.server.on('connection', () => {
+      proxyConnections += 1;
+    });
+    endpoint.server.on('connection', () => {
+      endpointConnections += 1;
+    });
+    advertiseServers([
+      {
+        mode: 'endpoint',
+        port: endpoint.port,
+        pid: process.pid,
+        startedAt: '2026-07-24T13:00:00.000Z',
+      },
+      {
+        mode: 'proxy',
+        port: proxy.port,
+        pid: process.pid,
+        caPath,
+        startedAt: '2026-07-24T12:00:00.000Z',
+      },
+    ]);
+
+    try {
+      const result = await runWrapper(claudeInvocation());
+
+      expect(result).toMatchObject({ code: 0, signal: null });
+      expect(readLaunchEnv()).toEqual({
+        baseUrl: null,
+        httpProxy: `http://127.0.0.1:${proxy.port}`,
+      });
+      expect(proxyConnections).toBe(1);
+      expect(endpointConnections).toBe(1);
+    } finally {
+      await Promise.all([
+        closeServer(proxy.server),
+        closeServer(endpoint.server),
+      ]);
+    }
+  });
+
+  it('reports unavailable when every candidate refuses connections', async () => {
+    const [newestProxy, olderProxy, endpoint] = await Promise.all([
+      openLoopbackServer('127.0.0.2'),
+      openLoopbackServer('127.0.0.2'),
+      openLoopbackServer('127.0.0.2'),
+    ]);
+    advertiseServers([
+      {
+        mode: 'proxy',
+        port: newestProxy.port,
+        pid: process.pid,
+        caPath,
+        startedAt: '2026-07-24T14:00:00.000Z',
+      },
+      {
+        mode: 'proxy',
+        port: olderProxy.port,
+        pid: process.pid,
+        caPath,
+        startedAt: '2026-07-24T13:00:00.000Z',
+      },
+      {
+        mode: 'endpoint',
+        port: endpoint.port,
+        pid: process.pid,
+        startedAt: '2026-07-24T12:00:00.000Z',
+      },
+    ]);
+
+    try {
+      const result = await runWrapper(['--check']);
+
+      expect(result).toMatchObject({ code: 1, signal: null });
+    } finally {
+      await Promise.all([
+        closeServer(newestProxy.server),
+        closeServer(olderProxy.server),
+        closeServer(endpoint.server),
+      ]);
+    }
   });
 });
