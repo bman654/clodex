@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fetchTemplateModels } from '../src/registry/fetch-template-models.js';
 import type { ProviderTemplate } from '../src/provider-templates.js';
+import { clearTraceSecrets, getProviderDebugLogPath } from '../src/trace-log.js';
 
 function template(partial: Partial<ProviderTemplate> & Pick<ProviderTemplate, 'id' | 'name' | 'npm'>): ProviderTemplate {
   return {
@@ -31,6 +35,7 @@ describe('fetchTemplateModels', () => {
   });
 
   afterEach(() => {
+    clearTraceSecrets();
     vi.unstubAllGlobals();
   });
 
@@ -77,6 +82,34 @@ describe('fetchTemplateModels', () => {
         }),
       }),
     );
+  });
+
+  it('redacts an opaque API key echoed in a traced response body', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'clodex-trace-redaction-'));
+    const previousHome = process.env.CLODEX_HOME;
+    const previousTrace = process.env.CLODEX_TRACE;
+    const secret = 'opaque.credential+$value[42]';
+    vi.mocked(fetch).mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: async () => JSON.stringify({ echo: secret }),
+    } as Response);
+
+    process.env.CLODEX_HOME = home;
+    process.env.CLODEX_TRACE = '1';
+    try {
+      await fetchTemplateModels(openaiCompatTemplate, secret);
+
+      const trace = readFileSync(getProviderDebugLogPath(), 'utf8');
+      expect(trace).toContain('{"echo":"[REDACTED]"}');
+      expect(trace).not.toContain(secret);
+    } finally {
+      if (previousHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousHome;
+      if (previousTrace === undefined) delete process.env.CLODEX_TRACE;
+      else process.env.CLODEX_TRACE = previousTrace;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   it('merges extra headers for custom endpoints needing plan/auth-tracking headers', async () => {
