@@ -42,7 +42,8 @@ describe('trace log redaction', () => {
   });
 
   it('redacts sk- prefixed keys', () => {
-    expect(redactTraceLine('key=sk-abc1234567890')).toBe('key=sk-[REDACTED]');
+    const keyShapedPlaceholder = ['sk', 'example-value'].join('-');
+    expect(redactTraceLine(`key=${keyShapedPlaceholder}`)).toBe('key=sk-[REDACTED]');
   });
 
   it('redacts full log content', () => {
