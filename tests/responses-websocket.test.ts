@@ -858,6 +858,59 @@ describe('createResponsesWebSocketFetch', () => {
     expect(fakeSockets).toHaveLength(2);
   }, 20_000);
 
+  it('maps an in-band WebSocket connection limit error to a retryable 429', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await withResponsesWebSocketDiagnosticContext(
+      { requestId: 'req-connection-limit' },
+      () => wsFetch('https://x', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tok' },
+        body: JSON.stringify(sessionPayload([])),
+      }),
+    );
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: {
+        code: 'websocket_connection_limit_reached',
+        message: 'connection limit reached',
+        retry_after_seconds: 12,
+      },
+    })));
+
+    const body = await readAll(res);
+    expect(JSON.parse(body.replace(/^data: /, '').trim())).toEqual({
+      type: 'error',
+      sequence_number: 1,
+      error: {
+        type: 'rate_limit_error',
+        code: '429',
+        message: 'OpenAI reported the Responses WebSocket connection limit was reached; retry after 12s',
+        param: null,
+        retry_after_seconds: 12,
+      },
+    });
+    expect(body).not.toContain('transport_error');
+    expect(await classifyThroughSdk(body)).toMatchObject({
+      statusCode: 429,
+      isRetryable: true,
+      retryAfterSeconds: 12,
+    });
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_error',
+      requestId: 'req-connection-limit',
+      source: 'error_frame',
+      errorCode: 'websocket_connection_limit_reached',
+      mappedStatusCode: 429,
+      retryAfterSeconds: 12,
+      emittedModelData: false,
+    }));
+  });
+
   it('logs sanitized upstream response failure details after partial output', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {

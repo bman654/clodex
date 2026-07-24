@@ -447,6 +447,21 @@ function responseErrorCode(event: unknown): string | undefined {
   return typeof responseError?.code === 'string' ? responseError.code : undefined;
 }
 
+function responseRetryAfterSeconds(event: unknown): number | undefined {
+  if (!event || typeof event !== 'object') return undefined;
+  const record = event as JsonObject;
+  const response = record.response && typeof record.response === 'object' ? record.response as JsonObject : undefined;
+  const candidates = [record, record.error, response?.error];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const error = candidate as JsonObject;
+    const value = error.retry_after_seconds ?? error.retry_after;
+    if (typeof value === 'number') return value;
+    if (typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value.trim())) return Number(value);
+  }
+  return undefined;
+}
+
 function boundedDiagnosticIdentifier(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.trim();
@@ -1071,8 +1086,26 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   }
   if (isModelDataEvent(type)) ctx.emittedModelData = true;
 
-  const previousMissing = responseErrorCode(event) === 'previous_response_not_found';
+  const errorCode = responseErrorCode(event);
+  const previousMissing = errorCode === 'previous_response_not_found';
   const willRetry = previousMissing && ctx.continued && !ctx.retried && !ctx.emittedModelData;
+  if (errorCode === 'websocket_connection_limit_reached' && !ctx.emittedModelData) {
+    const retryAfterSeconds = clampRetryAfterSeconds(responseRetryAfterSeconds(event));
+    failContext(
+      entry,
+      ctx,
+      `OpenAI reported the Responses WebSocket connection limit was reached; retry after ${retryAfterSeconds}s`,
+      {
+        source: 'error_frame',
+        errorCode,
+        mappedStatusCode: 429,
+        retryAfterSeconds,
+      },
+      429,
+      retryAfterSeconds,
+    );
+    return;
+  }
   if (FAILURE_EVENT_TYPES.has(type ?? '')) {
     emitResponseErrorDiagnostic(entry, ctx, {
       source: 'response_event',
