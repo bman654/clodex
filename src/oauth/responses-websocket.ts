@@ -82,6 +82,7 @@ interface RequestContext {
   responseId?: string;
   pendingEvents: unknown[];
   emittedModelData: boolean;
+  transportRetryPending: boolean;
   outputByIndex: Map<number, OutputAccumulator>;
   outputIndexByItemId: Map<string, number>;
   reasoningPartsByItemId: Map<string, Map<number, ReasoningPartState>>;
@@ -835,6 +836,75 @@ function failContext(
   closeContext(ctx);
 }
 
+function retryTransportFailure(
+  entry: ConnectionEntry,
+  ctx: RequestContext,
+  diagnosticDetails: Record<string, unknown>,
+): boolean {
+  if (
+    ctx.closed
+    || entry.current !== ctx
+    || ctx.retried
+    || ctx.frameCount !== 0
+    || ctx.emittedModelData
+  ) {
+    return false;
+  }
+
+  ctx.retried = true;
+  ctx.transportRetryPending = true;
+  entry.debug('transport failed before any response frame; retrying once with full context');
+  emitContextDiagnostic(entry, ctx, {
+    event: 'ws_transport_retry',
+    outcome: 'started',
+    ...diagnosticDetails,
+  });
+  deleteEntry(entry);
+  if (ctx.closed) {
+    ctx.transportRetryPending = false;
+    entry.debug('transport retry cancelled before replacement');
+    emitContextDiagnostic(entry, ctx, {
+      event: 'ws_transport_retry',
+      outcome: 'cancelled',
+    });
+    return true;
+  }
+  resetContextForRetry(ctx);
+  const replacement = ctx.createReplacement();
+  if (ctx.closed) {
+    ctx.transportRetryPending = false;
+    deleteEntry(replacement);
+    replacement.debug('transport retry cancelled while creating replacement');
+    emitContextDiagnostic(replacement, ctx, {
+      event: 'ws_transport_retry',
+      outcome: 'cancelled',
+    });
+    return true;
+  }
+  dispatchContext(replacement, ctx);
+  return true;
+}
+
+function handleTransportFailure(
+  entry: ConnectionEntry,
+  ctx: RequestContext,
+  message: string,
+  diagnosticDetails: Record<string, unknown>,
+): void {
+  if (retryTransportFailure(entry, ctx, diagnosticDetails)) return;
+  if (ctx.closed || entry.current !== ctx) return;
+  if (ctx.retried && ctx.frameCount === 0 && !ctx.emittedModelData) {
+    ctx.transportRetryPending = false;
+    entry.debug('transport retry exhausted before any response frame');
+    emitContextDiagnostic(entry, ctx, {
+      event: 'ws_transport_retry',
+      outcome: 'exhausted',
+      ...diagnosticDetails,
+    });
+  }
+  failContext(entry, ctx, message, diagnosticDetails);
+}
+
 function cleanupExpiredConnections(now: number): Array<Record<string, unknown>> {
   const evictions: Array<Record<string, unknown>> = [];
   for (const entry of connectionEntries()) {
@@ -906,7 +976,27 @@ function sendContext(entry: ConnectionEntry, ctx: RequestContext): void {
     `connection=${entry.debugId} key=${debugKey(entry.key)} sending ${outgoing.length}B payload`
     + (ctx.continued ? ' (continuation)' : ''),
   );
-  entry.socket.send(outgoing);
+  try {
+    entry.socket.send(outgoing, error => {
+      if (!error) return;
+      handleTransportFailure(entry, ctx, error.message, {
+        source: 'socket_send',
+        failureMode: 'callback',
+        socketErrorName: boundedDiagnosticIdentifier(error.name),
+        socketErrorCode: boundedDiagnosticIdentifier((error as NodeJS.ErrnoException).code),
+        ...diagnosticTextFingerprint('errorMessage', error.message),
+      });
+    });
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error('WebSocket send failed');
+    handleTransportFailure(entry, ctx, failure.message, {
+      source: 'socket_send',
+      failureMode: 'synchronous',
+      socketErrorName: boundedDiagnosticIdentifier(failure.name),
+      socketErrorCode: boundedDiagnosticIdentifier((failure as NodeJS.ErrnoException).code),
+      ...diagnosticTextFingerprint('errorMessage', failure.message),
+    });
+  }
 }
 
 function dispatchContext(entry: ConnectionEntry, ctx: RequestContext): void {
@@ -943,6 +1033,14 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   if (!ctx || ctx.closed) return;
   const text = Array.isArray(data) ? Buffer.concat(data).toString('utf8') : data.toString('utf8');
   ctx.frameCount += 1;
+  if (ctx.transportRetryPending) {
+    ctx.transportRetryPending = false;
+    entry.debug('transport retry received its first response frame');
+    emitContextDiagnostic(entry, ctx, {
+      event: 'ws_transport_retry',
+      outcome: 'recovered',
+    });
+  }
   let event: unknown;
   try {
     event = JSON.parse(text);
@@ -1076,12 +1174,15 @@ function createConnection(
   socket.on('message', (data: RawData) => handleSocketMessage(entry, data));
   socket.on('error', (error: Error) => {
     const ctx = entry.current;
-    if (ctx) failContext(entry, ctx, error.message, {
-      source: 'socket_error',
-      socketErrorName: boundedDiagnosticIdentifier(error.name),
-      socketErrorCode: boundedDiagnosticIdentifier((error as NodeJS.ErrnoException).code),
-    });
-    else deleteEntry(entry);
+    if (ctx) {
+      const details = {
+        source: 'socket_error',
+        socketErrorName: boundedDiagnosticIdentifier(error.name),
+        socketErrorCode: boundedDiagnosticIdentifier((error as NodeJS.ErrnoException).code),
+        ...diagnosticTextFingerprint('errorMessage', error.message),
+      };
+      handleTransportFailure(entry, ctx, error.message, details);
+    } else deleteEntry(entry);
   });
   socket.on('close', (code: number, reason: Buffer) => {
     entry.open = false;
@@ -1090,7 +1191,7 @@ function createConnection(
     if (ctx && !ctx.closed) {
       const reasonText = reason?.length ? reason.toString('utf8') : '';
       const suffix = reasonText ? `: ${reasonText}` : '';
-      failContext(entry, ctx, `WebSocket closed (${code})${suffix}`, {
+      handleTransportFailure(entry, ctx, `WebSocket closed (${code})${suffix}`, {
         source: 'socket_close',
         closeCode: code,
         ...diagnosticTextFingerprint('closeReason', reasonText),
@@ -1297,6 +1398,7 @@ export function createResponsesWebSocketFetch(
           frameCount: 0,
           pendingEvents: [],
           emittedModelData: false,
+          transportRetryPending: false,
           outputByIndex: new Map(),
           outputIndexByItemId: new Map(),
           reasoningPartsByItemId: new Map(),
@@ -1309,7 +1411,7 @@ export function createResponsesWebSocketFetch(
             WebSocket as unknown as WebSocketConstructor,
             wsUrl,
             headers,
-            Boolean(partitionKey),
+            persistent,
             partitionKey,
             resolvedOptions,
             debug,
