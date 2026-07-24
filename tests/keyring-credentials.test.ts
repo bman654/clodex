@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -128,7 +136,8 @@ const authRef = `keyring:${account}`;
 const mainKey = `clodex:${account}`;
 const journalKey = `clodex-journal:${account}`;
 const deletedKey = `clodex-deleted:${account}`;
-const journalPrefix = '__relay_chunk_journal__:v1:';
+const managedStateKey = `clodex-state-key:${account}`;
+const journalPrefix = '__clodex_chunk_journal__:v1:';
 const previousHome = process.env.CLODEX_HOME;
 const previousRuntimeDir = process.env.XDG_RUNTIME_DIR;
 let tempDir = '';
@@ -399,7 +408,7 @@ describe('keyring credential chunks', () => {
 
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe('short-secret');
 
-    expect(keyring.getCount).toBe(5);
+    expect(keyring.getCount).toBe(6);
     expect(keyring.findCount).toBe(1);
   });
 
@@ -420,6 +429,63 @@ describe('keyring credential chunks', () => {
       rmSync(defaultHome, { recursive: true, force: true });
       rmSync(alternateRuntime, { recursive: true, force: true });
     }
+  });
+
+  it('encrypts managed cleanup metadata with a key kept in the keyring', async () => {
+    const secret = 'locally-chosen-secret';
+    const digest = createHash('sha256').update(secret).digest('hex');
+
+    await expect(saveProviderCredential(authRef, secret)).resolves.toBe(true);
+
+    const marker = readFileSync(managedStatePath(), 'utf8');
+    expect(marker).toMatch(/^v2:managed:[A-Za-z0-9_-]+\n$/);
+    const payload = marker.slice('v2:managed:'.length, -1);
+    const decodedPayload = Buffer.from(payload, 'base64url').toString('utf8');
+    expect(decodedPayload).not.toContain(secret);
+    expect(decodedPayload).not.toContain(digest);
+    expect(keyring.values.get(managedStateKey)).toMatch(/^v1:[A-Za-z0-9_-]{43}$/);
+  });
+
+  it('fails closed when encrypted metadata is changed on disk', async () => {
+    const diagnostics: string[] = [];
+    await expect(saveProviderCredential(authRef, 'current-secret')).resolves.toBe(true);
+    const marker = readFileSync(managedStatePath(), 'utf8');
+    const payloadOffset = 'v2:managed:'.length;
+    const replacement = marker[payloadOffset] === 'A' ? 'B' : 'A';
+    writeFileSync(
+      managedStatePath(),
+      `${marker.slice(0, payloadOffset)}${replacement}${marker.slice(payloadOffset + 1)}`,
+      'utf8',
+    );
+
+    await expect(
+      resolveProviderCredential('test', authRef, message => diagnostics.push(message)),
+    ).resolves.toBeNull();
+    await expect(
+      replaceProviderCredential(authRef, 'replacement-secret', message =>
+        diagnostics.push(message),
+      ),
+    ).resolves.toBe(false);
+
+    expect(keyring.values.get(mainKey)).toBe('current-secret');
+    expect(diagnostics).toContain('keyring error: keyring managed-state marker is invalid');
+  });
+
+  it('fails closed when the metadata key is missing but a credential remains', async () => {
+    const diagnostics: string[] = [];
+    await expect(saveProviderCredential(authRef, 'current-secret')).resolves.toBe(true);
+    keyring.values.delete(managedStateKey);
+
+    await expect(
+      replaceProviderCredential(authRef, 'replacement-secret', message =>
+        diagnostics.push(message),
+      ),
+    ).resolves.toBe(false);
+
+    expect(keyring.values.get(mainKey)).toBe('current-secret');
+    expect(diagnostics).toContain(
+      'keyring error: keyring managed-state encryption key is unavailable',
+    );
   });
 
   it('keeps the published credential readable when a new generation fails', async () => {
@@ -834,7 +900,7 @@ describe('keyring credential chunks', () => {
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
 
     expectDeletionGuard();
-    expect(keyring.values.get(journalKey)).toMatch(/^__relay_chunk_journal__:v1:/);
+    expect(keyring.values.get(journalKey)).toMatch(/^__clodex_chunk_journal__:v1:/);
     keyring.failSetKey = '';
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
     expectDeletionGuard();
@@ -986,7 +1052,7 @@ describe('keyring credential chunks', () => {
     const newGeneration = '22222222-2222-4222-8222-222222222222';
     const oldMarker = `__relay_chunked__:v2:${oldGeneration}:2`;
     const newMarker = `__relay_chunked__:v2:${newGeneration}:2`;
-    const journal = `__relay_chunk_journal__:v1:${JSON.stringify({
+    const journal = `__clodex_chunk_journal__:v1:${JSON.stringify({
       mode: 'write',
       generations: [
         { count: 2, generation: newGeneration },
@@ -1072,7 +1138,7 @@ describe('keyring credential chunks', () => {
     keyring.values.set(`clodex-chunks:${account}::chunk::${newGeneration}::0`, 'new-');
     keyring.values.set(
       journalKey,
-      `__relay_chunk_journal__:v1:${JSON.stringify({
+      `__clodex_chunk_journal__:v1:${JSON.stringify({
         mode: 'write',
         generations: [newMarker, oldMarker],
       })}`,
@@ -1108,7 +1174,7 @@ describe('keyring credential chunks', () => {
     keyring.values.set(`clodex:${account}::chunk::${oldGeneration}::1`, 'secret');
     keyring.values.set(
       journalKey,
-      `__relay_chunk_journal__:v1:${JSON.stringify({
+      `__clodex_chunk_journal__:v1:${JSON.stringify({
         mode: 'write',
         generations: [journalMarker, oldMarker],
       })}`,
@@ -1175,7 +1241,7 @@ describe('keyring credential chunks', () => {
     keyring.values.set(`clodex:${account}::chunk::${oldGeneration}::1`, 'secret');
     keyring.values.set(
       journalKey,
-      `__relay_chunk_journal__:v1:${JSON.stringify({
+      `__clodex_chunk_journal__:v1:${JSON.stringify({
         mode: 'write',
         generations: [currentMarker, { count: 2, generation: oldGeneration }],
       })}`,
@@ -1257,6 +1323,9 @@ describe('keyring credential chunks', () => {
     await expect(
       resolveProviderCredential('test', authRef, message => diagnostics.push(message)),
     ).resolves.toBe('current-secret');
+    await expect(
+      resolveProviderCredential('test', authRef, message => diagnostics.push(message)),
+    ).resolves.toBe('current-secret');
     expect(diagnostics).toContain('keyring error: injected keyring write failure');
 
     keyring.failSetKey = '';
@@ -1264,7 +1333,7 @@ describe('keyring credential chunks', () => {
     expectActiveShort('current-secret');
   });
 
-  it('recovers when managed metadata outlives the keyring entries', async () => {
+  it('re-provisions when managed metadata outlives an empty keyring', async () => {
     const diagnostics: string[] = [];
     await expect(saveProviderCredential(authRef, 'first-secret')).resolves.toBe(true);
     expect(existsSync(managedStatePath())).toBe(true);
@@ -1273,19 +1342,25 @@ describe('keyring credential chunks', () => {
     await expect(
       resolveProviderCredential('test', authRef, message => diagnostics.push(message)),
     ).resolves.toBeNull();
-    expect(diagnostics).toContain('restored keyring cleanup journal from managed state');
+    expect(diagnostics).toContain(
+      'keyring error: keyring managed-state encryption key is unavailable',
+    );
     expect(existsSync(managedStatePath())).toBe(true);
 
-    await expect(provisionProviderCredential(authRef, 'replacement-secret')).resolves.toBe(false);
-    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
-    expectDeletionMarker();
     await expect(provisionProviderCredential(authRef, 'replacement-secret')).resolves.toBe(true);
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe('replacement-secret');
+  });
 
+  it('replaces an empty restored keyring with a chunked credential in one call', async () => {
+    const replacement = 'b'.repeat(2_500);
+    await expect(saveProviderCredential(authRef, 'first-secret')).resolves.toBe(true);
     keyring.values.clear();
-    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
-    expect(existsSync(managedStatePath())).toBe(true);
-    expectDeletionMarker();
+
+    await expect(replaceProviderCredential(authRef, replacement)).resolves.toBe(true);
+
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe(replacement);
+    expect(currentChunkKeys().length).toBeGreaterThan(1);
+    expectActiveInventory();
   });
 
   it('fails closed while a managed journal remains persistently hidden', async () => {
@@ -1379,6 +1454,21 @@ describe('keyring credential chunks', () => {
     expect(currentChunkKeys()).toEqual([]);
   });
 
+  it('deletes a journal-less long credential with a confirmed missing chunk', async () => {
+    const currentSecret = 'a'.repeat(2_500);
+    await expect(saveProviderCredential(authRef, currentSecret)).resolves.toBe(true);
+    const chunkKeys = currentChunkKeys().sort();
+    expect(chunkKeys.length).toBeGreaterThan(1);
+    writeFileSync(managedStatePath(), 'v1:managed\n', 'utf8');
+    keyring.values.delete(journalKey);
+    keyring.values.delete(chunkKeys[0]!);
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+
+    expectDeletionMarker();
+    expect(currentChunkKeys()).toEqual([]);
+  });
+
   it('removes an inventory sentinel when direct verification collapses', async () => {
     let collapsed = false;
     await expect(saveProviderCredential(authRef, 'current-secret')).resolves.toBe(true);
@@ -1408,6 +1498,21 @@ describe('keyring credential chunks', () => {
     keyring.omitFindOnceKey = '';
     await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
     expectDeletionMarker();
+  });
+
+  it('reports an inventory sentinel that cannot be removed during cleanup', async () => {
+    const diagnostics: string[] = [];
+    await expect(saveProviderCredential(authRef, 'current-secret')).resolves.toBe(true);
+    writeFileSync(managedStatePath(), 'v1:managed\n', 'utf8');
+    keyring.values.delete(journalKey);
+    keyring.omitFindAccount = account;
+    keyring.failDeleteSuffix = '::0';
+
+    await expect(
+      deleteProviderCredential(authRef, message => diagnostics.push(message)),
+    ).resolves.toBe(false);
+
+    expect(diagnostics).toContain('keyring credential inventory sentinel could not be removed');
   });
 
   it('does not trust an incomplete retired-chunk inventory for a short credential', async () => {
@@ -1645,7 +1750,7 @@ describe('keyring credential chunks', () => {
     keyring.values.set(v3ChunkKey, v3Value);
     keyring.values.set(
       journalKey,
-      `__relay_chunk_journal__:v1:${JSON.stringify({
+      `__clodex_chunk_journal__:v1:${JSON.stringify({
         mode: 'delete',
         generations: [v3Marker],
       })}`,
@@ -1892,7 +1997,7 @@ describe('keyring credential chunks', () => {
 
   it('fails closed with a durable tombstone after a malformed journal', async () => {
     keyring.values.set(mainKey, 'existing-secret');
-    keyring.values.set(journalKey, '__relay_chunk_journal__:v1:{');
+    keyring.values.set(journalKey, '__clodex_chunk_journal__:v1:{');
 
     await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
     await expect(saveProviderCredential(authRef, 'replacement-secret')).resolves.toBe(false);
@@ -1902,7 +2007,7 @@ describe('keyring credential chunks', () => {
     await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
 
     keyring.values.set(`relay-ai:${account}`, 'legacy-secret');
-    keyring.values.set(journalKey, '__relay_chunk_journal__:v1:{');
+    keyring.values.set(journalKey, '__clodex_chunk_journal__:v1:{');
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
     expect(keyring.values.has(mainKey)).toBe(false);
     expect(keyring.values.get(`relay-ai:${account}`)).toBe('legacy-secret');
@@ -1914,7 +2019,7 @@ describe('keyring credential chunks', () => {
 
   it('keeps a tombstone while the Clodex credential cannot be unpublished', async () => {
     const legacyMainKey = `relay-ai:${account}`;
-    const malformedJournal = '__relay_chunk_journal__:v1:{';
+    const malformedJournal = '__clodex_chunk_journal__:v1:{';
     keyring.values.set(mainKey, 'current-secret');
     keyring.values.set(legacyMainKey, 'legacy-secret');
     keyring.values.set(journalKey, malformedJournal);
@@ -1948,7 +2053,7 @@ describe('keyring credential chunks', () => {
     keyring.values.set(`relay-ai:${account}`, `__relay_chunked__:v2:${legacyGeneration}:1`);
     keyring.values.set(currentChunk, 'current-secret');
     keyring.values.set(legacyChunk, 'legacy-secret');
-    keyring.values.set(journalKey, '__relay_chunk_journal__:v1:{');
+    keyring.values.set(journalKey, '__clodex_chunk_journal__:v1:{');
 
     await expect(deleteProviderCredential(authRef)).resolves.toBe(false);
 

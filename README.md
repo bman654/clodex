@@ -229,13 +229,19 @@ clodex --version    # version
   Manager / Secret Service). The `clodex` service holds the main value or
   published marker; `clodex-chunks` holds current long-credential chunks;
   `clodex-journal` holds crash-recovery metadata and a deletion marker; and
-  `clodex-deleted` holds a redundant non-secret deletion guard. Use Clodex
-  provider removal instead of deleting these entries individually. Non-secret
-  per-account managed-state markers live under the native OS account home at
-  `~/.clodex/keyring-state`; before each journal write they record the exact
-  non-secret intent so a retry can replay and verify it. They also prevent a
-  temporarily unavailable keyring journal from being mistaken for an absent
-  one. Credential mutation locks live beside that state at
+  `clodex-deleted` holds a redundant non-secret deletion guard. A
+  `clodex-state-key` entry protects each account's recovery metadata. Use
+  Clodex provider removal instead of deleting these entries individually.
+  Authenticated encrypted per-account managed-state markers live under the
+  native OS account home at `~/.clodex/keyring-state`; before each journal
+  write they record the exact recovery intent so a retry can replay and verify
+  it. The encryption key remains in the OS credential store, so the filesystem
+  marker alone cannot be used to test credential guesses. The marker also
+  prevents a temporarily unavailable keyring journal from being mistaken for
+  an absent one. If the OS credential store was completely reset, Clodex
+  permits direct reauthorization only after sentinel checks prove the main and
+  chunk namespaces are empty. Hidden, locked, or partially restored state
+  remains fail-closed. Credential mutation locks live beside that state at
   `~/.clodex/credential-locks`. Both paths are independent of `CLODEX_HOME` and
   runtime or temporary-directory environment overrides. This keeps concurrent
   processes serialized when they use different config homes. Set

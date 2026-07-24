@@ -61,22 +61,36 @@ before attempting any credential-store deletion.
 
 ## OS keyring layout and compatibility
 
-The default OS credential-store backend uses four service namespaces:
+The default OS credential-store backend uses five service namespaces:
 
 - `clodex` stores a short credential directly or publishes the marker for a
   long credential;
 - `clodex-chunks` stores the chunks for current long credentials;
 - `clodex-journal` records crash recovery, the active chunk generation, and a
   deletion marker;
-- `clodex-deleted` stores a redundant non-secret deletion guard.
+- `clodex-deleted` stores a redundant non-secret deletion guard;
+- `clodex-state-key` stores a random per-account key that protects the
+  filesystem recovery marker.
 
-Clodex also keeps a non-secret per-account managed-state marker under the
-native OS account home at `~/.clodex/keyring-state`. Before each
-cleanup-journal write, the marker records the exact non-secret journal intent.
-A retry republishes and verifies that intent before continuing, then marks it
-managed. If the OS keyring temporarily reports a managed journal as absent,
-the marker makes reads, writes, and deletes fail closed instead of replacing
-unknown chunk inventory. Malformed local intent also remains fail-closed.
+Clodex also keeps an authenticated encrypted per-account managed-state marker
+under the native OS account home at `~/.clodex/keyring-state`. Before each
+cleanup-journal write, the marker records the exact journal intent. A retry
+decrypts, republishes, and verifies that intent before continuing, then marks
+it managed. The encryption key remains only in the OS credential store, so a
+copied filesystem marker does not expose credentials or an offline credential
+confirmation value. If the OS keyring temporarily reports a managed journal as
+absent, the marker makes reads, writes, and deletes fail closed instead of
+replacing unknown chunk inventory. Malformed or unauthenticated local intent
+also remains fail-closed.
+
+If the filesystem marker outlives a complete OS credential-store reset,
+Clodex allows direct reauthorization only after sentinel-backed service
+enumeration proves that the main credential and chunk namespaces are empty.
+The recovery first records durable deleted state, then follows the normal
+journal-before-publication path for the replacement. A hidden, locked,
+incomplete, or partially restored namespace cannot take this path and remains
+fail-closed.
+
 Credential mutation locks live beside that state under
 `~/.clodex/credential-locks`. Neither path depends on `CLODEX_HOME`,
 `XDG_RUNTIME_DIR`, or temporary-directory environment variables because the OS
