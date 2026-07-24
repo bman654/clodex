@@ -72,14 +72,14 @@ clodex-claude [args...]     # second bin: launch claude bridged to a running clo
 
 **Critical URL constraint:** Anthropic-passthrough base URLs must NOT include `/v1` — the Anthropic SDK appends `/v1/messages` itself.
 
-**Provider registry** (`src/registry/`): only two providers exist — templates in `src/provider-templates.ts` (`openai` API-key template with `https://api.openai.com/v1`, and `openai-oauth`). `provider-auth.ts` implements the OpenAI device-code OAuth flow; `refresh-models.ts` fetches the model list (3-tier fetch for OAuth). `io.ts::loadRegistry` and `config.ts::readConfig` both trigger the one-time legacy migration. Materialization (`materialize.ts`) turns registry providers into `LocalProvider`s with per-model `npm`/`baseUrl`/`upstreamModelId`.
+**Provider registry** (`src/registry/`): only two providers exist — templates in `src/provider-templates.ts` (`openai` API-key template with `https://api.openai.com/v1`, and `openai-oauth`). `provider-auth.ts` implements the OpenAI device-code OAuth flow; `refresh-models.ts` fetches the model list (3-tier fetch for OAuth). Materialization (`materialize.ts`) turns registry providers into `LocalProvider`s with per-model `npm`/`baseUrl`/`upstreamModelId`.
 
 Registry writes use atomic hard-link lock publication, so the filesystem containing `CLODEX_HOME` must support hard links. A parseable lock owned by a live PID is never reclaimed based on age; contenders wait for a bounded interval and fail with the owner PID. Malformed locks and locks owned by dead PIDs remain reclaimable. This live-owner rule is what makes the final ownership check before `providers.json` publication meaningful because a concurrent process cannot invalidate a live writer between its check and rename.
 
-**Config & migration** (`src/paths.ts`, `src/config.ts`, `src/env.ts`):
+**Config** (`src/paths.ts`, `src/config.ts`, `src/env.ts`):
 
-- Config home `~/.clodex`, override `CLODEX_HOME`. `ensureLegacyAppHomeMigrated()` silently copies a legacy `~/.relay-ai` (skipping `logs/`) on first read — **never mutates the legacy directory**.
-- Keychain service `clodex` with per-account fallback read from legacy service `relay-ai` (copied into `clodex` on first hit). Chunked-entry support retained for Windows credential size limits.
+- Config home `~/.clodex`, override `CLODEX_HOME`.
+- Keychain service `clodex` supports chunked entries for Windows credential size limits.
 - Preferences: `lastModel`, `lastProvider`, `recentModelsByProvider`, `favoriteModels`, `modelAliases`, `claudeBridgeMode`, `serverBridgeMode`, `appPathOverrides`, `recentLaunchFolders`, `server*` settings. All writes skipped when `dryRun`.
 - `CLODEX_CLAUDE_PATH` overrides Claude Code binary discovery (`src/launch.ts`).
 
@@ -103,7 +103,7 @@ Registry writes use atomic hard-link lock publication, so the filesystem contain
 
 **Outbound proxy** (`src/outbound-proxy.ts`): when `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` are set in clodex's environment, `installOutboundProxyDispatcher()` (called at the top of `main()`) installs undici's `EnvHttpProxyAgent` as the global fetch dispatcher, so every fetch-based call (OAuth device flow/refresh, model-list + models.dev refresh, AI-SDK upstream calls) honors them; without proxy env vars it is a no-op and nothing changes. The `ws`-based OAuth Responses WebSocket doesn't use the undici dispatcher — `outboundWsProxyAgent()` gives it an `https-proxy-agent` CONNECT-tunnel agent instead (passed through `createConnection`). Self-loop guard: clodex never sets proxy vars in its own `process.env`; proxy bridge mode points only the CHILD at the MITM listener via env copies (`buildChildEnv`/`buildHttpProxyChildEnv` never mutate `process.env` — covered by a test), so the dispatcher can never route clodex's upstream calls through clodex's own listener.
 
-**Tests** (`tests/`): pure functions only — adapter, provider factory, proxy, http-proxy routes, registry, config/migration, bridge-mode persistence, patcher (config building, hash stability, manifest staleness, lock behavior, per-site patch transforms), help text. Interactive launch flow and real-provider behavior are verified manually.
+**Tests** (`tests/`): pure functions only — adapter, provider factory, proxy, http-proxy routes, registry, config, bridge-mode persistence, patcher (config building, hash stability, manifest staleness, lock behavior, per-site patch transforms), help text. Interactive launch flow and real-provider behavior are verified manually.
 
 ## Key constraints
 

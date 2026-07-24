@@ -485,41 +485,6 @@ describe('materializeRegistry', () => {
     expect(locals[0]?.authType).toBeUndefined();
   });
 
-  it('normalizes the unambiguous legacy no-auth representation', () => {
-    const registry = emptyRegistry();
-    registry.providers.push({
-      id: 'legacy-anonymous',
-      templateId: 'custom-openai',
-      name: 'Legacy Anonymous',
-      enabled: true,
-      authRef: 'keyring:provider:legacy-anonymous',
-      authType: 'none',
-      api: {
-        npm: '@ai-sdk/openai-compatible',
-        url: 'https://legacy-anonymous.example/v1',
-      },
-      addedAt: '2026-06-09T00:00:00.000Z',
-      modelsCache: {
-        fetchedAt: '2026-06-09T00:00:00.000Z',
-        models: [{
-          id: 'local-model',
-          name: 'Local Model',
-          upstreamModelId: 'local-model',
-          modelFormat: 'openai',
-          npm: '@ai-sdk/openai-compatible',
-        }],
-      },
-    });
-
-    const locals = materializeRegistry(registry, () => {
-      throw new Error('legacy no-auth access must not resolve a credential');
-    });
-
-    expect(locals).toHaveLength(1);
-    expect(locals[0]?.apiKey).toBe('');
-    expect(locals[0]?.authRef).toBe('none:anonymous');
-  });
-
   it('marks NVIDIA imported models as free provider access', () => {
     const registry = emptyRegistry();
     registry.providers.push({

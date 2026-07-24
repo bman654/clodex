@@ -18,10 +18,7 @@ import {
 } from '../src/registry/credential-lifecycle.js';
 import { emptyRegistry, saveRegistry } from '../src/registry/io.js';
 import { withRegistryWriteLockSync } from '../src/registry/lock.js';
-import {
-  getProvidersPath,
-  resetLegacyMigrationForTests,
-} from '../src/paths.js';
+import { getProvidersPath } from '../src/paths.js';
 
 const helperPath = fileURLToPath(
   new URL('./fixtures/credential-helper.mjs', import.meta.url),
@@ -38,7 +35,6 @@ describe('persisted credential cleanup recovery', () => {
     process.env.CLODEX_HOME = home;
     process.env.CLODEX_CREDENTIAL_HELPER = helperPath;
     process.env.CLODEX_TEST_CREDENTIAL_HELPER_STORE = join(home, 'helper-store.json');
-    resetLegacyMigrationForTests();
   });
 
   afterEach(() => {
@@ -48,7 +44,6 @@ describe('persisted credential cleanup recovery', () => {
     else process.env.CLODEX_CREDENTIAL_HELPER = previousHelper;
     if (previousStore === undefined) delete process.env.CLODEX_TEST_CREDENTIAL_HELPER_STORE;
     else process.env.CLODEX_TEST_CREDENTIAL_HELPER_STORE = previousStore;
-    resetLegacyMigrationForTests();
     rmSync(home, { recursive: true, force: true });
   });
 

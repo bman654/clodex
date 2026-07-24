@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   chmodSync,
-  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -18,53 +17,24 @@ import {
 } from '../src/registry/credential-cleanup-journal.js';
 import { emptyRegistry, saveRegistry } from '../src/registry/io.js';
 import { withRegistryWriteLockSync } from '../src/registry/lock.js';
-import {
-  getCredentialCleanupPath,
-  getProvidersPath,
-  resetLegacyMigrationForTests,
-} from '../src/paths.js';
+import { getCredentialCleanupPath, getProvidersPath } from '../src/paths.js';
 
 const TEST_HELPER_ID = 'a'.repeat(64);
 const helperRef = (account: string): string => `helper:v1:${TEST_HELPER_ID}:${account}`;
 
 describe('credential cleanup journal', () => {
   const previousHome = process.env.CLODEX_HOME;
-  const previousUserHome = process.env.HOME;
   let home = '';
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'clodex-cleanup-journal-'));
     process.env.CLODEX_HOME = home;
-    resetLegacyMigrationForTests();
   });
 
   afterEach(() => {
     if (previousHome === undefined) delete process.env.CLODEX_HOME;
     else process.env.CLODEX_HOME = previousHome;
-    if (previousUserHome === undefined) delete process.env.HOME;
-    else process.env.HOME = previousUserHome;
-    resetLegacyMigrationForTests();
     rmSync(home, { recursive: true, force: true });
-  });
-
-  it('migrates the legacy app home before publishing its first journal lock', async () => {
-    const appHome = join(home, '.clodex');
-    const legacyHome = join(home, '.relay-ai');
-    const legacyRegistry = `${JSON.stringify({
-      schemaVersion: 1,
-      providers: [{ id: 'legacy-provider' }],
-    })}\n`;
-    process.env.HOME = home;
-    process.env.CLODEX_HOME = appHome;
-    mkdirSync(legacyHome, { recursive: true });
-    writeFileSync(join(legacyHome, 'providers.json'), legacyRegistry);
-    resetLegacyMigrationForTests();
-
-    expect(await loadPendingCredentialDeletes()).toEqual([]);
-
-    expect(readFileSync(join(appHome, 'providers.json'), 'utf8')).toBe(
-      legacyRegistry,
-    );
   });
 
   it('serializes concurrent updates without dropping references', async () => {
