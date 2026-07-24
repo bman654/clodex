@@ -9,7 +9,7 @@ vi.mock('../src/registry/custom-endpoint.js', () => ({
   fetchAnthropicModels: vi.fn(),
 }));
 vi.mock('../src/registry/io.js', () => ({
-  loadRegistry: vi.fn(() => ({ version: 1, providers: [] })),
+  loadRegistryStrict: vi.fn(() => ({ schemaVersion: 1, providers: [] })),
   saveRegistry: vi.fn(),
 }));
 vi.mock('../src/registry/lock.js', () => ({
@@ -18,12 +18,12 @@ vi.mock('../src/registry/lock.js', () => ({
 }));
 
 import { fetchTemplateModels } from '../src/registry/fetch-template-models.js';
-import { loadRegistry, saveRegistry } from '../src/registry/io.js';
+import { loadRegistryStrict, saveRegistry } from '../src/registry/io.js';
 
 describe('refreshProviderModels', () => {
   beforeEach(() => {
     vi.mocked(fetchTemplateModels).mockReset();
-    vi.mocked(loadRegistry).mockReset();
+    vi.mocked(loadRegistryStrict).mockReset();
     vi.mocked(saveRegistry).mockClear();
   });
 
@@ -48,7 +48,7 @@ describe('refreshProviderModels', () => {
         name: 'Renamed while discovery was running',
       }],
     };
-    vi.mocked(loadRegistry).mockReturnValue(persistedRegistry);
+    vi.mocked(loadRegistryStrict).mockReturnValue(persistedRegistry);
     vi.mocked(fetchTemplateModels).mockResolvedValue({
       baseUrl: 'https://api.groq.com/openai/v1',
       models: [{
@@ -62,7 +62,7 @@ describe('refreshProviderModels', () => {
     const result = await refreshProviderModels('groq', 'test-key', initialRegistry);
 
     expect(result).toMatchObject({ ok: true, modelCount: 1 });
-    expect(loadRegistry).toHaveBeenCalledOnce();
+    expect(loadRegistryStrict).toHaveBeenCalledOnce();
     expect(saveRegistry).toHaveBeenCalledWith(persistedRegistry);
     expect(persistedRegistry.providers[0]?.name).toBe('Renamed while discovery was running');
     expect(persistedRegistry.providers[0]?.modelsCache?.models[0]?.id).toBe('live-a');
@@ -82,7 +82,7 @@ describe('refreshProviderModels', () => {
         addedAt: '2026-01-01T00:00:00.000Z',
       }],
     };
-    vi.mocked(loadRegistry).mockReturnValue({
+    vi.mocked(loadRegistryStrict).mockReturnValue({
       schemaVersion: 1,
       providers: [{
         ...initialRegistry.providers[0]!,
@@ -122,7 +122,7 @@ describe('refreshProviderModels', () => {
         addedAt: '2026-01-01T00:00:00.000Z',
       }],
     };
-    vi.mocked(loadRegistry).mockReturnValue({
+    vi.mocked(loadRegistryStrict).mockReturnValue({
       schemaVersion: 1,
       providers: [{
         ...initialRegistry.providers[0]!,
@@ -208,7 +208,7 @@ describe('refreshProviderModels', () => {
         modelFormat: 'openai',
       }],
     });
-    vi.mocked(loadRegistry).mockReturnValue(registry);
+    vi.mocked(loadRegistryStrict).mockReturnValue(registry);
 
     const first = await refreshProviderModels('groq', 'gsk-real-key', registry);
     const second = await refreshProviderModels('groq', 'gsk-real-key', registry);

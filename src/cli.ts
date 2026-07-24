@@ -10,10 +10,11 @@ import { claudeCodeClientModelId } from './context-model-id.js';
 import { needsFirstRunSetup, runFirstRunWizard } from './first-run.js';
 import { MAX_MODEL_CATALOG } from './constants.js';
 import { startProxy, startProxyCatalog } from './proxy.js';
-import type { ProxyHandle, ProxyRoute } from './proxy.js';
+import type { ProxyHandle, ProxyModelAlias, ProxyRoute } from './proxy.js';
 import {
   buildCatalogRoutes,
   makeRouteResolver,
+  resolveCatalogModelAliases,
 } from './catalog.js';
 import { runServerCommand } from './server/index.js';
 import { loadPreferences, savePreferences, recordLaunchSelection, resolveBridgeMode } from './config.js';
@@ -565,13 +566,22 @@ function printHelp(text: string): void {
 async function launchClaudeViaCatalog(
   catalogRoutes: ProxyRoute[],
   startingRoute: ProxyRoute,
+  modelAliases: ProxyModelAlias[],
   contextWindow: number | undefined,
   trace: boolean,
   claudeArgs: string[],
 ): Promise<number> {
   let proxyHandle: ProxyHandle;
   try {
-    proxyHandle = await startProxyCatalog(catalogRoutes, startingRoute.aliasId, trace);
+    proxyHandle = await startProxyCatalog(
+      catalogRoutes,
+      startingRoute.aliasId,
+      trace,
+      undefined,
+      undefined,
+      undefined,
+      modelAliases,
+    );
     p.log.info(
       `Switch menu active — proxy on port ${proxyHandle.port} ` +
       pc.dim(`(${catalogRoutes.length} model${catalogRoutes.length !== 1 ? 's' : ''} in /model)`),
@@ -1219,6 +1229,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     return launchClaudeViaCatalog(
       catalogRoutes,
       startingRoute,
+      resolveCatalogModelAliases(prefs.modelAliases ?? [], resolveRoute),
       selectedModel.contextWindow,
       trace,
       claudeArgs,
@@ -1249,7 +1260,8 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   }
 
   const launchApiKey = await resolveLocalProviderApiKey(activeProvider);
-  if (!launchApiKey?.trim()) {
+  const anonymousProvider = activeProvider.authType === 'none';
+  if (!anonymousProvider && !launchApiKey?.trim()) {
     p.log.error(
       `No credential found for ${activeProvider.name}. Add a key or sign in with clodex providers.`,
     );
@@ -1260,9 +1272,15 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   let childEnv: NodeJS.ProcessEnv;
 
   const isOAuthAnthropic = selectedModel.modelFormat === 'anthropic' && activeProvider.authType === 'oauth';
+  const usesAnthropicProxy = selectedModel.modelFormat === 'anthropic' &&
+    (isOAuthAnthropic || anonymousProvider);
 
-  if (isOAuthAnthropic) {
-    // Anthropic OAuth passthrough — proxy injects compatibility metadata and Bearer auth.
+  // Static provider headers remain part of the proxied endpoint contract,
+  // including OAuth routes. Anonymous dispatch filters credential-bearing
+  // names at the final boundary while retaining non-credential metadata.
+  if (usesAnthropicProxy) {
+    // The passthrough proxy owns upstream authentication for OAuth and strips it
+    // entirely for explicitly anonymous Anthropic endpoints.
     try {
       proxyHandle = await startProxy(
         selectedModel.baseUrl ?? 'https://api.anthropic.com',
@@ -1271,16 +1289,17 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
         selectedModel.contextWindow,
         {
           providerId: activeProvider.id,
-          authType: 'oauth',
+          authType: activeProvider.authType,
           oauthAccountId: activeProvider.oauthAccountId,
           providerData: activeProvider.providerData,
           modelFormat: 'anthropic',
+          headers: activeProvider.headers,
         },
-        launchApiKey,
+        launchApiKey ?? '',
       );
-      if (!isAgentStdoutMode()) p.log.info(`OAuth proxy started on port ${proxyHandle.port}`);
+      if (!isAgentStdoutMode()) p.log.info(`Anthropic proxy started on port ${proxyHandle.port}`);
     } catch (err) {
-      p.log.error(`Failed to start OAuth proxy: ${err instanceof Error ? err.message : String(err)}`);
+      p.log.error(`Failed to start Anthropic proxy: ${err instanceof Error ? err.message : String(err)}`);
       return 1;
     }
     childEnv = buildChildEnv(
@@ -1294,7 +1313,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     childEnv = buildChildEnv(
       selectedModel.baseUrl!,
       selectedModel.id,
-      launchApiKey,
+      launchApiKey ?? '',
       undefined,
       selectedModel.contextWindow,
     );
@@ -1317,8 +1336,9 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
           interleavedReasoningField: selectedModel.interleavedReasoningField,
           useResponsesLite: selectedModel.useResponsesLite,
           preferWebSockets: selectedModel.preferWebSockets,
+          headers: activeProvider.headers,
         },
-        launchApiKey,
+        launchApiKey ?? '',
       );
       if (!isAgentStdoutMode()) {
         p.log.info(
@@ -1339,7 +1359,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     );
   }
 
-  if (selectedModel.modelFormat === 'anthropic' && !isOAuthAnthropic) {
+  if (selectedModel.modelFormat === 'anthropic' && !usesAnthropicProxy) {
     childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
   }
 

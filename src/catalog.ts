@@ -1,10 +1,17 @@
 // Route map + catalog assembly for the mid-session /model switch menu.
 import { MAX_MODEL_CATALOG } from './constants.js';
 import { claudeCodeClientModelId } from './context-model-id.js';
+import { resolveProviderCredential } from './env.js';
+import { modelAliasTarget } from './model-aliases.js';
 import { isSdkMigratedNpm } from './provider-factory.js';
 import { aliasModelId } from './proxy.js';
-import type { ProxyRoute } from './proxy.js';
-import type { FavoriteModel, LocalProvider, LocalProviderModel } from './types.js';
+import type { ProxyModelAlias, ProxyRoute } from './proxy.js';
+import type {
+  FavoriteModel,
+  LocalProvider,
+  LocalProviderModel,
+  ModelAlias,
+} from './types.js';
 
 export function localModelToRoute(lp: LocalProvider, model: LocalProviderModel): ProxyRoute | null {
   if (model.modelFormat === 'anthropic' && !model.baseUrl) return null;
@@ -22,6 +29,16 @@ export function localModelToRoute(lp: LocalProvider, model: LocalProviderModel):
     baseURL: model.apiBaseUrl,
     providerId: lp.id,
     authType: lp.authType,
+    refreshToken: lp.authType === 'oauth' && lp.authRef
+      ? rejectedAccessToken => rejectedAccessToken === undefined
+        ? resolveProviderCredential(lp.id, lp.authRef!)
+        : resolveProviderCredential(
+            lp.id,
+            lp.authRef!,
+            undefined,
+            { rejectedAccessToken },
+          )
+      : undefined,
     oauthAccountId: lp.oauthAccountId,
     providerData: lp.providerData,
     headers: lp.headers,
@@ -41,6 +58,17 @@ export function makeRouteResolver(
     const model = provider?.models.find(m => m.id === modelId);
     return provider && model ? localModelToRoute(provider, model) ?? undefined : undefined;
   };
+}
+
+export function resolveCatalogModelAliases(
+  modelAliases: ModelAlias[],
+  resolveRoute: (providerId: string, modelId: string) => ProxyRoute | undefined,
+): ProxyModelAlias[] {
+  return modelAliases.map(alias => ({
+    name: alias.name,
+    routeId: resolveRoute(alias.providerId, alias.modelId)?.aliasId
+      ?? modelAliasTarget(alias),
+  }));
 }
 
 /**

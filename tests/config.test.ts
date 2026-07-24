@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -15,12 +15,7 @@ import {
   setSavedServerPassword,
   setServerListenMode,
 } from '../src/config.js';
-import {
-  getAppHome,
-  getConfigPath,
-  getLegacyAppHome,
-  resetLegacyMigrationForTests,
-} from '../src/paths.js';
+import { getAppHome, getConfigPath } from '../src/paths.js';
 
 let tempHome: string;
 let previousHome: string | undefined;
@@ -30,7 +25,6 @@ beforeEach(() => {
   previousHome = process.env['HOME'];
   process.env['HOME'] = tempHome;
   process.env['CLODEX_HOME'] = join(tempHome, 'app-home');
-  resetLegacyMigrationForTests();
 });
 
 afterEach(() => {
@@ -38,7 +32,6 @@ afterEach(() => {
   if (previousHome === undefined) delete process.env['HOME'];
   else process.env['HOME'] = previousHome;
   delete process.env['CLODEX_HOME'];
-  resetLegacyMigrationForTests();
 });
 
 describe('app paths', () => {
@@ -170,43 +163,5 @@ describe('bridge-mode memory', () => {
     expect(resolveBridgeMode('claude', 'proxy', { persist: true })).toBe('proxy');
     expect(resolveBridgeMode('claude', undefined)).toBe('proxy');
     expect(resolveBridgeMode('server', undefined)).toBe('endpoint');
-  });
-});
-
-describe('legacy ~/.relay-ai migration', () => {
-  it('copies config and auth state on first read when the clodex home is missing', () => {
-    delete process.env['CLODEX_HOME'];
-    const legacyHome = getLegacyAppHome({ HOME: tempHome });
-    mkdirSync(join(legacyHome, 'http-proxy'), { recursive: true });
-    writeFileSync(join(legacyHome, 'config.json'), JSON.stringify({ lastModel: 'gpt-5.6-sol' }), 'utf8');
-    writeFileSync(join(legacyHome, 'providers.json'), JSON.stringify({ schemaVersion: 1, providers: [] }), 'utf8');
-    writeFileSync(join(legacyHome, 'http-proxy', 'ca.pem'), 'PEM', 'utf8');
-    mkdirSync(join(legacyHome, 'logs'), { recursive: true });
-    writeFileSync(join(legacyHome, 'logs', 'session.log'), 'log', 'utf8');
-    resetLegacyMigrationForTests();
-
-    expect(loadPreferences().lastModel).toBe('gpt-5.6-sol');
-    const appHome = getAppHome({ HOME: tempHome });
-    expect(existsSync(join(appHome, 'config.json'))).toBe(true);
-    expect(existsSync(join(appHome, 'providers.json'))).toBe(true);
-    expect(existsSync(join(appHome, 'http-proxy', 'ca.pem'))).toBe(true);
-    // logs are session state, not config — never copied
-    expect(existsSync(join(appHome, 'logs'))).toBe(false);
-    // the legacy home is never modified
-    expect(readFileSync(join(legacyHome, 'config.json'), 'utf8')).toContain('gpt-5.6-sol');
-  });
-
-  it('does not migrate when the clodex home already exists', () => {
-    delete process.env['CLODEX_HOME'];
-    const appHome = getAppHome({ HOME: tempHome });
-    mkdirSync(appHome, { recursive: true });
-    writeFileSync(join(appHome, 'config.json'), JSON.stringify({ lastModel: 'existing' }), 'utf8');
-
-    const legacyHome = getLegacyAppHome({ HOME: tempHome });
-    mkdirSync(legacyHome, { recursive: true });
-    writeFileSync(join(legacyHome, 'config.json'), JSON.stringify({ lastModel: 'legacy' }), 'utf8');
-    resetLegacyMigrationForTests();
-
-    expect(loadPreferences().lastModel).toBe('existing');
   });
 });

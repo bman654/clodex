@@ -21,7 +21,7 @@ import { dirname, join } from 'node:path';
 import bundledPricing from '../data/pricing-cache.json';
 import { getAppHome } from '../paths.js';
 import type { CachedModel } from './types.js';
-import { loadRegistry, saveRegistry } from './io.js';
+import { loadRegistryStrict, saveRegistry } from './io.js';
 import { withRegistryWriteLock, withRegistryWriteLockSync } from './lock.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 
@@ -245,7 +245,7 @@ export function applyPricingToRegistryProviders(
 /** Apply bundled or on-disk pricing cache synchronously (non-blocking enrich baseline). */
 export function applyCachedPricing(): boolean {
   return withRegistryWriteLockSync(() => {
-    const registry = loadRegistry();
+    const registry = loadRegistryStrict();
     const cache = loadPricingCache();
     const changed = applyPricingToRegistryProviders(registry, cache);
     if (changed) saveRegistry(registry);
@@ -259,7 +259,7 @@ export function enrichPricingAsync(onComplete?: (updated: boolean) => void): voi
     const fetched = await fetchPricingCache();
     const cache = fetched ?? loadPricingCache();
     const changed = await withRegistryWriteLock(() => {
-      const registry = loadRegistry();
+      const registry = loadRegistryStrict();
       const updated = applyPricingToRegistryProviders(registry, cache);
       if (updated) saveRegistry(registry);
       return updated;

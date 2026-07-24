@@ -23,13 +23,12 @@ import {
   type OpenAiRequest,
 } from '../openai-adapter.js';
 import { sendJson, readBody } from '../http-utils.js';
-import { relayAnthropicMessages } from '../upstream-forward.js';
+import { relayAnthropicMessages, resolveOAuthRetryReplacement } from '../upstream-forward.js';
 import {
   anthropicPromptTooLongMessage,
   estimateAnthropicInputTokens,
 } from '../anthropic-endpoints.js';
 import { resolveProviderCredential } from '../env.js';
-import { oauthAuthRef } from '../registry/import-build.js';
 import {
   injectClaudeCodeBillingSystemLine,
   injectClaudeIdentity,
@@ -65,6 +64,7 @@ import {
   type AnthropicRequest,
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
+import { listenTcpServer, tcpListenerUrlHost } from '../listener-ready.js';
 
 export interface ServerOptions {
   host: string;
@@ -100,6 +100,7 @@ export interface ServerHandle {
 type JsonBody = Record<string, any>;
 
 type PLog = (msg: string | (() => string)) => void;
+type LanguageModelCache = Map<string, { apiKey: string; languageModel: LanguageModel }>;
 
 function makeServerLog(debugLogPath: string | undefined): PLog {
   if (!debugLogPath) return () => {};
@@ -115,13 +116,44 @@ function inferenceProvider(model: ServerModelInfo): string {
   return model.providerId ?? String(model.sourceBackend);
 }
 
+async function resolveModelApiKey(
+  model: ServerModelInfo,
+  fallback: string,
+  rejectedAccessToken?: string,
+): Promise<string> {
+  if (model.authType === 'oauth' && model.providerId && model.authRef) {
+    let current: string | null;
+    try {
+      current = rejectedAccessToken === undefined
+        ? await resolveProviderCredential(model.providerId, model.authRef)
+        : await resolveProviderCredential(
+            model.providerId,
+            model.authRef,
+            undefined,
+            { rejectedAccessToken },
+          );
+    } catch (cause) {
+      throw new Error(
+        `OAuth credential is unavailable for ${model.providerId}`,
+        { cause },
+      );
+    }
+    if (!current) {
+      throw new Error(`OAuth credential is unavailable for ${model.providerId}`);
+    }
+    model.apiKey = current;
+    return current;
+  }
+  return model.apiKey ?? fallback;
+}
+
 function auditSdkError(
   options: ServerOptions,
   requestedModelId: string,
   model: ServerModelInfo,
   err: unknown,
   message: string,
-): number {
+): { statusCode: number; retryAfterSeconds?: number } {
   const details = sdkUpstreamErrorDetails(err);
   const statusCode = details?.statusCode ?? upstreamHttpStatus(err, message);
   if (options.inferenceLogPath && statusCode >= 400) {
@@ -135,7 +167,7 @@ function auditSdkError(
       attemptCount: details?.attemptCount,
     });
   }
-  return statusCode;
+  return { statusCode, retryAfterSeconds: details?.retryAfterSeconds };
 }
 
 function openAiEffort(body: JsonBody): string | undefined {
@@ -151,30 +183,19 @@ function openAiEffort(body: JsonBody): string | undefined {
 
 export async function startServer(options: ServerOptions): Promise<ServerHandle> {
   silenceSdkWarnings();
-  const languageModelCache = new Map<string, LanguageModel>();
+  const languageModelCache: LanguageModelCache = new Map();
   const plog = makeServerLog(options.debugLogPath);
 
   const server = createServer((req, res) => {
     void routeRequest(req, res, options, languageModelCache, plog);
   });
 
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(options.port, options.host, () => {
-      server.off('error', reject);
-      resolve();
-    });
-  });
-
-  const address = server.address();
-  if (!address || typeof address === 'string') {
-    throw new Error('Server did not bind to a TCP port');
-  }
+  const address = await listenTcpServer(server, options.port, options.host);
 
   return {
     host: options.host,
     port: address.port,
-    url: `http://${options.host}:${address.port}`,
+    url: `http://${tcpListenerUrlHost(address.address)}:${address.port}`,
     server,
     inferenceLogPath: options.inferenceLogPath,
     close: () => new Promise<void>((resolve, reject) => {
@@ -183,7 +204,7 @@ export async function startServer(options: ServerOptions): Promise<ServerHandle>
   };
 }
 
-async function routeRequest(req: IncomingMessage, res: ServerResponse, options: ServerOptions, modelCache: Map<string, LanguageModel>, plog: PLog): Promise<void> {
+async function routeRequest(req: IncomingMessage, res: ServerResponse, options: ServerOptions, modelCache: LanguageModelCache, plog: PLog): Promise<void> {
   try {
     const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname;
     plog(`${req.method} ${pathname}`);
@@ -213,7 +234,16 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse, options: 
     }
 
     if (req.method === 'GET' && pathname === '/models') {
-      sendJson(res, 200, { models: options.catalog.list().map(({ apiKey: _apiKey, headers: _headers, ...rest }) => rest) });
+      sendJson(res, 200, {
+        models: options.catalog.list().map(({
+          apiKey: _apiKey,
+          authRef: _authRef,
+          headers: _headers,
+          oauthAccountId: _oauthAccountId,
+          providerData: _providerData,
+          ...rest
+        }) => rest),
+      });
       return;
     }
 
@@ -247,7 +277,7 @@ async function handleAnthropicMessages(
   req: IncomingMessage,
   res: ServerResponse,
   options: ServerOptions,
-  modelCache: Map<string, LanguageModel>,
+  modelCache: LanguageModelCache,
   plog: PLog,
 ): Promise<void> {
   const body = await readJson(req);
@@ -289,12 +319,21 @@ async function handleAnthropicMessages(
       return;
     }
     const messagesUrl = `${model.baseUrl}/v1/messages`;
-    const apiKey = model.apiKey ?? options.apiKey;
+    let apiKey: string;
+    try {
+      apiKey = await resolveModelApiKey(model, options.apiKey);
+    } catch (err) {
+      sendJson(res, 401, {
+        error: { message: err instanceof Error ? err.message : String(err) },
+      });
+      return;
+    }
     const betaHeaderRaw = req.headers['anthropic-beta'];
     const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
     const clientWantsStream = Boolean(body.stream);
     const forwardBody: Record<string, unknown> = { ...body, model: upstreamModelId(model) };
-    const isOAuth = model.authType === 'oauth';
+    const authType = model.authType ?? 'api';
+    const isOAuth = authType === 'oauth';
 
     auditInference(options, {
       requestId,
@@ -316,14 +355,18 @@ async function handleAnthropicMessages(
       effectiveBeta = selectBetaFlags(forwardBody, upstreamModelId(model), inboundBeta);
     }
 
-    const refreshToken = isOAuth && model.providerId
-      ? () => resolveProviderCredential(model.providerId!, oauthAuthRef(model.providerId!))
+    const refreshToken = isOAuth && model.providerId && model.authRef
+      ? (rejectedAccessToken: string) => resolveModelApiKey(
+          model,
+          options.apiKey,
+          rejectedAccessToken,
+        )
       : undefined;
 
     plog(() => `anthropic-passthrough → ${messagesUrl} oauth=${isOAuth} stream=${clientWantsStream}`);
     await relayAnthropicMessages(res, messagesUrl, forwardBody, apiKey, clientWantsStream, {
       inboundBeta: effectiveBeta,
-      authType: isOAuth ? 'oauth' : 'api',
+      authType,
       log: message => plog(message),
       claudeCodeSessionId,
       extraHeaders: model.headers,
@@ -348,7 +391,15 @@ async function handleAnthropicMessages(
       sendJson(res, 400, { error: { message: `No SDK provider for model: ${model.id}` } });
       return;
     }
-    const apiKey = model.apiKey ?? options.apiKey;
+    let apiKey: string;
+    try {
+      apiKey = await resolveModelApiKey(model, options.apiKey);
+    } catch (err) {
+      sendJson(res, 401, {
+        error: { message: err instanceof Error ? err.message : String(err) },
+      });
+      return;
+    }
     auditInference(options, {
       requestId,
       modelId: body.model,
@@ -358,14 +409,6 @@ async function handleAnthropicMessages(
       route: 'translated',
       requestPreview: getLatestMessagePreview(body.messages, body.system),
     });
-    const languageModel = await getOrInitLanguageModel(
-      modelCache,
-      model,
-      model.npm!,
-      model.apiBaseUrl,
-      apiKey,
-      options.webSocketDiagnosticsLogPath,
-    );
     const npmMaxTools = maxToolsForNpm(model.npm);
     const toolCount = Array.isArray((body as Record<string, unknown>).tools) ? ((body as Record<string, unknown>).tools as unknown[]).length : 0;
     if (npmMaxTools !== undefined && toolCount > npmMaxTools) {
@@ -394,66 +437,96 @@ async function handleAnthropicMessages(
 
     plog(() => `sdk npm=${model.npm} upstream=${upstreamModelId(model)} responseModel=${responseModelId} stream=${clientWantsStream}`);
 
-    try {
-      if (clientWantsStream) {
-        const writeStreamChunk = (chunk: string) => {
-          if (!res.headersSent) {
-            res.writeHead(200, {
-              'Content-Type': 'text/event-stream',
-              'Cache-Control': 'no-cache',
-              'Connection': 'keep-alive',
-            });
-          }
-          res.write(chunk);
-        };
-        await withResponsesWebSocketDiagnosticContext(
-          { requestId, claudeSessionId },
-          () => streamAnthropicResponse(languageModel, params, responseModelId, writeStreamChunk, undefined, {
-            initialInputTokens: estimateAnthropicInputTokens(body),
-          }),
+    let sdkAttempt = 0;
+    for (;;) {
+      try {
+        const languageModel = await getOrInitLanguageModel(
+          modelCache,
+          model,
+          model.npm!,
+          model.apiBaseUrl,
+          apiKey,
+          options.webSocketDiagnosticsLogPath,
         );
-        if (!res.headersSent) writeStreamChunk('');
-        res.end();
-      } else {
-        // ChatGPT/Codex OAuth routes only ever answer as SSE (the WebSocket fetch
-        // returns text/event-stream unconditionally), so stream internally and
-        // collect the result instead of issuing a non-streaming SDK request.
-        const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
-          { requestId, claudeSessionId },
-          () => generateAnthropicResponse(languageModel, params, responseModelId, { forceStream: openAiOAuth }),
-        );
-        sendJson(res, 200, anthropicResponse);
-      }
-    } catch (err) {
-      const message = formatUpstreamError(err);
-      const status = auditSdkError(options, body.model, model, err, message);
-      const contextLengthExceeded = status === 400
-        && isContextLengthExceededError(err, message);
-      const clientMessage = contextLengthExceeded
-        ? anthropicPromptTooLongMessage(
-            body,
-            resolveContextWindow(upstreamModelId(model), model.contextWindow),
-          )
-        : message;
-      plog(`sdk error npm=${model.npm} upstream=${upstreamModelId(model)}: ${message}`);
-      if (!res.headersSent) {
-        if (contextLengthExceeded) {
-          sendJson(res, 400, {
-            type: 'error',
-            error: { type: 'invalid_request_error', message: clientMessage },
-            request_id: requestId,
-          });
+        if (clientWantsStream) {
+          const writeStreamChunk = (chunk: string) => {
+            if (!res.headersSent) {
+              res.writeHead(200, {
+                'Content-Type': 'text/event-stream',
+                'Cache-Control': 'no-cache',
+                'Connection': 'keep-alive',
+              });
+            }
+            res.write(chunk);
+          };
+          await withResponsesWebSocketDiagnosticContext(
+            { requestId, claudeSessionId },
+            () => streamAnthropicResponse(languageModel, params, responseModelId, writeStreamChunk, undefined, {
+              initialInputTokens: estimateAnthropicInputTokens(body),
+            }),
+          );
+          if (!res.headersSent) writeStreamChunk('');
+          res.end();
         } else {
-          sendJson(res, status === 500 ? 502 : status, { error: { message: clientMessage } });
+          // ChatGPT/Codex OAuth routes only ever answer as SSE (the WebSocket fetch
+          // returns text/event-stream unconditionally), so stream internally and
+          // collect the result instead of issuing a non-streaming SDK request.
+          const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
+            { requestId, claudeSessionId },
+            () => generateAnthropicResponse(languageModel, params, responseModelId, { forceStream: openAiOAuth }),
+          );
+          sendJson(res, 200, anthropicResponse);
         }
-      } else {
-        const errorType = anthropicErrorType(status);
-        res.write(`event: error\ndata: ${JSON.stringify({
-          type: 'error',
-          error: { type: errorType, message: clientMessage },
-          ...(contextLengthExceeded ? { request_id: requestId } : {}),
-        })}\n\n`);
-        res.end();
+        break;
+      } catch (err) {
+        const message = formatUpstreamError(err);
+        const details = sdkUpstreamErrorDetails(err);
+        const candidateStatus = details?.statusCode ?? upstreamHttpStatus(err, message);
+        const replacement = await resolveOAuthRetryReplacement(
+          openAiOAuth,
+          candidateStatus,
+          sdkAttempt,
+          res.headersSent,
+          apiKey,
+          rejectedAccessToken => resolveModelApiKey(model, options.apiKey, rejectedAccessToken),
+        );
+        if (replacement) {
+          apiKey = replacement;
+          sdkAttempt += 1;
+          plog('sdk oauth credential replaced after 401; retrying once');
+          continue;
+        }
+        const { statusCode: status, retryAfterSeconds } = auditSdkError(options, body.model, model, err, message);
+        const contextLengthExceeded = status === 400
+          && isContextLengthExceededError(err, message);
+        const clientMessage = contextLengthExceeded
+          ? anthropicPromptTooLongMessage(
+              body,
+              resolveContextWindow(upstreamModelId(model), model.contextWindow),
+            )
+          : message;
+        plog(`sdk error npm=${model.npm} upstream=${upstreamModelId(model)}: ${message}`);
+        if (!res.headersSent) {
+          if (contextLengthExceeded) {
+            sendJson(res, 400, {
+              type: 'error',
+              error: { type: 'invalid_request_error', message: clientMessage },
+              request_id: requestId,
+            });
+          } else {
+            if (retryAfterSeconds !== undefined) res.setHeader('retry-after', String(retryAfterSeconds));
+            sendJson(res, status === 500 ? 502 : status, { error: { message: clientMessage } });
+          }
+        } else {
+          const errorType = anthropicErrorType(status);
+          res.write(`event: error\ndata: ${JSON.stringify({
+            type: 'error',
+            error: { type: errorType, message: clientMessage },
+            ...(contextLengthExceeded ? { request_id: requestId } : {}),
+          })}\n\n`);
+          res.end();
+        }
+        break;
       }
     }
     return;
@@ -466,7 +539,7 @@ async function handleOpenAIChatCompletions(
   req: IncomingMessage,
   res: ServerResponse,
   options: ServerOptions,
-  modelCache: Map<string, LanguageModel>,
+  modelCache: LanguageModelCache,
   plog: PLog,
 ): Promise<void> {
   const body = await readJson(req);
@@ -488,7 +561,15 @@ async function handleOpenAIChatCompletions(
       return;
     }
     const completionsUrl = model.completionsUrl;
-    const apiKey = model.apiKey ?? options.apiKey;
+    let apiKey: string;
+    try {
+      apiKey = await resolveModelApiKey(model, options.apiKey);
+    } catch (err) {
+      sendJson(res, 401, {
+        error: { message: err instanceof Error ? err.message : String(err) },
+      });
+      return;
+    }
     // The client may have addressed the model via a gateway alias or saved
     // short alias — the upstream API only knows its own wire id.
     const forwardBody = body.model === upstreamModelId(model) ? body : { ...body, model: upstreamModelId(model) };
@@ -499,7 +580,19 @@ async function handleOpenAIChatCompletions(
       route: 'passthrough',
       requestPreview: getLatestMessagePreview(body.messages, body.system),
     });
+    const isOAuth = model.authType === 'oauth';
+    const refreshToken = isOAuth && model.providerId && model.authRef
+      ? (rejectedAccessToken: string) => resolveModelApiKey(
+          model,
+          options.apiKey,
+          rejectedAccessToken,
+        )
+      : undefined;
     await relayAnthropicMessages(res, completionsUrl, forwardBody, apiKey, Boolean(body.stream), {
+      authType: model.authType ?? 'api',
+      extraHeaders: model.headers,
+      refreshToken,
+      onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
       onUpstreamError: options.inferenceLogPath
         ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
             modelId: body.model,
@@ -520,7 +613,15 @@ async function handleOpenAIChatCompletions(
     return;
   }
 
-  const apiKey = model.apiKey ?? options.apiKey;
+  let apiKey: string;
+  try {
+    apiKey = await resolveModelApiKey(model, options.apiKey);
+  } catch (err) {
+    sendJson(res, 401, {
+      error: { message: err instanceof Error ? err.message : String(err) },
+    });
+    return;
+  }
   auditInference(options, {
     modelId: body.model,
     effort: openAiEffort(body),
@@ -529,7 +630,6 @@ async function handleOpenAIChatCompletions(
     requestPreview: getLatestMessagePreview(body.messages, body.system),
   });
   const baseURL = model.modelFormat === 'anthropic' ? model.baseUrl : model.apiBaseUrl;
-  const languageModel = await getOrInitLanguageModel(modelCache, model, npm, baseURL, apiKey);
   const openAiOAuth = npm === '@ai-sdk/openai' && model.authType === 'oauth';
   const params = translateOpenAiRequest(body as unknown as OpenAiRequest, { openAiOAuth });
   const clientWantsStream = Boolean(body.stream);
@@ -537,37 +637,66 @@ async function handleOpenAIChatCompletions(
 
   plog(() => `sdk-openai npm=${npm} upstream=${upstreamModelId(model)} responseModel=${responseModelId} stream=${clientWantsStream}`);
 
-  try {
-    if (clientWantsStream) {
-      const writeStreamChunk = (chunk: string) => {
-        if (!res.headersSent) {
-          res.writeHead(200, {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Connection': 'keep-alive',
-          });
-        }
-        res.write(chunk);
-      };
-      await streamOpenAiResponse(languageModel, params, responseModelId, writeStreamChunk);
-      if (!res.headersSent) writeStreamChunk('');
-      res.end();
-    } else {
-      // ChatGPT/Codex OAuth routes only ever answer as SSE (the WebSocket fetch
-      // returns text/event-stream unconditionally), so stream internally and
-      // collect the result instead of issuing a non-streaming SDK request.
-      const response = await generateOpenAiResponse(languageModel, params, responseModelId, { forceStream: openAiOAuth });
-      sendJson(res, 200, response);
-    }
-  } catch (err) {
-    const message = formatUpstreamError(err);
-    const status = auditSdkError(options, body.model, model, err, message);
-    plog(`sdk error npm=${model.npm} upstream=${upstreamModelId(model)}: ${message}`);
-    if (!res.headersSent) {
-      sendJson(res, status === 500 ? 502 : status, { error: { message } });
-    } else {
-      res.write(`data: ${JSON.stringify({ error: { message, type: 'upstream_error', code: status } })}\n\n`);
-      res.end();
+  let sdkAttempt = 0;
+  for (;;) {
+    try {
+      const languageModel = await getOrInitLanguageModel(
+        modelCache,
+        model,
+        npm,
+        baseURL,
+        apiKey,
+      );
+      if (clientWantsStream) {
+        const writeStreamChunk = (chunk: string) => {
+          if (!res.headersSent) {
+            res.writeHead(200, {
+              'Content-Type': 'text/event-stream',
+              'Cache-Control': 'no-cache',
+              'Connection': 'keep-alive',
+            });
+          }
+          res.write(chunk);
+        };
+        await streamOpenAiResponse(languageModel, params, responseModelId, writeStreamChunk);
+        if (!res.headersSent) writeStreamChunk('');
+        res.end();
+      } else {
+        // ChatGPT/Codex OAuth routes only ever answer as SSE (the WebSocket fetch
+        // returns text/event-stream unconditionally), so stream internally and
+        // collect the result instead of issuing a non-streaming SDK request.
+        const response = await generateOpenAiResponse(languageModel, params, responseModelId, { forceStream: openAiOAuth });
+        sendJson(res, 200, response);
+      }
+      break;
+    } catch (err) {
+      const message = formatUpstreamError(err);
+      const details = sdkUpstreamErrorDetails(err);
+      const candidateStatus = details?.statusCode ?? upstreamHttpStatus(err, message);
+      const replacement = await resolveOAuthRetryReplacement(
+        openAiOAuth,
+        candidateStatus,
+        sdkAttempt,
+        res.headersSent,
+        apiKey,
+        rejectedAccessToken => resolveModelApiKey(model, options.apiKey, rejectedAccessToken),
+      );
+      if (replacement) {
+        apiKey = replacement;
+        sdkAttempt += 1;
+        plog('sdk oauth credential replaced after 401; retrying once');
+        continue;
+      }
+      const { statusCode: status, retryAfterSeconds } = auditSdkError(options, body.model, model, err, message);
+      plog(`sdk error npm=${model.npm} upstream=${upstreamModelId(model)}: ${message}`);
+      if (!res.headersSent) {
+        if (retryAfterSeconds !== undefined) res.setHeader('retry-after', String(retryAfterSeconds));
+        sendJson(res, status === 500 ? 502 : status, { error: { message } });
+      } else {
+        res.write(`data: ${JSON.stringify({ error: { message, type: 'upstream_error', code: status } })}\n\n`);
+        res.end();
+      }
+      break;
     }
   }
 }
@@ -588,7 +717,7 @@ function lookupModel(res: ServerResponse, catalog: ModelCatalog, modelId: unknow
 }
 
 async function getOrInitLanguageModel(
-  modelCache: Map<string, LanguageModel>,
+  modelCache: LanguageModelCache,
   model: ServerModelInfo,
   npm: string,
   baseURL: string | undefined,
@@ -602,9 +731,9 @@ async function getOrInitLanguageModel(
     npm,
     baseURL ?? '',
   ].join('\x1f');
-  let languageModel = modelCache.get(cacheKey);
-  if (!languageModel) {
-    languageModel = await createLanguageModel({
+  let cached = modelCache.get(cacheKey);
+  if (!cached || cached.apiKey !== apiKey) {
+    const languageModel = await createLanguageModel({
       npm,
       modelId: upstreamModelId(model),
       apiKey,
@@ -619,9 +748,10 @@ async function getOrInitLanguageModel(
         ? event => writeWebSocketDiagnosticLog(webSocketDiagnosticsLogPath, event)
         : undefined,
     });
-    modelCache.set(cacheKey, languageModel);
+    cached = { apiKey, languageModel };
+    modelCache.set(cacheKey, cached);
   }
-  return languageModel;
+  return cached.languageModel;
 }
 
 function getResponseModelId(bodyModel: unknown, model: ServerModelInfo, options: ServerOptions): string {

@@ -5,7 +5,11 @@ import { resolveContextWindow } from '../context-window.js';
 import type { ProviderTemplate } from '../provider-templates.js';
 import { normalizeGoogleDisplayName, normalizeGoogleModelId } from './google-model-id.js';
 import type { CachedModel } from './types.js';
-import { makeTraceLogger, getProviderDebugLogPath } from '../trace-log.js';
+import {
+  getProviderDebugLogPath,
+  makeTraceLogger,
+  registerTraceSecret,
+} from '../trace-log.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 
 const TEST_TIMEOUT_MS = 10_000;
@@ -212,6 +216,7 @@ export async function fetchTemplateModels(
 
     let logTrace: ((msg: string) => void) | undefined;
     if (process.env.CLODEX_TRACE === '1') {
+      if (trimmedApiKey) registerTraceSecret(trimmedApiKey);
       logTrace = makeTraceLogger(getProviderDebugLogPath());
     }
 

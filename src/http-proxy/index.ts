@@ -6,10 +6,15 @@ import { fetchProviderCatalog, resolveLocalProviderApiKey } from '../provider-ca
 import { providersForTarget } from '../target-compatibility.js';
 import type { ProxyRoute } from '../proxy.js';
 import { buildHttpProxyRoutes, type HttpProxyRouteResult } from './routes.js';
-import { startHttpProxy, type HttpProxyHandle } from './server.js';
+import { startHttpProxy, type HttpProxyHandle, type HttpProxyOptions } from './server.js';
 import { ensureHttpProxyCaBundle } from './ca.js';
 import { registerServerRuntimeState, unregisterServerRuntimeState } from '../server-runtime.js';
-import { getInferenceRequestLogPath, getSessionLogPath } from '../trace-log.js';
+import {
+  getInferenceRequestLogPath,
+  getSessionLogPath,
+  writeProxyLifecycleLog,
+} from '../trace-log.js';
+import { removeAnthropicProxyBypass } from '../wrapper-env.js';
 
 export interface LoadedHttpProxyRoutes extends HttpProxyRouteResult {
   favoriteCount: number;
@@ -89,6 +94,44 @@ export function reportSkippedHttpProxyFavorites(loaded: LoadedHttpProxyRoutes): 
   }
 }
 
+export function buildConfiguredHttpProxyOptions(
+  loaded: LoadedHttpProxyRoutes,
+  port: number,
+  debug = false,
+  inferenceLogPath = getInferenceRequestLogPath(),
+  debugLogPath?: string,
+  webSocketDiagnosticsLogPath?: string,
+): HttpProxyOptions {
+  return {
+    host: '127.0.0.1',
+    port,
+    routes: loaded.routes,
+    modelAliases: loaded.aliases,
+    reservedModelIds: loaded.unavailableAliases.map(alias => alias.name),
+    debug,
+    debugLogPath,
+    inferenceLogPath,
+    webSocketDiagnosticsLogPath,
+  };
+}
+
+export function formatHttpProxyEnvironmentLines(
+  handle: Pick<HttpProxyHandle, 'port' | 'caCertPath'>,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const env = { ...baseEnv };
+  const hadNoProxy = env['NO_PROXY'] !== undefined || env['no_proxy'] !== undefined;
+  removeAnthropicProxyBypass(env);
+  return [
+    `  HTTPS_PROXY=http://127.0.0.1:${handle.port}`,
+    `  HTTP_PROXY=http://127.0.0.1:${handle.port}`,
+    `  NODE_EXTRA_CA_CERTS=${handle.caCertPath}`,
+    ...(hadNoProxy
+      ? [`  NO_PROXY=${env['NO_PROXY'] ?? ''}`, `  no_proxy=${env['no_proxy'] ?? ''}`]
+      : []),
+  ];
+}
+
 export async function startConfiguredHttpProxy(
   port: number,
   debug = false,
@@ -97,16 +140,14 @@ export async function startConfiguredHttpProxy(
   webSocketDiagnosticsLogPath?: string,
 ): Promise<{ handle: HttpProxyHandle; loaded: LoadedHttpProxyRoutes }> {
   const loaded = await loadHttpProxyRoutes();
-  const handle = await startHttpProxy({
-    host: '127.0.0.1',
+  const handle = await startHttpProxy(buildConfiguredHttpProxyOptions(
+    loaded,
     port,
-    routes: loaded.routes,
-    modelAliases: loaded.aliases,
     debug,
-    debugLogPath,
     inferenceLogPath,
+    debugLogPath,
     webSocketDiagnosticsLogPath,
-  });
+  ));
   handle.caCertPath = ensureHttpProxyCaBundle(
     handle.caCertPath,
     process.env['NODE_EXTRA_CA_CERTS'],
@@ -135,12 +176,13 @@ export async function runHttpProxyServerCommand(
   const webSocketDiagnosticsLogPath = webSocketDiagnostics
     ? getSessionLogPath('server-websocket-diagnostics', 'jsonl')
     : undefined;
+  const inferenceLogPath = getInferenceRequestLogPath();
   let started: Awaited<ReturnType<typeof startConfiguredHttpProxy>>;
   try {
     started = await startConfiguredHttpProxy(
       port ?? DEFAULT_SERVER_PORT,
       debug,
-      getInferenceRequestLogPath(),
+      inferenceLogPath,
       undefined,
       webSocketDiagnosticsLogPath,
     );
@@ -150,11 +192,16 @@ export async function runHttpProxyServerCommand(
   }
 
   const { handle, loaded } = started;
+  writeProxyLifecycleLog(inferenceLogPath, {
+    event: 'proxy_started',
+    pid: process.pid,
+    parentPid: process.ppid,
+    host: handle.host,
+    port: handle.port,
+  });
   console.log('');
   console.log(pc.bold(pc.green('clodex proxy-mode server running')));
-  console.log(`  HTTPS_PROXY=http://127.0.0.1:${handle.port}`);
-  console.log(`  HTTP_PROXY=http://127.0.0.1:${handle.port}`);
-  console.log(`  NODE_EXTRA_CA_CERTS=${handle.caCertPath}`);
+  for (const line of formatHttpProxyEnvironmentLines(handle)) console.log(line);
   console.log(`  Request log: ${handle.inferenceLogPath}`);
   if (handle.webSocketDiagnosticsLogPath) {
     console.log(`  WebSocket diagnostics: ${handle.webSocketDiagnosticsLogPath}`);
@@ -183,7 +230,22 @@ export async function runHttpProxyServerCommand(
   }
 
   await waitForShutdown();
+  writeProxyLifecycleLog(inferenceLogPath, {
+    event: 'proxy_stopping',
+    pid: process.pid,
+    parentPid: process.ppid,
+    host: handle.host,
+    port: handle.port,
+    reason: 'shutdown signal received',
+  });
   if (!noDiscovery) unregisterServerRuntimeState();
   await handle.close();
+  writeProxyLifecycleLog(inferenceLogPath, {
+    event: 'proxy_stopped',
+    pid: process.pid,
+    parentPid: process.ppid,
+    host: handle.host,
+    port: handle.port,
+  });
   return 0;
 }

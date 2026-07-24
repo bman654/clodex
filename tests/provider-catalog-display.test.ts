@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import * as env from '../src/env.js';
 import {
   formatRegistryAuthLabel,
+  localProvidersToServerModels,
   providersForPicker,
   resolveLocalProviderApiKey,
   resolveProvidersForDisplay,
@@ -72,9 +73,9 @@ describe('provider-catalog-display', () => {
       expect(env.resolveProviderCredential).toHaveBeenCalledWith('groq', 'keyring:provider:groq');
     });
 
-    it('returns "anonymous" for providers declared authType none', async () => {
+    it('returns an empty credential for providers declared authType none', async () => {
       const provider = { id: 'local', name: 'Local', apiKey: '', authType: 'none', models: [] } as any;
-      expect(await resolveLocalProviderApiKey(provider)).toBe('anonymous');
+      expect(await resolveLocalProviderApiKey(provider)).toBe('');
     });
 
     it('does not resurrect a direct key for an explicitly anonymous provider', async () => {
@@ -86,7 +87,7 @@ describe('provider-catalog-display', () => {
         authType: 'none',
         models: [],
       } as any;
-      expect(await resolveLocalProviderApiKey(provider)).toBe('anonymous');
+      expect(await resolveLocalProviderApiKey(provider)).toBe('');
     });
 
     it('falls back to the OAuth keyring ref when there is no registry authRef and no zen/go/anonymous special case', async () => {
@@ -115,6 +116,26 @@ describe('provider-catalog-display', () => {
     });
   });
 
+  it('propagates exact credential references to server models for OAuth retry', () => {
+    const models = localProvidersToServerModels([{
+      id: 'openai-oauth',
+      name: 'OpenAI (ChatGPT)',
+      apiKey: 'access-token',
+      authRef: TEST_HELPER_REF,
+      authType: 'oauth',
+      models: [{
+        id: 'gpt-oauth-route',
+        name: 'OAuth Route',
+        family: 'gpt',
+        brand: 'GPT',
+        modelFormat: 'openai',
+        upstreamModelId: 'gpt-oauth-route',
+      }],
+    }]);
+
+    expect(models[0]?.authRef).toBe(TEST_HELPER_REF);
+  });
+
   describe('formatRegistryAuthLabel', () => {
     it('distinguishes OAuth, API key, and env refs', () => {
       expect(formatRegistryAuthLabel({
@@ -138,11 +159,6 @@ describe('provider-catalog-display', () => {
       } as any)).toBe('env:OPENAI_API_KEY');
       expect(formatRegistryAuthLabel({
         authRef: 'none:anonymous',
-        authType: 'none',
-      } as any)).toBe('anonymous');
-      expect(formatRegistryAuthLabel({
-        id: 'legacy-local',
-        authRef: 'keyring:provider:legacy-local',
         authType: 'none',
       } as any)).toBe('anonymous');
     });

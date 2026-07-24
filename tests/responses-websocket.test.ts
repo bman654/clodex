@@ -60,6 +60,54 @@ const sessionPayload = (input: unknown[], extra: Record<string, unknown> = {}) =
   ...extra,
 });
 
+/** Drive a failed WebSocket upgrade by emitting `unexpected-response`. */
+function rejectUpgrade(
+  socket: FakeWebSocket,
+  statusCode: number,
+  opts: { headers?: Record<string, string>; statusMessage?: string } = {},
+): { resume: ReturnType<typeof vi.fn> } {
+  const response = Object.assign(new EventEmitter(), {
+    statusCode,
+    statusMessage: opts.statusMessage ?? '',
+    headers: opts.headers ?? {},
+    resume: vi.fn(),
+  });
+  socket.emit('unexpected-response', {}, response);
+  return response;
+}
+
+/** Parse the single SSE error frame produced by a failed request. */
+async function readErrorFrame(res: Response): Promise<{
+  type: string;
+  sequence_number: number;
+  error: Record<string, unknown>;
+}> {
+  const body = await readAll(res);
+  return JSON.parse(body.replace(/^data: /, '').trim());
+}
+
+/** Run the SSE error body through the real AI SDK and classify the surfaced error. */
+async function classifyThroughSdk(sseBody: string): Promise<ReturnType<typeof sdkUpstreamErrorDetails>> {
+  const provider = createOpenAI({
+    apiKey: 'test-only',
+    fetch: async () => new Response(sseBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    }),
+  });
+  const streamed = streamText({
+    model: provider.responses('gpt-5.6-sol'),
+    prompt: 'test',
+    maxRetries: 0,
+    onError: () => {},
+  });
+  let upstreamError: unknown;
+  for await (const part of streamed.stream) {
+    if (part.type === 'error') upstreamError = part.error;
+  }
+  return sdkUpstreamErrorDetails(upstreamError);
+}
+
 function emitTextResponse(socket: FakeWebSocket, responseId: string, text: string): void {
   socket.emit('message', Buffer.from(JSON.stringify({
     type: 'response.created', response: { id: responseId },
@@ -209,18 +257,83 @@ describe('createResponsesWebSocketFetch', () => {
     }));
   });
 
-  it('surfaces a socket error as SSE and logs privacy-safe diagnostics', async () => {
+  it('retries a pre-frame socket error once on a fresh socket with full context', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
       onDiagnostic: event => diagnostics.push(event),
     });
+    const input = [
+      { role: 'user', content: [{ type: 'input_text', text: 'retry this request' }] },
+    ];
+    const payload = sessionPayload(input);
     const res = await withResponsesWebSocketDiagnosticContext(
       { requestId: 'req-socket-error' },
-      () => wsFetch('https://x', { method: 'POST', headers: {}, body: '{}' }),
+      () => wsFetch('https://x', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(payload),
+      }),
     );
     const socket = lastSocket();
     const error = Object.assign(new Error('secret socket failure'), { code: 'ECONNRESET' });
     socket.emit('error', error);
+
+    expect(fakeSockets).toHaveLength(2);
+    expect(socket.close).toHaveBeenCalledOnce();
+    const replacement = lastSocket();
+    replacement.emit('open');
+    expect(JSON.parse(replacement.send.mock.calls[0]![0] as string)).toEqual({
+      type: 'response.create',
+      ...payload,
+    });
+    emitTextResponse(replacement, 'resp_transport_retry', 'recovered');
+    expect(await readAll(res)).toContain('recovered');
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'started',
+      requestId: 'req-socket-error',
+      connectionId: 1,
+      generation: 'nursery',
+      source: 'socket_error',
+      socketErrorName: 'Error',
+      socketErrorCode: 'ECONNRESET',
+      frameCount: 0,
+      emittedModelData: false,
+      errorMessageBytes: 21,
+      errorMessageHash: expect.stringMatching(/^[a-f0-9]{16}$/),
+    }));
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'recovered',
+      requestId: 'req-socket-error',
+      connectionId: 2,
+      frameCount: 1,
+      emittedModelData: false,
+    }));
+    expect(JSON.stringify(diagnostics)).not.toContain('secret socket failure');
+  });
+
+  it('shares one retry budget across pre-frame socket errors and closes', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([])),
+    });
+
+    const first = lastSocket();
+    first.emit(
+      'error',
+      Object.assign(new Error('first private failure'), { code: 'ECONNRESET' }),
+    );
+    const replacement = lastSocket();
+    replacement.emit('close', 1006, Buffer.from('second private failure'));
+
+    expect(fakeSockets).toHaveLength(2);
     const body = await readAll(res);
     expect(JSON.parse(body.replace(/^data: /, '').trim())).toEqual({
       type: 'error',
@@ -228,23 +341,294 @@ describe('createResponsesWebSocketFetch', () => {
       error: {
         type: 'transport_error',
         code: 'websocket_transport_error',
-        message: 'secret socket failure',
+        message: 'WebSocket closed (1006): second private failure',
         param: null,
       },
     });
     expect(diagnostics).toContainEqual(expect.objectContaining({
-      event: 'ws_response_error',
-      requestId: 'req-socket-error',
-      connectionId: 1,
-      generation: 'isolated',
-      source: 'socket_error',
-      socketErrorName: 'Error',
-      socketErrorCode: 'ECONNRESET',
+      event: 'ws_transport_retry',
+      outcome: 'exhausted',
+      connectionId: 2,
+      source: 'socket_close',
+      closeCode: 1006,
+      frameCount: 0,
       emittedModelData: false,
-      errorMessageBytes: 21,
-      errorMessageHash: expect.stringMatching(/^[a-f0-9]{16}$/),
     }));
-    expect(JSON.stringify(diagnostics)).not.toContain('secret socket failure');
+    const serialized = JSON.stringify(diagnostics);
+    expect(serialized).not.toContain('first private failure');
+    expect(serialized).not.toContain('second private failure');
+  });
+
+  it('retries a synchronous send failure once on a fresh socket', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const payload = sessionPayload([
+      { role: 'user', content: [{ type: 'input_text', text: 'send this request' }] },
+    ]);
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(payload),
+    });
+    const first = lastSocket();
+    first.send.mockImplementationOnce(() => {
+      throw Object.assign(new Error('private synchronous send failure'), { code: 'EPIPE' });
+    });
+
+    expect(() => first.emit('open')).not.toThrow();
+    expect(fakeSockets).toHaveLength(2);
+    const replacement = lastSocket();
+    replacement.emit('open');
+    expect(JSON.parse(replacement.send.mock.calls[0]![0] as string)).toEqual({
+      type: 'response.create',
+      ...payload,
+    });
+    emitTextResponse(replacement, 'resp_sync_send_retry', 'recovered');
+    await readAll(res);
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'started',
+      source: 'socket_send',
+      failureMode: 'synchronous',
+      socketErrorCode: 'EPIPE',
+      frameCount: 0,
+    }));
+    expect(JSON.stringify(diagnostics)).not.toContain('private synchronous send failure');
+  });
+
+  it('retries a callback-reported send failure through the same transport path', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([])),
+    });
+    const first = lastSocket();
+    first.send.mockImplementationOnce((
+      _data: string,
+      callback?: (error?: Error) => void,
+    ) => {
+      callback?.(Object.assign(new Error('private callback send failure'), { code: 'ECONNRESET' }));
+    });
+
+    first.emit('open');
+    expect(fakeSockets).toHaveLength(2);
+    const replacement = lastSocket();
+    replacement.emit('open');
+    emitTextResponse(replacement, 'resp_callback_send_retry', 'recovered');
+    await readAll(res);
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'started',
+      source: 'socket_send',
+      failureMode: 'callback',
+      socketErrorCode: 'ECONNRESET',
+      frameCount: 0,
+    }));
+    expect(JSON.stringify(diagnostics)).not.toContain('private callback send failure');
+  });
+
+  it('does not create a replacement when cancellation occurs while retiring the failed socket', async () => {
+    const controller = new AbortController();
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([])),
+      signal: controller.signal,
+    });
+    const socket = lastSocket();
+    socket.close.mockImplementationOnce(() => controller.abort());
+
+    socket.emit(
+      'error',
+      Object.assign(new Error('private cancelled failure'), { code: 'ECONNRESET' }),
+    );
+
+    expect(fakeSockets).toHaveLength(1);
+    expect(await readAll(res)).toBe('');
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'cancelled',
+      connectionId: 1,
+      frameCount: 0,
+    }));
+    expect(JSON.stringify(diagnostics)).not.toContain('private cancelled failure');
+  });
+
+  it('does not retry after any upstream response frame has arrived', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.created',
+      response: { id: 'resp_started' },
+    })));
+    socket.emit(
+      'error',
+      Object.assign(new Error('private post-frame failure'), { code: 'ECONNRESET' }),
+    );
+
+    expect(fakeSockets).toHaveLength(1);
+    expect(await readAll(res)).toContain('websocket_transport_error');
+    expect(diagnostics).not.toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'started',
+    }));
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_error',
+      connectionId: 1,
+      frameCount: 1,
+      emittedModelData: false,
+    }));
+  });
+
+  it('does not retry after model output has reached the downstream stream', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_text.delta',
+      delta: 'partial output',
+    })));
+    socket.emit(
+      'error',
+      Object.assign(new Error('post-output failure'), { code: 'ECONNRESET' }),
+    );
+
+    expect(fakeSockets).toHaveLength(1);
+    const body = await readAll(res);
+    expect(body).toContain('partial output');
+    expect(body).toContain('websocket_transport_error');
+  });
+
+  it('retries a failed incremental continuation with the complete original context', async () => {
+    const initialInput = [
+      { role: 'user', content: [{ type: 'input_text', text: 'first turn' }] },
+    ];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-transport-continuation',
+    });
+    const first = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload(initialInput)),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    emitTextResponse(socket, 'resp_transport_base', 'first answer');
+    await readAll(first);
+
+    const fullInput = [
+      ...initialInput,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'first answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'second turn' }] },
+    ];
+    const continued = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload(fullInput)),
+    });
+    const incremental = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(incremental.previous_response_id).toBe('resp_transport_base');
+    expect(incremental.input).toEqual([fullInput[2]]);
+
+    socket.emit(
+      'error',
+      Object.assign(new Error('continuation transport failure'), { code: 'ECONNRESET' }),
+    );
+    expect(fakeSockets).toHaveLength(2);
+    const replacement = lastSocket();
+    replacement.emit('open');
+    const replay = JSON.parse(replacement.send.mock.calls[0]![0] as string);
+    expect(replay.previous_response_id).toBeUndefined();
+    expect(replay.input).toEqual(fullInput);
+    emitTextResponse(replacement, 'resp_transport_recovered', 'second answer');
+    await readAll(continued);
+  });
+
+  it('keeps a retried parallel auxiliary request isolated from reusable heads', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-parallel-transport',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const mainInput = [
+      { role: 'user', content: [{ type: 'input_text', text: 'main request' }] },
+    ];
+    const main = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload(mainInput)),
+    });
+    const mainSocket = lastSocket();
+    mainSocket.emit('open');
+
+    const auxiliaryInput = [
+      { role: 'user', content: [{ type: 'input_text', text: 'auxiliary request' }] },
+    ];
+    const auxiliary = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload(auxiliaryInput)),
+    });
+    const failedAuxiliarySocket = lastSocket();
+    failedAuxiliarySocket.emit(
+      'error',
+      Object.assign(new Error('auxiliary transport failure'), { code: 'ECONNRESET' }),
+    );
+    const auxiliaryReplacement = lastSocket();
+    auxiliaryReplacement.emit('open');
+    emitTextResponse(auxiliaryReplacement, 'resp_auxiliary', 'auxiliary answer');
+    await readAll(auxiliary);
+    emitTextResponse(mainSocket, 'resp_main', 'main answer');
+    await readAll(main);
+
+    const nextAuxiliaryInput = [
+      ...auxiliaryInput,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'auxiliary answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'continue auxiliary' }] },
+    ];
+    const nextAuxiliary = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload(nextAuxiliaryInput)),
+    });
+    expect(fakeSockets).toHaveLength(4);
+    const nextAuxiliarySocket = lastSocket();
+    expect(nextAuxiliarySocket).not.toBe(auxiliaryReplacement);
+    nextAuxiliarySocket.emit('open');
+    emitTextResponse(nextAuxiliarySocket, 'resp_auxiliary_next', 'done');
+    await readAll(nextAuxiliary);
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'recovered',
+      generation: 'isolated',
+    }));
   });
 
   it('terminates an unexpected HTTP upgrade response with a schema-valid stream error', async () => {
@@ -268,17 +652,10 @@ describe('createResponsesWebSocketFetch', () => {
       }),
     );
     const socket = lastSocket();
-    const resume = vi.fn();
-    socket.emit(
-      'unexpected-response',
-      {},
-      {
-        statusCode: 401,
-        statusMessage: 'private response status',
-        headers: { 'x-private': 'private response header' },
-        resume,
-      },
-    );
+    const { resume } = rejectUpgrade(socket, 401, {
+      statusMessage: 'private response status',
+      headers: { 'x-private': 'private response header' },
+    });
 
     const body = await readAll(res);
     const frame = JSON.parse(body.replace(/^data: /, '').trim());
@@ -292,23 +669,7 @@ describe('createResponsesWebSocketFetch', () => {
         param: null,
       },
     });
-    const provider = createOpenAI({
-      apiKey: 'test-only',
-      fetch: async () => new Response(body, {
-        status: 200,
-        headers: { 'content-type': 'text/event-stream' },
-      }),
-    });
-    const streamed = streamText({
-      model: provider.responses('gpt-5.6-sol'),
-      prompt: 'test',
-      onError: () => {},
-    });
-    let upstreamError: unknown;
-    for await (const part of streamed.stream) {
-      if (part.type === 'error') upstreamError = part.error;
-    }
-    expect(sdkUpstreamErrorDetails(upstreamError)?.statusCode).toBe(401);
+    expect((await classifyThroughSdk(body))?.statusCode).toBe(401);
     expect(resume).toHaveBeenCalledOnce();
     expect(socket.close).toHaveBeenCalledOnce();
     expect(diagnostics).toContainEqual(
@@ -343,6 +704,211 @@ describe('createResponsesWebSocketFetch', () => {
     replacement.emit('open');
     emitTextResponse(replacement, 'resp_after_401', 'recovered');
     await readAll(next);
+  });
+
+  it('maps a 403 upgrade rejection (edge throttle) to a retryable 429 rate limit without reading the body', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await withResponsesWebSocketDiagnosticContext(
+      { requestId: 'req-upgrade-403' },
+      () => wsFetch('https://x', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tok' },
+        body: JSON.stringify(sessionPayload([
+          { role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+        ])),
+      }),
+    );
+    // Emit only `unexpected-response` — never body data or `end`. The mapping
+    // must be synchronous and status-only.
+    const { resume } = rejectUpgrade(lastSocket(), 403);
+
+    const body = await readAll(res);
+    const frame = JSON.parse(body.replace(/^data: /, '').trim());
+    expect(frame.error.type).toBe('rate_limit_error');
+    expect(frame.error.code).toBe('429');
+    expect(frame.error.retry_after_seconds).toBe(5);
+    expect(frame.error.message).toMatch(/retry after 5s/i);
+    expect(resume).toHaveBeenCalledOnce();
+
+    // Through the real AI SDK the failure surfaces as a retryable 429 with the
+    // backoff hint — never as the permission error hosts relabel "Please run
+    // /login".
+    const details = await classifyThroughSdk(body);
+    expect(details).toMatchObject({
+      statusCode: 429,
+      isRetryable: true,
+      retryAfterSeconds: 5,
+    });
+
+    // Diagnostics keep the real upstream status alongside the mapping.
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_error',
+      requestId: 'req-upgrade-403',
+      source: 'unexpected_response',
+      httpStatusCode: 403,
+      mappedStatusCode: 429,
+      retryAfterSeconds: 5,
+    }));
+  });
+
+  it('honors an upstream retry-after header on a 403 rejection', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer tok' },
+      body: JSON.stringify({ model: 'gpt-5.6-luna', input: [] }),
+    });
+    rejectUpgrade(lastSocket(), 403, { headers: { 'retry-after': '12' } });
+
+    const frame = await readErrorFrame(res);
+    expect(frame.error.type).toBe('rate_limit_error');
+    expect(frame.error.retry_after_seconds).toBe(12);
+  });
+
+  it('clamps an oversized retry-after header and defaults a malformed one', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+
+    const oversized = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify({ model: 'gpt-5.6-luna', input: [] }),
+    });
+    rejectUpgrade(lastSocket(), 403, { headers: { 'retry-after': '3600' } });
+    const oversizedFrame = await readErrorFrame(oversized);
+    expect(oversizedFrame.error.retry_after_seconds).toBe(60);
+    // The message text is the only channel that survives the AI SDK's chunk
+    // schema stripping, so the CLAMPED value must appear there too.
+    expect(oversizedFrame.error.message).toMatch(/retry after 60s\b/i);
+
+    const malformed = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify({ model: 'gpt-5.6-luna', input: [] }),
+    });
+    rejectUpgrade(lastSocket(), 403, { headers: { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' } });
+    const malformedFrame = await readErrorFrame(malformed);
+    expect(malformedFrame.error.retry_after_seconds).toBe(5);
+    expect(malformedFrame.error.message).toMatch(/retry after 5s\b/i);
+  });
+
+  it('handles the 403 synchronously so later socket error/close events cannot retry or double-handle', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([
+        { role: 'user', content: [{ type: 'input_text', text: 'throttled' }] },
+      ])),
+    });
+    const socket = lastSocket();
+    rejectUpgrade(socket, 403);
+    // ws surfaces transport teardown after a failed upgrade; the pre-frame
+    // transport retry (PR #29) must see a finished request and stand down.
+    socket.emit('error', Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }));
+    socket.emit('close', 1006, Buffer.from(''));
+
+    expect(fakeSockets).toHaveLength(1);
+    const frames = (await readAll(res)).split('\n\n').filter(Boolean);
+    expect(frames).toHaveLength(1);
+    expect(JSON.parse(frames[0]!.replace(/^data: /, '')).error.type).toBe('rate_limit_error');
+    expect(diagnostics).not.toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+    }));
+  });
+
+  it('lets the AI SDK transparently retry a 403-throttled upgrade and recover', async () => {
+    // The design premise of the 403->429 mapping: because the synthetic error
+    // frame arrives BEFORE any output chunk, @ai-sdk/openai's
+    // throwIfOpenAIStreamErrorBeforeOutput rejects doStream with a retryable
+    // 429 APICallError, so the AI SDK's own retry loop re-attempts the whole
+    // request — including a fresh WebSocket upgrade. This drives that loop for
+    // real: attempt 1 gets a 403 upgrade rejection, attempt 2 succeeds.
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const provider = createOpenAI({ apiKey: 'test-only', fetch: wsFetch });
+    const streamed = streamText({
+      model: provider.responses('gpt-5.6-sol'),
+      prompt: 'retry me',
+      maxRetries: 1,
+      onError: () => {},
+    });
+    const collected = (async () => {
+      let out = '';
+      for await (const chunk of streamed.textStream) out += chunk;
+      return out;
+    })();
+
+    await vi.waitFor(() => expect(fakeSockets).toHaveLength(1));
+    rejectUpgrade(lastSocket(), 403);
+
+    // The SDK backs off (no retry-after header on the synthetic SSE response,
+    // so its default ~2s exponential delay) and opens a SECOND upgrade.
+    await vi.waitFor(() => expect(fakeSockets).toHaveLength(2), { timeout: 10_000 });
+    const replacement = lastSocket();
+    replacement.emit('open');
+    emitTextResponse(replacement, 'resp_retry_recovered', 'recovered');
+
+    // Transparent recovery: the caller sees only the successful text.
+    await expect(collected).resolves.toBe('recovered');
+    expect(fakeSockets).toHaveLength(2);
+  }, 20_000);
+
+  it('maps an in-band WebSocket connection limit error to a retryable 429', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await withResponsesWebSocketDiagnosticContext(
+      { requestId: 'req-connection-limit' },
+      () => wsFetch('https://x', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tok' },
+        body: JSON.stringify(sessionPayload([])),
+      }),
+    );
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: {
+        code: 'websocket_connection_limit_reached',
+        message: 'connection limit reached',
+        retry_after_seconds: 12,
+      },
+    })));
+
+    const body = await readAll(res);
+    expect(JSON.parse(body.replace(/^data: /, '').trim())).toEqual({
+      type: 'error',
+      sequence_number: 1,
+      error: {
+        type: 'rate_limit_error',
+        code: '429',
+        message: 'OpenAI reported the Responses WebSocket connection limit was reached; retry after 12s',
+        param: null,
+        retry_after_seconds: 12,
+      },
+    });
+    expect(body).not.toContain('transport_error');
+    expect(await classifyThroughSdk(body)).toMatchObject({
+      statusCode: 429,
+      isRetryable: true,
+      retryAfterSeconds: 12,
+    });
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_error',
+      requestId: 'req-connection-limit',
+      source: 'error_frame',
+      errorCode: 'websocket_connection_limit_reached',
+      mappedStatusCode: 429,
+      retryAfterSeconds: 12,
+      emittedModelData: false,
+    }));
   });
 
   it('logs sanitized upstream response failure details after partial output', async () => {

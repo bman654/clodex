@@ -6,6 +6,7 @@ import {
   closeSync,
   copyFileSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -14,7 +15,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
-import { ensureLegacyAppHomeMigrated, getAppHome, getProvidersPath } from '../paths.js';
+import { getAppHome, getProvidersPath } from '../paths.js';
 import type { ProviderRegistry, RegistryProvider } from './types.js';
 import { REGISTRY_SCHEMA_VERSION } from './types.js';
 import {
@@ -37,12 +38,21 @@ export function ensureSecureAppHome(): void {
   }
 }
 
-function writeSecureFile(path: string, content: string): void {
+export function writeSecureFile(path: string, content: string): void {
   ensureSecureAppHome();
   mkdirSync(dirname(path), { recursive: true, mode: DIR_MODE });
-  const fd = openSync(path, 'w', FILE_MODE);
+  const fd = openSync(path, 'wx', FILE_MODE);
   try {
-    writeSync(fd, content);
+    const payload = Buffer.from(content);
+    let offset = 0;
+    while (offset < payload.length) {
+      const written = writeSync(fd, payload, offset, payload.length - offset);
+      if (written <= 0) {
+        throw new Error(`Could not complete secure file write: ${path}`);
+      }
+      offset += written;
+    }
+    fsyncSync(fd);
   } finally {
     closeSync(fd);
   }
@@ -50,6 +60,19 @@ function writeSecureFile(path: string, content: string): void {
     chmodSync(path, FILE_MODE);
   } catch {
     // best-effort
+  }
+}
+
+export function syncParentDirectory(path: string): void {
+  let fd: number | undefined;
+  try {
+    fd = openSync(dirname(path), 'r');
+    fsyncSync(fd);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EINVAL' && code !== 'ENOTSUP' && code !== 'EPERM') throw error;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 
@@ -96,6 +119,41 @@ function parseProvider(raw: unknown): RegistryProvider | null {
   return provider;
 }
 
+function hasOwn(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key);
+}
+
+function hasValidStrictProviderFields(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  const provider = raw as Record<string, unknown>;
+  if (hasOwn(provider, 'subscriptionFilter') && provider.subscriptionFilter !== 'free') {
+    return false;
+  }
+  if (
+    hasOwn(provider, 'authType')
+    && provider.authType !== 'api'
+    && provider.authType !== 'oauth'
+    && provider.authType !== 'none'
+  ) {
+    return false;
+  }
+  if (hasOwn(provider, 'refreshedAt') && typeof provider.refreshedAt !== 'string') {
+    return false;
+  }
+  if (hasOwn(provider, 'modelsCache')) {
+    const cache = provider.modelsCache;
+    if (!cache || typeof cache !== 'object' || Array.isArray(cache)) return false;
+    const fields = cache as Record<string, unknown>;
+    if (typeof fields.fetchedAt !== 'string' || !Array.isArray(fields.models)) {
+      return false;
+    }
+    if (fields.models.some(model => !model || typeof model !== 'object' || Array.isArray(model))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function parseRegistry(raw: unknown): ProviderRegistry {
   const empty: ProviderRegistry = { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
   if (!raw || typeof raw !== 'object') return empty;
@@ -117,8 +175,30 @@ function parseRegistry(raw: unknown): ProviderRegistry {
   return registry;
 }
 
+function parseRegistryStrict(raw: unknown): ProviderRegistry {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Provider registry must be a JSON object.');
+  }
+  const data = raw as Record<string, unknown>;
+  if (data.schemaVersion !== REGISTRY_SCHEMA_VERSION) {
+    throw new Error('Provider registry has an unsupported schema version.');
+  }
+  if (!Array.isArray(data.providers)) {
+    throw new Error('Provider registry is missing its providers list.');
+  }
+  for (const entry of data.providers) {
+    if (!parseProvider(entry) || !hasValidStrictProviderFields(entry)) {
+      throw new Error('Provider registry contains an invalid provider entry.');
+    }
+  }
+  return parseRegistry(raw);
+}
+
+function readRegistryStrict(path: string): ProviderRegistry {
+  return parseRegistryStrict(JSON.parse(readFileSync(path, 'utf8')));
+}
+
 export function loadRegistry(path = getProvidersPath()): ProviderRegistry {
-  ensureLegacyAppHomeMigrated();
   if (!existsSync(path)) {
     return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
   }
@@ -130,7 +210,7 @@ export function loadRegistry(path = getProvidersPath()): ProviderRegistry {
       try {
         withRegistryWriteLockSync(() => {
           if (!existsSync(path)) return;
-          const current = parseRegistry(JSON.parse(readFileSync(path, 'utf8')));
+          const current = readRegistryStrict(path);
           if (migrateOAuthOpenAiProvider(current)) saveRegistry(current, path);
         }, { lockPath: `${path}.lock` });
       } catch {
@@ -141,6 +221,20 @@ export function loadRegistry(path = getProvidersPath()): ProviderRegistry {
   } catch {
     return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
   }
+}
+
+/**
+ * Load a registry for destructive decisions. Unlike `loadRegistry`, read,
+ * parse, and provider-shape errors propagate so callers cannot confuse an
+ * unreadable registry with an empty one.
+ */
+export function loadRegistryStrict(path = getProvidersPath()): ProviderRegistry {
+  if (!existsSync(path)) {
+    return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
+  }
+  const registry = readRegistryStrict(path);
+  migrateOAuthOpenAiProvider(registry);
+  return registry;
 }
 
 export function saveRegistry(registry: ProviderRegistry, path = getProvidersPath()): void {
@@ -159,6 +253,7 @@ export function saveRegistry(registry: ProviderRegistry, path = getProvidersPath
     writeSecureFile(tmp, payload);
     assertRegistryWriteOwnership(path);
     renameSync(tmp, path);
+    syncParentDirectory(path);
   } finally {
     try {
       unlinkSync(tmp);

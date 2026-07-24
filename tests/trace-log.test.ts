@@ -1,13 +1,16 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  clearTraceSecrets,
   getInferenceSessionLogPath,
   getLatestMessagePreview,
   redactTraceLine,
   redactTraceLog,
+  registerTraceSecret,
   writeInferenceRequestLog,
+  writeInferenceRouteUnavailableLog,
   writeInferenceResponseLifecycleLog,
   writeInferenceResponseErrorLog,
   writeProxyLifecycleLog,
@@ -15,6 +18,24 @@ import {
 } from '../src/trace-log.js';
 
 describe('trace log redaction', () => {
+  afterEach(() => {
+    clearTraceSecrets();
+  });
+
+  it('redacts registered opaque credentials as literal values', () => {
+    const secret = 'opaque.$credential+[42]';
+    registerTraceSecret(secret);
+
+    expect(redactTraceLine(`{"echo":"${secret}","again":"${secret}"}`))
+      .toBe('{"echo":"[REDACTED]","again":"[REDACTED]"}');
+  });
+
+  it('does not register too-short values', () => {
+    registerTraceSecret('short');
+
+    expect(redactTraceLine('{"echo":"short"}')).toBe('{"echo":"short"}');
+  });
+
   it('redacts bearer tokens', () => {
     expect(redactTraceLine('Authorization: Bearer sk-ant-api03-secret123')).toContain('[REDACTED]');
     expect(redactTraceLine('Authorization: Bearer sk-ant-api03-secret123')).not.toContain('secret123');
@@ -266,6 +287,30 @@ describe('inference request log', () => {
     }
   });
 
+  it('records local route rejection without upstream attribution', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-route-unavailable-'));
+    const path = join(dir, 'requests.jsonl');
+    try {
+      writeInferenceRouteUnavailableLog(path, {
+        requestId: 'request-1',
+        modelId: 'missing-route',
+        statusCode: 400,
+      });
+
+      const entry = JSON.parse(readFileSync(path, 'utf8').trim());
+      expect(entry).toMatchObject({
+        event: 'route_unavailable',
+        requestId: 'request-1',
+        modelId: 'missing-route',
+        statusCode: 400,
+      });
+      expect(entry).not.toHaveProperty('provider');
+      expect(entry).not.toHaveProperty('route');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('writes correlated response lifecycle metadata without response content', () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-inference-lifecycle-'));
     const path = join(dir, 'requests.jsonl');
@@ -273,6 +318,7 @@ describe('inference request log', () => {
       writeInferenceResponseLifecycleLog(path, {
         event: 'translation_progress',
         requestId: 'req-123',
+        claudeSessionId: '00000000-0000-4000-8000-000000000001',
         modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
@@ -286,19 +332,39 @@ describe('inference request log', () => {
         lastPartType: 'text-delta',
       });
       writeInferenceResponseLifecycleLog(path, {
-        event: 'translation_failed',
+        event: 'response_failed',
         requestId: 'req-123',
+        claudeSessionId: 'not-a-session-id',
         modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
         errorType: 'Error',
         errorSignature: 'reasoning_part_not_found',
+        terminationSource: 'upstream_failure',
+      });
+      writeInferenceResponseLifecycleLog(path, {
+        event: 'response_client_disconnected',
+        requestId: 'req-123',
+        claudeSessionId: '00000000-0000-4000-8000-000000000001',
+        modelId: 'clodex:openai:gpt-test',
+        provider: 'openai',
+        route: 'translated',
+        terminationSource: 'downstream_client',
+      });
+      writeInferenceResponseLifecycleLog(path, {
+        event: 'response_client_disconnected',
+        requestId: 'req-456',
+        modelId: 'clodex:openai:gpt-test',
+        provider: 'openai',
+        route: 'translated',
+        terminationSource: 'local_shutdown',
       });
 
-      const [entry, failure] = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const [entry, failure, disconnect, shutdown] = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       expect(entry).toMatchObject({
         event: 'translation_progress',
         requestId: 'req-123',
+        claudeSessionId: '00000000-0000-4000-8000-000000000001',
         modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
@@ -313,9 +379,21 @@ describe('inference request log', () => {
       });
       expect(entry).not.toHaveProperty('responseContent');
       expect(failure).toMatchObject({
-        event: 'translation_failed',
+        event: 'response_failed',
         errorType: 'Error',
         errorSignature: 'reasoning_part_not_found',
+        terminationSource: 'upstream_failure',
+      });
+      expect(failure).not.toHaveProperty('claudeSessionId');
+      expect(disconnect).toMatchObject({
+        event: 'response_client_disconnected',
+        claudeSessionId: '00000000-0000-4000-8000-000000000001',
+        terminationSource: 'downstream_client',
+      });
+      expect(shutdown).toMatchObject({
+        event: 'response_client_disconnected',
+        requestId: 'req-456',
+        terminationSource: 'local_shutdown',
       });
     } finally {
       rmSync(dir, { recursive: true, force: true });

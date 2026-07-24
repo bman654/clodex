@@ -5,7 +5,7 @@ import type { StoredOAuthCredential } from './types.js';
 import { accessTokenIsExpiring, NATIVE_OAUTH_PROVIDER_IDS, oauthCredentialNeedsRefresh, tokensToStoredCredential } from './types.js';
 
 export function oauthCredentialShouldRefresh(
-  cred: StoredOAuthCredential,
+  cred: Pick<StoredOAuthCredential, 'access' | 'expires'>,
   providerId: string,
 ): boolean {
   if (oauthCredentialNeedsRefresh(cred)) return true;

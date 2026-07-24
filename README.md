@@ -153,7 +153,7 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:17645/anthropic
 OPENAI_BASE_URL=http://127.0.0.1:17645/openai/v1
 ```
 
-Use any API key locally; network mode requires the server password. Proxy mode prints `HTTPS_PROXY`, `HTTP_PROXY`, and `NODE_EXTRA_CA_CERTS` values to export — do **not** set `ANTHROPIC_BASE_URL` in that mode.
+Use any API key locally; network mode requires the server password. Proxy mode prints `HTTPS_PROXY`, `HTTP_PROXY`, `NODE_EXTRA_CA_CERTS`, and adjusted `NO_PROXY` / `no_proxy` values to export. The adjusted bypass lists preserve unrelated hosts while ensuring `api.anthropic.com` reaches the selective proxy. Do **not** set `ANTHROPIC_BASE_URL` in that mode.
 
 Several `clodex server` instances can run at once — each advertises itself in `~/.clodex/server-runtime.json`, and `clodex-claude` prefers a proxy-mode server (newest first) when bridging (see [docs/background-agents.md](docs/background-agents.md)). Pass `--no-discovery` to keep a server out of that file, e.g. a dedicated endpoint you point another tool at.
 
@@ -217,10 +217,15 @@ clodex --version    # version
 - The config-home filesystem must support hard links because registry locks are
   published atomically. Keep `CLODEX_HOME` on a local filesystem rather than
   FAT, exFAT, or a network mount that rejects hard links. An abrupt process kill
-  during lock publication can leave a `providers.json.lock.*.tmp` file; it does
+  during lock publication can leave a `*.lock.*.tmp` file; it does
   not block later lock acquisition and can be removed when no Clodex process is
-  running.
+  running. A canonical `providers.json.lock` whose recorded PID is no longer
+  running is reclaimed automatically on the next lock acquisition. If it remains
+  while that PID is active, stop every Clodex process and verify the recorded PID
+  before removing the lock manually. Never remove the canonical lock while a
+  Clodex process is active.
 - Credentials live in the OS credential store (Keychain / Windows Credential Manager / Secret Service) under the `clodex` service. Set `CLODEX_CREDENTIAL_HELPER` to an absolute executable path to use an external secure store instead; see [credential helpers](docs/credential-helpers.md).
+- Proxied routes forward configured provider headers for API-key and OAuth authentication. Anonymous routes preserve non-credential headers while removing authorization, API-key, cookie, token, secret, and credential-bearing header names before dispatch.
 - `CLODEX_CLAUDE_PATH` overrides Claude Code binary discovery.
 - **Outbound proxy:** when `HTTP_PROXY`/`HTTPS_PROXY` (and optionally `NO_PROXY`) are set in clodex's environment, all clodex-originated network calls honor them — OAuth sign-in and token refresh, model-list and models.dev refreshes, upstream OpenAI API calls, and the ChatGPT/Codex OAuth WebSocket transport (tunneled via HTTP CONNECT).
 

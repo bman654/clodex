@@ -2,10 +2,16 @@
 // Adapted from cucoleadan/opencode-cowork-proxy (MIT)
 import { createServer } from 'node:http';
 import type { ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { appendFileSync, openSync, writeSync, closeSync } from 'node:fs';
 import { readBody, extractApiKey, sendJson } from './http-utils.js';
 import { formatAnthropicModelEntry, formatAnthropicModelList } from './server/models.js';
-import { claudeCodeClientModelId, routeLookupIds, stripOneMContextSuffix } from './context-model-id.js';
+import {
+  claudeCodeClientModelId,
+  normalizeRouteLookupId,
+  stripOneMContextSuffix,
+} from './context-model-id.js';
+import { routeUnavailableMessage } from './route-unavailable.js';
 import {
   getProxyDebugLogPath,
   INFERENCE_PROGRESS_INTERVAL_MS,
@@ -15,7 +21,11 @@ import {
   writeInferenceResponseErrorLog,
   writeWebSocketDiagnosticLog,
 } from './trace-log.js';
-import { fetchWithOAuthRetry, relayAnthropicMessages, UpstreamUnreachableError } from './upstream-forward.js';
+import {
+  relayAnthropicMessages,
+  resolveOAuthRetryReplacement,
+  UpstreamUnreachableError,
+} from './upstream-forward.js';
 import {
   CLAUDE_CODE_CLI_VERSION,
   injectClaudeCodeBillingSystemLine,
@@ -46,6 +56,7 @@ import {
 } from './anthropic-endpoints.js';
 import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-websocket.js';
 import { resolveContextWindow } from './context-window.js';
+import { listenTcpServer } from './listener-ready.js';
 
 type ProxyLog = (message: string | (() => string)) => void;
 
@@ -64,6 +75,7 @@ const STREAM_KEEPALIVE_PING = 'event: ping\ndata: {"type":"ping"}\n\n';
 function createTranslationLifecycle(
   logPath: string | undefined,
   requestId: string | undefined,
+  claudeSessionId: string | undefined,
   modelId: string,
   provider: string,
 ) {
@@ -86,6 +98,7 @@ function createTranslationLifecycle(
   ) => writeInferenceResponseLifecycleLog(logPath, {
     event,
     requestId,
+    claudeSessionId,
     modelId,
     provider,
     route: 'translated',
@@ -220,8 +233,8 @@ export interface ProxyRoute {
   authType?: 'api' | 'oauth' | 'none';
   oauthAccountId?: string;
   providerData?: Record<string, unknown>;
-  /** Called once on upstream HTTP 401 to get a refreshed OAuth token. Retry happens only if token differs from current apiKey. */
-  refreshToken?: () => Promise<string | null>;
+  /** Resolves the current OAuth token before dispatch and once more after an upstream HTTP 401. */
+  refreshToken?: (rejectedAccessToken?: string) => Promise<string | null>;
   supportedParameters?: string[];
   reasoning?: boolean;
   interleavedReasoningField?: string;
@@ -247,11 +260,7 @@ export function aliasModelId(realId: string, providerId: string): string {
 
 /** Resolve catalog alias when Claude Code or legacy registry ids differ by prefix/suffix. */
 function lookupRoute(byAlias: Map<string, ProxyRoute>, id: string): ProxyRoute | undefined {
-  for (const key of routeLookupIds(id)) {
-    const route = byAlias.get(key);
-    if (route) return route;
-  }
-  return undefined;
+  return byAlias.get(normalizeRouteLookupId(id));
 }
 
 /** Short alias name → route id, resolvable in request bodies alongside route aliasIds. */
@@ -261,7 +270,7 @@ export interface ProxyModelAlias {
 }
 
 /** Multi-model proxy: routes each request by body.model to the correct upstream. */
-export function startProxyCatalog(
+export async function startProxyCatalog(
   routes: ProxyRoute[],
   defaultAliasId: string,
   debug = false,
@@ -274,15 +283,19 @@ export function startProxyCatalog(
   silenceSdkWarnings();
 
   if (routes.length === 0) {
-    return Promise.reject(new Error('Proxy catalog requires at least one route'));
+    throw new Error('Proxy catalog requires at least one route');
   }
 
-  const byAlias = new Map(routes.map(r => [r.aliasId, r]));
+  const byAlias = new Map(routes.map(r => [normalizeRouteLookupId(r.aliasId), r]));
+  const configuredAliasNames = new Set(
+    (modelAliases ?? []).map(alias => normalizeRouteLookupId(alias.name)),
+  );
   for (const alias of modelAliases ?? []) {
-    const route = byAlias.get(alias.routeId);
-    if (route && !byAlias.has(alias.name)) byAlias.set(alias.name, route);
+    const route = lookupRoute(byAlias, alias.routeId);
+    const aliasId = normalizeRouteLookupId(alias.name);
+    if (route && !byAlias.has(aliasId)) byAlias.set(aliasId, route);
   }
-  const defaultRoute = byAlias.get(defaultAliasId) ?? routes[0]!;
+  const defaultRoute = lookupRoute(byAlias, defaultAliasId) ?? routes[0]!;
 
   const plog = makeProxyLog(debug, debugLogPath);
 
@@ -365,26 +378,53 @@ export function startProxyCatalog(
       const relayRequestId = Array.isArray(relayRequestIdRaw) ? relayRequestIdRaw[0] : relayRequestIdRaw;
 
       // Per-request route resolution: look up the alias, fall back to default
-      const route = lookupRoute(byAlias, originalModel) ?? defaultRoute;
-      const apiKey = route.apiKey;
+      const resolvedRoute = typeof originalModel === 'string'
+        ? lookupRoute(byAlias, originalModel)
+        : undefined;
+      const configuredModelUnavailable = typeof originalModel === 'string'
+        && (
+          normalizeRouteLookupId(originalModel).startsWith('clodex:')
+          || configuredAliasNames.has(normalizeRouteLookupId(originalModel))
+        );
+      if (!resolvedRoute && configuredModelUnavailable) {
+        anthropicError(res, 400, routeUnavailableMessage(originalModel));
+        return;
+      }
+      const route = resolvedRoute ?? defaultRoute;
+      if (messagesEndpoint === 'count_tokens' && route.modelFormat !== 'anthropic') {
+        const inputTokens = estimateAnthropicInputTokens(anthropicBody);
+        plog(() => `token-count: local estimate model=${originalModel} input_tokens=${inputTokens}`);
+        res.setHeader('x-relay-token-count-source', 'local-estimate');
+        sendJson(res, 200, { input_tokens: inputTokens });
+        return;
+      }
+
+      let apiKey = route.apiKey;
+      if (route.authType === 'oauth' && route.refreshToken) {
+        try {
+          const current = await route.refreshToken();
+          if (!current) throw new Error('credential is missing');
+          apiKey = current;
+          route.apiKey = current;
+        } catch (err) {
+          plog(() =>
+            `oauth credential unavailable: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          anthropicError(res, 401, 'OAuth credential is unavailable');
+          return;
+        }
+      }
       const upstreamUrl = route.upstreamUrl;
+      const routeAuthType = route.authType ?? 'api';
 
       plog(() =>
-        `POST /v1/messages - alias=${originalModel} route=${route.realModelId} format=${route.modelFormat} key=${apiKey ? `len:${apiKey.length}` : 'MISSING'}`,
+        `POST /v1/messages - alias=${originalModel} route=${route.realModelId} format=${route.modelFormat} key=${routeAuthType === 'none' ? 'none' : apiKey ? `len:${apiKey.length}` : 'MISSING'}`,
       );
 
       const usesSdkAdapter = isSdkMigratedNpm(route.npm);
 
       if (messagesEndpoint === 'count_tokens') {
-        if (route.modelFormat !== 'anthropic') {
-          const inputTokens = estimateAnthropicInputTokens(anthropicBody);
-          plog(() => `token-count: local estimate model=${originalModel} input_tokens=${inputTokens}`);
-          res.setHeader('x-relay-token-count-source', 'local-estimate');
-          sendJson(res, 200, { input_tokens: inputTokens });
-          return;
-        }
-
-        if (!apiKey) {
+        if (!apiKey && routeAuthType !== 'none') {
           anthropicError(res, 401, 'Missing API key');
           return;
         }
@@ -393,11 +433,11 @@ export function startProxyCatalog(
         const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
         const forwardBody = { ...anthropicBody, model: route.realModelId };
         const targetUrl = `${upstreamUrl}/v1/messages/count_tokens`;
-        const isOAuth = route.authType === 'oauth';
+        const isOAuth = routeAuthType === 'oauth';
         try {
           await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, false, {
             inboundBeta,
-            authType: isOAuth ? 'oauth' : 'api',
+            authType: routeAuthType,
             log: message => plog(message),
             extraHeaders: route.headers,
             refreshToken: route.refreshToken,
@@ -413,7 +453,7 @@ export function startProxyCatalog(
         return;
       }
 
-      if (!apiKey && !usesSdkAdapter) {
+      if (!apiKey && routeAuthType !== 'none' && !usesSdkAdapter) {
         anthropicError(res, 401, 'Missing API key');
         return;
       }
@@ -426,7 +466,7 @@ export function startProxyCatalog(
         const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
         const forwardBody = { ...anthropicBody, model: route.realModelId };
         const targetUrl = `${upstreamUrl}/v1/messages`;
-        const isOAuth = route.authType === 'oauth';
+        const isOAuth = routeAuthType === 'oauth';
 
         let effectiveBeta = inboundBeta;
         let claudeCodeSessionId: string | undefined;
@@ -446,7 +486,7 @@ export function startProxyCatalog(
         try {
           await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, clientWantsStream, {
             inboundBeta: effectiveBeta,
-            authType: isOAuth ? 'oauth' : 'api',
+            authType: routeAuthType,
             log: message => plog(message),
             claudeCodeSessionId,
             extraHeaders: route.headers,
@@ -477,17 +517,18 @@ export function startProxyCatalog(
       // format, endpoint selection, and provider quirks.
       if (usesSdkAdapter) {
         const openAiOAuth = route.npm === '@ai-sdk/openai' && route.authType === 'oauth';
+        const claudeSessionIdHeader = Array.isArray(req.headers['x-claude-code-session-id'])
+          ? req.headers['x-claude-code-session-id'][0]
+          : req.headers['x-claude-code-session-id'];
+        const claudeSessionId = extractClaudeSessionId(anthropicBody, claudeSessionIdHeader);
         const translationLifecycle = createTranslationLifecycle(
           inferenceLogPath,
           relayRequestId,
+          claudeSessionId,
           originalModel,
           route.providerId ?? route.aliasId.split(':')[1] ?? 'unknown',
         );
-        try {
-          const claudeSessionIdHeader = Array.isArray(req.headers['x-claude-code-session-id'])
-            ? req.headers['x-claude-code-session-id'][0]
-            : req.headers['x-claude-code-session-id'];
-          const claudeSessionId = extractClaudeSessionId(anthropicBody, claudeSessionIdHeader);
+        const runSdkRequest = async (): Promise<void> => {
           const params = sdkTranslateRequest(anthropicBody, route.npm!, {
             openAiOAuth,
             claudeSessionId,
@@ -605,18 +646,38 @@ export function startProxyCatalog(
             translationLifecycle?.complete();
             sendJson(res, 200, anthropicResponse);
           }
-        } catch (err) {
+        };
+
+        let sdkAttempt = 0;
+        const handleSdkError = async (
+          err: unknown,
+        ): Promise<'retry' | 'cancelled' | 'done'> => {
           if (clientAbort.signal.aborted) {
             translationLifecycle?.cancel();
-            return;
+            return 'cancelled';
+          }
+          const message = formatUpstreamError(err);
+          const details = sdkUpstreamErrorDetails(err);
+          const upstreamStatus = details?.statusCode ?? upstreamHttpStatus(err, message);
+          const replacement = await resolveOAuthRetryReplacement(
+            openAiOAuth,
+            upstreamStatus,
+            sdkAttempt,
+            res.headersSent,
+            apiKey,
+            route.refreshToken,
+          );
+          if (replacement) {
+            apiKey = replacement;
+            route.apiKey = replacement;
+            sdkAttempt += 1;
+            plog(() => 'sdk oauth credential replaced after 401; retrying once');
+            return 'retry';
           }
           translationLifecycle?.fail(
             err instanceof Error ? err.name : 'UpstreamError',
             sdkTranslationErrorSignature(err),
           );
-          const message = formatUpstreamError(err);
-          const details = sdkUpstreamErrorDetails(err);
-          const upstreamStatus = details?.statusCode ?? upstreamHttpStatus(err, message);
           const contextLengthExceeded = upstreamStatus === 400
             && isContextLengthExceededError(err, message);
           const clientMessage = contextLengthExceeded
@@ -639,6 +700,9 @@ export function startProxyCatalog(
             });
           }
           if (!res.headersSent) {
+            if (details?.retryAfterSeconds !== undefined) {
+              res.setHeader('retry-after', String(details.retryAfterSeconds));
+            }
             anthropicError(
               res,
               upstreamStatus === 500 ? 502 : upstreamStatus,
@@ -654,6 +718,19 @@ export function startProxyCatalog(
             })}\n\n`);
             res.end();
           }
+          return 'done';
+        };
+
+        for (;;) {
+          try {
+            await runSdkRequest();
+            break;
+          } catch (err) {
+            const outcome = await handleSdkError(err);
+            if (outcome === 'retry') continue;
+            if (outcome === 'cancelled') return;
+            break;
+          }
         }
         return;
       }
@@ -667,26 +744,26 @@ export function startProxyCatalog(
     anthropicError(res, 404, `Unknown endpoint: ${req.method} ${req.url}`);
   });
 
-  return new Promise((resolve, reject) => {
-    server.on('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address();
-      if (!addr || typeof addr === 'string') {
-        reject(new Error('Failed to bind proxy'));
-        return;
-      }
-      plog(() => `started on port ${addr.port}, catalog=${routes.length} model(s), default=${defaultRoute.aliasId}`);
-      resolve({
-        port: addr.port,
-        token: proxyToken,
-        close: () => {
-          process.off('unhandledRejection', onRejection);
-          process.off('uncaughtException', onException);
-          server.close();
-        },
-      });
-    });
-  });
+  let address: AddressInfo;
+  try {
+    address = await listenTcpServer(server, 0, '127.0.0.1');
+  } catch (error) {
+    process.off('unhandledRejection', onRejection);
+    process.off('uncaughtException', onException);
+    throw error;
+  }
+  plog(() =>
+    `started on port ${address.port}, catalog=${routes.length} model(s), default=${defaultRoute.aliasId}`,
+  );
+  return {
+    port: address.port,
+    token: proxyToken,
+    close: () => {
+      process.off('unhandledRejection', onRejection);
+      process.off('uncaughtException', onException);
+      server.close();
+    },
+  };
 }
 
 /** Single-model proxy — backward-compatible wrapper around startProxyCatalog. */
@@ -709,6 +786,7 @@ export function startProxy(
     interleavedReasoningField?: string;
     useResponsesLite?: boolean;
     preferWebSockets?: boolean;
+    headers?: Record<string, string>;
   },
   apiKey?: string,
 ): Promise<ProxyHandle> {
@@ -733,5 +811,6 @@ export function startProxy(
     interleavedReasoningField: sdk?.interleavedReasoningField,
     useResponsesLite: sdk?.useResponsesLite,
     preferWebSockets: sdk?.preferWebSockets,
+    headers: sdk?.headers,
   }], clientModelId, debug);
 }

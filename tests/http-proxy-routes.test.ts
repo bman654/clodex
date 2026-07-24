@@ -61,6 +61,22 @@ describe('HTTP proxy routes', () => {
     expect(result.unavailable).toHaveLength(1);
   });
 
+  it('retains an explicitly anonymous route with an empty credential', () => {
+    const anonymous = [{ ...providers[0]!, apiKey: '', authType: 'none' as const }];
+    const favorite = { providerId: 'groq', modelId: 'llama-3.3-70b' };
+
+    const result = buildHttpProxyRoutes(anonymous, [favorite]);
+
+    expect(result.routes).toHaveLength(1);
+    expect(result.routes[0]).toMatchObject({
+      aliasId: 'clodex:groq:llama-3.3-70b[1m]',
+      apiKey: '',
+      authType: 'none',
+    });
+    expect(result.unavailable).toEqual([]);
+    expect(result.unsupported).toEqual([]);
+  });
+
   it('formats the exact freeform Claude model id', () => {
     expect(httpProxyModelId('openrouter', 'deepseek/deepseek-v3')).toBe('clodex:openrouter:deepseek/deepseek-v3');
   });

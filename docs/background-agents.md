@@ -13,6 +13,7 @@ This page explains how to bridge **every** Claude Code process on your machine â
 - Setting **`CLAUDE_CODE_PROCESS_WRAPPER`** to `clodex-claude` makes Claude Code invoke it as `clodex-claude <claude-binary-path> <args...>` for every process it spawns â€” agents view sessions and background agents are bridged automatically.
 - For your own terminal sessions, run **`clodex-claude`** instead of `claude` â€” same auto-discovery, no port or CA path to hardcode anywhere.
 - Set **`CLODEX_REQUIRE_SERVER=1`** in an isolated routed profile when bypassing Clodex must be impossible. `clodex-claude` then exits with an error if no advertised server passes its process and TCP checks. The default remains fail-open for ordinary installations.
+- Proxy-mode wrapper launches remove Anthropic entries from the union of `NO_PROXY` and `no_proxy`, while preserving unrelated bypasses. The manual server output prints the same adjusted values for users who export the proxy settings themselves.
 
 ## Setup steps
 
@@ -27,6 +28,8 @@ This page explains how to bridge **every** Claude Code process on your machine â
    ```bash
    clodex server --proxy
    ```
+
+   If the server prints `NO_PROXY` and `no_proxy`, export those adjusted values with the proxy and CA settings. Empty values intentionally clear inherited wildcard or Anthropic bypasses.
 
    Bridging only happens while this server is running. When it is not, `clodex-claude` falls back cleanly and launches `claude` with an untouched environment.
 

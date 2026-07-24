@@ -1,9 +1,18 @@
 // tests/catalog.test.ts
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { MAX_MODEL_CATALOG } from '../src/constants.js';
-import { buildCatalogRoutes, localModelToRoute, makeRouteResolver } from '../src/catalog.js';
+import {
+  buildCatalogRoutes,
+  localModelToRoute,
+  makeRouteResolver,
+  resolveCatalogModelAliases,
+} from '../src/catalog.js';
+import * as env from '../src/env.js';
+import { modelAliasTarget } from '../src/model-aliases.js';
 import type { ModelInfo } from '../src/types.js';
-import type { FavoriteModel, LocalProvider } from '../src/types.js';
+import type { FavoriteModel, LocalProvider, ModelAlias } from '../src/types.js';
+
+const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:openai-oauth`;
 
 describe('buildCatalogRoutes', () => {
   const starting = {
@@ -32,6 +41,52 @@ describe('buildCatalogRoutes', () => {
   });
 });
 
+describe('resolveCatalogModelAliases', () => {
+  it('maps saved provider/model targets to the resolved catalog route id', () => {
+    const providers: LocalProvider[] = [{
+      id: 'test-provider',
+      name: 'Test Provider',
+      apiKey: 'test-key',
+      models: [{
+        id: 'model-v1',
+        name: 'Model V1',
+        family: 'test',
+        brand: 'Other',
+        modelFormat: 'openai',
+        upstreamModelId: 'model-v1',
+        npm: '@ai-sdk/openai-compatible',
+        contextWindow: 1_000_000,
+      }],
+    }];
+    const aliases: ModelAlias[] = [{
+      name: 'fast',
+      providerId: 'test-provider',
+      modelId: 'model-v1',
+    }];
+
+    const resolved = resolveCatalogModelAliases(aliases, makeRouteResolver(providers));
+
+    expect(resolved).toEqual([{
+      name: 'fast',
+      routeId: 'anthropic-test-provider__model-v1[1m]',
+    }]);
+    expect(resolved[0]?.routeId).not.toBe('clodex:test-provider:model-v1');
+  });
+
+  it('preserves unavailable saved aliases as reserved preference targets', () => {
+    const alias: ModelAlias = {
+      name: 'archived',
+      providerId: 'missing-provider',
+      modelId: 'missing-model',
+    };
+
+    expect(resolveCatalogModelAliases([alias], makeRouteResolver([]))).toEqual([{
+      name: 'archived',
+      routeId: modelAliasTarget(alias),
+    }]);
+  });
+});
+
 
 describe('localModelToRoute', () => {
   it('uses upstreamModelId for SDK calls while keeping catalog id as alias', () => {
@@ -57,12 +112,14 @@ describe('localModelToRoute', () => {
     });
   });
 
-  it('preserves OAuth provider data for catalog routes', () => {
+  it('preserves OAuth provider data and exact credential references for catalog routes', async () => {
+    const resolveSpy = vi.spyOn(env, 'resolveProviderCredential').mockResolvedValue('refreshed-token');
     const provider: LocalProvider = {
       id: 'openai-oauth',
       name: 'OpenAI OAuth (ChatGPT)',
       apiKey: 'oauth-token',
       authType: 'oauth',
+      authRef: TEST_HELPER_REF,
       providerData: { plan: 'pro' },
       models: [{
         id: 'gpt-5.6-sol',
@@ -80,6 +137,21 @@ describe('localModelToRoute', () => {
       authType: 'oauth',
       providerData: { plan: 'pro' },
     });
+    await expect(route?.refreshToken?.()).resolves.toBe('refreshed-token');
+    expect(resolveSpy).toHaveBeenNthCalledWith(
+      1,
+      'openai-oauth',
+      TEST_HELPER_REF,
+    );
+    await expect(route?.refreshToken?.('rejected-token')).resolves.toBe('refreshed-token');
+    expect(resolveSpy).toHaveBeenNthCalledWith(
+      2,
+      'openai-oauth',
+      TEST_HELPER_REF,
+      undefined,
+      { rejectedAccessToken: 'rejected-token' },
+    );
+    resolveSpy.mockRestore();
   });
 
   it('propagates Responses-Lite / WebSocket capability flags onto the route', () => {

@@ -12,7 +12,7 @@ import type { FetchFunction } from '@ai-sdk/provider-utils';
 import type { RawData, WebSocket as WsWebSocket } from 'ws';
 import { CODEX_RESPONSES_WEBSOCKETS_BETA } from '../constants.js';
 import { outboundWsProxyAgent } from '../outbound-proxy.js';
-import { anthropicErrorType } from '../upstream-error.js';
+import { anthropicErrorType, clampRetryAfterSeconds } from '../upstream-error.js';
 
 const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite';
 const TERMINAL_EVENT_TYPES = new Set(['response.completed', 'response.failed', 'response.incomplete']);
@@ -82,6 +82,7 @@ interface RequestContext {
   responseId?: string;
   pendingEvents: unknown[];
   emittedModelData: boolean;
+  transportRetryPending: boolean;
   outputByIndex: Map<number, OutputAccumulator>;
   outputIndexByItemId: Map<string, number>;
   reasoningPartsByItemId: Map<string, Map<number, ReasoningPartState>>;
@@ -444,6 +445,21 @@ function responseErrorCode(event: unknown): string | undefined {
   const response = record.response && typeof record.response === 'object' ? record.response as JsonObject : undefined;
   const responseError = response?.error && typeof response.error === 'object' ? response.error as JsonObject : undefined;
   return typeof responseError?.code === 'string' ? responseError.code : undefined;
+}
+
+function responseRetryAfterSeconds(event: unknown): number | undefined {
+  if (!event || typeof event !== 'object') return undefined;
+  const record = event as JsonObject;
+  const response = record.response && typeof record.response === 'object' ? record.response as JsonObject : undefined;
+  const candidates = [record, record.error, response?.error];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const error = candidate as JsonObject;
+    const value = error.retry_after_seconds ?? error.retry_after;
+    if (typeof value === 'number') return value;
+    if (typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value.trim())) return Number(value);
+  }
+  return undefined;
 }
 
 function boundedDiagnosticIdentifier(value: unknown): string | undefined {
@@ -813,6 +829,7 @@ function failContext(
   message: string,
   diagnosticDetails: Record<string, unknown>,
   statusCode?: number,
+  retryAfterSeconds?: number,
 ): void {
   if (ctx.closed || entry.current !== ctx) return;
   entry.debug(`fail: ${message}`);
@@ -829,10 +846,80 @@ function failContext(
       code: statusCode === undefined ? 'websocket_transport_error' : String(statusCode),
       message,
       param: null,
+      ...(retryAfterSeconds !== undefined ? { retry_after_seconds: retryAfterSeconds } : {}),
     },
   });
   deleteEntry(entry);
   closeContext(ctx);
+}
+
+function retryTransportFailure(
+  entry: ConnectionEntry,
+  ctx: RequestContext,
+  diagnosticDetails: Record<string, unknown>,
+): boolean {
+  if (
+    ctx.closed
+    || entry.current !== ctx
+    || ctx.retried
+    || ctx.frameCount !== 0
+    || ctx.emittedModelData
+  ) {
+    return false;
+  }
+
+  ctx.retried = true;
+  ctx.transportRetryPending = true;
+  entry.debug('transport failed before any response frame; retrying once with full context');
+  emitContextDiagnostic(entry, ctx, {
+    event: 'ws_transport_retry',
+    outcome: 'started',
+    ...diagnosticDetails,
+  });
+  deleteEntry(entry);
+  if (ctx.closed) {
+    ctx.transportRetryPending = false;
+    entry.debug('transport retry cancelled before replacement');
+    emitContextDiagnostic(entry, ctx, {
+      event: 'ws_transport_retry',
+      outcome: 'cancelled',
+    });
+    return true;
+  }
+  resetContextForRetry(ctx);
+  const replacement = ctx.createReplacement();
+  if (ctx.closed) {
+    ctx.transportRetryPending = false;
+    deleteEntry(replacement);
+    replacement.debug('transport retry cancelled while creating replacement');
+    emitContextDiagnostic(replacement, ctx, {
+      event: 'ws_transport_retry',
+      outcome: 'cancelled',
+    });
+    return true;
+  }
+  dispatchContext(replacement, ctx);
+  return true;
+}
+
+function handleTransportFailure(
+  entry: ConnectionEntry,
+  ctx: RequestContext,
+  message: string,
+  diagnosticDetails: Record<string, unknown>,
+): void {
+  if (retryTransportFailure(entry, ctx, diagnosticDetails)) return;
+  if (ctx.closed || entry.current !== ctx) return;
+  if (ctx.retried && ctx.frameCount === 0 && !ctx.emittedModelData) {
+    ctx.transportRetryPending = false;
+    entry.debug('transport retry exhausted before any response frame');
+    emitContextDiagnostic(entry, ctx, {
+      event: 'ws_transport_retry',
+      outcome: 'exhausted',
+      ...diagnosticDetails,
+    });
+  }
+  failContext(entry, ctx, message, diagnosticDetails);
 }
 
 function cleanupExpiredConnections(now: number): Array<Record<string, unknown>> {
@@ -906,7 +993,27 @@ function sendContext(entry: ConnectionEntry, ctx: RequestContext): void {
     `connection=${entry.debugId} key=${debugKey(entry.key)} sending ${outgoing.length}B payload`
     + (ctx.continued ? ' (continuation)' : ''),
   );
-  entry.socket.send(outgoing);
+  try {
+    entry.socket.send(outgoing, error => {
+      if (!error) return;
+      handleTransportFailure(entry, ctx, error.message, {
+        source: 'socket_send',
+        failureMode: 'callback',
+        socketErrorName: boundedDiagnosticIdentifier(error.name),
+        socketErrorCode: boundedDiagnosticIdentifier((error as NodeJS.ErrnoException).code),
+        ...diagnosticTextFingerprint('errorMessage', error.message),
+      });
+    });
+  } catch (error) {
+    const failure = error instanceof Error ? error : new Error('WebSocket send failed');
+    handleTransportFailure(entry, ctx, failure.message, {
+      source: 'socket_send',
+      failureMode: 'synchronous',
+      socketErrorName: boundedDiagnosticIdentifier(failure.name),
+      socketErrorCode: boundedDiagnosticIdentifier((failure as NodeJS.ErrnoException).code),
+      ...diagnosticTextFingerprint('errorMessage', failure.message),
+    });
+  }
 }
 
 function dispatchContext(entry: ConnectionEntry, ctx: RequestContext): void {
@@ -943,6 +1050,14 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   if (!ctx || ctx.closed) return;
   const text = Array.isArray(data) ? Buffer.concat(data).toString('utf8') : data.toString('utf8');
   ctx.frameCount += 1;
+  if (ctx.transportRetryPending) {
+    ctx.transportRetryPending = false;
+    entry.debug('transport retry received its first response frame');
+    emitContextDiagnostic(entry, ctx, {
+      event: 'ws_transport_retry',
+      outcome: 'recovered',
+    });
+  }
   let event: unknown;
   try {
     event = JSON.parse(text);
@@ -971,8 +1086,26 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   }
   if (isModelDataEvent(type)) ctx.emittedModelData = true;
 
-  const previousMissing = responseErrorCode(event) === 'previous_response_not_found';
+  const errorCode = responseErrorCode(event);
+  const previousMissing = errorCode === 'previous_response_not_found';
   const willRetry = previousMissing && ctx.continued && !ctx.retried && !ctx.emittedModelData;
+  if (errorCode === 'websocket_connection_limit_reached' && !ctx.emittedModelData) {
+    const retryAfterSeconds = clampRetryAfterSeconds(responseRetryAfterSeconds(event));
+    failContext(
+      entry,
+      ctx,
+      `OpenAI reported the Responses WebSocket connection limit was reached; retry after ${retryAfterSeconds}s`,
+      {
+        source: 'error_frame',
+        errorCode,
+        mappedStatusCode: 429,
+        retryAfterSeconds,
+      },
+      429,
+      retryAfterSeconds,
+    );
+    return;
+  }
   if (FAILURE_EVENT_TYPES.has(type ?? '')) {
     emitResponseErrorDiagnostic(entry, ctx, {
       source: 'response_event',
@@ -1019,6 +1152,13 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   }
 }
 
+function numericRetryAfterHeader(value: string | string[] | undefined): number | undefined {
+  const single = Array.isArray(value) ? value[0] : value;
+  return typeof single === 'string' && /^\d+$/.test(single.trim())
+    ? Number(single.trim())
+    : undefined;
+}
+
 function createConnection(
   WebSocket: WebSocketConstructor,
   wsUrl: string,
@@ -1062,26 +1202,54 @@ function createConnection(
   socket.on('unexpected-response', (_request, response) => {
     const statusCode = response.statusCode ?? 502;
     debug(`unexpected-response status=${statusCode}`);
+    // Fire-and-forget drain. Upgrade failures are classified by status alone —
+    // the body is never read, so nothing here is deferred into a callback.
     response.resume();
     const ctx = entry.current;
-    if (ctx && !ctx.closed) {
-      failContext(entry, ctx, `WebSocket upgrade failed (HTTP ${statusCode})`, {
+    if (!ctx || ctx.closed) {
+      deleteEntry(entry);
+      return;
+    }
+    if (statusCode === 403) {
+      // OpenAI's edge/WAF rejects the upgrade with HTTP 403 when the ChatGPT
+      // account's concurrency/usage throttle trips, before the request ever
+      // reaches the application. Terminal conditions are 401 (re-auth) or a
+      // 429 with a JSON body; the only application 403 is a geo restriction,
+      // and the official codex client retries ALL 403s. Map every upgrade 403
+      // to a retryable Anthropic 429 synchronously; failContext closes the
+      // context here, so the socket error/close transport-retry path sees a
+      // finished request and cannot double-handle this failure.
+      const retryAfterSeconds = clampRetryAfterSeconds(
+        numericRetryAfterHeader(response.headers['retry-after']),
+      );
+      // "retry after Ns" is load-bearing: the AI SDK strips unknown frame
+      // fields, so sdkUpstreamErrorDetails recovers the hint from this text.
+      failContext(entry, ctx, 'OpenAI edge throttled the Responses WebSocket upgrade '
+        + `(HTTP 403); retry after ${retryAfterSeconds}s`, {
         source: 'unexpected_response',
         httpStatusCode: statusCode,
-      }, statusCode);
-    } else {
-      deleteEntry(entry);
+        mappedStatusCode: 429,
+        retryAfterSeconds,
+      }, 429, retryAfterSeconds);
+      return;
     }
+    failContext(entry, ctx, `WebSocket upgrade failed (HTTP ${statusCode})`, {
+      source: 'unexpected_response',
+      httpStatusCode: statusCode,
+    }, statusCode);
   });
   socket.on('message', (data: RawData) => handleSocketMessage(entry, data));
   socket.on('error', (error: Error) => {
     const ctx = entry.current;
-    if (ctx) failContext(entry, ctx, error.message, {
-      source: 'socket_error',
-      socketErrorName: boundedDiagnosticIdentifier(error.name),
-      socketErrorCode: boundedDiagnosticIdentifier((error as NodeJS.ErrnoException).code),
-    });
-    else deleteEntry(entry);
+    if (ctx) {
+      const details = {
+        source: 'socket_error',
+        socketErrorName: boundedDiagnosticIdentifier(error.name),
+        socketErrorCode: boundedDiagnosticIdentifier((error as NodeJS.ErrnoException).code),
+        ...diagnosticTextFingerprint('errorMessage', error.message),
+      };
+      handleTransportFailure(entry, ctx, error.message, details);
+    } else deleteEntry(entry);
   });
   socket.on('close', (code: number, reason: Buffer) => {
     entry.open = false;
@@ -1090,7 +1258,7 @@ function createConnection(
     if (ctx && !ctx.closed) {
       const reasonText = reason?.length ? reason.toString('utf8') : '';
       const suffix = reasonText ? `: ${reasonText}` : '';
-      failContext(entry, ctx, `WebSocket closed (${code})${suffix}`, {
+      handleTransportFailure(entry, ctx, `WebSocket closed (${code})${suffix}`, {
         source: 'socket_close',
         closeCode: code,
         ...diagnosticTextFingerprint('closeReason', reasonText),
@@ -1297,6 +1465,7 @@ export function createResponsesWebSocketFetch(
           frameCount: 0,
           pendingEvents: [],
           emittedModelData: false,
+          transportRetryPending: false,
           outputByIndex: new Map(),
           outputIndexByItemId: new Map(),
           reasoningPartsByItemId: new Map(),
@@ -1309,7 +1478,7 @@ export function createResponsesWebSocketFetch(
             WebSocket as unknown as WebSocketConstructor,
             wsUrl,
             headers,
-            Boolean(partitionKey),
+            persistent,
             partitionKey,
             resolvedOptions,
             debug,

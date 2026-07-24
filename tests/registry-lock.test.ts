@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'tsup';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   RegistryLockLostError,
   getCredentialMutationLockPath,
@@ -396,6 +396,53 @@ describe('provider registry lock', () => {
       await Promise.all([first, second]);
       expect(events).toEqual(['first-enter', 'first-exit', 'second-enter']);
     } finally {
+      if (previousHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousHome;
+    }
+  });
+
+  it('waits for a credential mutation holder through the refresh budget', async () => {
+    vi.useFakeTimers();
+    const home = dirname(temporaryLockPath());
+    const previousHome = process.env.CLODEX_HOME;
+    process.env.CLODEX_HOME = home;
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let first: Promise<void> | undefined;
+    let second: Promise<void> | undefined;
+
+    try {
+      first = withCredentialMutationLock(
+        'keyring:oauth:provider:openai-oauth',
+        () => firstGate,
+      );
+      let outcome: 'pending' | 'acquired' | 'rejected' = 'pending';
+      second = withCredentialMutationLock(
+        'keyring:oauth:provider:openai-oauth',
+        () => {
+          outcome = 'acquired';
+        },
+        { retryMs: 30_000 },
+      ).catch(() => {
+        outcome = 'rejected';
+      });
+
+      await vi.advanceTimersByTimeAsync(149_999);
+      expect(outcome).toBe('pending');
+      releaseFirst();
+      await first;
+      await vi.advanceTimersByTimeAsync(1);
+      await second;
+      expect(outcome).toBe('acquired');
+    } finally {
+      releaseFirst();
+      await vi.runOnlyPendingTimersAsync();
+      await Promise.allSettled([first, second].filter(
+        (operation): operation is Promise<void> => operation !== undefined,
+      ));
+      vi.useRealTimers();
       if (previousHome === undefined) delete process.env.CLODEX_HOME;
       else process.env.CLODEX_HOME = previousHome;
     }

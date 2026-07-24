@@ -1,6 +1,6 @@
 // src/env.ts
 import { CONFLICTING_ENV_VARS } from './constants.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   deleteCredentialHelperAccount,
   readCredentialHelperAccount,
@@ -11,10 +11,12 @@ import { resolveContextWindow } from './context-window.js';
 import {
   oauthCredentialToKeychainJson,
   parseStoredOAuthCredential,
+  type StoredOAuthCredential,
 } from './oauth/types.js';
 import { refreshStoredOAuthCredential, oauthCredentialShouldRefresh } from './oauth/refresh.js';
 import { withCredentialMutationLock } from './registry/lock.js';
 import type { ConflictInfo } from './types.js';
+import { removeAnthropicProxyBypass } from './wrapper-env.js';
 
 export function detectConflicts(): ConflictInfo[] {
   return CONFLICTING_ENV_VARS
@@ -82,31 +84,7 @@ export function buildHttpProxyChildEnv(proxyPort: number, caCertPath: string): N
   env['https_proxy'] = proxyUrl;
   env['http_proxy'] = proxyUrl;
   env['NODE_EXTRA_CA_CERTS'] = caCertPath;
-  const noProxy = env['NO_PROXY'] ?? env['no_proxy'];
-  if (noProxy !== undefined) {
-    const filtered = noProxy
-      .split(',')
-      .map(value => value.trim())
-      .filter(Boolean)
-      .filter(value => {
-        const entry = value.toLowerCase().replace(/^https?:\/\//, '');
-        const host = entry.replace(/:\d+$/, '');
-        if (host === '*') return false;
-        const suffix = host.startsWith('*.') ? host.slice(1) : host;
-        const bypassesAnthropic = suffix.startsWith('.')
-          ? 'api.anthropic.com'.endsWith(suffix)
-          : 'api.anthropic.com' === suffix || 'api.anthropic.com'.endsWith(`.${suffix}`);
-        return !bypassesAnthropic;
-      })
-      .join(',');
-    if (filtered) {
-      env['NO_PROXY'] = filtered;
-      env['no_proxy'] = filtered;
-    } else {
-      delete env['NO_PROXY'];
-      delete env['no_proxy'];
-    }
-  }
+  removeAnthropicProxyBypass(env);
   return env;
 }
 
@@ -127,8 +105,6 @@ export function classifyKeyringError(err: unknown): string {
 }
 
 const KEYRING_SERVICE = 'clodex';
-/** One-time silent migration source: credentials stored by relay-ai. */
-const LEGACY_KEYRING_SERVICE = 'relay-ai';
 // Windows Credential Manager caps a single credential blob at 2560 bytes (CredWriteW).
 // keyring-rs encodes the password as UTF-16 (2 bytes/char) before that check, so the
 // usable limit is 2560 / 2 = 1280 chars — long OAuth tokens (e.g. OpenAI's JWTs) exceed
@@ -151,12 +127,31 @@ function oauthProviderIdFromAccount(account: string): string | null {
 }
 
 const oauthRefreshInflight = new Map<string, Promise<string | null>>();
+interface CachedOAuthCredential {
+  access: string;
+  expires: number;
+  accessRejected?: true;
+  checkedAt: number;
+}
+
+// Another process can replace the shared credential without invalidating this
+// process. Keep only access-token metadata and bound that stale view to 30 seconds;
+// rejection and expiration bypass it immediately.
+const OAUTH_CREDENTIAL_CACHE_MAX_AGE_MS = 30_000;
+const oauthCredentialCache = new Map<string, CachedOAuthCredential>();
+const rejectedEnvCredentialFingerprints = new Map<string, string>();
+const OAUTH_REFRESH_LOCK_WAIT_MS = 150_000;
+const OAUTH_STATE_KEY_SEPARATOR = '\0';
 
 export type ParsedAuthRef =
   | { kind: 'keyring'; account: string }
   | { kind: 'helper'; helperId: string; account: string }
   | { kind: 'env'; varName: string }
   | { kind: 'none' };
+
+export interface ResolveCredentialOptions {
+  rejectedAccessToken?: string;
+}
 
 /** Parse registry credential references. */
 export function parseAuthRef(authRef: string): ParsedAuthRef | null {
@@ -185,6 +180,37 @@ function readEnvCredential(varName: string): string | null {
   return raw.trim().split(/\r?\n/)[0]?.trim() || null;
 }
 
+function credentialFingerprint(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function usableEnvCredential(
+  source: string,
+  value: string | null,
+  rejectedAccessToken?: string,
+): string | null {
+  if (!value) {
+    rejectedEnvCredentialFingerprints.delete(source);
+    return null;
+  }
+
+  const fingerprint = credentialFingerprint(value);
+  if (
+    rejectedAccessToken !== undefined
+    && fingerprint === credentialFingerprint(rejectedAccessToken)
+  ) {
+    rejectedEnvCredentialFingerprints.set(source, fingerprint);
+    return null;
+  }
+
+  const rejectedFingerprint = rejectedEnvCredentialFingerprints.get(source);
+  if (rejectedFingerprint === fingerprint) return null;
+  if (rejectedFingerprint !== undefined) {
+    rejectedEnvCredentialFingerprints.delete(source);
+  }
+  return value;
+}
+
 function readKeyringAccountFromService(
   Entry: typeof import('@napi-rs/keyring').Entry,
   service: string,
@@ -203,20 +229,7 @@ function readKeyringAccountFromService(
 async function readKeyringAccount(account: string, diag?: (msg: string) => void): Promise<string | null> {
   try {
     const { Entry } = await import('@napi-rs/keyring');
-    const value = readKeyringAccountFromService(Entry, KEYRING_SERVICE, account);
-    if (value !== null) return value;
-    // One-time silent migration: fall back to the relay-ai keychain service and
-    // copy the credential into the clodex service on first read.
-    let legacy: string | null = null;
-    try {
-      legacy = readKeyringAccountFromService(Entry, LEGACY_KEYRING_SERVICE, account);
-    } catch {
-      legacy = null;
-    }
-    if (legacy !== null) {
-      await writeKeyringAccount(account, legacy, diag);
-    }
-    return legacy;
+    return readKeyringAccountFromService(Entry, KEYRING_SERVICE, account);
   } catch (err) {
     diag?.(classifyKeyringError(err));
     return null;
@@ -321,20 +334,30 @@ export async function resolveProviderCredential(
   providerId: string,
   authRef: string,
   diag?: (msg: string) => void,
+  options: ResolveCredentialOptions = {},
 ): Promise<string | null> {
   const parsed = parseAuthRef(authRef);
   if (parsed?.kind === 'none') return null;
 
-  const namespaced = readEnvCredential(clodexKeyEnvVar(providerId));
+  const namespacedVar = clodexKeyEnvVar(providerId);
+  const namespaced = usableEnvCredential(
+    `provider:${providerId}`,
+    readEnvCredential(namespacedVar),
+    options.rejectedAccessToken,
+  );
   if (namespaced) return namespaced;
 
   if (!parsed) return null;
 
   if (parsed.kind === 'env') {
-    return readEnvCredential(parsed.varName);
+    return usableEnvCredential(
+      `provider:${providerId}:env:${parsed.varName}`,
+      readEnvCredential(parsed.varName),
+      options.rejectedAccessToken,
+    );
   }
 
-  return readProviderSecret(parsed, diag);
+  return readProviderSecret(parsed, diag, options.rejectedAccessToken);
 }
 
 /** Read OAuth metadata retained alongside the access token. */
@@ -368,7 +391,7 @@ export async function resolveProviderOAuthProviderData(
   return parseStoredOAuthCredential(raw)?.providerData;
 }
 
-function decodeProviderSecret(raw: string | null): string | null {
+function decodeProviderSecret(raw: string | null, allowOpaqueJson = false): string | null {
   if (!raw) return null;
   const trimmed = raw.trim();
   if (!trimmed.startsWith('{')) return trimmed;
@@ -376,60 +399,170 @@ function decodeProviderSecret(raw: string | null): string | null {
   if (oauth) return oauth.access;
   try {
     const parsed = JSON.parse(trimmed) as { type?: string; access?: string; token?: string };
-    if (parsed.type === 'oauth' && typeof parsed.access === 'string') return parsed.access;
-    if (parsed.type === 'wellknown' && typeof parsed.token === 'string') return parsed.token;
+    if (parsed.type === 'wellknown') {
+      return typeof parsed.token === 'string' && parsed.token.trim()
+        ? parsed.token.trim()
+        : null;
+    }
+    if (allowOpaqueJson && parsed.type === 'oauth') {
+      return typeof parsed.access === 'string' && parsed.access.trim()
+        ? parsed.access.trim()
+        : null;
+    }
+    return allowOpaqueJson ? raw : null;
   } catch {
-    // fall through
+    return null;
   }
-  return trimmed;
 }
 
-async function refreshOAuthStoredCredential(
+function oauthCredentialStateKey(providerId: string, authRef: string): string {
+  return `${providerId}${OAUTH_STATE_KEY_SEPARATOR}${authRef}`;
+}
+
+function clearOAuthCredentialCache(authRef: string): void {
+  const suffix = `${OAUTH_STATE_KEY_SEPARATOR}${authRef}`;
+  for (const key of oauthCredentialCache.keys()) {
+    if (key.endsWith(suffix)) oauthCredentialCache.delete(key);
+  }
+}
+
+function cacheOAuthCredential(
+  stateKey: string,
+  credential: StoredOAuthCredential,
+): void {
+  oauthCredentialCache.set(stateKey, {
+    access: credential.access,
+    expires: credential.expires,
+    ...(credential.accessRejected === true ? { accessRejected: true as const } : {}),
+    checkedAt: Date.now(),
+  });
+}
+
+function cachedOAuthCredentialIsUsable(
+  credential: CachedOAuthCredential | undefined,
+  providerId: string,
+  rejectedAccessToken?: string,
+): boolean {
+  if (!credential) return false;
+  const age = Date.now() - credential.checkedAt;
+  return age >= 0
+    && age < OAUTH_CREDENTIAL_CACHE_MAX_AGE_MS
+    && credential.access !== rejectedAccessToken
+    && credential.accessRejected !== true
+    && !oauthCredentialShouldRefresh(credential, providerId);
+}
+
+async function readOAuthProviderSecret(
   ref: StoredCredentialRef,
   providerId: string,
   diag?: (msg: string) => void,
+  rejectedAccessToken?: string,
 ): Promise<string | null> {
   const authRef = storedCredentialAuthRef(ref);
-  const existing = oauthRefreshInflight.get(authRef);
-  if (existing) return existing;
+  const stateKey = oauthCredentialStateKey(providerId, authRef);
+  const existing = oauthRefreshInflight.get(stateKey);
+  if (existing) {
+    const resolved = await existing;
+    if (resolved !== rejectedAccessToken) return resolved;
+    return readOAuthProviderSecret(ref, providerId, diag, rejectedAccessToken);
+  }
+
+  const cached = oauthCredentialCache.get(stateKey);
+  if (cached && cachedOAuthCredentialIsUsable(cached, providerId, rejectedAccessToken)) {
+    return cached.access;
+  }
+  if (cached?.access === rejectedAccessToken) oauthCredentialCache.delete(stateKey);
 
   const work = withCredentialMutationLock(authRef, async (): Promise<string | null> => {
-    const currentRaw = await readStoredCredential(ref, diag);
-    if (!currentRaw) return null;
-    const cred = parseStoredOAuthCredential(currentRaw);
-    if (!cred || !oauthCredentialShouldRefresh(cred, providerId)) {
-      return decodeProviderSecret(currentRaw);
+    const latestCached = oauthCredentialCache.get(stateKey);
+    if (
+      latestCached
+      && cachedOAuthCredentialIsUsable(latestCached, providerId, rejectedAccessToken)
+    ) {
+      return latestCached.access;
     }
-    try {
-      const refreshed = await refreshStoredOAuthCredential(providerId, cred);
-      const json = oauthCredentialToKeychainJson(refreshed);
+
+    for (let generation = 0; generation < 3; generation += 1) {
+      const raw = await readStoredCredential(ref, diag);
+      if (!raw) return null;
+
+      const cred = parseStoredOAuthCredential(raw);
+      if (!cred) {
+        const decoded = decodeProviderSecret(raw);
+        return decoded === rejectedAccessToken ? null : decoded;
+      }
+      cacheOAuthCredential(stateKey, cred);
+
+      const forceRefresh = cred.access === rejectedAccessToken || cred.accessRejected === true;
+      if (!forceRefresh && !oauthCredentialShouldRefresh(cred, providerId)) {
+        return cred.access;
+      }
+
+      let refreshed;
+      try {
+        refreshed = await refreshStoredOAuthCredential(providerId, cred);
+      } catch (err) {
+        diag?.(err instanceof Error ? err.message : String(err));
+        if (!forceRefresh && cred.access && cred.expires > Date.now()) return cred.access;
+        oauthCredentialCache.delete(stateKey);
+        throw err;
+      }
+
+      const accessStillRejected = (
+        rejectedAccessToken !== undefined
+        && refreshed.access === rejectedAccessToken
+      ) || (
+        cred.accessRejected === true
+        && refreshed.access === cred.access
+      );
+      const currentRaw = await readStoredCredential(ref, diag);
+      if (currentRaw !== raw) {
+        oauthCredentialCache.delete(stateKey);
+        continue;
+      }
+
+      const credentialToSave: StoredOAuthCredential = accessStillRejected
+        ? { ...refreshed, accessRejected: true }
+        : refreshed;
+      const json = oauthCredentialToKeychainJson(credentialToSave);
       const saved = await saveProviderCredential(authRef, json, diag);
-      if (!saved) throw new Error('Could not persist refreshed OAuth credential');
+      if (!saved) {
+        oauthCredentialCache.delete(stateKey);
+        throw new Error('Could not persist refreshed OAuth credential');
+      }
+      if (accessStillRejected) {
+        oauthCredentialCache.delete(stateKey);
+        return null;
+      }
       return refreshed.access;
-    } catch (err) {
-      diag?.(err instanceof Error ? err.message : String(err));
-      if (cred.access && cred.expires > Date.now()) return cred.access;
-      throw err;
     }
+    throw new Error('OAuth credential changed repeatedly while refresh was in progress');
+  }, {
+    waitMs: OAUTH_REFRESH_LOCK_WAIT_MS,
   });
 
-  oauthRefreshInflight.set(authRef, work);
+  oauthRefreshInflight.set(stateKey, work);
   try {
     return await work;
   } finally {
-    oauthRefreshInflight.delete(authRef);
+    if (oauthRefreshInflight.get(stateKey) === work) {
+      oauthRefreshInflight.delete(stateKey);
+    }
   }
 }
 
-async function readProviderSecret(ref: StoredCredentialRef, diag?: (msg: string) => void): Promise<string | null> {
-  const raw = await readStoredCredential(ref, diag);
-  if (!raw) return null;
-
+async function readProviderSecret(
+  ref: StoredCredentialRef,
+  diag?: (msg: string) => void,
+  rejectedAccessToken?: string,
+): Promise<string | null> {
   const oauthProviderId = oauthProviderIdFromAccount(ref.account);
-  if (oauthProviderId && raw.trim().startsWith('{')) {
-    return refreshOAuthStoredCredential(ref, oauthProviderId, diag);
+  if (oauthProviderId) {
+    return readOAuthProviderSecret(ref, oauthProviderId, diag, rejectedAccessToken);
   }
-  return decodeProviderSecret(raw);
+  const raw = await readStoredCredential(ref, diag);
+  const decoded = decodeProviderSecret(raw, true);
+  return decoded === rejectedAccessToken ? null : decoded;
 }
 
 export async function saveProviderCredential(
@@ -440,10 +573,19 @@ export async function saveProviderCredential(
   const parsed = parseAuthRef(authRef);
   if (!parsed || parsed.kind === 'env' || parsed.kind === 'none') return false;
   return withCredentialMutationLock(authRef, async () => {
+    const cacheKey = storedCredentialAuthRef(parsed);
+    clearOAuthCredentialCache(cacheKey);
     const written = await writeStoredCredential(parsed, key, diag);
     if (!written) return false;
     const readBack = await readStoredCredential(parsed, diag);
-    if (readBack === key) return true;
+    if (readBack === key) {
+      const oauth = parseStoredOAuthCredential(key);
+      const oauthProviderId = oauthProviderIdFromAccount(parsed.account);
+      if (oauth && oauthProviderId) {
+        cacheOAuthCredential(oauthCredentialStateKey(oauthProviderId, cacheKey), oauth);
+      }
+      return true;
+    }
     diag?.('credential store read-back verification failed');
     return false;
   });
@@ -488,6 +630,8 @@ export async function deleteProviderCredential(
 ): Promise<boolean> {
   const parsed = parseAuthRef(authRef);
   if (!parsed || parsed.kind === 'env' || parsed.kind === 'none') return false;
-  return withCredentialMutationLock(authRef, () =>
-    deleteStoredCredential(parsed, diag));
+  return withCredentialMutationLock(authRef, () => {
+    clearOAuthCredentialCache(storedCredentialAuthRef(parsed));
+    return deleteStoredCredential(parsed, diag);
+  });
 }

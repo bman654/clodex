@@ -3,6 +3,7 @@
 // This is only used when running `clodex providers auth <provider>` without the GUI.
 
 import http from 'node:http';
+import { listenTcpServer } from '../listener-ready.js';
 
 export interface CallbackParams {
   code: string;
@@ -25,44 +26,37 @@ const SUCCESS_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Au
 <p style="color:#666">You can close this tab and return to the terminal.</p>
 </div></body></html>`;
 
-export function startCallbackServer(): Promise<CallbackServer> {
-  return new Promise((resolve, reject) => {
-    let codeResolve: ((p: CallbackParams) => void) | undefined;
-    let codeReject: ((e: Error) => void) | undefined;
+export async function startCallbackServer(): Promise<CallbackServer> {
+  let codeResolve: ((p: CallbackParams) => void) | undefined;
+  let codeReject: ((e: Error) => void) | undefined;
 
-    const server = http.createServer((req, res) => {
-      const u = new URL(req.url ?? '/', 'http://localhost');
-      if (u.pathname !== '/callback' && u.pathname !== '/oauth/callback') {
-        res.writeHead(404); res.end(); return;
-      }
-      const code = u.searchParams.get('code') ?? '';
-      const state = u.searchParams.get('state') ?? '';
-      const error = u.searchParams.get('error') ?? '';
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(SUCCESS_HTML);
-      codeResolve?.({ code, state, error: error || undefined });
-    });
-
-    server.listen(0, '127.0.0.1', () => {
-      const addr = server.address() as { port: number };
-      const port = addr.port;
-      resolve({
-        port,
-        redirectUri: `http://127.0.0.1:${port}/callback`,
-        waitForCallback(timeoutMs = 300_000) {
-          return new Promise<CallbackParams>((res, rej) => {
-            codeResolve = res;
-            codeReject = rej;
-            setTimeout(
-              () => rej(new Error('OAuth timeout — browser closed without completing sign-in')),
-              timeoutMs,
-            );
-          });
-        },
-        close() { server.close(); codeReject?.(new Error('Server closed')); },
-      });
-    });
-
-    server.on('error', reject);
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url ?? '/', 'http://localhost');
+    if (u.pathname !== '/callback' && u.pathname !== '/oauth/callback') {
+      res.writeHead(404); res.end(); return;
+    }
+    const code = u.searchParams.get('code') ?? '';
+    const state = u.searchParams.get('state') ?? '';
+    const error = u.searchParams.get('error') ?? '';
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(SUCCESS_HTML);
+    codeResolve?.({ code, state, error: error || undefined });
   });
+
+  const address = await listenTcpServer(server, 0, '127.0.0.1');
+  return {
+    port: address.port,
+    redirectUri: `http://127.0.0.1:${address.port}/callback`,
+    waitForCallback(timeoutMs = 300_000) {
+      return new Promise<CallbackParams>((resolve, reject) => {
+        codeResolve = resolve;
+        codeReject = reject;
+        setTimeout(
+          () => reject(new Error('OAuth timeout — browser closed without completing sign-in')),
+          timeoutMs,
+        );
+      });
+    },
+    close() { server.close(); codeReject?.(new Error('Server closed')); },
+  };
 }

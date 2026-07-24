@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import pc from 'picocolors';
 import { getLogsPath } from './paths.js';
+import { isCredentialBearingHeader } from './credential-headers.js';
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -204,6 +205,12 @@ export interface InferenceResponseErrorLogEntry {
   attemptCount?: number;
 }
 
+export interface InferenceRouteUnavailableLogEntry {
+  requestId: string;
+  modelId: string;
+  statusCode: number;
+}
+
 export type InferenceResponseLifecycleEvent =
   | 'translation_dispatched'
   | 'translation_started'
@@ -227,9 +234,15 @@ export type InferenceResponsePhase =
   | 'streaming'
   | 'delivering';
 
+export type InferenceTerminationSource =
+  | 'downstream_client'
+  | 'local_shutdown'
+  | 'upstream_failure';
+
 export interface InferenceResponseLifecycleLogEntry {
   event: InferenceResponseLifecycleEvent;
   requestId: string;
+  claudeSessionId?: string;
   modelId: string;
   provider: string;
   route: 'passthrough' | 'translated';
@@ -253,6 +266,7 @@ export interface InferenceResponseLifecycleLogEntry {
   lastPartType?: string;
   errorType?: string;
   errorSignature?: string;
+  terminationSource?: InferenceTerminationSource;
 }
 
 export type ProxyLifecycleEvent =
@@ -283,7 +297,6 @@ export interface WebSocketDiagnosticRequestLogEntry {
 }
 
 const REDACTED_DIAGNOSTIC_HEADER = '[REDACTED]';
-const SENSITIVE_DIAGNOSTIC_HEADER = /(?:^|[-_])(?:authorization|api[-_]?key|cookie|token|secret|credential)(?:$|[-_])/i;
 const CONVERSATION_BODY_FIELDS = new Set(['system', 'messages', 'tools']);
 
 function canonicalDiagnosticValue(value: unknown): unknown {
@@ -315,7 +328,7 @@ export function sanitizeDiagnosticHeaders(
   const out: Record<string, string | string[]> = {};
   for (const [name, value] of Object.entries(headers).sort(([left], [right]) => left.localeCompare(right))) {
     if (value === undefined) continue;
-    out[name.toLowerCase()] = SENSITIVE_DIAGNOSTIC_HEADER.test(name)
+    out[name.toLowerCase()] = isCredentialBearingHeader(name)
       ? REDACTED_DIAGNOSTIC_HEADER
       : value;
   }
@@ -409,6 +422,7 @@ export function writeInferenceResponseLifecycleLog(
   path: string,
   entry: InferenceResponseLifecycleLogEntry,
 ): void {
+  const claudeSessionId = safeClaudeSessionId(entry.claudeSessionId);
   const statusCode = nonNegativeInteger(entry.statusCode);
   const durationMs = nonNegativeInteger(entry.durationMs);
   const timeToFirstByteMs = nonNegativeInteger(entry.timeToFirstByteMs);
@@ -428,6 +442,7 @@ export function writeInferenceResponseLifecycleLog(
     timestamp: new Date().toISOString(),
     event: entry.event,
     requestId: compactLogValue(entry.requestId, 100),
+    ...(claudeSessionId ? { claudeSessionId } : {}),
     modelId: compactLogValue(entry.modelId),
     provider: compactLogValue(entry.provider, 200),
     route: entry.route,
@@ -451,6 +466,7 @@ export function writeInferenceResponseLifecycleLog(
     ...(entry.lastPartType ? { lastPartType: compactLogValue(entry.lastPartType, 100) } : {}),
     ...(entry.errorType ? { errorType: compactLogValue(entry.errorType, 200) } : {}),
     ...(entry.errorSignature ? { errorSignature: compactLogValue(entry.errorSignature, 100) } : {}),
+    ...(entry.terminationSource ? { terminationSource: entry.terminationSource } : {}),
   }));
 }
 
@@ -519,6 +535,20 @@ export function writeInferenceResponseErrorLog(
   }));
 }
 
+/** Append a local routing-policy rejection without attributing it to an upstream provider. */
+export function writeInferenceRouteUnavailableLog(
+  path: string,
+  entry: InferenceRouteUnavailableLogEntry,
+): void {
+  writeSecureLogLine(path, JSON.stringify({
+    timestamp: new Date().toISOString(),
+    event: 'route_unavailable',
+    requestId: compactLogValue(entry.requestId, 100),
+    modelId: compactLogValue(entry.modelId),
+    statusCode: entry.statusCode,
+  }));
+}
+
 export function prepareProviderTraceLog(): string {
   const path = getProviderDebugLogPath();
   resetTraceLog(path);
@@ -543,6 +573,19 @@ export function resetTraceLog(path: string): void {
   }
 }
 
+const MIN_TRACE_SECRET_LENGTH = 8;
+const knownTraceSecrets = new Set<string>();
+
+export function registerTraceSecret(value: string): void {
+  if (value.trim().length < MIN_TRACE_SECRET_LENGTH) return;
+  knownTraceSecrets.add(value);
+}
+
+/** Test hook: prevent registered credentials from leaking between test cases. */
+export function clearTraceSecrets(): void {
+  knownTraceSecrets.clear();
+}
+
 const REDACTION_PATTERNS: Array<(line: string) => string> = [
   // Bearer / Authorization headers
   line => line.replace(/Bearer\s+[A-Za-z0-9._\-+/=]+/gi, 'Bearer [REDACTED]'),
@@ -557,6 +600,9 @@ const REDACTION_PATTERNS: Array<(line: string) => string> = [
 
 export function redactTraceLine(line: string): string {
   let out = line;
+  for (const secret of knownTraceSecrets) {
+    out = out.split(secret).join('[REDACTED]');
+  }
   for (const apply of REDACTION_PATTERNS) {
     out = apply(out);
   }

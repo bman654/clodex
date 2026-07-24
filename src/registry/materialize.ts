@@ -83,13 +83,9 @@ export function cachedModelToLocal(
 }
 
 export function isAnonymousProvider(
-  provider: Pick<RegistryProvider, 'authRef' | 'authType'>
-    & Partial<Pick<RegistryProvider, 'id'>>,
+  provider: Pick<RegistryProvider, 'authRef' | 'authType'>,
 ): boolean {
-  if (provider.authType !== 'none') return false;
-  if (provider.authRef === 'none:anonymous') return true;
-  return provider.id !== undefined
-    && provider.authRef === `keyring:provider:${provider.id}`;
+  return provider.authType === 'none' && provider.authRef === 'none:anonymous';
 }
 
 function isLegacyAnonymousCustomEndpoint(

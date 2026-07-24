@@ -1,5 +1,66 @@
 # Changelog
 
+## [2.1.0](https://github.com/bman654/clodex/compare/v2.0.0...v2.1.0) (2026-07-24)
+
+
+### Features
+
+* **logging:** correlate response lifecycles ([#26](https://github.com/bman654/clodex/issues/26)) ([2de8cf8](https://github.com/bman654/clodex/commit/2de8cf8393f1f4bba867a05a0f22cec03acd6597))
+
+
+### Bug Fixes
+
+* **routing:** prevent configured route bypasses ([#10](https://github.com/bman654/clodex/issues/10)) ([383f464](https://github.com/bman654/clodex/commit/383f46461ddea28ee42e63bf6c52b1507f4ab4c5))
+
+## [2.0.0](https://github.com/bman654/clodex/compare/v1.3.0...v2.0.0) (2026-07-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove legacy ~/.relay-ai migration support ([#37](https://github.com/bman654/clodex/issues/37))
+
+### Features
+
+* remove legacy ~/.relay-ai migration support ([#37](https://github.com/bman654/clodex/issues/37)) ([6a7b5cf](https://github.com/bman654/clodex/commit/6a7b5cf35552b042a5b7b1b555be7c4eb51ec7d8))
+
+
+### Bug Fixes
+
+* **config:** serialize and atomically write preferences ([#40](https://github.com/bman654/clodex/issues/40)) ([e653d89](https://github.com/bman654/clodex/commit/e653d8939ce3244e50d65f0993579df156b02afd))
+* **oauth:** treat websocket_connection_limit_reached as a retryable limit ([#38](https://github.com/bman654/clodex/issues/38)) ([32c1f7b](https://github.com/bman654/clodex/commit/32c1f7b552a20869e0a08ba79de09b5c1a1e1143))
+* **providers:** reconcile credential cleanup for interactive hub mutations ([#39](https://github.com/bman654/clodex/issues/39)) ([102e496](https://github.com/bman654/clodex/commit/102e496a4b7c11430f4c215ccc9b218d19e5f020))
+* **trace:** redact resolved credentials from trace logs by value ([#35](https://github.com/bman654/clodex/issues/35)) ([46d4818](https://github.com/bman654/clodex/commit/46d4818afdd9285c5beec66e31dc39089b1f61f0))
+
+## [1.3.0](https://github.com/bman654/clodex/compare/v1.2.2...v1.3.0) (2026-07-24)
+
+
+### Features
+
+* **logging:** record proxy process lifecycle ([#30](https://github.com/bman654/clodex/issues/30)) ([495684c](https://github.com/bman654/clodex/commit/495684c63544c8d7b74ece0041585554157de427))
+
+
+### Bug Fixes
+
+* **auth:** make credential cleanup crash-safe ([#15](https://github.com/bman654/clodex/issues/15)) ([9657038](https://github.com/bman654/clodex/commit/96570383c82d0e92298909c1b6c75a28820335dd))
+* **auth:** recover once from rejected access tokens ([#16](https://github.com/bman654/clodex/issues/16)) ([f9272d6](https://github.com/bman654/clodex/commit/f9272d60adafdf904f97ddae06f910bfd93b706b))
+* **oauth:** map upstream 403 throttle to retryable 429 ([#33](https://github.com/bman654/clodex/issues/33)) ([303db6e](https://github.com/bman654/clodex/commit/303db6eb8bffd15004c0b69105cfe3cf95e22572))
+* **transport:** retry pre-frame websocket failures ([#29](https://github.com/bman654/clodex/issues/29)) ([8485e1c](https://github.com/bman654/clodex/commit/8485e1c757cf8c23d9ceaa215977871dacda191b))
+
+## [1.2.2](https://github.com/bman654/clodex/compare/v1.2.1...v1.2.2) (2026-07-23)
+
+
+### Bug Fixes
+
+* **auth:** enforce anonymous credential boundaries ([#21](https://github.com/bman654/clodex/issues/21)) ([d4ec9e2](https://github.com/bman654/clodex/commit/d4ec9e2b02f5203efad77eb21cf735c13feab8a0))
+* **server:** wait for listener readiness ([#23](https://github.com/bman654/clodex/issues/23)) ([77ae2bf](https://github.com/bman654/clodex/commit/77ae2bf57e92dce4adb61efe4be3b79323b060d8))
+
+## [1.2.1](https://github.com/bman654/clodex/compare/v1.2.0...v1.2.1) (2026-07-23)
+
+
+### Bug Fixes
+
+* **patcher:** pin node-gyp-build directly to unbreak fresh installs ([94aeab8](https://github.com/bman654/clodex/commit/94aeab8910d93da8dc3fa1dd0402b24b1faa3601))
+
 ## [1.2.0](https://github.com/bman654/clodex/compare/v1.1.0...v1.2.0) (2026-07-22)
 
 
