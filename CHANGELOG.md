@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1](https://github.com/bman654/clodex/compare/v2.1.0...v2.1.1) (2026-07-24)
+
+
+### Bug Fixes
+
+* **logging:** attribute proxy transport failures ([#43](https://github.com/bman654/clodex/issues/43)) ([5bff8dd](https://github.com/bman654/clodex/commit/5bff8ddb05c1fbd15760ea51791f71ac8eb94a77))
+
 ## [2.1.0](https://github.com/bman654/clodex/compare/v2.0.0...v2.1.0) (2026-07-24)
 
 
