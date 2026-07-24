@@ -479,7 +479,8 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
   }
 
   if (action === 'auth') {
-    await runProvidersAuth(id);
+    await runWithCredentialCleanup(state =>
+      runProvidersAuthWithCleanupState(id, undefined, state));
     return 'back';
   }
 
@@ -491,7 +492,8 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
     return 'back';
   }
 
-  const code = await runProvidersRemove(id, true);
+  const code = await runWithCredentialCleanup(state =>
+    runProvidersRemoveWithCleanupState(id, true, state));
   return code === 0 ? 'removed' : 'back';
 }
 
@@ -529,7 +531,7 @@ export async function runProvidersHub(): Promise<number> {
       return 0;
     }
     if (choice === 'add') {
-      await runProvidersAdd();
+      await runWithCredentialCleanup(state => runProvidersAddWithCleanupState(state));
       continue;
     }
     if (choice === 'refresh-all') {
@@ -537,7 +539,8 @@ export async function runProvidersHub(): Promise<number> {
       continue;
     }
     if (choice === 'auth-menu') {
-      await runProvidersAuth('openai');
+      await runWithCredentialCleanup(state =>
+        runProvidersAuthWithCleanupState('openai', undefined, state));
       continue;
     }
     if (typeof choice === 'string' && choice.startsWith('provider:')) {

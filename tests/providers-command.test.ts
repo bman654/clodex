@@ -443,6 +443,56 @@ describe('provider command cleanup reconciliation', () => {
       'Credential cleanup is pending and will be retried by the next provider command.',
     );
   });
+
+  it('reconciles hub add cleanup when the mutation throws after journaling', async () => {
+    const authRef = helperRef('provider:replaced');
+    selectMock
+      .mockResolvedValueOnce('add')
+      .mockResolvedValueOnce('apikey');
+    passwordMock.mockResolvedValue('test-key');
+    addTemplateMock.mockImplementation(async () => {
+      await queueCredentialDelete(authRef);
+      throw new Error('Credential save failed.');
+    });
+    const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(false);
+
+    await expect(runProvidersCommand([])).rejects.toThrow('Credential save failed.');
+
+    expect(deleteSpy).toHaveBeenCalledOnce();
+    expect(deleteSpy).toHaveBeenCalledWith(authRef);
+    await expect(loadPendingCredentialDeletes()).resolves.toEqual([authRef]);
+    expect(warnMock).toHaveBeenCalledOnce();
+    expect(warnMock).toHaveBeenCalledWith(
+      'Credential cleanup is pending and will be retried by the next provider command.',
+    );
+  });
+
+  it('reconciles provider-detail OAuth cleanup when authentication fails after journaling', async () => {
+    const authRef = helperRef('provider:replaced-oauth');
+    const registry = emptyRegistry();
+    registry.providers.push(openaiEntry());
+    withRegistryWriteLockSync(() => saveRegistry(registry));
+    selectMock
+      .mockResolvedValueOnce('provider:openai')
+      .mockResolvedValueOnce('auth')
+      .mockResolvedValueOnce('done');
+    authenticateProviderMock.mockImplementation(async () => {
+      await queueCredentialDelete(authRef);
+      throw new Error('Credential save failed.');
+    });
+    const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(false);
+
+    await expect(runProvidersCommand([])).resolves.toBe(0);
+
+    expect(logErrorMock).toHaveBeenCalledWith('Credential save failed.');
+    expect(deleteSpy).toHaveBeenCalledOnce();
+    expect(deleteSpy).toHaveBeenCalledWith(authRef);
+    await expect(loadPendingCredentialDeletes()).resolves.toEqual([authRef]);
+    expect(warnMock).toHaveBeenCalledOnce();
+    expect(warnMock).toHaveBeenCalledWith(
+      'Credential cleanup is pending and will be retried by the next provider command.',
+    );
+  });
 });
 
 describe('providers add menu', () => {
