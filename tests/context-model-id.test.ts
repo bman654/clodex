@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   claudeCodeClientModelId,
+  normalizeRouteLookupId,
   routeLookupIds,
   stripOneMContextSuffix,
 } from '../src/context-model-id.js';
@@ -29,6 +30,11 @@ describe('routeLookupIds', () => {
     const ids = routeLookupIds('gemini-3.5-flash');
     expect(ids).toContain('gemini-3.5-flash[1m]');
     expect(ids).toContain('models/gemini-3.5-flash');
+  });
+
+  it('normalizes context suffix case and the Google models prefix to one key', () => {
+    expect(normalizeRouteLookupId('sol[1M]')).toBe('sol');
+    expect(normalizeRouteLookupId('models/sol[1m]')).toBe('sol');
   });
 });
 

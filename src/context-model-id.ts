@@ -12,6 +12,12 @@ export function hasOneMContextSuffix(modelId: string): boolean {
   return /\[1m\]$/i.test(modelId);
 }
 
+/** Canonical key for matching route ids across context suffix and Google prefix variants. */
+export function normalizeRouteLookupId(id: string): string {
+  const bare = stripOneMContextSuffix(id);
+  return bare.startsWith('models/') ? bare.slice('models/'.length) : bare;
+}
+
 /** Model id to pass to Claude Code (--model / ANTHROPIC_MODEL) for accurate context UX. */
 export function claudeCodeClientModelId(modelId: string, contextWindow?: number): string {
   const bare = stripOneMContextSuffix(modelId);
@@ -25,7 +31,7 @@ export function claudeCodeClientModelId(modelId: string, contextWindow?: number)
 /** Variants to match inbound Claude Code model ids against proxy catalog aliases. */
 export function routeLookupIds(id: string): string[] {
   const bare = stripOneMContextSuffix(id);
-  const googleBare = bare.startsWith('models/') ? bare.slice('models/'.length) : bare;
+  const googleBare = normalizeRouteLookupId(id);
   return [...new Set([
     id,
     bare,

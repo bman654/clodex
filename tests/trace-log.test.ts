@@ -10,6 +10,7 @@ import {
   redactTraceLog,
   registerTraceSecret,
   writeInferenceRequestLog,
+  writeInferenceRouteUnavailableLog,
   writeInferenceResponseLifecycleLog,
   writeInferenceResponseErrorLog,
   writeProxyLifecycleLog,
@@ -282,6 +283,30 @@ describe('inference request log', () => {
     } finally {
       if (previous === undefined) delete process.env['CLODEX_LOG_REQUEST_PREVIEW'];
       else process.env['CLODEX_LOG_REQUEST_PREVIEW'] = previous;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('records local route rejection without upstream attribution', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-route-unavailable-'));
+    const path = join(dir, 'requests.jsonl');
+    try {
+      writeInferenceRouteUnavailableLog(path, {
+        requestId: 'request-1',
+        modelId: 'missing-route',
+        statusCode: 400,
+      });
+
+      const entry = JSON.parse(readFileSync(path, 'utf8').trim());
+      expect(entry).toMatchObject({
+        event: 'route_unavailable',
+        requestId: 'request-1',
+        modelId: 'missing-route',
+        statusCode: 400,
+      });
+      expect(entry).not.toHaveProperty('provider');
+      expect(entry).not.toHaveProperty('route');
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -7,7 +7,7 @@ import * as zlib from 'node:zlib';
  * `openai` provider zstd-compresses request bodies; without this they reach the
  * proxy as binary and JSON.parse fails with "Invalid JSON body".
  */
-function decodeRequestBody(raw: Buffer, encoding?: string | string[]): string {
+export function decodeRequestBody(raw: Buffer, encoding?: string | string[]): string {
   const enc = (Array.isArray(encoding) ? encoding.join(',') : encoding ?? '').toLowerCase().trim();
   if (!enc || enc === 'identity') return raw.toString();
   switch (enc) {

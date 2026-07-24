@@ -16,6 +16,7 @@ import {
 import { refreshStoredOAuthCredential, oauthCredentialShouldRefresh } from './oauth/refresh.js';
 import { withCredentialMutationLock } from './registry/lock.js';
 import type { ConflictInfo } from './types.js';
+import { removeAnthropicProxyBypass } from './wrapper-env.js';
 
 export function detectConflicts(): ConflictInfo[] {
   return CONFLICTING_ENV_VARS
@@ -83,31 +84,7 @@ export function buildHttpProxyChildEnv(proxyPort: number, caCertPath: string): N
   env['https_proxy'] = proxyUrl;
   env['http_proxy'] = proxyUrl;
   env['NODE_EXTRA_CA_CERTS'] = caCertPath;
-  const noProxy = env['NO_PROXY'] ?? env['no_proxy'];
-  if (noProxy !== undefined) {
-    const filtered = noProxy
-      .split(',')
-      .map(value => value.trim())
-      .filter(Boolean)
-      .filter(value => {
-        const entry = value.toLowerCase().replace(/^https?:\/\//, '');
-        const host = entry.replace(/:\d+$/, '');
-        if (host === '*') return false;
-        const suffix = host.startsWith('*.') ? host.slice(1) : host;
-        const bypassesAnthropic = suffix.startsWith('.')
-          ? 'api.anthropic.com'.endsWith(suffix)
-          : 'api.anthropic.com' === suffix || 'api.anthropic.com'.endsWith(`.${suffix}`);
-        return !bypassesAnthropic;
-      })
-      .join(',');
-    if (filtered) {
-      env['NO_PROXY'] = filtered;
-      env['no_proxy'] = filtered;
-    } else {
-      delete env['NO_PROXY'];
-      delete env['no_proxy'];
-    }
-  }
+  removeAnthropicProxyBypass(env);
   return env;
 }
 
