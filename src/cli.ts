@@ -14,6 +14,7 @@ import type { ProxyHandle, ProxyModelAlias, ProxyRoute } from './proxy.js';
 import {
   buildCatalogRoutes,
   makeRouteResolver,
+  resolveCatalogModelAliases,
 } from './catalog.js';
 import { runServerCommand } from './server/index.js';
 import { loadPreferences, savePreferences, recordLaunchSelection, resolveBridgeMode } from './config.js';
@@ -1228,10 +1229,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     return launchClaudeViaCatalog(
       catalogRoutes,
       startingRoute,
-      (prefs.modelAliases ?? []).map(alias => ({
-        name: alias.name,
-        routeId: modelAliasTarget(alias),
-      })),
+      resolveCatalogModelAliases(prefs.modelAliases ?? [], resolveRoute),
       selectedModel.contextWindow,
       trace,
       claudeArgs,

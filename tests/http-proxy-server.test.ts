@@ -290,6 +290,54 @@ describe('selective HTTP proxy', () => {
     }
   }, 20_000);
 
+  it('preserves compressed first-party request bytes, encoding, and auth', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    let receivedBody = Buffer.alloc(0);
+    let receivedEncoding: string | undefined;
+    let receivedAuth: string | undefined;
+    const origin = https.createServer({
+      key: certificates.serverKey,
+      cert: certificates.serverCert,
+    }, async (req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      await once(req, 'end');
+      receivedBody = Buffer.concat(chunks);
+      receivedEncoding = req.headers['content-encoding'];
+      receivedAuth = req.headers.authorization;
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Connection': 'close' });
+      res.end('{}');
+    });
+    const originPort = await listen(origin);
+    const proxy = await startHttpProxy({
+      routes: [],
+      anthropicOrigin: `https://127.0.0.1:${originPort}`,
+      anthropicRejectUnauthorized: false,
+    });
+
+    try {
+      const compressedBody = gzipSync(Buffer.from(JSON.stringify({
+        model: 'claude-synthetic-1',
+        messages: [{ role: 'user', content: 'test request' }],
+      })));
+      const response = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/v1/messages',
+        compressedBody,
+        { 'Content-Encoding': 'gzip' },
+      );
+
+      expect(response).toContain('200 OK');
+      expect(receivedBody.equals(compressedBody)).toBe(true);
+      expect(receivedEncoding).toBe('gzip');
+      expect(receivedAuth).toBe('Bearer subscription-oauth-token');
+    } finally {
+      await proxy.close();
+      await new Promise<void>(resolve => origin.close(() => resolve()));
+    }
+  });
+
   it('logs Haiku passthrough status, error body, and system fallback preview', async () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'haiku-error-inference.jsonl');

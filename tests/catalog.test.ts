@@ -1,10 +1,16 @@
 // tests/catalog.test.ts
 import { describe, it, expect, vi } from 'vitest';
 import { MAX_MODEL_CATALOG } from '../src/constants.js';
-import { buildCatalogRoutes, localModelToRoute, makeRouteResolver } from '../src/catalog.js';
+import {
+  buildCatalogRoutes,
+  localModelToRoute,
+  makeRouteResolver,
+  resolveCatalogModelAliases,
+} from '../src/catalog.js';
 import * as env from '../src/env.js';
+import { modelAliasTarget } from '../src/model-aliases.js';
 import type { ModelInfo } from '../src/types.js';
-import type { FavoriteModel, LocalProvider } from '../src/types.js';
+import type { FavoriteModel, LocalProvider, ModelAlias } from '../src/types.js';
 
 const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:openai-oauth`;
 
@@ -32,6 +38,52 @@ describe('buildCatalogRoutes', () => {
     expect(routes[0]).toEqual(starting);
     expect(routes).toHaveLength(2);
     expect(droppedFavorites).toEqual([{ providerId: 'zen', modelId: 'claude-sonnet-4' }]);
+  });
+});
+
+describe('resolveCatalogModelAliases', () => {
+  it('maps saved provider/model targets to the resolved catalog route id', () => {
+    const providers: LocalProvider[] = [{
+      id: 'test-provider',
+      name: 'Test Provider',
+      apiKey: 'test-key',
+      models: [{
+        id: 'model-v1',
+        name: 'Model V1',
+        family: 'test',
+        brand: 'Other',
+        modelFormat: 'openai',
+        upstreamModelId: 'model-v1',
+        npm: '@ai-sdk/openai-compatible',
+        contextWindow: 1_000_000,
+      }],
+    }];
+    const aliases: ModelAlias[] = [{
+      name: 'fast',
+      providerId: 'test-provider',
+      modelId: 'model-v1',
+    }];
+
+    const resolved = resolveCatalogModelAliases(aliases, makeRouteResolver(providers));
+
+    expect(resolved).toEqual([{
+      name: 'fast',
+      routeId: 'anthropic-test-provider__model-v1[1m]',
+    }]);
+    expect(resolved[0]?.routeId).not.toBe('clodex:test-provider:model-v1');
+  });
+
+  it('preserves unavailable saved aliases as reserved preference targets', () => {
+    const alias: ModelAlias = {
+      name: 'archived',
+      providerId: 'missing-provider',
+      modelId: 'missing-model',
+    };
+
+    expect(resolveCatalogModelAliases([alias], makeRouteResolver([]))).toEqual([{
+      name: 'archived',
+      routeId: modelAliasTarget(alias),
+    }]);
   });
 });
 
