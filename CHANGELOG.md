@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.3.0](https://github.com/bman654/clodex/compare/v1.2.2...v1.3.0) (2026-07-24)
+
+
+### Features
+
+* **logging:** record proxy process lifecycle ([#30](https://github.com/bman654/clodex/issues/30)) ([495684c](https://github.com/bman654/clodex/commit/495684c63544c8d7b74ece0041585554157de427))
+
+
+### Bug Fixes
+
+* **auth:** make credential cleanup crash-safe ([#15](https://github.com/bman654/clodex/issues/15)) ([9657038](https://github.com/bman654/clodex/commit/96570383c82d0e92298909c1b6c75a28820335dd))
+* **auth:** recover once from rejected access tokens ([#16](https://github.com/bman654/clodex/issues/16)) ([f9272d6](https://github.com/bman654/clodex/commit/f9272d60adafdf904f97ddae06f910bfd93b706b))
+* **oauth:** map upstream 403 throttle to retryable 429 ([#33](https://github.com/bman654/clodex/issues/33)) ([303db6e](https://github.com/bman654/clodex/commit/303db6eb8bffd15004c0b69105cfe3cf95e22572))
+* **transport:** retry pre-frame websocket failures ([#29](https://github.com/bman654/clodex/issues/29)) ([8485e1c](https://github.com/bman654/clodex/commit/8485e1c757cf8c23d9ceaa215977871dacda191b))
+
 ## [1.2.2](https://github.com/bman654/clodex/compare/v1.2.1...v1.2.2) (2026-07-23)
 
 
