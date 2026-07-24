@@ -1,6 +1,11 @@
 import { createServer } from 'node:net';
+import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
-import { listenTcpServer, tcpListenerUrlHost } from '../src/listener-ready.js';
+import {
+  listenTcpServer,
+  tcpListenerUrlHost,
+  waitForTcpListener,
+} from '../src/listener-ready.js';
 
 describe('tcp listener readiness', () => {
   it.each([
@@ -32,6 +37,26 @@ describe('tcp listener readiness', () => {
       expect(conflictingServer.listenerCount('error')).toBe(0);
     } finally {
       await new Promise<void>(resolve => boundServer.close(() => resolve()));
+    }
+  });
+
+  it('retries transient connection failures until a listener is reachable', async () => {
+    const reservation = createServer();
+    const address = await listenTcpServer(reservation, 0, '127.0.0.1');
+    await new Promise<void>(resolve => reservation.close(() => resolve()));
+
+    const delayedServer = createServer(socket => socket.end());
+    const readiness = waitForTcpListener('127.0.0.1', address.port, 500);
+    await delay(25);
+    await new Promise<void>((resolve, reject) => {
+      delayedServer.once('error', reject);
+      delayedServer.listen(address.port, '127.0.0.1', resolve);
+    });
+
+    try {
+      await expect(readiness).resolves.toBe(true);
+    } finally {
+      await new Promise<void>(resolve => delayedServer.close(() => resolve()));
     }
   });
 });

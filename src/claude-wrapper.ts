@@ -23,17 +23,18 @@
 
 import { spawn } from 'node:child_process';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
-import { connect } from 'node:net';
 import { constants as osConstants } from 'node:os';
+import { findClaudeBinary } from './launch.js';
+import { waitForTcpListener } from './listener-ready.js';
 import {
   orderWrapperServerCandidates,
   readLiveServerRuntimeStates,
   type ServerRuntimeState,
 } from './server-runtime.js';
 import { computeWrapperEnv, wrapperRequiresServer } from './wrapper-env.js';
-import { findClaudeBinary } from './launch.js';
 
 const isWindows = process.platform === 'win32';
+const WRAPPER_SERVER_READY_TIMEOUT_MS = 500;
 
 function isExecutableFile(path: string): boolean {
   try {
@@ -43,20 +44,6 @@ function isExecutableFile(path: string): boolean {
   } catch {
     return false;
   }
-}
-
-/** Fast TCP probe — the state file can outlive a SIGKILLed listener. Never hangs. */
-function portIsOpen(port: number, timeoutMs = 100): Promise<boolean> {
-  return new Promise(resolve => {
-    const socket = connect({ host: '127.0.0.1', port });
-    const done = (result: boolean) => {
-      socket.destroy();
-      resolve(result);
-    };
-    socket.setTimeout(timeoutMs, () => done(false));
-    socket.once('connect', () => done(true));
-    socket.once('error', () => done(false));
-  });
 }
 
 async function main(): Promise<void> {
@@ -88,7 +75,13 @@ async function main(): Promise<void> {
   // endpoint server is live it is used; with none, claude launches untouched.
   let state: ServerRuntimeState | null = null;
   for (const candidate of orderWrapperServerCandidates(readLiveServerRuntimeStates())) {
-    if (await portIsOpen(candidate.port)) {
+    if (
+      await waitForTcpListener(
+        '127.0.0.1',
+        candidate.port,
+        WRAPPER_SERVER_READY_TIMEOUT_MS,
+      )
+    ) {
       state = candidate;
       break;
     }

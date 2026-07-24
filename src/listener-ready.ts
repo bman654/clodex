@@ -32,6 +32,26 @@ function probeTcpListener(host: string, port: number, timeoutMs: number): Promis
   });
 }
 
+/** Retry a TCP probe until the listener answers or the deadline expires. */
+export async function waitForTcpListener(
+  host: string,
+  port: number,
+  timeoutMs = LISTENER_READY_TIMEOUT_MS,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const remaining = Math.max(1, deadline - Date.now());
+    if (await probeTcpListener(host, port, Math.min(remaining, 50))) {
+      return true;
+    }
+    const retryDelay = Math.min(LISTENER_READY_RETRY_MS, deadline - Date.now());
+    if (retryDelay <= 0) return false;
+    await delay(retryDelay);
+  } while (Date.now() < deadline);
+
+  return false;
+}
+
 async function closeAfterReadinessFailure(server: Server): Promise<void> {
   if (!server.listening) return;
   await new Promise<void>(resolve => server.close(() => resolve()));
@@ -68,14 +88,7 @@ export async function listenTcpServer(
   }
 
   const probeHost = connectHost(address.address);
-  const deadline = Date.now() + LISTENER_READY_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const remaining = deadline - Date.now();
-    if (await probeTcpListener(probeHost, address.port, Math.min(remaining, 50))) {
-      return address;
-    }
-    await delay(Math.min(LISTENER_READY_RETRY_MS, Math.max(1, deadline - Date.now())));
-  }
+  if (await waitForTcpListener(probeHost, address.port)) return address;
 
   await closeAfterReadinessFailure(server);
   throw new Error(
