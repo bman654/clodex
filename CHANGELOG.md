@@ -1,5 +1,24 @@
 # Changelog
 
+## [2.0.0](https://github.com/bman654/clodex/compare/v1.3.0...v2.0.0) (2026-07-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove legacy ~/.relay-ai migration support ([#37](https://github.com/bman654/clodex/issues/37))
+
+### Features
+
+* remove legacy ~/.relay-ai migration support ([#37](https://github.com/bman654/clodex/issues/37)) ([6a7b5cf](https://github.com/bman654/clodex/commit/6a7b5cf35552b042a5b7b1b555be7c4eb51ec7d8))
+
+
+### Bug Fixes
+
+* **config:** serialize and atomically write preferences ([#40](https://github.com/bman654/clodex/issues/40)) ([e653d89](https://github.com/bman654/clodex/commit/e653d8939ce3244e50d65f0993579df156b02afd))
+* **oauth:** treat websocket_connection_limit_reached as a retryable limit ([#38](https://github.com/bman654/clodex/issues/38)) ([32c1f7b](https://github.com/bman654/clodex/commit/32c1f7b552a20869e0a08ba79de09b5c1a1e1143))
+* **providers:** reconcile credential cleanup for interactive hub mutations ([#39](https://github.com/bman654/clodex/issues/39)) ([102e496](https://github.com/bman654/clodex/commit/102e496a4b7c11430f4c215ccc9b218d19e5f020))
+* **trace:** redact resolved credentials from trace logs by value ([#35](https://github.com/bman654/clodex/issues/35)) ([46d4818](https://github.com/bman654/clodex/commit/46d4818afdd9285c5beec66e31dc39089b1f61f0))
+
 ## [1.3.0](https://github.com/bman654/clodex/compare/v1.2.2...v1.3.0) (2026-07-24)
 
 
