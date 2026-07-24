@@ -1,8 +1,7 @@
 // src/registry/add-template.ts — add a provider from a builtin template
 
-import { randomUUID } from 'node:crypto';
-import { saveProviderCredential } from '../env.js';
-import { credentialAuthRef } from '../credential-helper.js';
+import { provisionProviderCredential, saveProviderCredential } from '../env.js';
+import { credentialInstanceAuthRef } from '../credential-helper.js';
 import { isSdkMigratedNpm } from '../provider-factory.js';
 import type { ProviderTemplate } from '../provider-templates.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
@@ -16,6 +15,7 @@ import { fetchTemplateModels } from './fetch-template-models.js';
 import { loadRegistryStrict, saveRegistry } from './io.js';
 import {
   withCredentialMutationLock,
+  withProviderMutationLock,
   withRegistryWriteLock,
 } from './lock.js';
 import {
@@ -84,7 +84,6 @@ export async function addProviderFromTemplate(
     const existing = registry.providers.find(p => p.id === template.id);
     if (existing && !opts?.replaceExisting) {
       return {
-        existing: false,
         error: {
           added: false as const,
           error: `${template.name} is already configured.`,
@@ -92,7 +91,7 @@ export async function addProviderFromTemplate(
         },
       };
     }
-    return { existing: existing !== undefined, error: null };
+    return { authRef: existing?.authRef ?? null, error: null };
   });
   if (existingState.error) return existingState.error;
 
@@ -122,76 +121,43 @@ export async function addProviderFromTemplate(
     buildPricingIndex(pricingCache),
     platform,
   );
-  const authRef = trimmedKey
-    ? credentialAuthRef(
-      existingState.existing
-        ? `provider:${template.id}:replacement:${randomUUID()}`
-        : `provider:${template.id}`,
-    )
-    : 'none:anonymous';
-  const commitProvider = () => withRegistryWriteLock(async () => {
-    const registry = loadRegistryStrict();
-    const existing = registry.providers.find(p => p.id === template.id);
-    if (existing && !opts?.replaceExisting) {
-      return {
-        added: false,
-        error: `${template.name} is already configured.`,
-        hint: `Remove it first with: clodex providers remove ${template.id}`,
-      };
-    }
-
-    const now = new Date().toISOString();
-    const entry: RegistryProvider = {
-      id: template.id,
-      templateId: template.id,
-      name: template.name,
-      enabled: true,
-      authRef,
-      authType: trimmedKey ? template.authType : 'none',
-      ...(!trimmedKey && template.anonymousFreeModels
-        ? { subscriptionFilter: 'free' as const }
-        : {}),
-      api: {
-        npm: template.npm,
-        url: fetched.baseUrl,
-      },
-      addedAt: existing?.addedAt ?? now,
-      refreshedAt: now,
-      modelsCache: {
-        fetchedAt: now,
-        models: pricedModels,
-      },
-    };
-
-    if (existing) {
-      const idx = registry.providers.findIndex(p => p.id === template.id);
-      registry.providers[idx] = entry;
-    } else {
-      registry.providers.push(entry);
-    }
-    if (existing?.authRef && existing.authRef !== authRef) {
-      await queueCredentialDelete(existing.authRef);
-    }
-    saveRegistry(registry);
-    let credentialCleanupPending = false;
-    if (trimmedKey) {
-      try {
-        await cancelCredentialDelete(authRef);
-      } catch {
-        credentialCleanupPending = true;
+  const account = `provider:${template.id}`;
+  const result: AddTemplateResult = await withProviderMutationLock(template.id, async () => {
+    const currentState = await withRegistryWriteLock(() => {
+      const registry = loadRegistryStrict();
+      const existing = registry.providers.find(p => p.id === template.id);
+      if (existing && !opts?.replaceExisting) {
+        return {
+          existingAuthRef: null,
+          error: {
+            added: false as const,
+            error: `${template.name} is already configured.`,
+            hint: `Remove it first with: clodex providers remove ${template.id}`,
+          },
+        };
       }
-    }
-    return {
-      added: true,
-      provider: entry,
-      modelCount: pricedModels.length,
-      ...(credentialCleanupPending ? { credentialCleanupPending: true } : {}),
-    };
-  });
+      return { existingAuthRef: existing?.authRef ?? null, error: null };
+    });
+    if (currentState.error) return currentState.error;
 
-  const result: AddTemplateResult = trimmedKey
-    ? await withCredentialMutationLock(authRef, async () => {
-      const prepareError = await withRegistryWriteLock(() => {
+    const authRef = trimmedKey ? credentialInstanceAuthRef(account) : 'none:anonymous';
+    const persistAndCommit = async (): Promise<AddTemplateResult> => {
+      if (trimmedKey) {
+        await journalCredentialWrite(authRef);
+        const saved =
+          currentState.existingAuthRef === authRef
+            ? await saveProviderCredential(authRef, trimmedKey)
+            : await provisionProviderCredential(authRef, trimmedKey);
+        if (!saved) {
+          return {
+            added: false,
+            error: 'Could not save API key to the credential store.',
+            hint: 'Check credential-store access and try again.',
+          };
+        }
+      }
+
+      return withRegistryWriteLock(async () => {
         const registry = loadRegistryStrict();
         const existing = registry.providers.find(p => p.id === template.id);
         if (existing && !opts?.replaceExisting) {
@@ -201,23 +167,67 @@ export async function addProviderFromTemplate(
             hint: `Remove it first with: clodex providers remove ${template.id}`,
           };
         }
-        return null;
-      });
-      if (prepareError) return prepareError;
+        if ((existing?.authRef ?? null) !== currentState.existingAuthRef) {
+          return {
+            added: false,
+            error: `${template.name} changed while its credential was being saved.`,
+            hint: 'Retry the provider update.',
+          };
+        }
 
-      await journalCredentialWrite(authRef);
-
-      const saved = await saveProviderCredential(authRef, trimmedKey);
-      if (!saved) {
-        return {
-          added: false,
-          error: 'Could not save API key to the credential store.',
-          hint: 'Check credential-store access and try again.',
+        const now = new Date().toISOString();
+        const entry: RegistryProvider = {
+          id: template.id,
+          templateId: template.id,
+          name: template.name,
+          enabled: true,
+          authRef,
+          authType: trimmedKey ? template.authType : 'none',
+          ...(!trimmedKey && template.anonymousFreeModels
+            ? { subscriptionFilter: 'free' as const }
+            : {}),
+          api: {
+            npm: template.npm,
+            url: fetched.baseUrl,
+          },
+          addedAt: existing?.addedAt ?? now,
+          refreshedAt: now,
+          modelsCache: {
+            fetchedAt: now,
+            models: pricedModels,
+          },
         };
-      }
-      return commitProvider();
-    })
-    : await commitProvider();
+
+        if (existing) {
+          const idx = registry.providers.findIndex(p => p.id === template.id);
+          registry.providers[idx] = entry;
+        } else {
+          registry.providers.push(entry);
+        }
+        if (existing?.authRef && existing.authRef !== authRef) {
+          await queueCredentialDelete(existing.authRef);
+        }
+        saveRegistry(registry);
+        let credentialCleanupPending = false;
+        if (trimmedKey) {
+          try {
+            await cancelCredentialDelete(authRef);
+          } catch {
+            credentialCleanupPending = true;
+          }
+        }
+        return {
+          added: true,
+          provider: entry,
+          modelCount: pricedModels.length,
+          ...(credentialCleanupPending ? { credentialCleanupPending: true } : {}),
+        };
+      });
+    };
+
+    if (!trimmedKey) return persistAndCommit();
+    return withCredentialMutationLock(authRef, persistAndCommit);
+  });
 
   if (result.added) {
     try {

@@ -12,7 +12,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { userInfo } from 'node:os';
+import { dirname, isAbsolute, join } from 'node:path';
 import { getProvidersPath } from '../paths.js';
 
 const DEFAULT_WAIT_MS = 30_000;
@@ -416,7 +417,23 @@ export function getCredentialMutationLockPath(authRef: string): string {
     .update('clodex-credential-mutation\0')
     .update(authRef)
     .digest('hex');
-  return `${getProvidersPath()}.credential-${digest}.lock`;
+  return join(getCredentialLockRoot(), `${digest}.lock`);
+}
+
+function getNativeCredentialRoot(): string {
+  const nativeHome = userInfo().homedir;
+  if (!nativeHome || !isAbsolute(nativeHome)) {
+    throw new Error('Could not determine the native user home for credential coordination');
+  }
+  return join(nativeHome, '.clodex');
+}
+
+export function getCredentialLockRoot(): string {
+  return join(getNativeCredentialRoot(), 'credential-locks');
+}
+
+export function getCredentialStateRoot(): string {
+  return join(getNativeCredentialRoot(), 'keyring-state');
 }
 
 export function withCredentialMutationLock<T>(
@@ -428,5 +445,22 @@ export function withCredentialMutationLock<T>(
     ...options,
     lockPath: getCredentialMutationLockPath(authRef),
     waitMs: options.waitMs ?? DEFAULT_CREDENTIAL_MUTATION_WAIT_MS,
+  });
+}
+
+export function getProviderMutationLockPath(providerSlot: string): string {
+  const digest = createHash('sha256')
+    .update('clodex-provider-mutation\0')
+    .update(providerSlot)
+    .digest('hex');
+  return `${getProvidersPath()}.provider-${digest}.lock`;
+}
+
+export function withProviderMutationLock<T>(
+  providerSlot: string,
+  operation: () => Promise<T> | T,
+): Promise<T> {
+  return withRegistryWriteLock(operation, {
+    lockPath: getProviderMutationLockPath(providerSlot),
   });
 }

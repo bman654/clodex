@@ -6,6 +6,7 @@ import {
 } from './credential-lifecycle.js';
 import { loadRegistryStrict, saveRegistry } from './io.js';
 import {
+  withProviderMutationLock,
   withRegistryWriteLock,
   withRegistryWriteLockSync,
 } from './lock.js';
@@ -26,7 +27,7 @@ interface PendingProviderRemoval {
 }
 
 /** Remove a provider from the registry; delete its stored credential when safe. */
-export async function removeProviderFromRegistry(
+async function removeProviderWithinLifecycle(
   id: string,
   opts?: { deleteCredential?: boolean },
 ): Promise<RemoveProviderResult> {
@@ -74,6 +75,13 @@ export async function removeProviderFromRegistry(
     removal.result.credentialCleanupReconciled = true;
   }
   return removal.result;
+}
+
+export async function removeProviderFromRegistry(
+  id: string,
+  opts?: { deleteCredential?: boolean },
+): Promise<RemoveProviderResult> {
+  return withProviderMutationLock(id, () => removeProviderWithinLifecycle(id, opts));
 }
 
 export function toggleProviderEnabled(id: string): { toggled: boolean; enabled?: boolean; error?: string } {

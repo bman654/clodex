@@ -10,6 +10,7 @@ const lockState = vi.hoisted(() => ({
   credentialActive: false,
   credentialTails: new Map<string, Promise<void>>(),
   afterRegistryUnlock: null as null | (() => void),
+  providerActive: false,
 }));
 const registryState = vi.hoisted(() => ({
   current: { schemaVersion: 1, providers: [] } as ProviderRegistry,
@@ -22,7 +23,14 @@ vi.mock('../src/ui.js', () => ({
   printOAuthStepsPanel: vi.fn(),
 }));
 vi.mock('../src/oauth/openai.js', () => ({
-  runOpenAiDeviceCodeFlow: vi.fn(),
+  runOpenAiDeviceCodeFlow: vi.fn(async () => ({
+    tokens: {
+      access_token: 'openai-access',
+      refresh_token: 'openai-refresh',
+      expires_in: 3600,
+    },
+    accountId: 'acct-123',
+  })),
 }));
 vi.mock('../src/env.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/env.js')>();
@@ -30,6 +38,7 @@ vi.mock('../src/env.js', async importOriginal => {
     ...actual,
     deleteProviderCredential: vi.fn(),
     probeProviderCredentialStore: vi.fn(),
+    provisionProviderCredential: vi.fn(),
     saveProviderCredential: vi.fn(),
   };
 });
@@ -95,6 +104,14 @@ vi.mock('../src/registry/lock.js', () => ({
       }
     }
   }),
+  withProviderMutationLock: vi.fn(async (_providerSlot: string, operation: () => unknown) => {
+    lockState.providerActive = true;
+    try {
+      return await operation();
+    } finally {
+      lockState.providerActive = false;
+    }
+  }),
 }));
 vi.mock('@clack/prompts', () => ({
   log: { warn: vi.fn(), info: vi.fn(), error: vi.fn(), success: vi.fn() },
@@ -106,25 +123,27 @@ vi.mock('@clack/prompts', () => ({
 import {
   deleteProviderCredential,
   probeProviderCredentialStore,
+  provisionProviderCredential,
   saveProviderCredential,
 } from '../src/env.js';
-import { credentialAuthRef } from '../src/credential-helper.js';
 import { runOpenAiDeviceCodeFlow } from '../src/oauth/openai.js';
 import { reconcilePendingCredentialDeletes } from '../src/registry/credential-lifecycle.js';
 import * as cleanupJournal from '../src/registry/credential-cleanup-journal.js';
 import { loadRegistryStrict, saveRegistry } from '../src/registry/io.js';
 import { authenticateProvider } from '../src/registry/provider-auth.js';
 import { refreshProviderModels } from '../src/registry/refresh-models.js';
+import { credentialInstanceAuthRef } from '../src/credential-helper.js';
 import * as prompts from '@clack/prompts';
 
 describe('authenticateProvider', () => {
   const previousHelper = process.env.CLODEX_CREDENTIAL_HELPER;
   const previousHome = process.env.CLODEX_HOME;
   let home = '';
-
+  let credentialRef = '';
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'clodex-provider-auth-'));
     process.env.CLODEX_HOME = home;
+    credentialRef = credentialInstanceAuthRef('oauth:provider:openai-oauth');
     registryState.current = { schemaVersion: 1, providers: [] };
     journalState.pending.clear();
     delete process.env.CLODEX_CREDENTIAL_HELPER;
@@ -135,6 +154,8 @@ describe('authenticateProvider', () => {
     lockState.credentialActive = false;
     lockState.credentialTails.clear();
     lockState.afterRegistryUnlock = null;
+    lockState.providerActive = false;
+    vi.mocked(provisionProviderCredential).mockReset().mockResolvedValue(true);
     vi.mocked(saveProviderCredential).mockReset().mockResolvedValue(true);
     vi.mocked(loadRegistryStrict).mockReset().mockImplementation(
       () => structuredClone(registryState.current),
@@ -174,9 +195,10 @@ describe('authenticateProvider', () => {
   });
 
   it('runs the OpenAI device-code flow and stores the openai-oauth registry entry', async () => {
-    vi.mocked(saveProviderCredential).mockImplementationOnce(async () => {
+    vi.mocked(provisionProviderCredential).mockImplementationOnce(async () => {
       expect(lockState.active).toBe(false);
       expect(lockState.credentialActive).toBe(true);
+      expect(lockState.providerActive).toBe(true);
       return true;
     });
     const result = await authenticateProvider('openai');
@@ -191,6 +213,7 @@ describe('authenticateProvider', () => {
     expect(result.providerId).toBe('openai-oauth');
     expect(result.credential.access).toBe('openai-access');
     expect(result.registryProvider.name).toBe('OpenAI (ChatGPT)');
+    expect(result.registryProvider.authRef).toBe(credentialRef);
   });
 
   it('stops before device authorization when the credential store preflight fails', async () => {
@@ -203,12 +226,13 @@ describe('authenticateProvider', () => {
       + 'Set CLODEX_CREDENTIAL_HELPER to an absolute path to an external credential helper and try again.',
     );
     expect(runOpenAiDeviceCodeFlow).not.toHaveBeenCalled();
+    expect(provisionProviderCredential).not.toHaveBeenCalled();
     expect(saveProviderCredential).not.toHaveBeenCalled();
     expect(saveRegistry).not.toHaveBeenCalled();
   });
 
   it('rejects before updating the registry or refreshing models when token persistence fails', async () => {
-    vi.mocked(saveProviderCredential).mockImplementationOnce(async (_authRef, _credential, diagnostic) => {
+    vi.mocked(provisionProviderCredential).mockImplementationOnce(async (_authRef, _credential, diagnostic) => {
       diagnostic?.('credential write failed');
       return false;
     });
@@ -216,13 +240,73 @@ describe('authenticateProvider', () => {
     await expect(authenticateProvider('openai')).rejects.toThrow(
       'Could not save OAuth tokens to the credential store',
     );
-    expect(saveProviderCredential).toHaveBeenCalled();
+    expect(provisionProviderCredential).toHaveBeenCalled();
     expect(registryState.current.providers).toHaveLength(0);
-    expect([...journalState.pending]).toEqual([
-      'keyring:oauth:provider:openai-oauth',
-    ]);
+    expect([...journalState.pending]).toEqual([credentialRef]);
     expect(deleteProviderCredential).not.toHaveBeenCalled();
     expect(refreshProviderModels).not.toHaveBeenCalled();
+  });
+
+  it('does not publish a provider when token persistence fails', async () => {
+    vi.mocked(provisionProviderCredential).mockResolvedValueOnce(false);
+
+    await expect(authenticateProvider('openai')).rejects.toThrow(
+      'Could not save OAuth tokens to the credential store',
+    );
+    expect(provisionProviderCredential).toHaveBeenCalled();
+    expect(saveRegistry).not.toHaveBeenCalled();
+  });
+
+  it('moves an older credential reference to the selected account instance', async () => {
+    const existingProvider = {
+      id: 'openai-oauth',
+      templateId: 'openai',
+      name: 'OpenAI (ChatGPT)',
+      enabled: true,
+      authType: 'oauth' as const,
+      authRef: 'keyring:oauth:provider:openai-oauth',
+      api: { npm: '@ai-sdk/openai', url: 'https://api.openai.com/v1' },
+      addedAt: '2026-01-01T00:00:00.000Z',
+    };
+    registryState.current.providers = [existingProvider];
+    vi.mocked(provisionProviderCredential).mockResolvedValue(true);
+
+    const result = await authenticateProvider('openai');
+
+    expect(provisionProviderCredential).toHaveBeenCalledWith(
+      credentialRef,
+      expect.any(String),
+      expect.any(Function),
+    );
+    expect(saveProviderCredential).not.toHaveBeenCalled();
+    expect(result.registryProvider.authRef).toBe(credentialRef);
+  });
+
+  it('replaces the credential when the selected account instance is current', async () => {
+    const authRef = credentialRef;
+    registryState.current.providers = [
+      {
+        id: 'openai-oauth',
+        templateId: 'openai',
+        name: 'OpenAI (ChatGPT)',
+        enabled: true,
+        authType: 'oauth' as const,
+        authRef,
+        api: { npm: '@ai-sdk/openai', url: 'https://api.openai.com/v1' },
+        addedAt: '2026-01-01T00:00:00.000Z',
+      },
+    ];
+    vi.mocked(saveProviderCredential).mockResolvedValue(true);
+
+    const result = await authenticateProvider('openai');
+
+    expect(saveProviderCredential).toHaveBeenCalledWith(
+      authRef,
+      expect.any(String),
+      expect.any(Function),
+    );
+    expect(provisionProviderCredential).not.toHaveBeenCalled();
+    expect(result.registryProvider.authRef).toBe(authRef);
   });
 
   it('does not persist credentials when the registry cannot be validated', async () => {
@@ -245,11 +329,15 @@ describe('authenticateProvider', () => {
     vi.mocked(runOpenAiDeviceCodeFlow).mockImplementationOnce(async () => {
       observations.push(['authorization', lockState.active, lockState.credentialActive]);
       return {
-        tokens: { access_token: 'access-token', refresh_token: 'refresh-token', expires_in: 3600 },
+        tokens: {
+          access_token: 'access-token',
+          refresh_token: 'refresh-token',
+          expires_in: 3600,
+        },
         accountId: 'account-id',
       };
     });
-    vi.mocked(saveProviderCredential).mockImplementationOnce(async () => {
+    vi.mocked(provisionProviderCredential).mockImplementationOnce(async () => {
       observations.push(['credential-write', lockState.active, lockState.credentialActive]);
       return true;
     });
@@ -279,11 +367,11 @@ describe('authenticateProvider', () => {
       addedAt: '2026-01-01T00:00:00.000Z',
     });
     process.env.CLODEX_CREDENTIAL_HELPER = process.execPath;
-    const helperAuthRef = credentialAuthRef('oauth:provider:openai-oauth');
+    const helperAuthRef = credentialInstanceAuthRef('oauth:provider:openai-oauth');
 
     await authenticateProvider('openai');
 
-    expect(saveProviderCredential).toHaveBeenCalledWith(
+    expect(provisionProviderCredential).toHaveBeenCalledWith(
       helperAuthRef,
       expect.any(String),
       expect.any(Function),
@@ -293,7 +381,7 @@ describe('authenticateProvider', () => {
   });
 
   it('reauthorizes the same OAuth reference without deleting the active credential', async () => {
-    const authRef = 'keyring:oauth:provider:openai-oauth';
+    const authRef = credentialRef;
     registryState.current.providers.push({
       id: 'openai-oauth',
       templateId: 'openai',
@@ -329,7 +417,7 @@ describe('authenticateProvider', () => {
       addedAt: '2026-01-01T00:00:00.000Z',
     });
     process.env.CLODEX_CREDENTIAL_HELPER = process.execPath;
-    const helperAuthRef = credentialAuthRef('oauth:provider:openai-oauth');
+    const helperAuthRef = credentialInstanceAuthRef('oauth:provider:openai-oauth');
     vi.mocked(deleteProviderCredential).mockResolvedValue(false);
 
     const result = await authenticateProvider('openai');
@@ -348,6 +436,7 @@ describe('authenticateProvider', () => {
     );
 
     await expect(authenticateProvider('openai')).rejects.toThrow('journal unavailable');
+    expect(provisionProviderCredential).not.toHaveBeenCalled();
     expect(saveProviderCredential).not.toHaveBeenCalled();
     expect(registryState.current.providers).toHaveLength(0);
   });
@@ -358,31 +447,29 @@ describe('authenticateProvider', () => {
     });
 
     await expect(authenticateProvider('openai')).rejects.toThrow('activation failed');
-    expect(saveProviderCredential).toHaveBeenCalled();
+    expect(provisionProviderCredential).toHaveBeenCalled();
     expect(registryState.current.providers).toHaveLength(0);
-    expect([...journalState.pending]).toEqual([
-      'keyring:oauth:provider:openai-oauth',
-    ]);
+    expect([...journalState.pending]).toEqual([credentialRef]);
     expect(deleteProviderCredential).not.toHaveBeenCalled();
   });
 
   it('does not let concurrent reconciliation delete a credential during activation', async () => {
     let releaseWrite!: () => void;
     const writeGate = new Promise<void>(resolve => { releaseWrite = resolve; });
-    vi.mocked(saveProviderCredential).mockImplementation(async () => {
+    vi.mocked(provisionProviderCredential).mockImplementation(async () => {
       await writeGate;
       return true;
     });
 
     const authentication = authenticateProvider('openai');
-    await vi.waitFor(() => expect(saveProviderCredential).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(provisionProviderCredential).toHaveBeenCalledTimes(1));
     const reconciliation = reconcilePendingCredentialDeletes();
     await new Promise(resolve => setTimeout(resolve, 25));
 
     expect(deleteProviderCredential).not.toHaveBeenCalled();
     releaseWrite();
     const [result, cleanup] = await Promise.all([authentication, reconciliation]);
-    expect(result.registryProvider.authRef).toBe('keyring:oauth:provider:openai-oauth');
+    expect(result.registryProvider.authRef).toBe(credentialRef);
     expect(cleanup.deleted).toEqual([]);
     expect(deleteProviderCredential).not.toHaveBeenCalled();
     expect(journalState.pending.size).toBe(0);
@@ -421,7 +508,7 @@ describe('authenticateProvider', () => {
     const replacementRef = result.registryProvider.authRef;
 
     expect(cancellationLockStates).toEqual([true]);
-    expect(replacementRef).toBe('keyring:oauth:provider:openai-oauth');
+    expect(replacementRef).toBe(credentialRef);
     expect(journalState.pending).toContain(replacementRef);
     expect(result.credentialCleanupPending).toBe(true);
   });
