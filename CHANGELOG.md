@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.0](https://github.com/bman654/clodex/compare/v2.0.0...v2.1.0) (2026-07-24)
+
+
+### Features
+
+* **logging:** correlate response lifecycles ([#26](https://github.com/bman654/clodex/issues/26)) ([2de8cf8](https://github.com/bman654/clodex/commit/2de8cf8393f1f4bba867a05a0f22cec03acd6597))
+
+
+### Bug Fixes
+
+* **routing:** prevent configured route bypasses ([#10](https://github.com/bman654/clodex/issues/10)) ([383f464](https://github.com/bman654/clodex/commit/383f46461ddea28ee42e63bf6c52b1507f4ab4c5))
+
 ## [2.0.0](https://github.com/bman654/clodex/compare/v1.3.0...v2.0.0) (2026-07-24)
 
 
