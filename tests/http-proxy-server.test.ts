@@ -7,6 +7,7 @@ import * as http from 'node:http';
 import * as net from 'node:net';
 import * as tls from 'node:tls';
 import { EventEmitter, once } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { gzipSync } from 'node:zlib';
 import { ensureHttpProxyCaBundle, ensureHttpProxyCertificates } from '../src/http-proxy/ca.js';
 import { shouldInterceptConnect, startHttpProxy } from '../src/http-proxy/server.js';
@@ -77,6 +78,94 @@ function activeProxySockets(proxyPort: number): net.Socket[] {
     handle instanceof net.Socket
     && handle.localPort === proxyPort
     && !handle.destroyed);
+}
+
+function adapterRequestWithResponseEvents(
+  emitEvents: (response: http.IncomingMessage) => void,
+): typeof http.request {
+  return ((
+    _options: http.RequestOptions,
+    onResponse: (response: http.IncomingMessage) => void,
+  ) => {
+    const request = new EventEmitter() as EventEmitter & {
+      end(body: Buffer): void;
+      destroy(error?: Error): void;
+    };
+    request.end = () => {
+      queueMicrotask(() => {
+        const response = Object.assign(new PassThrough(), {
+          statusCode: 200,
+          statusMessage: 'OK',
+          headers: { 'content-type': 'text/event-stream' },
+          rawHeaders: ['Content-Type', 'text/event-stream'],
+          complete: false,
+        }) as unknown as http.IncomingMessage;
+        onResponse(response);
+        emitEvents(response);
+      });
+    };
+    request.destroy = () => {};
+    return request;
+  }) as unknown as typeof http.request;
+}
+
+async function adapterResponseFailureEntries(
+  logName: string,
+  emitEvents: (response: http.IncomingMessage) => void,
+): Promise<Array<Record<string, unknown>>> {
+  const certificates = ensureHttpProxyCertificates();
+  const inferenceLogPath = join(testHome, logName);
+  const route = {
+    aliasId: 'clodex:test:translated-model',
+    realModelId: 'translated-model',
+    displayName: 'Translated Model',
+    upstreamUrl: '',
+    apiKey: 'provider-key',
+    modelFormat: 'openai' as const,
+    npm: '@ai-sdk/openai-compatible',
+    providerId: 'test-provider',
+  };
+  const proxy = await startHttpProxy({
+    routes: [route],
+    adapterHandle: {
+      port: 1,
+      token: 'adapter-local-token',
+      close: () => {},
+    },
+    inferenceLogPath,
+    adapterRequest: adapterRequestWithResponseEvents(emitEvents),
+  });
+
+  try {
+    const body = JSON.stringify({
+      model: route.aliasId,
+      messages: [{ role: 'user', content: 'test adapter response failure' }],
+      stream: true,
+    });
+    const secure = await connectMitm(proxy.port, certificates.caCert);
+    secure.resume();
+    secure.write([
+      'POST /v1/messages HTTP/1.1',
+      'Host: api.anthropic.com',
+      'Content-Type: application/json',
+      `Content-Length: ${Buffer.byteLength(body)}`,
+      'Connection: close',
+      '',
+      '',
+    ].join('\r\n') + body);
+    await new Promise<void>(resolve => {
+      secure.once('close', () => resolve());
+      secure.once('error', () => resolve());
+    });
+    await new Promise(resolve => setImmediate(resolve));
+
+    return readFileSync(inferenceLogPath, 'utf8')
+      .trim()
+      .split('\n')
+      .map(line => JSON.parse(line) as Record<string, unknown>);
+  } finally {
+    await proxy.close();
+  }
 }
 
 beforeAll(() => {
@@ -1250,5 +1339,69 @@ describe('selective HTTP proxy', () => {
     } finally {
       await proxy.close();
     }
+  }, 20_000);
+
+  it('logs adapter response errno and source when the response emits an error', async () => {
+    const entries = await adapterResponseFailureEntries(
+      'adapter-response-error-inference.jsonl',
+      response => {
+        const error = Object.assign(new Error('adapter response reset'), {
+          code: 'ECONNRESET',
+        });
+        response.emit('error', error);
+      },
+    );
+    const failures = entries.filter(entry => entry['event'] === 'response_failed');
+
+    expect(failures).toEqual([
+      expect.objectContaining({
+        event: 'response_failed',
+        statusCode: 200,
+        phase: 'waiting_for_first_byte',
+        errorType: 'Error',
+        errorCode: 'ECONNRESET',
+        failureSource: 'adapter_response_error',
+        terminationSource: 'upstream_failure',
+      }),
+    ]);
+  }, 20_000);
+
+  it('logs adapter response abort before a following close', async () => {
+    const entries = await adapterResponseFailureEntries(
+      'adapter-response-aborted-inference.jsonl',
+      response => {
+        response.emit('aborted');
+        response.emit('close');
+      },
+    );
+    const failures = entries.filter(entry => entry['event'] === 'response_failed');
+
+    expect(failures).toEqual([
+      expect.objectContaining({
+        event: 'response_failed',
+        statusCode: 200,
+        phase: 'waiting_for_first_byte',
+        failureSource: 'adapter_response_aborted',
+        terminationSource: 'upstream_failure',
+      }),
+    ]);
+  }, 20_000);
+
+  it('logs adapter response close when no more specific failure fires first', async () => {
+    const entries = await adapterResponseFailureEntries(
+      'adapter-response-close-inference.jsonl',
+      response => response.emit('close'),
+    );
+    const failures = entries.filter(entry => entry['event'] === 'response_failed');
+
+    expect(failures).toEqual([
+      expect.objectContaining({
+        event: 'response_failed',
+        statusCode: 200,
+        phase: 'waiting_for_first_byte',
+        failureSource: 'adapter_response_close',
+        terminationSource: 'upstream_failure',
+      }),
+    ]);
   }, 20_000);
 });

@@ -85,6 +85,38 @@ describe('sdkUpstreamErrorDetails retry-after extraction', () => {
   });
 });
 
+describe('sdkUpstreamErrorDetails transport-code extraction', () => {
+  it('omits an unexpected WebSocket transport code', () => {
+    const details = sdkUpstreamErrorDetails(apiCallError({
+      statusCode: 500,
+      data: {
+        error: {
+          message: 'transport unavailable',
+          code: 'unexpected_transport_code',
+        },
+      },
+    }));
+
+    expect(details).toBeDefined();
+    expect(details).not.toHaveProperty('transportCode');
+  });
+
+  it('omits an overlong WebSocket transport code', () => {
+    const details = sdkUpstreamErrorDetails(apiCallError({
+      statusCode: 500,
+      data: {
+        error: {
+          message: 'transport unavailable',
+          code: `websocket_${'transport_'.repeat(30)}error`,
+        },
+      },
+    }));
+
+    expect(details).toBeDefined();
+    expect(details).not.toHaveProperty('transportCode');
+  });
+});
+
 describe('clampRetryAfterSeconds', () => {
   it('defaults missing or invalid values to 5s and caps at 60s', () => {
     expect(clampRetryAfterSeconds(undefined)).toBe(5);
