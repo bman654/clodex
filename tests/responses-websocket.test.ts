@@ -777,7 +777,11 @@ describe('createResponsesWebSocketFetch', () => {
       body: JSON.stringify({ model: 'gpt-5.6-luna', input: [] }),
     });
     rejectUpgrade(lastSocket(), 403, { headers: { 'retry-after': '3600' } });
-    expect((await readErrorFrame(oversized)).error.retry_after_seconds).toBe(60);
+    const oversizedFrame = await readErrorFrame(oversized);
+    expect(oversizedFrame.error.retry_after_seconds).toBe(60);
+    // The message text is the only channel that survives the AI SDK's chunk
+    // schema stripping, so the CLAMPED value must appear there too.
+    expect(oversizedFrame.error.message).toMatch(/retry after 60s\b/i);
 
     const malformed = await wsFetch('https://x', {
       method: 'POST',
@@ -785,7 +789,9 @@ describe('createResponsesWebSocketFetch', () => {
       body: JSON.stringify({ model: 'gpt-5.6-luna', input: [] }),
     });
     rejectUpgrade(lastSocket(), 403, { headers: { 'retry-after': 'Wed, 21 Oct 2026 07:28:00 GMT' } });
-    expect((await readErrorFrame(malformed)).error.retry_after_seconds).toBe(5);
+    const malformedFrame = await readErrorFrame(malformed);
+    expect(malformedFrame.error.retry_after_seconds).toBe(5);
+    expect(malformedFrame.error.message).toMatch(/retry after 5s\b/i);
   });
 
   it('handles the 403 synchronously so later socket error/close events cannot retry or double-handle', async () => {
@@ -815,6 +821,42 @@ describe('createResponsesWebSocketFetch', () => {
       event: 'ws_transport_retry',
     }));
   });
+
+  it('lets the AI SDK transparently retry a 403-throttled upgrade and recover', async () => {
+    // The design premise of the 403->429 mapping: because the synthetic error
+    // frame arrives BEFORE any output chunk, @ai-sdk/openai's
+    // throwIfOpenAIStreamErrorBeforeOutput rejects doStream with a retryable
+    // 429 APICallError, so the AI SDK's own retry loop re-attempts the whole
+    // request — including a fresh WebSocket upgrade. This drives that loop for
+    // real: attempt 1 gets a 403 upgrade rejection, attempt 2 succeeds.
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const provider = createOpenAI({ apiKey: 'test-only', fetch: wsFetch });
+    const streamed = streamText({
+      model: provider.responses('gpt-5.6-sol'),
+      prompt: 'retry me',
+      maxRetries: 1,
+      onError: () => {},
+    });
+    const collected = (async () => {
+      let out = '';
+      for await (const chunk of streamed.textStream) out += chunk;
+      return out;
+    })();
+
+    await vi.waitFor(() => expect(fakeSockets).toHaveLength(1));
+    rejectUpgrade(lastSocket(), 403);
+
+    // The SDK backs off (no retry-after header on the synthetic SSE response,
+    // so its default ~2s exponential delay) and opens a SECOND upgrade.
+    await vi.waitFor(() => expect(fakeSockets).toHaveLength(2), { timeout: 10_000 });
+    const replacement = lastSocket();
+    replacement.emit('open');
+    emitTextResponse(replacement, 'resp_retry_recovered', 'recovered');
+
+    // Transparent recovery: the caller sees only the successful text.
+    await expect(collected).resolves.toBe('recovered');
+    expect(fakeSockets).toHaveLength(2);
+  }, 20_000);
 
   it('logs sanitized upstream response failure details after partial output', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];

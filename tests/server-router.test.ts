@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { APICallError } from 'ai';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -596,6 +597,88 @@ describe('server router', () => {
     expect(body.error.type).toBe('invalid_request_error');
     expect(body.error.message).toMatch(/^prompt is too long: \d+ tokens > 10 maximum$/);
     expect(body.request_id).toEqual(expect.any(String));
+  });
+
+  it('sets a clamped retry-after header on translated 429s from both endpoints', async () => {
+    const sdkCatalog = createGatewayModelCatalog([{
+      id: 'sdk-model',
+      name: 'SDK Model',
+      isFree: false,
+      brand: 'Test',
+      providerId: 'test-provider',
+      sourceBackend: 'test-provider',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      apiKey: 'provider-key',
+    }]);
+    const rateLimitError = (retryAfter: string) => new APICallError({
+      message: 'rate limited',
+      url: 'https://upstream/v1/responses',
+      requestBodyValues: {},
+      statusCode: 429,
+      responseHeaders: { 'retry-after': retryAfter },
+      responseBody: JSON.stringify({ error: { message: 'rate limited' } }),
+    });
+    const server = await startTestServer({ catalog: sdkCatalog });
+
+    // Anthropic-format endpoint: an oversized upstream hint comes out clamped.
+    vi.mocked(generateAnthropicResponse).mockRejectedValueOnce(rateLimitError('3600'));
+    const anthropicResponse = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'anthropic-test-provider__sdk-model',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    expect(anthropicResponse.status).toBe(429);
+    expect(anthropicResponse.headers.get('retry-after')).toBe('60');
+
+    // OpenAI-format endpoint: an in-range hint is forwarded as-is.
+    vi.mocked(generateOpenAiResponse).mockRejectedValueOnce(rateLimitError('7'));
+    const openAiResponse = await fetch(`${server.url}/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'sdk-model', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    expect(openAiResponse.status).toBe(429);
+    expect(openAiResponse.headers.get('retry-after')).toBe('7');
+  });
+
+  it('omits the retry-after header on non-429 upstream errors', async () => {
+    const sdkCatalog = createGatewayModelCatalog([{
+      id: 'sdk-model',
+      name: 'SDK Model',
+      isFree: false,
+      brand: 'Test',
+      providerId: 'test-provider',
+      sourceBackend: 'test-provider',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      apiKey: 'provider-key',
+    }]);
+    // Even with a retry-after header present upstream, a non-429 stays terminal
+    // with no backoff hint.
+    vi.mocked(generateAnthropicResponse).mockRejectedValueOnce(new APICallError({
+      message: 'forbidden',
+      url: 'https://upstream/v1/responses',
+      requestBodyValues: {},
+      statusCode: 403,
+      responseHeaders: { 'retry-after': '30' },
+      responseBody: JSON.stringify({ error: { message: 'forbidden' } }),
+    }));
+    const server = await startTestServer({ catalog: sdkCatalog });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'anthropic-test-provider__sdk-model',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    expect(response.status).toBe(403);
+    expect(response.headers.get('retry-after')).toBeNull();
   });
 
   it('forces internal streaming for non-streaming requests on OpenAI OAuth routes', async () => {

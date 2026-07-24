@@ -30,6 +30,18 @@ describe('sdkUpstreamErrorDetails retry-after extraction', () => {
     expect(anthropicErrorType(details!.statusCode!)).toBe('permission_error');
   });
 
+  it('keeps a bodyless 403 terminal — the removed WS-throttle heuristic must not return here', () => {
+    // OpenAI's edge rejects the WebSocket upgrade with an HTTP 403 carrying NO
+    // body. That exact shape maps to a retryable 429 in the WebSocket layer
+    // ONLY; reintroducing a bodyless-403 -> 429 heuristic in this HTTP
+    // classifier would make every plain 403 (real permission failures) retryable.
+    const details = sdkUpstreamErrorDetails(apiCallError({ statusCode: 403 }));
+    expect(details).toMatchObject({ statusCode: 403, isRetryable: false });
+    expect(details?.statusCode).not.toBe(429);
+    expect(details?.retryAfterSeconds).toBeUndefined();
+    expect(anthropicErrorType(details!.statusCode!)).toBe('permission_error');
+  });
+
   it('extracts the backoff hint on 429s from the error payload or retry-after header', () => {
     const fromPayload = sdkUpstreamErrorDetails(apiCallError({
       statusCode: 429,
