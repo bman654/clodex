@@ -15,6 +15,7 @@ function postToProxy(
   body: unknown,
   relayRequestId?: string,
   path = '/v1/messages',
+  claudeSessionId?: string,
 ): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
@@ -30,6 +31,7 @@ function postToProxy(
           'anthropic-version': '2023-06-01',
           'Content-Length': Buffer.byteLength(payload),
           ...(relayRequestId ? { 'x-relay-request-id': relayRequestId } : {}),
+          ...(claudeSessionId ? { 'x-claude-code-session-id': claudeSessionId } : {}),
         },
       },
       (res) => {
@@ -670,6 +672,65 @@ describe('SDK translated error logging', () => {
     }
   }, 20_000);
 
+  it('records the bounded WebSocket transport code in the translation lifecycle', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-sdk-transport-error-'));
+    const inferenceLogPath = join(dir, 'inference.jsonl');
+    const upstream = http.createServer((req, res) => {
+      req.resume();
+      res.writeHead(400, {
+        'Content-Type': 'application/json',
+        'Connection': 'close',
+      });
+      res.end(JSON.stringify({
+        error: {
+          type: 'transport_error',
+          code: 'websocket_transport_error',
+          message: 'transport unavailable',
+        },
+      }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstream.once('error', reject);
+      upstream.listen(0, '127.0.0.1', () => resolve());
+    });
+    const address = upstream.address();
+    if (!address || typeof address === 'string') throw new Error('test upstream did not bind');
+
+    const route: ProxyRoute = {
+      aliasId: 'clodex:test:translated-model',
+      realModelId: 'gpt-5.6-test',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: `http://127.0.0.1:${address.port}/v1`,
+      providerId: 'test-provider',
+    };
+    const handle = await startProxyCatalog([route], route.aliasId, false, inferenceLogPath);
+
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'test transport failure' }],
+        stream: true,
+      }, 'req-transport-error');
+
+      expect(res.status).toBe(400);
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'translation_failed',
+        requestId: 'req-transport-error',
+        errorCode: 'websocket_transport_error',
+      }));
+    } finally {
+      handle.close();
+      await new Promise<void>(resolve => upstream.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it('translates an OpenAI context overflow into an Anthropic prompt-too-long error', async () => {
     const upstream = http.createServer((req, res) => {
       req.resume();
@@ -779,7 +840,15 @@ describe('SDK translated error logging', () => {
         '/v1/messages/count_tokens',
       );
       const expectedInputTokens = JSON.parse(countResponse.body).input_tokens;
-      const res = await postToProxy(handle.port, handle.token, requestBody, 'req-success-1');
+      const claudeSessionId = '00000000-0000-4000-8000-000000000003';
+      const res = await postToProxy(
+        handle.port,
+        handle.token,
+        requestBody,
+        'req-success-1',
+        '/v1/messages',
+        claudeSessionId,
+      );
 
       expect(res.status).toBe(200);
       expect(res.body).toContain('event: message_stop');
@@ -797,15 +866,18 @@ describe('SDK translated error logging', () => {
       expect(entries).toContainEqual(expect.objectContaining({
         event: 'translation_dispatched',
         requestId: 'req-success-1',
+        claudeSessionId,
         phase: 'waiting_for_sdk',
       }));
       expect(entries).toContainEqual(expect.objectContaining({
         event: 'translation_started',
         requestId: 'req-success-1',
+        claudeSessionId,
       }));
       expect(entries).toContainEqual(expect.objectContaining({
         event: 'translation_completed',
         requestId: 'req-success-1',
+        claudeSessionId,
         lastPartType: 'finish',
       }));
       const completed = entries.find(entry => entry.event === 'translation_completed');

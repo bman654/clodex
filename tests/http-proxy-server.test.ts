@@ -6,7 +6,7 @@ import * as https from 'node:https';
 import * as http from 'node:http';
 import * as net from 'node:net';
 import * as tls from 'node:tls';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { gzipSync } from 'node:zlib';
 import { ensureHttpProxyCaBundle, ensureHttpProxyCertificates } from '../src/http-proxy/ca.js';
 import { shouldInterceptConnect, startHttpProxy } from '../src/http-proxy/server.js';
@@ -40,6 +40,33 @@ async function connectMitm(proxyPort: number, ca: string): Promise<tls.TLSSocket
   const secure = tls.connect({ socket, servername: 'api.anthropic.com', ca });
   await once(secure, 'secureConnect');
   return secure;
+}
+
+async function requestMitm(
+  proxyPort: number,
+  ca: string,
+  path: string,
+  body: string,
+): Promise<string> {
+  const secure = await connectMitm(proxyPort, ca);
+  let response = '';
+  secure.on('data', chunk => {
+    response += chunk.toString();
+  });
+  secure.write([
+    `POST ${path} HTTP/1.1`,
+    'Host: api.anthropic.com',
+    'Content-Type: application/json',
+    `Content-Length: ${Buffer.byteLength(body)}`,
+    'Connection: close',
+    '',
+    '',
+  ].join('\r\n') + body);
+  await new Promise<void>(resolve => {
+    secure.once('close', resolve);
+    secure.once('error', resolve);
+  });
+  return response;
 }
 
 function activeProxySockets(proxyPort: number): net.Socket[] {
@@ -115,6 +142,7 @@ describe('selective HTTP proxy', () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'anthropic-inference.jsonl');
     const webSocketDiagnosticsLogPath = join(testHome, 'websocket-diagnostics.jsonl');
+    const claudeSessionId = '00000000-0000-4000-8000-000000000004';
     const previousRequestPreview = process.env['CLODEX_LOG_REQUEST_PREVIEW'];
     process.env['CLODEX_LOG_REQUEST_PREVIEW'] = '1';
     let receivedBody = Buffer.alloc(0);
@@ -166,6 +194,7 @@ describe('selective HTTP proxy', () => {
         'POST /v1/messages?beta=true HTTP/1.1',
         'Host: api.anthropic.com',
         'Authorization: Bearer subscription-oauth-token',
+        `x-claude-code-session-id: ${claudeSessionId}`,
         'Content-Type: application/json',
         `Content-Length: ${body.length}`,
         'Connection: close',
@@ -199,6 +228,7 @@ describe('selective HTTP proxy', () => {
         effort: 'high',
         provider: 'anthropic',
         route: 'passthrough',
+        claudeSessionId,
         requestPreview: 'user: identify this Sonnet request',
       });
       const responseStarted = entries.find(entry => entry.event === 'response_started');
@@ -209,6 +239,7 @@ describe('selective HTTP proxy', () => {
         requestId: entries[0].requestId,
         statusCode: 200,
         route: 'passthrough',
+        claudeSessionId,
       });
       expect(messageStartUsage).toMatchObject({
         event: 'response_usage',
@@ -216,6 +247,7 @@ describe('selective HTTP proxy', () => {
         modelId: 'claude-sonnet-4-6',
         provider: 'anthropic',
         route: 'passthrough',
+        claudeSessionId,
         usageStage: 'message_start',
         inputTokens: 321,
         outputTokens: 1,
@@ -228,6 +260,7 @@ describe('selective HTTP proxy', () => {
         modelId: 'claude-sonnet-4-6',
         provider: 'anthropic',
         route: 'passthrough',
+        claudeSessionId,
         usageStage: 'message_delta',
         inputTokens: 19,
         outputTokens: 8,
@@ -238,6 +271,7 @@ describe('selective HTTP proxy', () => {
         requestId: entries[0].requestId,
         statusCode: 200,
         route: 'passthrough',
+        claudeSessionId,
       });
       expect(inferenceLog).not.toContain('private-image-data');
       expect(inferenceLog).not.toContain('private response text');
@@ -403,6 +437,7 @@ describe('selective HTTP proxy', () => {
         event: 'response_failed',
         requestId: entries[0].requestId,
         statusCode: 503,
+        terminationSource: 'upstream_failure',
       }));
     } finally {
       if (previousRequestPreview === undefined) delete process.env['CLODEX_LOG_REQUEST_PREVIEW'];
@@ -458,6 +493,7 @@ describe('selective HTTP proxy', () => {
         statusCode: 502,
         phase: 'waiting_for_headers',
         errorType: expect.stringMatching(/^ECONN(?:REFUSED|RESET)$/),
+        terminationSource: 'upstream_failure',
       }));
       expect(entries).toContainEqual(expect.objectContaining({
         event: 'upstream_error',
@@ -749,6 +785,7 @@ describe('selective HTTP proxy', () => {
   it('closes the adapter request and logs a terminal client disconnect', async () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'client-disconnect-inference.jsonl');
+    const claudeSessionId = '00000000-0000-4000-8000-000000000002';
     let adapterReceivedResolve!: () => void;
     const adapterReceived = new Promise<void>(resolve => { adapterReceivedResolve = resolve; });
     let adapterClosedResolve!: () => void;
@@ -794,6 +831,7 @@ describe('selective HTTP proxy', () => {
         'POST /v1/messages HTTP/1.1',
         'Host: api.anthropic.com',
         'Content-Type: application/json',
+        `x-claude-code-session-id: ${claudeSessionId}`,
         `Content-Length: ${Buffer.byteLength(body)}`,
         '',
         '',
@@ -805,13 +843,214 @@ describe('selective HTTP proxy', () => {
 
       const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       const requestEntry = entries.find(entry => !entry.event);
+      expect(requestEntry.claudeSessionId).toBe(claudeSessionId);
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'response_client_disconnected',
+        requestId: requestEntry.requestId,
+        claudeSessionId,
+        phase: 'waiting_for_headers',
+        terminationSource: 'downstream_client',
+      }));
+      expect(entries.some(entry => entry.event === 'response_completed')).toBe(false);
+      expect(entries.some(entry => entry.event === 'response_failed')).toBe(false);
+    } finally {
+      await proxy.close();
+    }
+  }, 20_000);
+
+  it('attributes an in-flight response termination to local proxy shutdown', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    const inferenceLogPath = join(testHome, 'local-shutdown-inference.jsonl');
+    let adapterReceivedResolve!: () => void;
+    const adapterReceived = new Promise<void>(resolve => {
+      adapterReceivedResolve = resolve;
+    });
+    let adapterClosedResolve!: () => void;
+    const adapterClosed = new Promise<void>(resolve => {
+      adapterClosedResolve = resolve;
+    });
+    const adapterServer = http.createServer(req => {
+      req.resume();
+      req.once('end', adapterReceivedResolve);
+      req.socket.once('close', adapterClosedResolve);
+    });
+    const adapterPort = await listen(adapterServer);
+    const route = {
+      aliasId: 'clodex:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai' as const,
+      npm: '@ai-sdk/openai-compatible',
+      providerId: 'test-provider',
+    };
+    const proxy = await startHttpProxy({
+      routes: [route],
+      adapterHandle: {
+        port: adapterPort,
+        token: 'adapter-local-token',
+        close: () => {
+          adapterServer.closeAllConnections();
+          adapterServer.close();
+        },
+      },
+      inferenceLogPath,
+    });
+    let proxyClosed = false;
+
+    try {
+      const body = JSON.stringify({
+        model: route.aliasId,
+        messages: [{ role: 'user', content: 'wait for local shutdown' }],
+        stream: false,
+      });
+      const secure = await connectMitm(proxy.port, certificates.caCert);
+      secure.on('error', () => {});
+      secure.resume();
+      secure.write([
+        'POST /v1/messages HTTP/1.1',
+        'Host: api.anthropic.com',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        '',
+        '',
+      ].join('\r\n') + body);
+      await adapterReceived;
+      await proxy.close();
+      proxyClosed = true;
+      await adapterClosed;
+      await new Promise(resolve => setImmediate(resolve));
+
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const requestEntry = entries.find(entry => !entry.event);
       expect(entries).toContainEqual(expect.objectContaining({
         event: 'response_client_disconnected',
         requestId: requestEntry.requestId,
         phase: 'waiting_for_headers',
+        terminationSource: 'local_shutdown',
       }));
-      expect(entries.some(entry => entry.event === 'response_completed')).toBe(false);
-      expect(entries.some(entry => entry.event === 'response_failed')).toBe(false);
+      expect(entries.some(entry => entry.terminationSource === 'downstream_client')).toBe(false);
+    } finally {
+      if (!proxyClosed) await proxy.close();
+    }
+  }, 20_000);
+
+  it('logs adapter request errno and source when the adapter is unavailable before headers', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    const inferenceLogPath = join(testHome, 'adapter-request-error-inference.jsonl');
+    const unavailableAdapter = http.createServer();
+    const unavailableAdapterPort = await listen(unavailableAdapter);
+    await new Promise<void>(resolve => unavailableAdapter.close(() => resolve()));
+    const route = {
+      aliasId: 'clodex:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai' as const,
+      npm: '@ai-sdk/openai-compatible',
+      providerId: 'test-provider',
+    };
+    const proxy = await startHttpProxy({
+      routes: [route],
+      adapterHandle: {
+        port: unavailableAdapterPort,
+        token: 'adapter-local-token',
+        close: () => {},
+      },
+      inferenceLogPath,
+    });
+
+    try {
+      const response = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/v1/messages',
+        JSON.stringify({
+          model: route.aliasId,
+          messages: [{ role: 'user', content: 'test unavailable adapter' }],
+          stream: true,
+        }),
+      );
+
+      expect(response).toContain('502');
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const requestEntry = entries.find(entry => !entry.event);
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'response_failed',
+        requestId: requestEntry.requestId,
+        route: 'translated',
+        statusCode: 502,
+        phase: 'waiting_for_headers',
+        errorType: 'Error',
+        errorCode: expect.stringMatching(/^ECONN(?:REFUSED|RESET)$/),
+        failureSource: 'adapter_request_error',
+        terminationSource: 'upstream_failure',
+      }));
+    } finally {
+      await proxy.close();
+    }
+  }, 20_000);
+
+  it('logs a distinct source when the adapter request closes before headers', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    const inferenceLogPath = join(testHome, 'adapter-request-close-inference.jsonl');
+    const route = {
+      aliasId: 'clodex:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai' as const,
+      npm: '@ai-sdk/openai-compatible',
+      providerId: 'test-provider',
+    };
+    const adapterRequest = () => {
+      const request = new EventEmitter() as EventEmitter & {
+        end(body: Buffer): void;
+        destroy(error?: Error): void;
+      };
+      request.end = () => queueMicrotask(() => request.emit('close'));
+      request.destroy = () => {};
+      return request;
+    };
+    const proxy = await startHttpProxy({
+      routes: [route],
+      adapterHandle: {
+        port: 1,
+        token: 'adapter-local-token',
+        close: () => {},
+      },
+      inferenceLogPath,
+      adapterRequest,
+    } as Parameters<typeof startHttpProxy>[0]);
+
+    try {
+      const response = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/v1/messages',
+        JSON.stringify({
+          model: route.aliasId,
+          messages: [{ role: 'user', content: 'test closed adapter request' }],
+          stream: true,
+        }),
+      );
+
+      expect(response).toContain('502');
+      const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const requestEntry = entries.find(entry => !entry.event);
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'response_failed',
+        requestId: requestEntry.requestId,
+        route: 'translated',
+        statusCode: 502,
+        phase: 'waiting_for_headers',
+        errorType: 'Error',
+        failureSource: 'adapter_request_close',
+        terminationSource: 'upstream_failure',
+      }));
     } finally {
       await proxy.close();
     }
@@ -886,6 +1125,8 @@ describe('selective HTTP proxy', () => {
         requestId: requestEntry.requestId,
         statusCode: 200,
         phase: 'streaming',
+        failureSource: 'adapter_response_aborted',
+        terminationSource: 'upstream_failure',
       }));
       expect(entries.some(entry => entry.event === 'response_completed')).toBe(false);
     } finally {

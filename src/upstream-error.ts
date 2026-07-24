@@ -18,6 +18,7 @@ export interface SdkUpstreamErrorDetails {
   attemptCount: number;
   /** Client backoff hint (seconds); only present on rate-limit (429) failures. */
   retryAfterSeconds?: number;
+  transportCode?: 'websocket_transport_error';
 }
 
 /** Default downstream backoff hint when the upstream throttle gives none. */
@@ -53,6 +54,15 @@ function numericRetryAfterSeconds(inner: InstanceType<typeof APICallError>): num
   return undefined;
 }
 
+function boundedTransportCode(data: unknown): 'websocket_transport_error' | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const error = (data as { error?: unknown }).error;
+  if (!error || typeof error !== 'object') return undefined;
+  return (error as { code?: unknown }).code === 'websocket_transport_error'
+    ? 'websocket_transport_error'
+    : undefined;
+}
+
 /** Extract the real HTTP failure from an AI SDK retry wrapper without relying on instanceof. */
 export function sdkUpstreamErrorDetails(err: unknown): SdkUpstreamErrorDetails | undefined {
   const retry = RetryError.isInstance(err) ? err : undefined;
@@ -79,6 +89,7 @@ export function sdkUpstreamErrorDetails(err: unknown): SdkUpstreamErrorDetails |
     isRetryable: inner.isRetryable,
     attemptCount: retry?.errors.length ?? 1,
     ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
+    transportCode: boundedTransportCode(inner.data),
   };
 }
 

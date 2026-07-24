@@ -293,6 +293,7 @@ describe('inference request log', () => {
       writeInferenceResponseLifecycleLog(path, {
         event: 'translation_progress',
         requestId: 'req-123',
+        claudeSessionId: '00000000-0000-4000-8000-000000000001',
         modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
@@ -306,19 +307,41 @@ describe('inference request log', () => {
         lastPartType: 'text-delta',
       });
       writeInferenceResponseLifecycleLog(path, {
-        event: 'translation_failed',
+        event: 'response_failed',
         requestId: 'req-123',
+        claudeSessionId: 'not-a-session-id',
         modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
         errorType: 'Error',
+        errorCode: 'ECONNRESET',
         errorSignature: 'reasoning_part_not_found',
+        failureSource: 'adapter_response_error',
+        terminationSource: 'upstream_failure',
+      });
+      writeInferenceResponseLifecycleLog(path, {
+        event: 'response_client_disconnected',
+        requestId: 'req-123',
+        claudeSessionId: '00000000-0000-4000-8000-000000000001',
+        modelId: 'clodex:openai:gpt-test',
+        provider: 'openai',
+        route: 'translated',
+        terminationSource: 'downstream_client',
+      });
+      writeInferenceResponseLifecycleLog(path, {
+        event: 'response_client_disconnected',
+        requestId: 'req-456',
+        modelId: 'clodex:openai:gpt-test',
+        provider: 'openai',
+        route: 'translated',
+        terminationSource: 'local_shutdown',
       });
 
-      const [entry, failure] = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+      const [entry, failure, disconnect, shutdown] = readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       expect(entry).toMatchObject({
         event: 'translation_progress',
         requestId: 'req-123',
+        claudeSessionId: '00000000-0000-4000-8000-000000000001',
         modelId: 'clodex:openai:gpt-test',
         provider: 'openai',
         route: 'translated',
@@ -333,9 +356,23 @@ describe('inference request log', () => {
       });
       expect(entry).not.toHaveProperty('responseContent');
       expect(failure).toMatchObject({
-        event: 'translation_failed',
+        event: 'response_failed',
         errorType: 'Error',
+        errorCode: 'ECONNRESET',
         errorSignature: 'reasoning_part_not_found',
+        failureSource: 'adapter_response_error',
+        terminationSource: 'upstream_failure',
+      });
+      expect(failure).not.toHaveProperty('claudeSessionId');
+      expect(disconnect).toMatchObject({
+        event: 'response_client_disconnected',
+        claudeSessionId: '00000000-0000-4000-8000-000000000001',
+        terminationSource: 'downstream_client',
+      });
+      expect(shutdown).toMatchObject({
+        event: 'response_client_disconnected',
+        requestId: 'req-456',
+        terminationSource: 'local_shutdown',
       });
     } finally {
       rmSync(dir, { recursive: true, force: true });

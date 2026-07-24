@@ -228,9 +228,22 @@ export type InferenceResponsePhase =
   | 'streaming'
   | 'delivering';
 
+export type InferenceFailureSource =
+  | 'adapter_request_error'
+  | 'adapter_request_close'
+  | 'adapter_response_error'
+  | 'adapter_response_aborted'
+  | 'adapter_response_close';
+
+export type InferenceTerminationSource =
+  | 'downstream_client'
+  | 'local_shutdown'
+  | 'upstream_failure';
+
 export interface InferenceResponseLifecycleLogEntry {
   event: InferenceResponseLifecycleEvent;
   requestId: string;
+  claudeSessionId?: string;
   modelId: string;
   provider: string;
   route: 'passthrough' | 'translated';
@@ -253,7 +266,10 @@ export interface InferenceResponseLifecycleLogEntry {
   cacheReadInputTokens?: number;
   lastPartType?: string;
   errorType?: string;
+  errorCode?: string;
   errorSignature?: string;
+  failureSource?: InferenceFailureSource;
+  terminationSource?: InferenceTerminationSource;
 }
 
 export type ProxyLifecycleEvent =
@@ -409,6 +425,7 @@ export function writeInferenceResponseLifecycleLog(
   path: string,
   entry: InferenceResponseLifecycleLogEntry,
 ): void {
+  const claudeSessionId = safeClaudeSessionId(entry.claudeSessionId);
   const statusCode = nonNegativeInteger(entry.statusCode);
   const durationMs = nonNegativeInteger(entry.durationMs);
   const timeToFirstByteMs = nonNegativeInteger(entry.timeToFirstByteMs);
@@ -428,6 +445,7 @@ export function writeInferenceResponseLifecycleLog(
     timestamp: new Date().toISOString(),
     event: entry.event,
     requestId: compactLogValue(entry.requestId, 100),
+    ...(claudeSessionId ? { claudeSessionId } : {}),
     modelId: compactLogValue(entry.modelId),
     provider: compactLogValue(entry.provider, 200),
     route: entry.route,
@@ -450,7 +468,10 @@ export function writeInferenceResponseLifecycleLog(
     ...(cacheReadInputTokens !== undefined ? { cacheReadInputTokens } : {}),
     ...(entry.lastPartType ? { lastPartType: compactLogValue(entry.lastPartType, 100) } : {}),
     ...(entry.errorType ? { errorType: compactLogValue(entry.errorType, 200) } : {}),
+    ...(entry.errorCode ? { errorCode: compactLogValue(entry.errorCode, 100) } : {}),
     ...(entry.errorSignature ? { errorSignature: compactLogValue(entry.errorSignature, 100) } : {}),
+    ...(entry.failureSource ? { failureSource: entry.failureSource } : {}),
+    ...(entry.terminationSource ? { terminationSource: entry.terminationSource } : {}),
   }));
 }
 
