@@ -19,7 +19,11 @@ import {
 import type { CachedModel, RegistryProvider } from './types.js';
 import { customProviderId, isValidProviderId, slugifyProviderId } from './validate.js';
 import { validateCustomEndpointUrl } from './url-security.js';
-import { makeTraceLogger, getProviderDebugLogPath } from '../trace-log.js';
+import {
+  getProviderDebugLogPath,
+  makeTraceLogger,
+  registerTraceSecret,
+} from '../trace-log.js';
 
 export type CustomEndpointKind = 'openai' | 'anthropic';
 
@@ -75,6 +79,7 @@ export async function fetchAnthropicModels(
 
     let logTrace: ((msg: string) => void) | undefined;
     if (process.env.CLODEX_TRACE === '1') {
+      if (apiKey.trim()) registerTraceSecret(apiKey);
       logTrace = makeTraceLogger(getProviderDebugLogPath());
     }
 

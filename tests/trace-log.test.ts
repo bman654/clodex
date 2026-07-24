@@ -1,12 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  clearTraceSecrets,
   getInferenceSessionLogPath,
   getLatestMessagePreview,
   redactTraceLine,
   redactTraceLog,
+  registerTraceSecret,
   writeInferenceRequestLog,
   writeInferenceResponseLifecycleLog,
   writeInferenceResponseErrorLog,
@@ -15,6 +17,24 @@ import {
 } from '../src/trace-log.js';
 
 describe('trace log redaction', () => {
+  afterEach(() => {
+    clearTraceSecrets();
+  });
+
+  it('redacts registered opaque credentials as literal values', () => {
+    const secret = 'opaque.$credential+[42]';
+    registerTraceSecret(secret);
+
+    expect(redactTraceLine(`{"echo":"${secret}","again":"${secret}"}`))
+      .toBe('{"echo":"[REDACTED]","again":"[REDACTED]"}');
+  });
+
+  it('does not register too-short values', () => {
+    registerTraceSecret('short');
+
+    expect(redactTraceLine('{"echo":"short"}')).toBe('{"echo":"short"}');
+  });
+
   it('redacts bearer tokens', () => {
     expect(redactTraceLine('Authorization: Bearer sk-ant-api03-secret123')).toContain('[REDACTED]');
     expect(redactTraceLine('Authorization: Bearer sk-ant-api03-secret123')).not.toContain('secret123');

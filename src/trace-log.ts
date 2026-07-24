@@ -543,6 +543,19 @@ export function resetTraceLog(path: string): void {
   }
 }
 
+const MIN_TRACE_SECRET_LENGTH = 8;
+const knownTraceSecrets = new Set<string>();
+
+export function registerTraceSecret(value: string): void {
+  if (value.trim().length < MIN_TRACE_SECRET_LENGTH) return;
+  knownTraceSecrets.add(value);
+}
+
+/** Test hook: prevent registered credentials from leaking between test cases. */
+export function clearTraceSecrets(): void {
+  knownTraceSecrets.clear();
+}
+
 const REDACTION_PATTERNS: Array<(line: string) => string> = [
   // Bearer / Authorization headers
   line => line.replace(/Bearer\s+[A-Za-z0-9._\-+/=]+/gi, 'Bearer [REDACTED]'),
@@ -557,6 +570,9 @@ const REDACTION_PATTERNS: Array<(line: string) => string> = [
 
 export function redactTraceLine(line: string): string {
   let out = line;
+  for (const secret of knownTraceSecrets) {
+    out = out.split(secret).join('[REDACTED]');
+  }
   for (const apply of REDACTION_PATTERNS) {
     out = apply(out);
   }
