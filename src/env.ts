@@ -670,6 +670,19 @@ function writeKeyringJournal(
   persistKeyringManagedState(account, { mode: 'managed' });
 }
 
+function adoptKeyringJournal(
+  keyring: KeyringApi,
+  account: string,
+  journal: KeyringChunkJournal,
+  diag?: (msg: string) => void,
+): void {
+  try {
+    writeKeyringJournal(keyring, account, journal);
+  } catch (err) {
+    diag?.(classifyKeyringError(err));
+  }
+}
+
 function readKeyringDeletionGuard(
   keyring: KeyringApi,
   account: string,
@@ -714,12 +727,23 @@ function reconcileKeyringJournal(
     }
   }
   const deletionGuard = readKeyringDeletionGuard(keyring, account);
+  if (rawJournal === null && deletionGuard === null && managedState !== null) {
+    const confirmedJournal = readKeyringEntry(keyring, KEYRING_JOURNAL_SERVICE, account);
+    if (confirmedJournal !== null) {
+      diag?.('managed keyring cleanup metadata was temporarily unavailable');
+      return false;
+    }
+    try {
+      removeKeyringManagedState(account);
+      diag?.('removed stale keyring managed-state marker');
+    } catch (err) {
+      diag?.(classifyKeyringError(err));
+      return false;
+    }
+    return true;
+  }
   if (rawJournal === null) {
     if (deletionGuard === null) {
-      if (managedState !== null) {
-        diag?.('managed keyring cleanup metadata is temporarily unavailable');
-        return false;
-      }
       return true;
     }
     const restoredJournal: KeyringChunkJournal =
@@ -1286,17 +1310,27 @@ async function readKeyringAccount(
       const marker = parseKeyringChunkMarker(rawValue);
       if (marker) {
         const value = readKeyringAccountFromService(keyring, KEYRING_SERVICE, account);
-        writeKeyringJournal(keyring, account, {
-          mode: 'write',
-          generations: [marker],
-        });
+        adoptKeyringJournal(
+          keyring,
+          account,
+          {
+            mode: 'write',
+            generations: [marker],
+          },
+          diag,
+        );
         return value;
       }
-      writeKeyringJournal(keyring, account, {
-        mode: 'short',
-        generations: [],
-        shortDigest: createHash('sha256').update(rawValue).digest('hex'),
-      });
+      adoptKeyringJournal(
+        keyring,
+        account,
+        {
+          mode: 'short',
+          generations: [],
+          shortDigest: createHash('sha256').update(rawValue).digest('hex'),
+        },
+        diag,
+      );
       return rawValue;
     } catch (err) {
       diag?.(classifyKeyringError(err));
@@ -1555,7 +1589,9 @@ async function deleteKeyringAccount(
       if (pendingJournalRaw === null && readKeyringManagedState(account) !== null) {
         if (!reconcileKeyringJournal(keyring, account, diag)) return false;
         pendingJournalRaw = readKeyringEntry(keyring, KEYRING_JOURNAL_SERVICE, account);
-        if (pendingJournalRaw === null) return false;
+        if (pendingJournalRaw === null) {
+          return readKeyringManagedState(account) === null;
+        }
       }
       let pendingJournal: KeyringChunkJournal | null = null;
       try {

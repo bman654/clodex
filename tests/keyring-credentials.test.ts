@@ -337,6 +337,28 @@ describe('keyring credential chunks', () => {
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe(second);
   });
 
+  it('serializes concurrent public writes and retires the losing generation', async () => {
+    const first = 'a'.repeat(2_500);
+    const second = 'b'.repeat(3_700);
+
+    await expect(
+      Promise.all([
+        provisionProviderCredential(authRef, first),
+        provisionProviderCredential(authRef, second),
+      ]),
+    ).resolves.toEqual([true, true]);
+
+    const resolved = await resolveProviderCredential('test', authRef);
+    expect([first, second]).toContain(resolved);
+    const marker = publishedMarker();
+    const activeChunks = currentChunkKeys();
+    expect(activeChunks).toHaveLength(marker.count);
+    expect(
+      activeChunks.every(key => key.includes(`${account}::chunk::${marker.generation}::`)),
+    ).toBe(true);
+    expectActiveInventory(marker);
+  });
+
   it('does not split a surrogate pair across native keyring chunks', async () => {
     const secret = `${'a'.repeat(1_199)}😀b`;
 
@@ -345,6 +367,29 @@ describe('keyring credential chunks', () => {
     expect(currentChunkKeys()).toHaveLength(2);
     expect([...keyring.values.values()].every(value => !value.includes('�'))).toBe(true);
     await expect(resolveProviderCredential('test', authRef)).resolves.toBe(secret);
+  });
+
+  it('rejects credentials and markers above the chunk-count limit', async () => {
+    const diagnostics: string[] = [];
+    const oversized = 'a'.repeat(1_200 * 128 + 1);
+
+    await expect(
+      provisionProviderCredential(authRef, oversized, message => diagnostics.push(message)),
+    ).resolves.toBe(false);
+    expect(diagnostics.join('\n')).toContain(
+      'keyring credential exceeds the supported chunk count',
+    );
+    expect(currentChunkKeys()).toEqual([]);
+    expect(keyring.values.has(mainKey)).toBe(false);
+
+    diagnostics.length = 0;
+    const generation = '11111111-1111-4111-8111-111111111111';
+    const digest = createHash('sha256').update('oversized-marker').digest('hex');
+    keyring.values.set(mainKey, `__relay_chunked__:v3:${generation}:129:${digest}`);
+    await expect(
+      resolveProviderCredential('test', authRef, message => diagnostics.push(message)),
+    ).resolves.toBeNull();
+    expect(diagnostics.join('\n')).toContain('invalid chunk marker');
   });
 
   it('does not multiply missing-entry scans for a steady short credential', async () => {
@@ -1202,6 +1247,41 @@ describe('keyring credential chunks', () => {
 
     expectActiveShort('current-secret');
     expect(keyring.values.get(legacyMainKey)).toBe('stale-legacy-secret');
+  });
+
+  it('returns a pre-journal credential when metadata adoption is temporarily unavailable', async () => {
+    const diagnostics: string[] = [];
+    keyring.values.set(mainKey, 'current-secret');
+    keyring.failSetKey = journalKey;
+
+    await expect(
+      resolveProviderCredential('test', authRef, message => diagnostics.push(message)),
+    ).resolves.toBe('current-secret');
+    expect(diagnostics).toContain('keyring error: injected keyring write failure');
+
+    keyring.failSetKey = '';
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('current-secret');
+    expectActiveShort('current-secret');
+  });
+
+  it('recovers when managed metadata outlives the keyring entries', async () => {
+    const diagnostics: string[] = [];
+    await expect(saveProviderCredential(authRef, 'first-secret')).resolves.toBe(true);
+    expect(existsSync(managedStatePath())).toBe(true);
+
+    keyring.values.clear();
+    await expect(
+      resolveProviderCredential('test', authRef, message => diagnostics.push(message)),
+    ).resolves.toBeNull();
+    expect(diagnostics).toContain('removed stale keyring managed-state marker');
+    expect(existsSync(managedStatePath())).toBe(false);
+
+    await expect(provisionProviderCredential(authRef, 'replacement-secret')).resolves.toBe(true);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('replacement-secret');
+
+    keyring.values.clear();
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    expect(existsSync(managedStatePath())).toBe(false);
   });
 
   it('fails closed when the first pre-journal short read collapses', async () => {
