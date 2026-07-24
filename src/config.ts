@@ -1,7 +1,13 @@
 import type { UserPreferences } from './types.js';
-import { dirname } from 'node:path';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { readFileSync, renameSync, unlinkSync } from 'node:fs';
 import { getConfigPath } from './paths.js';
+import { syncParentDirectory, writeSecureFile } from './registry/io.js';
+import {
+  assertRegistryWriteOwnership,
+  withRegistryWriteLock,
+  withRegistryWriteLockSync,
+} from './registry/lock.js';
 
 function readJsonFile(path: string): UserPreferences | null {
   try {
@@ -18,8 +24,50 @@ function readConfig(): UserPreferences {
 
 function writeConfig(config: UserPreferences): void {
   const configPath = getConfigPath();
-  mkdirSync(dirname(configPath), { recursive: true, mode: 0o700 });
-  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  assertRegistryWriteOwnership(configPath);
+  const payload = `${JSON.stringify(config, null, 2)}\n`;
+  const tmp = `${configPath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeSecureFile(tmp, payload);
+    assertRegistryWriteOwnership(configPath);
+    renameSync(tmp, configPath);
+    syncParentDirectory(configPath);
+  } finally {
+    try {
+      unlinkSync(tmp);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+}
+
+function updateConfig<T>(mutate: (config: UserPreferences) => T): T {
+  const configPath = getConfigPath();
+  return withRegistryWriteLockSync(() => {
+    const config = readJsonFile(configPath) ?? {};
+    const result = mutate(config);
+    writeConfig(config);
+    return result;
+  }, { lockPath: `${configPath}.lock` });
+}
+
+interface AsyncConfigUpdate<T> {
+  result: T;
+  write: boolean;
+}
+
+async function updateConfigAsync<T>(
+  mutate: (
+    config: UserPreferences,
+  ) => Promise<AsyncConfigUpdate<T>> | AsyncConfigUpdate<T>,
+): Promise<T> {
+  const configPath = getConfigPath();
+  return withRegistryWriteLock(async () => {
+    const config = readJsonFile(configPath) ?? {};
+    const update = await mutate(config);
+    if (update.write) writeConfig(config);
+    return update.result;
+  }, { lockPath: `${configPath}.lock` });
 }
 
 export function loadPreferences(): UserPreferences {
@@ -39,17 +87,17 @@ export function loadPreferences(): UserPreferences {
 }
 
 export function savePreferences(prefs: Partial<Pick<UserPreferences, 'lastModel' | 'lastProvider' | 'recentModelsByProvider' | 'favoriteModels' | 'modelAliases' | 'claudeBridgeMode' | 'serverBridgeMode' | 'appPathOverrides' | 'recentLaunchFolders'>>): void {
-  const config = readConfig();
-  if (prefs.lastModel !== undefined) config.lastModel = prefs.lastModel;
-  if (prefs.lastProvider !== undefined) config.lastProvider = prefs.lastProvider;
-  if (prefs.recentModelsByProvider !== undefined) config.recentModelsByProvider = prefs.recentModelsByProvider;
-  if (prefs.favoriteModels !== undefined) config.favoriteModels = prefs.favoriteModels;
-  if (prefs.modelAliases !== undefined) config.modelAliases = prefs.modelAliases;
-  if (prefs.claudeBridgeMode !== undefined) config.claudeBridgeMode = prefs.claudeBridgeMode;
-  if (prefs.serverBridgeMode !== undefined) config.serverBridgeMode = prefs.serverBridgeMode;
-  if (prefs.appPathOverrides !== undefined) config.appPathOverrides = prefs.appPathOverrides;
-  if (prefs.recentLaunchFolders !== undefined) config.recentLaunchFolders = prefs.recentLaunchFolders;
-  writeConfig(config);
+  updateConfig(config => {
+    if (prefs.lastModel !== undefined) config.lastModel = prefs.lastModel;
+    if (prefs.lastProvider !== undefined) config.lastProvider = prefs.lastProvider;
+    if (prefs.recentModelsByProvider !== undefined) config.recentModelsByProvider = prefs.recentModelsByProvider;
+    if (prefs.favoriteModels !== undefined) config.favoriteModels = prefs.favoriteModels;
+    if (prefs.modelAliases !== undefined) config.modelAliases = prefs.modelAliases;
+    if (prefs.claudeBridgeMode !== undefined) config.claudeBridgeMode = prefs.claudeBridgeMode;
+    if (prefs.serverBridgeMode !== undefined) config.serverBridgeMode = prefs.serverBridgeMode;
+    if (prefs.appPathOverrides !== undefined) config.appPathOverrides = prefs.appPathOverrides;
+    if (prefs.recentLaunchFolders !== undefined) config.recentLaunchFolders = prefs.recentLaunchFolders;
+  });
 }
 
 export function getAppPathOverride(appId: string): string | undefined {
@@ -58,15 +106,15 @@ export function getAppPathOverride(appId: string): string | undefined {
 }
 
 export function setAppPathOverride(appId: string, path: string | null): Record<string, string> {
-  const config = readConfig();
-  const next = { ...(config.appPathOverrides ?? {}) };
-  const trimmed = path?.trim() ?? '';
-  if (trimmed) next[appId] = trimmed;
-  else delete next[appId];
-  config.appPathOverrides = next;
-  if (Object.keys(next).length === 0) delete config.appPathOverrides;
-  writeConfig(config);
-  return next;
+  return updateConfig(config => {
+    const next = { ...(config.appPathOverrides ?? {}) };
+    const trimmed = path?.trim() ?? '';
+    if (trimmed) next[appId] = trimmed;
+    else delete next[appId];
+    config.appPathOverrides = next;
+    if (Object.keys(next).length === 0) delete config.appPathOverrides;
+    return next;
+  });
 }
 
 /**
@@ -93,12 +141,12 @@ const MAX_RECENT_LAUNCH_FOLDERS = 6;
 export function recordLaunchFolder(folder: string): string[] {
   const trimmed = folder.trim();
   if (!trimmed) return loadPreferences().recentLaunchFolders ?? [];
-  const config = readConfig();
-  const prev = config.recentLaunchFolders ?? [];
-  const next = [trimmed, ...prev.filter(path => path !== trimmed)].slice(0, MAX_RECENT_LAUNCH_FOLDERS);
-  config.recentLaunchFolders = next;
-  writeConfig(config);
-  return next;
+  return updateConfig(config => {
+    const prev = config.recentLaunchFolders ?? [];
+    const next = [trimmed, ...prev.filter(path => path !== trimmed)].slice(0, MAX_RECENT_LAUNCH_FOLDERS);
+    config.recentLaunchFolders = next;
+    return next;
+  });
 }
 
 export function recordLaunchSelection(
@@ -129,32 +177,30 @@ async function getServerPasswordKeyring(): Promise<any | null> {
 }
 
 export async function getSavedServerPassword(): Promise<string | null> {
-  const config = readConfig();
-  if (config.server?.savedPassword) {
-    const pwd = config.server.savedPassword;
-    const keyring = await getServerPasswordKeyring();
-    if (keyring) {
-      try {
-        await keyring.setPassword(pwd);
-        delete config.server.savedPassword;
-        if (Object.keys(config.server).length === 0) delete config.server;
-        writeConfig(config);
-      } catch {
-        // Fallback: keep in config.json if keyring fails
-      }
-    }
-    return pwd;
-  }
-
   const keyring = await getServerPasswordKeyring();
-  if (keyring) {
+  if (!keyring) return readConfig().server?.savedPassword ?? null;
+
+  const savedPassword = await updateConfigAsync(async config => {
+    const server = config.server;
+    const password = server?.savedPassword;
+    if (!password) return { result: null, write: false };
     try {
-      return await keyring.getPassword();
+      await keyring.setPassword(password);
+      delete server.savedPassword;
+      if (Object.keys(server).length === 0) delete config.server;
+      return { result: password, write: true };
     } catch {
-      return null;
+      // Fallback: keep in config.json if keyring fails
+      return { result: password, write: false };
     }
+  });
+  if (savedPassword) return savedPassword;
+
+  try {
+    return await keyring.getPassword();
+  } catch {
+    return null;
   }
-  return null;
 }
 
 export async function setSavedServerPassword(password: string): Promise<void> {
@@ -167,12 +213,13 @@ export async function setSavedServerPassword(password: string): Promise<void> {
       // Fallback
     }
   }
-  const config = readConfig();
-  config.server = {
-    ...(config.server ?? {}),
-    savedPassword: password,
-  };
-  writeConfig(config);
+  await updateConfigAsync(config => {
+    config.server = {
+      ...(config.server ?? {}),
+      savedPassword: password,
+    };
+    return { result: undefined, write: true };
+  });
 }
 
 export async function clearSavedServerPassword(): Promise<void> {
@@ -184,11 +231,12 @@ export async function clearSavedServerPassword(): Promise<void> {
       // Ignore
     }
   }
-  const config = readConfig();
-  if (!config.server) return;
-  delete config.server.savedPassword;
-  if (Object.keys(config.server).length === 0) delete config.server;
-  writeConfig(config);
+  await updateConfigAsync(config => {
+    if (!config.server) return { result: undefined, write: false };
+    delete config.server.savedPassword;
+    if (Object.keys(config.server).length === 0) delete config.server;
+    return { result: undefined, write: true };
+  });
 }
 
 export function getServerExposedProviders(): string[] | null {
@@ -197,12 +245,12 @@ export function getServerExposedProviders(): string[] | null {
 }
 
 export function setServerExposedProviders(providerIds: string[]): void {
-  const config = readConfig();
-  config.server = {
-    ...(config.server ?? {}),
-    exposedProviders: providerIds,
-  };
-  writeConfig(config);
+  updateConfig(config => {
+    config.server = {
+      ...(config.server ?? {}),
+      exposedProviders: providerIds,
+    };
+  });
 }
 
 export function getServerMaskGatewayIds(): boolean {
@@ -210,12 +258,12 @@ export function getServerMaskGatewayIds(): boolean {
 }
 
 export function setServerMaskGatewayIds(mask: boolean): void {
-  const config = readConfig();
-  config.server = {
-    ...(config.server ?? {}),
-    maskGatewayIds: mask,
-  };
-  writeConfig(config);
+  updateConfig(config => {
+    config.server = {
+      ...(config.server ?? {}),
+      maskGatewayIds: mask,
+    };
+  });
 }
 
 export function getServerFavoritesOnly(): boolean {
@@ -223,12 +271,12 @@ export function getServerFavoritesOnly(): boolean {
 }
 
 export function setServerFavoritesOnly(favoritesOnly: boolean): void {
-  const config = readConfig();
-  config.server = {
-    ...(config.server ?? {}),
-    favoritesOnly,
-  };
-  writeConfig(config);
+  updateConfig(config => {
+    config.server = {
+      ...(config.server ?? {}),
+      favoritesOnly,
+    };
+  });
 }
 
 export function getServerListenMode(): 'local' | 'network' {
@@ -236,10 +284,10 @@ export function getServerListenMode(): 'local' | 'network' {
 }
 
 export function setServerListenMode(listenMode: 'local' | 'network'): void {
-  const config = readConfig();
-  config.server = {
-    ...(config.server ?? {}),
-    listenMode,
-  };
-  writeConfig(config);
+  updateConfig(config => {
+    config.server = {
+      ...(config.server ?? {}),
+      listenMode,
+    };
+  });
 }

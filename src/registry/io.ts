@@ -38,7 +38,7 @@ export function ensureSecureAppHome(): void {
   }
 }
 
-function writeSecureFile(path: string, content: string): void {
+export function writeSecureFile(path: string, content: string): void {
   ensureSecureAppHome();
   mkdirSync(dirname(path), { recursive: true, mode: DIR_MODE });
   const fd = openSync(path, 'wx', FILE_MODE);
@@ -63,7 +63,7 @@ function writeSecureFile(path: string, content: string): void {
   }
 }
 
-function syncParentDirectory(path: string): void {
+export function syncParentDirectory(path: string): void {
   let fd: number | undefined;
   try {
     fd = openSync(dirname(path), 'r');
