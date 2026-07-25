@@ -202,7 +202,61 @@ afterEach(() => {
   rmSync(testRoot, { recursive: true, force: true });
 });
 
+// Windows and Node older than 22.15 keep the spawn fallback, which cannot
+// preserve the pid.
+const execReplacesProcessImage =
+  process.platform !== 'win32' && typeof process.execve === 'function';
+
 describe('clodex-claude process wrapper', () => {
+  it.skipIf(!execReplacesProcessImage)(
+    'replaces its process image so Claude keeps the wrapper pid and leads its process group',
+    async () => {
+      const identityMarker = join(testRoot, 'claude-identity.json');
+      const identityHelper = join(testRoot, 'identity-claude.mjs');
+      writeFileSync(
+        identityHelper,
+        [
+          "import { execFileSync } from 'node:child_process';",
+          "import { writeFileSync } from 'node:fs';",
+          "const pgid = execFileSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], {",
+          "  encoding: 'utf8',",
+          '}).trim();',
+          `writeFileSync(${JSON.stringify(identityMarker)}, JSON.stringify({`,
+          '  pid: process.pid,',
+          '  pgid: Number(pgid),',
+          '}));',
+          '',
+        ].join('\n'),
+      );
+
+      const env: NodeJS.ProcessEnv = { ...process.env, CLODEX_HOME: clodexHome };
+      delete env['CLODEX_REQUIRE_SERVER'];
+      // detached mirrors how Claude Code starts a background pty host: the
+      // process it spawns is meant to lead its own group so that the resize
+      // signal `kill(-pid, 'SIGWINCH')` reaches Claude.
+      const child = spawn(process.execPath, [wrapperPath, process.execPath, identityHelper], {
+        env,
+        stdio: ['ignore', 'ignore', 'ignore'],
+        detached: true,
+      });
+      const wrapperPid = child.pid;
+      await new Promise<void>((resolveExit, reject) => {
+        child.once('error', reject);
+        child.once('close', () => resolveExit());
+      });
+
+      const identity = JSON.parse(readFileSync(identityMarker, 'utf8')) as {
+        pid: number;
+        pgid: number;
+      };
+      // Same pid: Claude replaced the wrapper rather than running under it.
+      expect(identity.pid).toBe(wrapperPid);
+      // Group leader: `process.kill(-pid, 'SIGWINCH')` resolves to this process
+      // instead of failing with ESRCH.
+      expect(identity.pgid).toBe(identity.pid);
+    },
+  );
+
   it('--check exits 0 only for an advertised server with a live TCP port', async () => {
     const { server, port } = await openLoopbackServer();
     try {

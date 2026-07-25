@@ -18,6 +18,9 @@
 // server: ANTHROPIC_BASE_URL points at the gateway. With no live server the
 // env is passed through untouched, so claude always launches.
 //
+// The wrapper REPLACES its own process image with claude (execve) rather than
+// parenting it — see execIntoClaude below for why that distinction matters.
+//
 // This file must stay a thin shell over pure helpers (wrapper-env.ts,
 // server-runtime.ts) with minimal imports — it runs for every spawned agent.
 
@@ -43,6 +46,43 @@ function isExecutableFile(path: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+/**
+ * Replace this process with claude instead of parenting it. Returns only when
+ * exec is unavailable or failed, leaving the caller to spawn a child instead.
+ *
+ * Claude Code starts each background pty host with `detached: true` so the
+ * process it spawns leads its own process group, then delivers terminal
+ * resizes to that group with `process.kill(-process.pid, 'SIGWINCH')`. A
+ * wrapper that spawns claude as a child takes the group-leader role for
+ * itself: claude's pid no longer matches its group id, the signal fails with
+ * ESRCH inside Claude Code's silent `catch {}`, and every background session
+ * stays frozen at the startup size it was given on the command line (200x50)
+ * however the terminal is later resized. Interactive sessions hid the bug
+ * because there the kernel delivers SIGWINCH through the controlling terminal.
+ *
+ * Replacing the process image keeps the pid, process group, and inherited fds
+ * exactly as Claude Code handed them out, so it cannot tell this wrapper apart
+ * from launching claude directly. That also makes the signal forwarding and
+ * exit-code mapping below unnecessary on this path.
+ *
+ * `process.execve` is POSIX-only and landed in Node 22.15. Windows and the
+ * older 22.x releases still permitted by `engines.node` fall back to spawning,
+ * which behaves correctly apart from background pty resizes.
+ */
+function execIntoClaude(file: string, args: string[], env: NodeJS.ProcessEnv): void {
+  if (isWindows || typeof process.execve !== 'function') return;
+
+  // Some Node 24 releases flag execve as experimental, and that warning would
+  // land on the stderr of every agent process Claude Code spawns.
+  const warningListeners = process.listeners('warning') as Array<(warning: Error) => void>;
+  process.removeAllListeners('warning');
+  try {
+    process.execve(file, [file, ...args], env);
+  } catch {
+    for (const listener of warningListeners) process.on('warning', listener);
   }
 }
 
@@ -88,6 +128,9 @@ async function main(): Promise<void> {
   }
   const env = computeWrapperEnv(process.env, state);
 
+  execIntoClaude(claudePath!, claudeArgs, env);
+
+  // Only reached when exec is unavailable or failed.
   const child = spawn(claudePath!, claudeArgs, {
     stdio: 'inherit',
     env,
