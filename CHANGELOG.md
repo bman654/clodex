@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.3](https://github.com/bman654/clodex/compare/v2.1.2...v2.1.3) (2026-07-25)
+
+
+### Bug Fixes
+
+* **wrapper:** exec into claude so background pty resizes reach it ([#51](https://github.com/bman654/clodex/issues/51)) ([73661d6](https://github.com/bman654/clodex/commit/73661d672cdbc2d2f2ccdc1b808a3b80d4811338))
+
 ## [2.1.2](https://github.com/bman654/clodex/compare/v2.1.1...v2.1.2) (2026-07-25)
 
 
