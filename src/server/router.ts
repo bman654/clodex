@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import {
   isAllowedGatewayHost,
   isAuthorized,
-  isBrowserOriginRequest,
+  isDisallowedGatewayOrigin,
   isLoopbackBind,
 } from './auth.js';
 import {
@@ -216,9 +216,9 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse, options: 
         sendJson(res, 403, { error: { message: 'Forbidden: unexpected Host header' } });
         return;
       }
-      if (isBrowserOriginRequest(req.headers.origin)) {
-        plog(`blocked browser request from Origin: ${req.headers.origin}`);
-        sendJson(res, 403, { error: { message: 'Forbidden: browser origins are not accepted' } });
+      if (isDisallowedGatewayOrigin(req.headers.origin)) {
+        plog(`blocked non-loopback browser Origin: ${req.headers.origin}`);
+        sendJson(res, 403, { error: { message: 'Forbidden: non-loopback browser origins are not accepted' } });
         return;
       }
     }

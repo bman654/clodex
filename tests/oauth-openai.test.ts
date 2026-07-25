@@ -58,7 +58,7 @@ describe('oauth/openai', () => {
       expect(res.access_token).toBe('new_token');
       expect(global.fetch).toHaveBeenCalledWith(
         'https://auth.openai.com/oauth/token',
-        expect.objectContaining({ method: 'POST' }),
+        expect.objectContaining({ method: 'POST', redirect: 'manual' }),
       );
     });
 
@@ -121,6 +121,9 @@ describe('oauth/openai', () => {
       });
       expect(sleep).toHaveBeenCalledWith(expect.any(Number)); // Called after the 403
       expect(result.tokens.access_token).toBe('final_access_token');
+      for (const [, init] of vi.mocked(global.fetch).mock.calls) {
+        expect(init).toEqual(expect.objectContaining({ redirect: 'manual' }));
+      }
     });
 
     it('throws if device initiation fails', async () => {

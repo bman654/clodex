@@ -228,6 +228,17 @@ describe('server router browser guards', () => {
     expect((await rawRequest(handle.port, '/health', { Host: `127.0.0.1:${handle.port}` })).status).toBe(200);
   });
 
+  it('serves Electron and loopback-web callers', async () => {
+    const handle = await startTestServer();
+    for (const origin of ['app://claude-desktop', `http://127.0.0.1:${handle.port}`]) {
+      const res = await rawRequest(handle.port, '/health', {
+        Host: `127.0.0.1:${handle.port}`,
+        Origin: origin,
+      });
+      expect(res.status, origin).toBe(200);
+    }
+  });
+
   it('rejects a rebound Host before it can even probe /health', async () => {
     const handle = await startTestServer();
     const res = await rawRequest(handle.port, '/health', { Host: 'attacker.example' });

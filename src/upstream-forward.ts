@@ -145,6 +145,11 @@ export async function relayAnthropicMessages(
 
   if (upstreamRes.status >= 300 && upstreamRes.status < 400) {
     const location = upstreamRes.headers.get('location') ?? '(none)';
+    try {
+      await upstreamRes.body?.cancel();
+    } catch {
+      // Preserve the redirect refusal when transport cleanup also fails.
+    }
     options.log?.(`anthropic upstream refused redirect to ${location}`);
     options.onUpstreamError?.(upstreamRes.status, `redirect to ${location}`);
     res.writeHead(502, { 'Content-Type': 'application/json' });

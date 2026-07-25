@@ -3,7 +3,7 @@ import {
   extractBearerToken,
   isAllowedGatewayHost,
   isAuthorized,
-  isBrowserOriginRequest,
+  isDisallowedGatewayOrigin,
   isLoopbackBind,
   sanitizeCredential,
 } from '../src/server/auth.js';
@@ -61,10 +61,20 @@ describe('loopback gateway browser guards', () => {
     }
   });
 
-  it('flags any Origin header as a browser request', () => {
-    expect(isBrowserOriginRequest('https://evil.example')).toBe(true);
-    expect(isBrowserOriginRequest('null')).toBe(true); // sandboxed iframe
-    expect(isBrowserOriginRequest(undefined)).toBe(false);
-    expect(isBrowserOriginRequest('  ')).toBe(false);
+  it('rejects only non-loopback HTTP(S) origins', () => {
+    for (const origin of ['https://evil.example', 'http://attacker.test:17645']) {
+      expect(isDisallowedGatewayOrigin(origin), origin).toBe(true);
+    }
+    for (const origin of [
+      'http://localhost:17645',
+      'https://127.0.0.1',
+      'http://[::1]:17645',
+      'app://claude-desktop',
+      'null',
+    ]) {
+      expect(isDisallowedGatewayOrigin(origin), origin).toBe(false);
+    }
+    expect(isDisallowedGatewayOrigin(undefined)).toBe(false);
+    expect(isDisallowedGatewayOrigin('  ')).toBe(false);
   });
 });

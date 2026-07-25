@@ -13,9 +13,9 @@ export function sanitizeCredential(value: string | null | undefined): string | n
  * - Host: a browser cannot forge it. DNS rebinding — the trick that makes
  *   loopback responses *readable* cross-origin — pins Host to the attacker's
  *   own name, so requiring a loopback literal defeats it.
- * - Origin: fetch/XHR always attach it, and no clodex client is a browser, so
- *   its mere presence marks a CORS-simple request (text/plain POSTs skip the
- *   preflight and would otherwise execute blind).
+ * - Origin: reject web pages hosted away from loopback, including CORS-simple
+ *   text/plain POSTs that skip preflight. Loopback web apps and Electron clients
+ *   with custom-scheme origins remain valid local callers.
  *
  * Network mode binds 0.0.0.0 and mandates a password, so it is gated already
  * and its Host is legitimately a LAN address; both checks are skipped there.
@@ -36,8 +36,15 @@ export function isAllowedGatewayHost(hostHeader: string | null | undefined): boo
   }
 }
 
-export function isBrowserOriginRequest(originHeader: string | null | undefined): boolean {
-  return typeof originHeader === 'string' && originHeader.trim() !== '';
+export function isDisallowedGatewayOrigin(originHeader: string | null | undefined): boolean {
+  if (typeof originHeader !== 'string' || originHeader.trim() === '') return false;
+  try {
+    const origin = new URL(originHeader);
+    if (origin.protocol !== 'http:' && origin.protocol !== 'https:') return false;
+    return !LOOPBACK_HOSTNAMES.has(origin.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 export function isAuthorized(request: Request, serverPassword: string | null): boolean {

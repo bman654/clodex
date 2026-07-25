@@ -52,12 +52,13 @@ describe('oauth refresh http', () => {
     vi.restoreAllMocks();
   });
 
-  it('posts form refresh requests and includes response text in the error', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({
+  it('posts form refresh requests without following redirects and includes response text in the error', async () => {
+    const fetchMock = vi.fn(async () => ({
       ok: false,
       status: 401,
       text: async () => 'bad refresh',
-    })));
+    }));
+    vi.stubGlobal('fetch', fetchMock);
 
     await expect(postOAuthRefresh(
       'https://auth/token',
@@ -69,14 +70,18 @@ describe('oauth refresh http', () => {
         includeBody: true,
       },
     )).rejects.toThrow('xAI token refresh failed (401): bad refresh');
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://auth/token',
+      expect.objectContaining({ redirect: 'manual' }),
+    );
   });
 
-  it('cancels an unread failed response body when error details are disabled', async () => {
+  it('rejects and cancels an unread redirect response', async () => {
     const cancel = vi.fn(async () => {});
     const text = vi.fn(async () => 'must stay unread');
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: false,
-      status: 401,
+      status: 307,
       body: { cancel },
       text,
     })));
@@ -89,7 +94,7 @@ describe('oauth refresh http', () => {
         errorPrefix: 'token refresh failed',
         includeStatus: true,
       },
-    )).rejects.toThrow('token refresh failed (401)');
+    )).rejects.toThrow('token refresh failed (307)');
     expect(cancel).toHaveBeenCalledOnce();
     expect(text).not.toHaveBeenCalled();
   });
