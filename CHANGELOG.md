@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.1.2](https://github.com/bman654/clodex/compare/v2.1.1...v2.1.2) (2026-07-25)
+
+
+### Bug Fixes
+
+* **auth:** make chunked credentials crash-safe ([#17](https://github.com/bman654/clodex/issues/17)) ([cae6db6](https://github.com/bman654/clodex/commit/cae6db6389bcae576ccc51f054937dfe4685b059))
+* **wrapper:** retry transient listener checks ([#44](https://github.com/bman654/clodex/issues/44)) ([de233d8](https://github.com/bman654/clodex/commit/de233d8c00aa12c55405ad12b9e9740988e8ee38))
+
 ## [2.1.1](https://github.com/bman654/clodex/compare/v2.1.0...v2.1.1) (2026-07-24)
 
 
