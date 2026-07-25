@@ -70,16 +70,16 @@ async function main(): Promise<void> {
 
   // Selection policy (see orderWrapperServerCandidates): proxy-mode servers
   // are preferred over endpoint-mode ones — bridging keeps Claude Code's own
-  // Anthropic auth — with newest startedAt breaking ties within a mode. The
-  // A fast probe round covers every candidate so an unreachable preferred
-  // record cannot delay a reachable fallback. If none answer, retry rounds
-  // tolerate transient refusal from an already-advertised live process under
-  // one shared deadline, then claude launches untouched when none recover.
+  // Anthropic auth — with newest startedAt breaking ties within a mode. A fast
+  // probe round covers every candidate so an unreachable preferred record
+  // cannot delay a reachable fallback. Timed-out probes retry under one shared
+  // deadline; definitive connection errors fail immediately.
   const candidates = orderWrapperServerCandidates(readLiveServerRuntimeStates());
   const state: ServerRuntimeState | null = await waitForTcpListenerCandidate(
     '127.0.0.1',
     candidates,
     WRAPPER_SERVER_READY_TIMEOUT_MS,
+    { retryFailure: result => result === 'timeout' },
   );
   if (checkOnly) process.exit(state ? 0 : 1);
   if (!state && wrapperRequiresServer(process.env)) {

@@ -17,25 +17,42 @@ export function tcpListenerUrlHost(address: string): string {
   return host.includes(':') ? `[${host}]` : host;
 }
 
-function probeTcpListener(host: string, port: number, timeoutMs: number): Promise<boolean> {
+type TcpListenerProbeResult = 'ready' | 'timeout' | 'unreachable';
+
+function probeTcpListener(
+  host: string,
+  port: number,
+  timeoutMs: number,
+): Promise<TcpListenerProbeResult> {
   return new Promise(resolve => {
     const socket = connect({ host, port });
     let settled = false;
-    const finish = (ready: boolean) => {
+    const finish = (result: TcpListenerProbeResult) => {
       if (settled) return;
       settled = true;
       socket.destroy();
-      resolve(ready);
+      resolve(result);
     };
-    socket.once('connect', () => finish(true));
-    socket.once('error', () => finish(false));
-    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.once('connect', () => finish('ready'));
+    socket.once('error', error => {
+      finish(
+        (error as NodeJS.ErrnoException).code === 'ETIMEDOUT'
+          ? 'timeout'
+          : 'unreachable',
+      );
+    });
+    socket.setTimeout(timeoutMs, () => finish('timeout'));
   });
 }
 
 interface TcpListenerWaitOptions {
   now?: () => number;
-  probe?: (host: string, port: number, timeoutMs: number) => Promise<boolean>;
+  probe?: (
+    host: string,
+    port: number,
+    timeoutMs: number,
+  ) => Promise<TcpListenerProbeResult>;
+  retryFailure?: (result: Exclude<TcpListenerProbeResult, 'ready'>) => boolean;
   delay?: (ms: number) => Promise<void>;
 }
 
@@ -54,20 +71,28 @@ export async function waitForTcpListenerCandidate<T extends { port: number }>(
 
   const now = options.now ?? Date.now;
   const probe = options.probe ?? probeTcpListener;
+  const retryFailure = options.retryFailure ?? (() => true);
   const wait = options.delay ?? (ms => delay(ms));
   const deadline = now() + timeoutMs;
+  let pendingCandidates = [...candidates];
 
   do {
     const remaining = Math.max(1, deadline - now());
     const results = await Promise.all(
-      candidates.map(candidate => probe(
+      pendingCandidates.map(candidate => probe(
         host,
         candidate.port,
         Math.min(remaining, TCP_PROBE_TIMEOUT_MS),
       )),
     );
-    const readyIndex = results.findIndex(Boolean);
-    if (readyIndex >= 0) return candidates[readyIndex] ?? null;
+    const readyIndex = results.findIndex(result => result === 'ready');
+    if (readyIndex >= 0) return pendingCandidates[readyIndex] ?? null;
+
+    pendingCandidates = pendingCandidates.filter((_candidate, index) => {
+      const result = results[index];
+      return result !== undefined && result !== 'ready' && retryFailure(result);
+    });
+    if (pendingCandidates.length === 0) return null;
 
     const retryDelay = Math.min(LISTENER_READY_RETRY_MS, deadline - now());
     if (retryDelay <= 0) return null;

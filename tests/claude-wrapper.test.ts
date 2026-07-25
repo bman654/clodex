@@ -75,6 +75,7 @@ async function runWrapper(
 
 async function openLoopbackServer(
   host = '127.0.0.1',
+  ipv6Only = false,
 ): Promise<{ server: Server; port: number }> {
   const server = createServer((socket) => socket.end());
   await new Promise<void>((resolveListen, reject) => {
@@ -83,7 +84,7 @@ async function openLoopbackServer(
       reject(error);
     };
     server.once('error', onError);
-    server.listen(0, host, () => {
+    server.listen({ port: 0, host, ipv6Only }, () => {
       server.off('error', onError);
       resolveListen();
     });
@@ -103,6 +104,14 @@ async function closeServer(server: Server): Promise<void> {
       else resolveClose();
     });
   });
+}
+
+async function openRefusingIpv4Reservations(
+  count: number,
+): Promise<Array<{ server: Server; port: number }>> {
+  return Promise.all(
+    Array.from({ length: count }, () => openLoopbackServer('::1', true)),
+  );
 }
 
 interface AdvertisedServer {
@@ -233,12 +242,12 @@ describe('clodex-claude process wrapper', () => {
   });
 
   it('uses a live endpoint when the preferred proxy record is stale', async () => {
-    const staleProxyReservation = await openLoopbackServer('127.0.0.2');
     const endpoint = await openLoopbackServer();
+    const [staleProxyReservation] = await openRefusingIpv4Reservations(1);
     advertiseServers([
       {
         mode: 'proxy',
-        port: staleProxyReservation.port,
+        port: staleProxyReservation!.port,
         pid: process.pid,
         caPath,
         startedAt: '2026-07-24T12:00:00.000Z',
@@ -261,7 +270,7 @@ describe('clodex-claude process wrapper', () => {
       });
     } finally {
       await Promise.all([
-        closeServer(staleProxyReservation.server),
+        closeServer(staleProxyReservation!.server),
         closeServer(endpoint.server),
       ]);
     }
@@ -313,43 +322,43 @@ describe('clodex-claude process wrapper', () => {
   });
 
   it('reports unavailable when every candidate refuses connections', async () => {
-    const [newestProxy, olderProxy, endpoint] = await Promise.all([
-      openLoopbackServer('127.0.0.2'),
-      openLoopbackServer('127.0.0.2'),
-      openLoopbackServer('127.0.0.2'),
-    ]);
+    const [newestProxy, olderProxy, endpoint] =
+      await openRefusingIpv4Reservations(3);
     advertiseServers([
       {
         mode: 'proxy',
-        port: newestProxy.port,
+        port: newestProxy!.port,
         pid: process.pid,
         caPath,
         startedAt: '2026-07-24T14:00:00.000Z',
       },
       {
         mode: 'proxy',
-        port: olderProxy.port,
+        port: olderProxy!.port,
         pid: process.pid,
         caPath,
         startedAt: '2026-07-24T13:00:00.000Z',
       },
       {
         mode: 'endpoint',
-        port: endpoint.port,
+        port: endpoint!.port,
         pid: process.pid,
         startedAt: '2026-07-24T12:00:00.000Z',
       },
     ]);
 
     try {
+      const startedAt = process.hrtime.bigint();
       const result = await runWrapper(['--check']);
+      const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
 
       expect(result).toMatchObject({ code: 1, signal: null });
+      expect(elapsedMs).toBeLessThan(400);
     } finally {
       await Promise.all([
-        closeServer(newestProxy.server),
-        closeServer(olderProxy.server),
-        closeServer(endpoint.server),
+        closeServer(newestProxy!.server),
+        closeServer(olderProxy!.server),
+        closeServer(endpoint!.server),
       ]);
     }
   });

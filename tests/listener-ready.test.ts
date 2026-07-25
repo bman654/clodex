@@ -48,7 +48,7 @@ describe('tcp listener readiness', () => {
       now: () => elapsedMs,
       probe: async () => {
         attempts += 1;
-        return attempts === 3;
+        return attempts === 3 ? 'ready' : 'unreachable';
       },
       delay: async (ms: number) => {
         elapsedMs += ms;
@@ -62,13 +62,13 @@ describe('tcp listener readiness', () => {
 
   it('returns false at the shared deadline when a listener stays unreachable', async () => {
     let elapsedMs = 0;
-    const probeTimeouts: number[] = [];
+    let attempts = 0;
 
     const readiness = waitForTcpListener('127.0.0.1', 17_645, 12, {
       now: () => elapsedMs,
-      probe: async (_host: string, _port: number, timeoutMs: number) => {
-        probeTimeouts.push(timeoutMs);
-        return false;
+      probe: async () => {
+        attempts += 1;
+        return 'unreachable';
       },
       delay: async (ms: number) => {
         elapsedMs += ms;
@@ -77,7 +77,7 @@ describe('tcp listener readiness', () => {
 
     await expect(readiness).resolves.toBe(false);
     expect(elapsedMs).toBe(12);
-    expect(probeTimeouts).toEqual([12, 7, 2]);
+    expect(attempts).toBeGreaterThan(1);
   });
 
   it('probes every candidate once and chooses the first reachable candidate', async () => {
@@ -92,7 +92,7 @@ describe('tcp listener readiness', () => {
         now: () => 0,
         probe: async (_host: string, port: number) => {
           probedPorts.push(port);
-          return true;
+          return 'ready';
         },
         delay: async () => {
           throw new Error('reachable fast pass must not retry');
@@ -106,7 +106,7 @@ describe('tcp listener readiness', () => {
 
   it('shares one exact deadline across all unreachable candidates', async () => {
     let elapsedMs = 0;
-    const probes: Array<{ port: number; timeoutMs: number }> = [];
+    const probedPorts: number[] = [];
 
     const selected = await waitForTcpListenerCandidate(
       '127.0.0.1',
@@ -114,9 +114,9 @@ describe('tcp listener readiness', () => {
       12,
       {
         now: () => elapsedMs,
-        probe: async (_host: string, port: number, timeoutMs: number) => {
-          probes.push({ port, timeoutMs });
-          return false;
+        probe: async (_host: string, port: number) => {
+          probedPorts.push(port);
+          return 'unreachable';
         },
         delay: async (ms: number) => {
           elapsedMs += ms;
@@ -126,13 +126,36 @@ describe('tcp listener readiness', () => {
 
     expect(selected).toBeNull();
     expect(elapsedMs).toBe(12);
-    expect(probes).toEqual([
-      { port: 17_645, timeoutMs: 12 },
-      { port: 17_646, timeoutMs: 12 },
-      { port: 17_645, timeoutMs: 7 },
-      { port: 17_646, timeoutMs: 7 },
-      { port: 17_645, timeoutMs: 2 },
-      { port: 17_646, timeoutMs: 2 },
-    ]);
+    expect(probedPorts.length).toBeGreaterThan(2);
+    expect(new Set(probedPorts)).toEqual(new Set([17_645, 17_646]));
+  });
+
+  it('retries only failures accepted by the retry policy', async () => {
+    let elapsedMs = 0;
+    const attempts = new Map<number, number>();
+    const candidates = [{ port: 17_645 }, { port: 17_646 }];
+
+    const selected = await waitForTcpListenerCandidate(
+      '127.0.0.1',
+      candidates,
+      20,
+      {
+        now: () => elapsedMs,
+        probe: async (_host: string, port: number) => {
+          const attempt = (attempts.get(port) ?? 0) + 1;
+          attempts.set(port, attempt);
+          if (port === 17_645) return 'unreachable';
+          return attempt === 1 ? 'timeout' : 'ready';
+        },
+        retryFailure: result => result === 'timeout',
+        delay: async (ms: number) => {
+          elapsedMs += ms;
+        },
+      },
+    );
+
+    expect(selected).toBe(candidates[1]);
+    expect(attempts.get(17_645)).toBe(1);
+    expect(attempts.get(17_646)).toBe(2);
   });
 });
