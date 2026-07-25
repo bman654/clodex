@@ -1736,6 +1736,30 @@ function recoverEmptyOpaqueManagedKeyringState(
   return true;
 }
 
+function retireUnreadableManagedStateForDeletion(
+  keyring: KeyringApi,
+  account: string,
+  diag?: (msg: string) => void,
+): boolean {
+  try {
+    readKeyringManagedState(keyring, account);
+    return true;
+  } catch (err) {
+    diag?.(classifyKeyringError(err));
+    if (!(err instanceof KeyringManagedStateKeyUnavailableError)) {
+      return false;
+    }
+  }
+  try {
+    removeKeyringManagedState(account);
+    diag?.('retired unreadable managed credential metadata for explicit deletion');
+    return true;
+  } catch (err) {
+    diag?.(classifyKeyringError(err));
+    return false;
+  }
+}
+
 function writeKeyringAccountLocked(
   keyring: KeyringApi,
   account: string,
@@ -1969,6 +1993,7 @@ function deleteJournalLessManagedKeyringAccount(
   keyring: KeyringApi,
   account: string,
   diag?: (msg: string) => void,
+  retireUnreadableManagedState = false,
 ): boolean {
   const sentinels: KeyringEnumerationSentinel[] = [];
   let sentinelsRemoved = false;
@@ -2028,6 +2053,10 @@ function deleteJournalLessManagedKeyringAccount(
       }
     }
     sentinelsRemoved = true;
+    if (retireUnreadableManagedState) {
+      removeKeyringManagedState(account);
+      diag?.('retired unreadable managed credential metadata for explicit deletion');
+    }
     writeKeyringJournal(keyring, account, {
       mode: 'deleted',
       generations: [],
@@ -2066,11 +2095,11 @@ async function deleteKeyringAccount(
           managedState = readKeyringManagedState(keyring, account);
         } catch (err) {
           diag?.(classifyKeyringError(err));
-          if (
-            err instanceof KeyringManagedStateKeyUnavailableError &&
-            recoverEmptyOpaqueManagedKeyringState(keyring, account, diag)
-          ) {
-            return true;
+          if (err instanceof KeyringManagedStateKeyUnavailableError) {
+            if (recoverEmptyOpaqueManagedKeyringState(keyring, account, diag)) {
+              return true;
+            }
+            return deleteJournalLessManagedKeyringAccount(keyring, account, diag, true);
           }
           return false;
         }
@@ -2082,12 +2111,17 @@ async function deleteKeyringAccount(
             pendingJournalRaw = encodeKeyringJournal(managedState.journal);
             diag?.('restored keyring cleanup journal from managed state');
           }
+        } else if (readKeyringDeletionGuard(keyring, account) !== null) {
+          return reconcileKeyringJournal(keyring, account, diag);
         }
       }
       let pendingJournal: KeyringChunkJournal | null = null;
       try {
         if (pendingJournalRaw !== null) {
           pendingJournal = parseKeyringChunkJournal(pendingJournalRaw);
+          if (!retireUnreadableManagedStateForDeletion(keyring, account, diag)) {
+            return false;
+          }
           if (pendingJournal.mode === 'deleted') {
             return reconcileKeyringJournal(keyring, account, diag);
           }

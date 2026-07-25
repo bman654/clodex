@@ -528,6 +528,70 @@ describe('keyring credential chunks', () => {
     },
   );
 
+  it.each([
+    ['malformed current-format', 'v1:CORRUPT', 'current-secret'],
+    ['future-format', 'v2:future-key-material', 'a'.repeat(2_500)],
+  ])(
+    'allows explicit deletion when %s metadata key material is unsupported',
+    async (_keyKind, unsupportedKey, currentSecret) => {
+      await expect(saveProviderCredential(authRef, currentSecret)).resolves.toBe(true);
+      const originalManagedState = readFileSync(managedStatePath(), 'utf8');
+      const originalPublishedValue = keyring.values.get(mainKey);
+      const originalChunks = currentChunkKeys().sort();
+      keyring.values.set(managedStateKey, unsupportedKey);
+
+      await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+      await expect(provisionProviderCredential(authRef, 'replacement-secret')).resolves.toBe(false);
+      expect(keyring.values.get(mainKey)).toBe(originalPublishedValue);
+      expect(currentChunkKeys().sort()).toEqual(originalChunks);
+      expect(keyring.values.get(managedStateKey)).toBe(unsupportedKey);
+      expect(readFileSync(managedStatePath(), 'utf8')).toBe(originalManagedState);
+
+      await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+      expectDeletionMarker();
+      expect(currentChunkKeys()).toEqual([]);
+      await expect(provisionProviderCredential(authRef, 'replacement-secret')).resolves.toBe(true);
+      await expect(resolveProviderCredential('test', authRef)).resolves.toBe('replacement-secret');
+    },
+  );
+
+  it('allows explicit deletion when future metadata has no keyring journal', async () => {
+    const currentSecret = 'a'.repeat(2_500);
+    const futureKey = 'v2:future-key-material';
+    await expect(saveProviderCredential(authRef, currentSecret)).resolves.toBe(true);
+    const originalManagedState = readFileSync(managedStatePath(), 'utf8');
+    const originalMarker = keyring.values.get(mainKey);
+    const originalChunks = currentChunkKeys().sort();
+    keyring.values.set(managedStateKey, futureKey);
+    keyring.values.delete(journalKey);
+
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+    await expect(provisionProviderCredential(authRef, 'replacement-secret')).resolves.toBe(false);
+    expect(keyring.values.get(mainKey)).toBe(originalMarker);
+    expect(currentChunkKeys().sort()).toEqual(originalChunks);
+    expect(keyring.values.get(managedStateKey)).toBe(futureKey);
+    expect(readFileSync(managedStatePath(), 'utf8')).toBe(originalManagedState);
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+    expectDeletionMarker();
+    expect(currentChunkKeys()).toEqual([]);
+    await expect(provisionProviderCredential(authRef, 'replacement-secret')).resolves.toBe(true);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBe('replacement-secret');
+  });
+
+  it('resumes explicit deletion after opaque metadata retirement', async () => {
+    await expect(saveProviderCredential(authRef, 'current-secret')).resolves.toBe(true);
+    keyring.values.delete(journalKey);
+    keyring.values.delete(mainKey);
+    keyring.values.set(deletedKey, 'v1:deleted');
+    keyring.values.set(managedStateKey, 'v2:future-key-material');
+    rmSync(managedStatePath());
+
+    await expect(deleteProviderCredential(authRef)).resolves.toBe(true);
+
+    expectDeletionMarker();
+  });
+
   it.each(['v1:CORRUPT', 'v2:future-key-material'])(
     'regenerates unsupported metadata key material %s after proving the keyring is empty',
     async unsupportedKey => {
