@@ -1,7 +1,7 @@
 import { tmpdir, userInfo } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { getAppHome } from '../src/paths.js';
+import { getAppHome, getCredentialCleanupPath } from '../src/paths.js';
 import {
   getCredentialLockRoot,
   getCredentialMutationLockPath,
@@ -34,9 +34,10 @@ describe('test sandbox floor', () => {
     expect(getAppHome()).not.toBe(join(userInfo().homedir, '.clodex'));
   });
 
-  it('keeps native credential coordination state inside the Vitest sandbox', () => {
+  it('keeps credential coordination and cleanup state inside the Vitest sandbox', () => {
     expectInsideVitestSandbox(getCredentialLockRoot());
     expectInsideVitestSandbox(getCredentialMutationLockPath('keyring:test-account'));
     expectInsideVitestSandbox(getCredentialStateRoot());
+    expectInsideVitestSandbox(getCredentialCleanupPath());
   });
 });

@@ -82,6 +82,7 @@ export function sdkUpstreamErrorDetails(err: unknown): SdkUpstreamErrorDetails |
   const retryAfterSeconds = rawRetryAfter === undefined
     ? undefined
     : clampRetryAfterSeconds(rawRetryAfter);
+  const transportCode = boundedTransportCode(inner.data);
 
   return {
     statusCode: inner.statusCode,
@@ -89,7 +90,7 @@ export function sdkUpstreamErrorDetails(err: unknown): SdkUpstreamErrorDetails |
     isRetryable: inner.isRetryable,
     attemptCount: retry?.errors.length ?? 1,
     ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
-    transportCode: boundedTransportCode(inner.data),
+    ...(transportCode !== undefined ? { transportCode } : {}),
   };
 }
 
