@@ -208,6 +208,19 @@ const execReplacesProcessImage =
   process.platform !== 'win32' && typeof process.execve === 'function';
 
 describe('clodex-claude process wrapper', () => {
+  it('reports an unlaunchable Claude binary instead of aborting the exec', async () => {
+    // execve aborts the process (exit 134, native crash dump) when the syscall
+    // fails, so an unusable binary has to be caught before the call and left to
+    // the spawn path. Existing but not executable reproduces that deterministically.
+    const unusable = join(testRoot, 'not-executable-claude');
+    writeFileSync(unusable, '#!/bin/sh\nexit 0\n', { mode: 0o644 });
+
+    const result = await runWrapper([], { CLODEX_CLAUDE_PATH: unusable });
+
+    expect(result).toMatchObject({ code: 127, signal: null });
+    expect(result.stderr).toContain('failed to launch');
+  });
+
   it.skipIf(!execReplacesProcessImage)(
     'replaces its process image so Claude keeps the wrapper pid and leads its process group',
     async () => {

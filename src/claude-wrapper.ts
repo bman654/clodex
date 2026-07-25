@@ -50,8 +50,8 @@ function isExecutableFile(path: string): boolean {
 }
 
 /**
- * Replace this process with claude instead of parenting it. Returns only when
- * exec is unavailable or failed, leaving the caller to spawn a child instead.
+ * Replace this process with claude instead of parenting it. Returns when exec
+ * is unavailable or declined, leaving the caller to spawn a child instead.
  *
  * Claude Code starts each background pty host with `detached: true` so the
  * process it spawns leads its own process group, then delivers terminal
@@ -71,18 +71,24 @@ function isExecutableFile(path: string): boolean {
  * `process.execve` is POSIX-only and landed in Node 22.15. Windows and the
  * older 22.x releases still permitted by `engines.node` fall back to spawning,
  * which behaves correctly apart from background pty resizes.
+ *
+ * A failed exec cannot fall back to spawning: on syscall failure `execve`
+ * aborts with a native crash dump (exit 134) rather than throwing. So re-check
+ * the binary immediately before the call — `main` has awaited up to 500ms of
+ * server probing since it first looked, and Claude Code replaces its own
+ * binary when it self-updates — and let a vanished or unreadable file take the
+ * spawn path, which still reports it as a one-line error and exit 127. Only
+ * argument and platform validation, which run before the syscall, are
+ * catchable; claude has not been launched when they throw.
  */
 function execIntoClaude(file: string, args: string[], env: NodeJS.ProcessEnv): void {
   if (isWindows || typeof process.execve !== 'function') return;
+  if (!isExecutableFile(file)) return;
 
-  // Some Node 24 releases flag execve as experimental, and that warning would
-  // land on the stderr of every agent process Claude Code spawns.
-  const warningListeners = process.listeners('warning') as Array<(warning: Error) => void>;
-  process.removeAllListeners('warning');
   try {
     process.execve(file, [file, ...args], env);
   } catch {
-    for (const listener of warningListeners) process.on('warning', listener);
+    // Rejected before the syscall — leave claude to the spawn path below.
   }
 }
 

@@ -66,6 +66,8 @@ This page explains how to bridge **every** Claude Code process on your machine â
    > exec "$NODE" "$(npm root -g)/@bman654/clodex/dist/claude-wrapper.js" "$@"
    > ```
    >
+   > **Keep the `exec`.** Without it the shell survives as claude's parent and keeps the process group Claude Code created for it. Claude Code addresses that group when it tells a background session its terminal was resized, so agent sessions would render at a fixed size and corrupt on resize. The wrapper execs into claude for the same reason.
+   >
    > Replace the `NODE=` line with your manager's stable path â€” nvm: `"$NVM_DIR/alias/default"` names the version, so use `"$NVM_DIR/versions/node/$(cat "$NVM_DIR/alias/default")/bin/node"`; volta: `"$HOME/.volta/bin/node"`; asdf: `"$(asdf which node)"` captured once. Hardcode the resolved `npm root -g` path if you prefer not to shell out. Verify the result works even with no PATH:
    >
    > ```bash
