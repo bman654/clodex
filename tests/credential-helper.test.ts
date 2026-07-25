@@ -219,6 +219,26 @@ describe('external credential helper', () => {
     await expect(readCredentialHelperAccount(account)).resolves.toBe('second-value');
   });
 
+  it('serializes a delete behind an active helper credential write', async () => {
+    process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE = 'detect-overlap';
+    const authRef = credentialInstanceAuthRef('provider:test');
+    const storePath = process.env.CLODEX_TEST_CREDENTIAL_HELPER_STORE!;
+
+    const write = provisionProviderCredential(authRef, 'secret-value');
+    await waitForPath(`${storePath}.set-started`);
+    const deletion = deleteProviderCredential(authRef);
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    expect(existsSync(`${storePath}.overlapping-delete`)).toBe(false);
+    writeFileSync(`${storePath}.release-set`, '', {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
+    await expect(write).resolves.toBe(true);
+    await expect(deletion).resolves.toBe(true);
+    await expect(resolveProviderCredential('test', authRef)).resolves.toBeNull();
+  });
+
   it('does not silently fall back when the configured helper fails', async () => {
     process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE = 'fail';
     const diagnostics: string[] = [];

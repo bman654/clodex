@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
+import os from 'node:os';
 import { join } from 'node:path';
 
 function requiredEnv(name: string): string {
@@ -15,6 +16,16 @@ function errorMessage(error: unknown): string {
 function writeJson(path: string, value: unknown): void {
   fs.writeFileSync(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
 }
+
+const nativeHome = requiredEnv('REGISTRY_LOCK_WORKER_NATIVE_HOME');
+os.userInfo = (() => ({
+  username: 'clodex-test',
+  uid: process.getuid?.() ?? -1,
+  gid: process.getgid?.() ?? -1,
+  shell: null,
+  homedir: nativeHome,
+})) as typeof os.userInfo;
+syncBuiltinESMExports();
 
 async function waitForFile(path: string, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;

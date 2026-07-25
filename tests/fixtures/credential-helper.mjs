@@ -98,6 +98,9 @@ if (operation === 'set') {
 }
 
 if (operation === 'delete') {
+  if (mode === 'detect-overlap' && existsSync(`${storePath}.active-set`)) {
+    writeFileSync(`${storePath}.overlapping-delete`, '', { encoding: 'utf8', mode: 0o600 });
+  }
   if (!(key in store)) process.exit(2);
   delete store[key];
   writeFileSync(storePath, JSON.stringify(store), { encoding: 'utf8', mode: 0o600 });

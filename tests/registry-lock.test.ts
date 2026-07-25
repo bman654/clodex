@@ -64,11 +64,14 @@ function workerEnvironment(
   role: WorkerRole,
   options: {
     clodexHome?: string;
+    nativeHome?: string;
     overrides?: NodeJS.ProcessEnv;
   } = {},
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
     CLODEX_HOME: options.clodexHome ?? root,
+    REGISTRY_LOCK_WORKER_NATIVE_HOME:
+      options.nativeHome ?? dirname(dirname(getCredentialStateRoot())),
     REGISTRY_LOCK_WORKER_ROOT: root,
     REGISTRY_LOCK_WORKER_ROLE: role,
   };
@@ -85,6 +88,7 @@ function spawnWorker(
   role: WorkerRole,
   options: {
     clodexHome?: string;
+    nativeHome?: string;
     overrides?: NodeJS.ProcessEnv;
   } = {},
 ): WorkerProcess {
@@ -705,12 +709,14 @@ describe('provider registry lock', () => {
     const contenderHome = temporaryRoot();
     const holderRuntime = temporaryRoot();
     const contenderRuntime = temporaryRoot();
+    const nativeHome = dirname(dirname(getCredentialStateRoot()));
     const credentialRef = `keyring:test:${randomUUID()}`;
     const workerPath = await buildWorker(root);
     const releasePath = join(root, 'release-credential-holder');
     const enteredPath = join(root, 'credential-contender-entered.json');
     const holder = spawnWorker(workerPath, root, 'credential-holder', {
       clodexHome: holderHome,
+      nativeHome,
       overrides: {
         HOME: holderHome,
         XDG_RUNTIME_DIR: holderRuntime,
@@ -730,6 +736,7 @@ describe('provider registry lock', () => {
 
       contender = spawnWorker(workerPath, root, 'credential-contender', {
         clodexHome: contenderHome,
+        nativeHome,
         overrides: {
           HOME: contenderHome,
           XDG_RUNTIME_DIR: contenderRuntime,
@@ -745,6 +752,7 @@ describe('provider registry lock', () => {
       expect(contenderReady.lockPath).toBe(holderReady.lockPath);
       expect(contenderReady.stateRoot).toBe(holderReady.stateRoot);
       expect(contenderReady.stateRoot).toBe(getCredentialStateRoot());
+      expect(contenderReady.stateRoot).toBe(join(nativeHome, '.clodex', 'keyring-state'));
       await new Promise(resolve => setTimeout(resolve, 125));
       expect(existsSync(enteredPath)).toBe(false);
       expect(contender.child.exitCode).toBeNull();

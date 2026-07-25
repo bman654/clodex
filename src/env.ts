@@ -310,8 +310,14 @@ function readKeyringEntry(keyring: KeyringApi, service: string, account: string)
 
 function deleteKeyringEntry(keyring: KeyringApi, service: string, account: string): boolean {
   const entry = new keyring.Entry(service, account);
-  if (!persistKeyringDeletionTombstone(keyring, service, account)) return false;
-  return entry.deletePassword();
+  const existing = readKeyringEntry(keyring, service, account);
+  if (existing === null) {
+    entry.deletePassword();
+    return readKeyringEntry(keyring, service, account) === null;
+  }
+  if (!persistKeyringDeletionTombstone(keyring, service, account, existing)) return false;
+  if (!entry.deletePassword()) return false;
+  return readKeyringEntry(keyring, service, account) === null;
 }
 
 function hasUnjournaledKeyringChunks(keyring: KeyringApi, account: string): boolean {
@@ -329,7 +335,7 @@ function hasUnjournaledKeyringChunks(keyring: KeyringApi, account: string): bool
 function listUnjournaledKeyringChunks(
   keyring: KeyringApi,
   account: string,
-): Array<{ service: string; account: string }> {
+): Array<{ service: string; account: string; value: string }> {
   const prefix = `${account}::chunk::`;
   return [KEYRING_SERVICE, KEYRING_CHUNK_SERVICE].flatMap(service =>
     keyring
@@ -338,7 +344,11 @@ function listUnjournaledKeyringChunks(
         credential =>
           credential.account.startsWith(prefix) && isReservedKeyringAccount(credential.account),
       )
-      .map(credential => ({ service, account: credential.account })),
+      .map(credential => ({
+        service,
+        account: credential.account,
+        value: credential.password,
+      })),
   );
 }
 
@@ -352,10 +362,11 @@ function createKeyringEnumerationSentinel(
   service: string,
   account: string,
 ): KeyringEnumerationSentinel {
+  const generation = randomUUID();
   return {
     service,
-    account: `${account}::chunk::${randomUUID()}::0`,
-    value: `${KEYRING_ENUMERATION_SENTINEL_PREFIX}${randomUUID()}`,
+    account: `${account}::chunk::${generation}::0`,
+    value: `${KEYRING_ENUMERATION_SENTINEL_PREFIX}${generation}`,
   };
 }
 
@@ -380,7 +391,42 @@ function removeKeyringEnumerationSentinel(
   keyring: KeyringApi,
   sentinel: KeyringEnumerationSentinel,
 ): boolean {
-  return deleteKeyringEntry(keyring, sentinel.service, sentinel.account);
+  const current = readKeyringEntry(keyring, sentinel.service, sentinel.account);
+  if (current === null) return true;
+  if (current !== sentinel.value) return false;
+  if (!new keyring.Entry(sentinel.service, sentinel.account).deletePassword()) {
+    return false;
+  }
+  return readKeyringEntry(keyring, sentinel.service, sentinel.account) === null;
+}
+
+function isKeyringInventoryBookkeepingEntry(
+  entry: { account: string; value: string },
+  ownerAccount: string,
+): boolean {
+  const accountPrefix = `${ownerAccount}::chunk::`;
+  const accountSuffix = '::0';
+  if (!entry.account.startsWith(accountPrefix) || !entry.account.endsWith(accountSuffix)) {
+    return false;
+  }
+  const generation = entry.account.slice(accountPrefix.length, -accountSuffix.length);
+  return (
+    KEYRING_GENERATION_PATTERN.test(generation) &&
+    entry.value === `${KEYRING_ENUMERATION_SENTINEL_PREFIX}${generation}`
+  );
+}
+
+function removeKeyringBookkeepingEntry(
+  keyring: KeyringApi,
+  ownerAccount: string,
+  entry: { service: string; account: string; value: string },
+): boolean {
+  if (!isKeyringInventoryBookkeepingEntry(entry, ownerAccount)) return false;
+  if (readKeyringEntry(keyring, entry.service, entry.account) !== entry.value) return false;
+  if (!new keyring.Entry(entry.service, entry.account).deletePassword()) {
+    return false;
+  }
+  return readKeyringEntry(keyring, entry.service, entry.account) === null;
 }
 
 function verifyEmptyKeyringCredentialInventory(
@@ -403,11 +449,26 @@ function verifyEmptyKeyringCredentialInventory(
       inventory.some(entry => sameKeyringEnumerationEntry(entry, sentinel)),
     );
     const credentialEntries = inventory.filter(
-      entry => !sentinels.some(sentinel => sameKeyringEnumerationEntry(entry, sentinel)),
+      entry =>
+        !sentinels.some(sentinel => sameKeyringEnumerationEntry(entry, sentinel)) &&
+        !isKeyringInventoryBookkeepingEntry(entry, account),
     );
+    const bookkeepingEntries = inventory.filter(
+      entry =>
+        !sentinels.some(sentinel => sameKeyringEnumerationEntry(entry, sentinel)) &&
+        isKeyringInventoryBookkeepingEntry(entry, account),
+    );
+    for (const entry of bookkeepingEntries) {
+      if (!removeKeyringBookkeepingEntry(keyring, account, entry)) {
+        cleanupComplete = false;
+        diag?.('keyring credential inventory bookkeeping could not be removed');
+      }
+    }
     empty = complete && currentValue === null && credentialEntries.length === 0;
     if (!complete) {
       diag?.('keyring credential inventory could not be verified');
+    } else if (!empty) {
+      diag?.('keyring credential inventory is not empty');
     }
   } catch (err) {
     diag?.(classifyKeyringError(err));
@@ -440,9 +501,9 @@ function persistKeyringDeletionTombstone(
   keyring: KeyringApi,
   service: string,
   account: string,
+  existing: string,
 ): boolean {
-  const existing = readKeyringEntry(keyring, service, account);
-  if (existing?.startsWith(KEYRING_DELETE_TOMBSTONE_PREFIX)) return true;
+  if (existing.startsWith(KEYRING_DELETE_TOMBSTONE_PREFIX)) return true;
   const tombstone = `${KEYRING_DELETE_TOMBSTONE_PREFIX}${randomUUID()}`;
   new keyring.Entry(service, account).setPassword(tombstone);
   return readKeyringEntry(keyring, service, account) === tombstone;
@@ -1186,7 +1247,24 @@ function reconcileKeyringJournal(
     }
   }
   if (!cleaned) return false;
-  if (journal.unverifiable === true) return false;
+  if (journal.unverifiable === true) {
+    if (!verifyEmptyKeyringCredentialInventory(keyring, account, diag)) {
+      return false;
+    }
+    const verifiedDelete: KeyringChunkJournal = {
+      mode: 'delete',
+      generations: [],
+      ...(journal.blockLegacy ? { blockLegacy: true } : {}),
+    };
+    try {
+      writeKeyringJournal(keyring, account, verifiedDelete);
+      journal = verifiedDelete;
+      diag?.('retired unverifiable credential metadata after verifying an empty keyring');
+    } catch (err) {
+      diag?.(classifyKeyringError(err));
+      return false;
+    }
+  }
 
   if (journal.mode === 'delete' && journal.blockLegacy === true) {
     try {
@@ -1296,12 +1374,12 @@ function keyringManagedStatePath(account: string): string {
 
 function parseKeyringManagedStateKey(value: string): Buffer {
   if (!value.startsWith(KEYRING_MANAGED_STATE_KEY_PREFIX)) {
-    throw new Error('keyring managed-state encryption key is invalid');
+    throw new KeyringManagedStateKeyUnavailableError();
   }
   const encoded = value.slice(KEYRING_MANAGED_STATE_KEY_PREFIX.length);
   const key = Buffer.from(encoded, 'base64url');
   if (key.length !== 32 || key.toString('base64url') !== encoded) {
-    throw new Error('keyring managed-state encryption key is invalid');
+    throw new KeyringManagedStateKeyUnavailableError();
   }
   return key;
 }
@@ -1312,7 +1390,13 @@ function readKeyringManagedStateKey(keyring: KeyringApi, account: string): Buffe
 }
 
 function ensureKeyringManagedStateKey(keyring: KeyringApi, account: string): Buffer {
-  const current = readKeyringManagedStateKey(keyring, account);
+  let current: Buffer | null;
+  try {
+    current = readKeyringManagedStateKey(keyring, account);
+  } catch (err) {
+    if (!(err instanceof KeyringManagedStateKeyUnavailableError)) throw err;
+    current = null;
+  }
   if (current !== null) return current;
   const key = randomBytes(32);
   const encoded = `${KEYRING_MANAGED_STATE_KEY_PREFIX}${key.toString('base64url')}`;
@@ -1577,7 +1661,7 @@ async function readKeyringAccount(
   });
 }
 
-function replaceMalformedKeyringJournalWithTombstone(
+function persistUnverifiableKeyringDeletion(
   keyring: KeyringApi,
   account: string,
   diag?: (msg: string) => void,
@@ -1590,10 +1674,10 @@ function replaceMalformedKeyringJournalWithTombstone(
       ...(blockLegacy ? { blockLegacy: true } : {}),
       unverifiable: true,
     });
-    diag?.('invalid keyring cleanup journal was replaced with a deletion tombstone');
+    diag?.('unverifiable credential state was marked for verified deletion');
     return true;
   } catch {
-    diag?.('invalid keyring cleanup journal could not be replaced');
+    diag?.('unverifiable credential state could not be marked for deletion');
     return false;
   }
 }
@@ -1709,9 +1793,6 @@ function writeKeyringAccountLocked(
         recoverEmptyOpaqueManagedKeyringState(keyring, account, diag)
       ) {
         reconciled = reconcileKeyringJournal(keyring, account, diag);
-      } else if (err instanceof InvalidKeyringJournalError) {
-        replaceMalformedKeyringJournalWithTombstone(keyring, account, diag);
-        return false;
       } else {
         return false;
       }
@@ -1794,7 +1875,7 @@ function writeKeyringAccountLocked(
       }
     } catch (err) {
       diag?.(classifyKeyringError(err));
-      replaceMalformedKeyringJournalWithTombstone(keyring, account, diag);
+      persistUnverifiableKeyringDeletion(keyring, account, diag);
       return false;
     }
     const unpublished =
@@ -1980,7 +2061,19 @@ async function deleteKeyringAccount(
       const keyring = await import('@napi-rs/keyring');
       let pendingJournalRaw = readKeyringEntry(keyring, KEYRING_JOURNAL_SERVICE, account);
       if (pendingJournalRaw === null) {
-        const managedState = readKeyringManagedState(keyring, account);
+        let managedState: KeyringManagedState | null;
+        try {
+          managedState = readKeyringManagedState(keyring, account);
+        } catch (err) {
+          diag?.(classifyKeyringError(err));
+          if (
+            err instanceof KeyringManagedStateKeyUnavailableError &&
+            recoverEmptyOpaqueManagedKeyringState(keyring, account, diag)
+          ) {
+            return true;
+          }
+          return false;
+        }
         if (managedState !== null) {
           if (managedState.journal === null) {
             return deleteJournalLessManagedKeyringAccount(keyring, account, diag);
@@ -2011,9 +2104,6 @@ async function deleteKeyringAccount(
         }
       } catch (err) {
         diag?.(classifyKeyringError(err));
-        if (err instanceof InvalidKeyringJournalError) {
-          replaceMalformedKeyringJournalWithTombstone(keyring, account, diag, blockLegacy);
-        }
         return false;
       }
       const value = readKeyringEntry(keyring, KEYRING_SERVICE, account);
