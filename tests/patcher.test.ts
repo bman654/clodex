@@ -248,6 +248,8 @@ const CLAUDE_FIXTURE = [
   'function rz(x){switch(x){case"best":{return "opus"}default:return null}}',
   'function opts(e,t,r){let n=cur(),o=(n==="opus")?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}',
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
+  'function Lbo(){if(lK("hipaa"))return!1;return QE_()&&iEs().enabled}',
+  'function Fw(e){let t=Rd();if(oSs(e))return!Syo(t.enabledMcpServers).includes(e);return Syo(t.disabledMcpServers).includes(e)}',
 ].join('\n');
 
 function runPatchScript(config: Parameters<typeof applyClodexPatches>[1], source = CLAUDE_FIXTURE): string {
@@ -333,6 +335,8 @@ describe('patch script identity naming', () => {
       ['PATCH 5: model picker options', 'OK'],
       ['PATCH 4: Agent tool model description', 'OK'],
       ['PATCH 7: per-model context window', 'OK'],
+      ['PATCH 8: native Computer Use opt-in', 'OK'],
+      ['PATCH 9: native Computer Use default enable', 'OK'],
     ]);
     const rerun = applyClodexPatches(fresh.content, config);
     expect(rerun.results.map(r => [r.name, r.status])).toEqual([
@@ -344,7 +348,28 @@ describe('patch script identity naming', () => {
       // PATCH 7 re-runs through the in-place refresh path; an unchanged config
       // rewrites the identical table, which reports as already patched.
       ['PATCH 7: per-model context window (refresh)', 'SKIP'],
+      ['PATCH 8: native Computer Use opt-in', 'SKIP'],
+      ['PATCH 9: native Computer Use default enable', 'SKIP'],
     ]);
+  });
+
+  it('enables native Computer Use only by explicit env opt-in and preserves the HIPAA guard', () => {
+    const out = runPatchScript(config);
+    expect(out).toContain(
+      'function Lbo(){if(lK("hipaa"))return!1;/*clodex:native-computer-use*/'
+      + 'if(process.env.CLODEX_NATIVE_COMPUTER_USE==="1")return!0;'
+      + 'return QE_()&&iEs().enabled}'
+    );
+  });
+
+  it('defaults only the built-in Computer Use MCP to enabled under the same opt-in', () => {
+    const out = runPatchScript(config);
+    expect(out).toContain(
+      'function Fw(e){/*clodex:native-computer-use-default*/'
+      + 'if(oSs(e)&&process.env.CLODEX_NATIVE_COMPUTER_USE==="1")return!1;'
+      + 'let t=Rd();if(oSs(e))return!Syo(t.enabledMcpServers).includes(e);'
+      + 'return Syo(t.disabledMcpServers).includes(e)}'
+    );
   });
 
   it('refreshes the baked context table in place when only the window changes', () => {
