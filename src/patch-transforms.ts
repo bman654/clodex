@@ -25,6 +25,11 @@ export interface PatchScriptModelEntry {
   context?: number;
   /** Human label for the /model picker, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. */
   display?: string;
+  /** Reasoning levels Claude Code should expose for this custom model. */
+  effort?: {
+    levels: string[];
+    defaultLevel: string;
+  };
 }
 
 /** Real model id (e.g. `clodex:openai-oauth:gpt-5.6-sol`) → alias/context. */
@@ -65,7 +70,7 @@ export function formatPatchSiteLine(result: PatchSiteResult): string {
 }
 
 /**
- * Apply the clodex patch sites (PATCH 1–7) to the Claude Code source.
+ * Apply the clodex patch sites (PATCH 1–9) to the Claude Code source.
  * Pure: source string in → patched string + per-site results out. Throws
  * `PatchApplyError` when the config is invalid or a required site fails —
  * nothing should be written to the binary in that case.
@@ -87,6 +92,8 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   const DISPLAY_BY_IDENTITY: Record<string, string> = {};
   // lowercased alias AND id -> context-window tokens (only for models that set it)
   const CONTEXT_BY_KEY: Record<string, number> = {};
+  // lowercased alias AND id -> effort metadata for Claude Code's capability gates.
+  const EFFORT_BY_KEY: Record<string, PatchScriptModelEntry['effort']> = {};
 
   const report: PatchSiteResult[] = [];
   const fail = (message: string): never => {
@@ -123,6 +130,15 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       }
       if (spec.alias !== undefined) CONTEXT_BY_KEY[String(spec.alias).trim().toLowerCase()] = n;
       CONTEXT_BY_KEY[String(id).trim().toLowerCase()] = n;
+    }
+
+    if (spec.effort && spec.effort.levels.length > 0) {
+      const effort = {
+        levels: [...spec.effort.levels],
+        defaultLevel: spec.effort.defaultLevel,
+      };
+      if (spec.alias !== undefined) EFFORT_BY_KEY[String(spec.alias).trim().toLowerCase()] = effort;
+      EFFORT_BY_KEY[String(id).trim().toLowerCase()] = effort;
     }
   }
   const ALIASES = Object.keys(ALIAS_TO_ID);
@@ -345,6 +361,103 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         /(function [\w$]+\(e,t\)\{)(let [\w$]+=[\w$]+\(\);if\([\w$]+!==void 0\)return [\w$]+;if\([\w$]+\(e,t\)\)return [\w$]+;return [\w$]+\(e,t\)\})/,
         (_m, head, body) => head! + SNIPPET + body!,
         { required: true }
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 8 — per-model effort capability gates.
+  //
+  // Claude Code checks three separate resolvers before it exposes effort at all,
+  // includes xhigh/max in the picker, and emits effort.level in status hooks.
+  // Inject model-specific lookups before the built-in and environment checks.
+  // ---------------------------------------------------------------------------
+  function patchEffortCapability(
+    capability: 'effort' | 'xhigh_effort' | 'max_effort',
+    marker: string,
+    name: string,
+    anchor: RegExp,
+  ): void {
+    const enabled = Object.fromEntries(
+      Object.entries(EFFORT_BY_KEY)
+        .filter(([, effort]) => effort?.levels.includes(
+          capability === 'effort' ? 'low' : capability === 'xhigh_effort' ? 'xhigh' : 'max',
+        ))
+        .map(([key]) => [key, 1]),
+    );
+    if (Object.keys(enabled).length === 0) return;
+
+    const snippet = (arg: string) =>
+      marker
+      + 'if((' + JSON.stringify(enabled) + ')[String(' + arg + '||"").trim().toLowerCase()]!==void 0)return!0;';
+
+    if (js.includes(marker)) {
+      const markerPattern = reEsc(marker);
+      applyOnce(
+        name + ' (refresh)',
+        new RegExp(
+          markerPattern
+          + 'if\\(\\(\\{[^{}]*\\}\\)\\[String\\(([\\w$]+)\\|\\|""\\)\\.trim\\(\\)\\.toLowerCase\\(\\)\\]!==void 0\\)return!0;',
+        ),
+        (_m, arg) => snippet(arg!),
+        { required: true, noopIsSkip: true },
+      );
+      return;
+    }
+
+    applyOnce(
+      name,
+      anchor,
+      (_m, head, arg, body) => head! + snippet(arg!) + body!,
+      { required: true },
+    );
+  }
+
+  patchEffortCapability(
+    'effort',
+    '/*ccpatch:effort*/',
+    'PATCH 8a: effort capability',
+    /(function [\w$]+\(([\w$]+)\)\{)(if\([\w$]+\(\2\)\)return!1;let [\w$]+=[\w$]+\(\2,"effort"\);)/,
+  );
+  patchEffortCapability(
+    'xhigh_effort',
+    '/*ccpatch:xhigh-effort*/',
+    'PATCH 8b: xhigh effort capability',
+    /(function [\w$]+\(([\w$]+)\)\{)(if\([\w$]+\(\2\)\)return!1;let [\w$]+=[\w$]+\(\2,"xhigh_effort"\);)/,
+  );
+  patchEffortCapability(
+    'max_effort',
+    '/*ccpatch:max-effort*/',
+    'PATCH 8c: max effort capability',
+    /(function [\w$]+\(([\w$]+)\)\{)(if\([\w$]+\(\2\)\)return!1;let [\w$]+=[\w$]+\(\2,"max_effort"\);)/,
+  );
+
+  // ---------------------------------------------------------------------------
+  // PATCH 9 — per-model default effort.
+  // ---------------------------------------------------------------------------
+  if (Object.keys(EFFORT_BY_KEY).length) {
+    const MARKER = '/*ccpatch:default-effort*/';
+    const defaults = Object.fromEntries(
+      Object.entries(EFFORT_BY_KEY).map(([key, effort]) => [key, effort!.defaultLevel]),
+    );
+    const snippet = (arg: string) =>
+      MARKER
+      + 'var _cce=(' + JSON.stringify(defaults) + ')[String(' + arg + '||"").trim().toLowerCase()];'
+      + 'if(_cce!==void 0)return _cce;';
+
+    if (js.includes(MARKER)) {
+      applyOnce(
+        'PATCH 9: default effort (refresh)',
+        /\/\*ccpatch:default-effort\*\/var _cce=\(\{[^{}]*\}\)\[String\(([\w$]+)\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_cce!==void 0\)return _cce;/,
+        (_m, arg) => snippet(arg!),
+        { required: true, noopIsSkip: true },
+      );
+    } else {
+      applyOnce(
+        'PATCH 9: default effort',
+        /(function [\w$]+\(([\w$]+)\)\{)(return [\w$]+\([\w$]+\(\2\)\)\?\.default_effort\?\?"high"\})/,
+        (_m, head, arg, body) => head! + snippet(arg!) + body!,
+        { required: true },
       );
     }
   }

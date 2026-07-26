@@ -37,6 +37,7 @@ import { loadRegistry } from './registry/io.js';
 import { findClaudeBinary, getInstalledClaudeVersion } from './launch.js';
 import { httpProxyDisplayName, httpProxyModelId } from './http-proxy/routes.js';
 import { stripOneMContextSuffix } from './context-model-id.js';
+import { getReasoningCapabilities } from './provider-factory.js';
 import {
   applyClodexPatches,
   formatPatchSiteLine,
@@ -101,6 +102,10 @@ export interface PatchModelMeta {
   contextWindow?: number;
   /** Canonical label, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. */
   displayName?: string;
+  effort?: {
+    levels: string[];
+    defaultLevel: string;
+  };
 }
 
 /**
@@ -130,6 +135,12 @@ export function buildPatchModelConfig(
     else if (context !== 200_000) entry.context = context;
     const display = meta?.displayName?.trim();
     if (display) entry.display = display;
+    if (meta?.effort?.levels.length) {
+      entry.effort = {
+        levels: [...meta.effort.levels],
+        defaultLevel: meta.effort.defaultLevel,
+      };
+    }
     config[id] = entry;
   }
   return { config, unknownWindows };
@@ -139,7 +150,14 @@ export function buildPatchModelConfig(
 export function computePatchConfigHash(config: PatchScriptModelConfig): string {
   const canonical = Object.keys(config).sort().map(key => {
     const entry = config[key]!;
-    return [key, entry.alias ?? null, entry.context ?? null, entry.display ?? null];
+    return [
+      key,
+      entry.alias ?? null,
+      entry.context ?? null,
+      entry.display ?? null,
+      entry.effort?.levels ?? null,
+      entry.effort?.defaultLevel ?? null,
+    ];
   });
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }
@@ -154,10 +172,22 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
   const meta = new Map<string, PatchModelMeta>();
   for (const provider of registry.providers) {
     for (const model of provider.modelsCache?.models ?? []) {
+      const npm = model.npm ?? provider.api.npm ?? '';
+      const effort = getReasoningCapabilities(npm, model.upstreamModelId, {
+        providerId: provider.id,
+        apiBaseUrl: model.apiUrl ?? provider.api.url,
+        supportedParameters: model.supportedParameters,
+        reasoning: model.reasoning,
+        interleavedReasoningField: model.interleavedReasoningField,
+        upstreamModelId: model.upstreamModelId,
+      });
       meta.set(`${provider.id}:${model.id}`, {
         contextWindow: model.contextWindow && model.contextWindow > 0 ? model.contextWindow : undefined,
         // Same label `clodex server` prints at startup and `models --list` shows.
         displayName: httpProxyDisplayName(model, provider.name),
+        effort: effort.mode === 'controllable'
+          ? { levels: effort.levels, defaultLevel: effort.defaultLevel }
+          : undefined,
       });
     }
   }

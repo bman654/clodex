@@ -22,8 +22,22 @@ describe('buildPatchModelConfig', () => {
     { name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
   ];
   const meta = new Map([
-    ['openai-oauth:gpt-5.6-sol', { contextWindow: 272_000, displayName: 'GPT-5.6 Sol (OpenAI (ChatGPT))' }],
-    ['openai-oauth:gpt-5.6-luna', { contextWindow: 272_000, displayName: 'GPT-5.6 Luna (OpenAI (ChatGPT))' }],
+    ['openai-oauth:gpt-5.6-sol', {
+      contextWindow: 272_000,
+      displayName: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
+      effort: {
+        levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'medium',
+      },
+    }],
+    ['openai-oauth:gpt-5.6-luna', {
+      contextWindow: 272_000,
+      displayName: 'GPT-5.6 Luna (OpenAI (ChatGPT))',
+      effort: {
+        levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'medium',
+      },
+    }],
   ]);
 
   it('builds clodex-prefixed entries with aliases, context windows, and display labels', () => {
@@ -37,10 +51,18 @@ describe('buildPatchModelConfig', () => {
       alias: 'sol',
       context: 272_000,
       display: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
+      effort: {
+        levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'medium',
+      },
     });
     expect(config['clodex:openai-oauth:gpt-5.6-luna']).toEqual({
       context: 272_000,
       display: 'GPT-5.6 Luna (OpenAI (ChatGPT))',
+      effort: {
+        levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'medium',
+      },
     });
     // Unknown window → no context (Claude Code's 200k default) + warning entry
     expect(config['clodex:openai:mystery-model']).toEqual({});
@@ -248,6 +270,10 @@ const CLAUDE_FIXTURE = [
   'function rz(x){switch(x){case"best":{return "opus"}default:return null}}',
   'function opts(e,t,r){let n=cur(),o=(n==="opus")?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}',
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
+  'function OI(e){if(SNr(e))return!1;let t=Ede(e,"effort");if(t!==void 0)return t;return!1}',
+  'function I_e(e){if(SNr(e))return!1;let t=Ede(e,"xhigh_effort");if(t!==void 0)return t;return!1}',
+  'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return!1}',
+  'function ait(e){return ww(lo(e))?.default_effort??"high"}',
 ].join('\n');
 
 function runPatchScript(config: Parameters<typeof applyClodexPatches>[1], source = CLAUDE_FIXTURE): string {
@@ -260,6 +286,10 @@ describe('patch script identity naming', () => {
       alias: 'sol',
       context: 272_000,
       display: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
+      effort: {
+        levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'medium',
+      },
     },
     'clodex:openai:mystery': { context: 128_000, display: 'Mystery (OpenAI)' },
   };
@@ -294,6 +324,15 @@ describe('patch script identity naming', () => {
     expect(parsed['sol']).toBe(272_000);
     expect(parsed['clodex:openai-oauth:gpt-5.6-sol']).toBe(272_000);
     expect(parsed['clodex:openai:mystery']).toBe(128_000);
+  });
+
+  it('enables GPT-5.6 effort, xhigh, max, and the medium default for its alias', () => {
+    const out = runPatchScript(config);
+    expect(out).toContain('/*ccpatch:effort*/');
+    expect(out).toContain('/*ccpatch:xhigh-effort*/');
+    expect(out).toContain('/*ccpatch:max-effort*/');
+    expect(out).toContain('/*ccpatch:default-effort*/');
+    expect(out).toContain('"sol":"medium"');
   });
 
   it('falls back to the canonical id as the identity when a model has no alias', () => {
@@ -333,6 +372,10 @@ describe('patch script identity naming', () => {
       ['PATCH 5: model picker options', 'OK'],
       ['PATCH 4: Agent tool model description', 'OK'],
       ['PATCH 7: per-model context window', 'OK'],
+      ['PATCH 8a: effort capability', 'OK'],
+      ['PATCH 8b: xhigh effort capability', 'OK'],
+      ['PATCH 8c: max effort capability', 'OK'],
+      ['PATCH 9: default effort', 'OK'],
     ]);
     const rerun = applyClodexPatches(fresh.content, config);
     expect(rerun.results.map(r => [r.name, r.status])).toEqual([
@@ -344,6 +387,10 @@ describe('patch script identity naming', () => {
       // PATCH 7 re-runs through the in-place refresh path; an unchanged config
       // rewrites the identical table, which reports as already patched.
       ['PATCH 7: per-model context window (refresh)', 'SKIP'],
+      ['PATCH 8a: effort capability (refresh)', 'SKIP'],
+      ['PATCH 8b: xhigh effort capability (refresh)', 'SKIP'],
+      ['PATCH 8c: max effort capability (refresh)', 'SKIP'],
+      ['PATCH 9: default effort (refresh)', 'SKIP'],
     ]);
   });
 

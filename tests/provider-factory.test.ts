@@ -166,6 +166,12 @@ describe('getReasoningCapabilities', () => {
     expect(caps.defaultLevel).toBe('');
   });
 
+  it('returns every documented GPT-5.6 effort level with the medium default', () => {
+    const caps = getReasoningCapabilities('@ai-sdk/openai', 'gpt-5.6-sol');
+    expect(caps.levels).toEqual(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+    expect(caps.defaultLevel).toBe('medium');
+  });
+
   it('returns empty levels for grok-build-0.1 (internal reasoning only)', () => {
     const caps = getReasoningCapabilities('@ai-sdk/xai', 'grok-build-0.1');
     expect(caps.levels).toEqual([]);
@@ -218,6 +224,15 @@ describe('getReasoningCapabilities', () => {
 });
 
 describe('effortProviderOptions + deepMergeProviderOptions', () => {
+  it.each(['none', 'low', 'medium', 'high', 'xhigh', 'max'])(
+    'preserves GPT-5.6 %s effort on the OpenAI wire',
+    (effort) => {
+      expect(effortProviderOptions('@ai-sdk/openai', effort, 'gpt-5.6-sol')).toEqual({
+        openai: { reasoningEffort: effort },
+      });
+    },
+  );
+
   it('merges OpenAI thinking + effort without dropping store/include', () => {
     const merged = deepMergeProviderOptions(
       thinkingProviderOptions('@ai-sdk/openai'),

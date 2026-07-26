@@ -249,16 +249,16 @@ describe('translateRequest', () => {
     });
   });
 
-  it('maps output_config.effort to OpenAI reasoningEffort without dropping store/include', () => {
+  it('preserves GPT-5.6 xhigh effort without dropping OpenAI store/include', () => {
     const params = translateRequest({
-      model: 'gpt-5.5',
-      output_config: { effort: 'high' },
+      model: 'gpt-5.6-sol',
+      output_config: { effort: 'xhigh' },
       messages: [{ role: 'user', content: 'hi' }],
     }, '@ai-sdk/openai');
     expect(params.providerOptions?.openai).toMatchObject({
       store: false,
       include: ['reasoning.encrypted_content'],
-      reasoningEffort: 'high',
+      reasoningEffort: 'xhigh',
     });
   });
 

@@ -312,6 +312,7 @@ export interface ReasoningCapabilities {
 
 const ANTHROPIC_EFFORT_LEVELS = ['low', 'medium', 'high'] as const;
 const OPENAI_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
+const GPT_56_EFFORT_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 const GEMINI_EFFORT_LEVELS = ['low', 'medium', 'high'] as const;
 const MISTRAL_EFFORT_LEVELS = ['high', 'off'] as const;
 const XAI_EFFORT_LEVELS = ['none', 'low', 'medium', 'high'] as const;
@@ -541,7 +542,18 @@ function mapCodexEffortToAnthropic(effort: string): string | undefined {
   }
 }
 
-function mapCodexEffortToOpenAI(effort: string): string | undefined {
+function isGpt56Model(modelId: string): boolean {
+  return /^gpt-5\.6(?:-|$)/i.test(modelId);
+}
+
+function mapCodexEffortToOpenAI(effort: string, modelId?: string): string | undefined {
+  if (
+    modelId
+    && isGpt56Model(modelId)
+    && GPT_56_EFFORT_LEVELS.includes(effort as typeof GPT_56_EFFORT_LEVELS[number])
+  ) {
+    return effort;
+  }
   if (effort === 'xhigh') return 'high';
   const allowed = ['low', 'medium', 'high'];
   return allowed.includes(effort) ? effort : undefined;
@@ -635,7 +647,7 @@ export function getReasoningCapabilities(
     const prefersResponses = modelPrefersResponsesApi(modelId);
     if (prefersResponses || metadata?.reasoning) {
       return {
-        levels: [...OPENAI_EFFORT_LEVELS],
+        levels: isGpt56Model(modelId) ? [...GPT_56_EFFORT_LEVELS] : [...OPENAI_EFFORT_LEVELS],
         defaultLevel: 'medium',
         supportsSummaries: true,
         mode: 'controllable',
@@ -804,7 +816,7 @@ export function effortProviderOptions(
 
   if (npm === '@ai-sdk/openai' || npm === '@ai-sdk/azure') {
     if (!modelId || !modelPrefersResponsesApi(modelId)) return undefined;
-    const reasoningEffort = mapCodexEffortToOpenAI(effort);
+    const reasoningEffort = mapCodexEffortToOpenAI(effort, modelId);
     return reasoningEffort ? { openai: { reasoningEffort } } : undefined;
   }
 
