@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -88,6 +89,13 @@ describe('computePatchConfigHash', () => {
     expect(computePatchConfigHash({ 'clodex:p:m1': { alias: 'x', context: 1000, display: 'M One (P)' } })).not.toBe(
       computePatchConfigHash({ 'clodex:p:m1': { alias: 'x', context: 1000, display: 'M One (Q)' } }),
     );
+  });
+
+  it('includes the binary patch schema in the persisted digest', () => {
+    const config = { 'clodex:p:m1': { alias: 'x', context: 1000 } };
+    const legacyCanonical = [['clodex:p:m1', 'x', 1000, null]];
+    const legacyHash = createHash('sha256').update(JSON.stringify(legacyCanonical)).digest('hex');
+    expect(computePatchConfigHash(config)).not.toBe(legacyHash);
   });
 });
 
