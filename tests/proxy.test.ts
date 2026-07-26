@@ -971,6 +971,16 @@ describe('SDK translated error logging', () => {
         .find(block => block.startsWith('event: message_start'))!;
       const messageStart = JSON.parse(messageStartBlock.split('\n')[1]!.replace('data: ', ''));
       expect(messageStart.message.usage).toEqual({
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      });
+      const messageDeltaBlock = res.body
+        .split('\n\n')
+        .find(block => block.startsWith('event: message_delta'))!;
+      const messageDelta = JSON.parse(messageDeltaBlock.split('\n')[1]!.replace('data: ', ''));
+      expect(messageDelta.usage).toEqual({
         input_tokens: expectedInputTokens,
         output_tokens: 0,
         cache_creation_input_tokens: 0,
