@@ -1200,6 +1200,90 @@ describe('selective HTTP proxy', () => {
     }
   }, 20_000);
 
+  it('keeps translated adapter connections out of the process-global pool', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    let connectionCount = 0;
+    const adapterServer = http.createServer((req, res) => {
+      req.resume();
+      req.once('end', () => {
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Content-Length': '2',
+        });
+        res.end('{}');
+      });
+    });
+    adapterServer.keepAliveTimeout = 60_000;
+    adapterServer.on('connection', () => {
+      connectionCount += 1;
+    });
+    const adapterPort = await listen(adapterServer);
+    const route = {
+      aliasId: 'clodex:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai' as const,
+      npm: '@ai-sdk/openai-compatible',
+      providerId: 'test-provider',
+    };
+    const proxy = await startHttpProxy({
+      routes: [route],
+      adapterHandle: {
+        port: adapterPort,
+        token: 'adapter-local-token',
+        close: () => {
+          adapterServer.closeAllConnections();
+          adapterServer.close();
+        },
+      },
+      adapterRequest: ((options: http.RequestOptions, onResponse: (response: http.IncomingMessage) => void) =>
+        http.request(
+          { ...options, agent: options.agent ?? false },
+          onResponse,
+        )) as typeof http.request,
+    });
+
+    try {
+      const body = JSON.stringify({
+        model: route.aliasId,
+        messages: [{ role: 'user', content: 'test adapter connection reuse' }],
+        stream: false,
+      });
+      const requestTranslatedModel = async () => {
+        const secure = await connectMitm(proxy.port, certificates.caCert);
+        const payload = Buffer.from(body);
+        secure.write([
+          'POST /v1/messages HTTP/1.1',
+          'Host: api.anthropic.com',
+          'Content-Type: application/json',
+          `Content-Length: ${payload.length}`,
+          'Connection: close',
+          '',
+          '',
+        ].join('\r\n'));
+        secure.write(payload);
+
+        let response = '';
+        for await (const chunk of secure) {
+          response += chunk.toString();
+          if (response.includes('\r\n\r\n{}')) break;
+        }
+        secure.destroy();
+        return response;
+      };
+      const firstResponse = await requestTranslatedModel();
+      const secondResponse = await requestTranslatedModel();
+
+      expect(firstResponse).toContain('200');
+      expect(secondResponse).toContain('200');
+      expect(connectionCount).toBe(1);
+    } finally {
+      await proxy.close();
+    }
+  }, 20_000);
+
   it('logs a distinct source when the adapter request closes before headers', async () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'adapter-request-close-inference.jsonl');

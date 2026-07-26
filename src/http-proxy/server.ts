@@ -455,6 +455,7 @@ function forwardToAdapter(
   rawBody: Buffer,
   adapter: ProxyHandle,
   adapterRequest: typeof http.request = http.request,
+  adapterAgent?: http.Agent,
   lifecycle?: {
     logPath: string;
     requestId: string;
@@ -584,6 +585,7 @@ function forwardToAdapter(
       port: adapter.port,
       method: 'POST',
       path: req.url,
+      agent: adapterAgent,
       headers: {
         'Content-Type': 'application/json',
         'Content-Length': String(rawBody.length),
@@ -730,6 +732,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       options.modelAliases,
     );
   }
+  const adapterAgent = adapter ? new http.Agent({ keepAlive: true }) : undefined;
   let shuttingDown = false;
 
   const mitmServer = https.createServer({
@@ -848,6 +851,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
           adapterBody,
           adapter,
           options.adapterRequest,
+          adapterAgent,
           messagesEndpoint === 'messages' && options.inferenceLogPath
             ? {
                 logPath: options.inferenceLogPath,
@@ -971,6 +975,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       options.host ?? '127.0.0.1',
     );
   } catch (err) {
+    adapterAgent?.destroy();
     adapter?.close();
     throw err;
   }

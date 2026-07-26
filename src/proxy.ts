@@ -71,6 +71,7 @@ type ProxyLog = (message: string | (() => string)) => void;
 // still surfaced by the SDK idle watchdog rather than masked by pings forever.
 const STREAM_KEEPALIVE_INTERVAL_MS = 20_000;
 const STREAM_KEEPALIVE_PING = 'event: ping\ndata: {"type":"ping"}\n\n';
+const INTERNAL_ADAPTER_KEEPALIVE_TIMEOUT_MS = 60_000;
 
 function createTranslationLifecycle(
   logPath: string | undefined,
@@ -749,6 +750,7 @@ export async function startProxyCatalog(
     // Everything else → 404
     anthropicError(res, 404, `Unknown endpoint: ${req.method} ${req.url}`);
   });
+  server.keepAliveTimeout = INTERNAL_ADAPTER_KEEPALIVE_TIMEOUT_MS;
 
   let address: AddressInfo;
   try {
