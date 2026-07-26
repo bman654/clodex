@@ -11,6 +11,8 @@ import {
   supportsOpenAiPromptCacheBreakpoints,
   extractClaudeSessionId,
   claudeSessionPromptCacheKey,
+  isClaudeCodeCompactRequest,
+  isClaudeCodeStructuredOutputCompactRequest,
   sdkTranslationErrorSignature,
 } from '../src/sdk-adapter.js';
 
@@ -444,6 +446,12 @@ describe('translateRequest', () => {
     };
 
     const compact = translateRequest(compactBody, '@ai-sdk/openai', { openAiOAuth: true });
+    expect(isClaudeCodeCompactRequest(compactBody)).toBe(true);
+    expect(isClaudeCodeStructuredOutputCompactRequest(compactBody)).toBe(true);
+    expect(isClaudeCodeCompactRequest({
+      ...compactBody,
+      tools: [{ name: 'Read', input_schema: { type: 'object' } }],
+    })).toBe(true);
     expect(compact.tools && Object.keys(compact.tools)).toEqual(['Read', 'StructuredOutput']);
     expect(compact.toolChoice).toBe('none');
     expect(compact.messages.map(message => message.role)).toEqual(['tool', 'user']);
@@ -463,6 +471,13 @@ describe('translateRequest', () => {
         content: compactInstruction.replace(/\nREMINDER:.*$/, ''),
       }],
     }, '@ai-sdk/openai', { openAiOAuth: true });
+    expect(isClaudeCodeCompactRequest({
+      ...compactBody,
+      messages: [{
+        role: 'user',
+        content: compactInstruction.replace(/\nREMINDER:.*$/, ''),
+      }],
+    })).toBe(false);
     expect(partialMarker.tools && Object.keys(partialMarker.tools)).toEqual(['Read', 'StructuredOutput']);
     expect(partialMarker.toolChoice).toBe('required');
 
@@ -470,6 +485,10 @@ describe('translateRequest', () => {
       ...compactBody,
       diagnostics: { previous_message_id: null },
     }, '@ai-sdk/openai', { openAiOAuth: true });
+    expect(isClaudeCodeCompactRequest({
+      ...compactBody,
+      diagnostics: { previous_message_id: null },
+    })).toBe(false);
     expect(ordinary.tools && Object.keys(ordinary.tools)).toEqual(['Read', 'StructuredOutput']);
     expect(ordinary.toolChoice).toBe('required');
     expect(compact.providerOptions?.openai?.promptCacheKey)

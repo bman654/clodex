@@ -458,18 +458,9 @@ export function translateToolChoice(tc: AnthropicRequest['tool_choice']): SdkCal
 const COMPACT_TEXT_ONLY_START = 'CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.';
 const COMPACT_TEXT_ONLY_END = 'REMINDER: Do NOT call any tools. Respond with plain text only';
 
-/**
- * Claude Code's structured-output agents inherit the terminal StructuredOutput
- * tool when they fork a reactive compaction turn, even though the compact prompt
- * requires plain text and rejects every tool call. OpenAI-family models tend to
- * call that highly salient tool, leaving Claude Code with an empty summary.
- *
- * Detect only the observed compact envelope. If Claude Code changes it, this
- * deliberately fails open rather than stripping tools from an ordinary request.
- */
-function isClaudeCodeStructuredOutputCompactRequest(body: AnthropicRequest): boolean {
+/** Detect Claude Code's observed plain-text compaction envelope. */
+export function isClaudeCodeCompactRequest(body: AnthropicRequest): boolean {
   if (body.diagnostics !== undefined) return false;
-  if (!body.tools?.some(candidate => candidate.name === 'StructuredOutput')) return false;
 
   const finalMessage = body.messages.at(-1);
   if (!finalMessage || finalMessage.role !== 'user') return false;
@@ -480,6 +471,21 @@ function isClaudeCodeStructuredOutputCompactRequest(body: AnthropicRequest): boo
       .map(block => block.text ?? '')
       .join('\n');
   return text.includes(COMPACT_TEXT_ONLY_START) && text.includes(COMPACT_TEXT_ONLY_END);
+}
+
+/**
+ * Claude Code's structured-output agents inherit the terminal StructuredOutput
+ * tool when they fork a reactive compaction turn, even though the compact prompt
+ * requires plain text and rejects every tool call. OpenAI-family models tend to
+ * call that highly salient tool, leaving Claude Code with an empty summary.
+ *
+ * Keep this narrower than the generic compaction detector. If Claude Code
+ * changes the observed envelope, fail open rather than stripping tools from an
+ * ordinary request.
+ */
+export function isClaudeCodeStructuredOutputCompactRequest(body: AnthropicRequest): boolean {
+  return body.tools?.some(candidate => candidate.name === 'StructuredOutput') === true
+    && isClaudeCodeCompactRequest(body);
 }
 
 export function translateRequest(

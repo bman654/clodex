@@ -108,7 +108,16 @@ async function classifyThroughSdk(sseBody: string): Promise<ReturnType<typeof sd
   return sdkUpstreamErrorDetails(upstreamError);
 }
 
-function emitTextResponse(socket: FakeWebSocket, responseId: string, text: string): void {
+function emitTextResponse(
+  socket: FakeWebSocket,
+  responseId: string,
+  text: string,
+  usage?: {
+    input_tokens: number;
+    input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+    output_tokens: number;
+  },
+): void {
   socket.emit('message', Buffer.from(JSON.stringify({
     type: 'response.created', response: { id: responseId },
   })));
@@ -124,7 +133,39 @@ function emitTextResponse(socket: FakeWebSocket, responseId: string, text: strin
     item: { type: 'message', id: `msg_${responseId}` },
   })));
   socket.emit('message', Buffer.from(JSON.stringify({
-    type: 'response.completed', response: { id: responseId },
+    type: 'response.completed', response: { id: responseId, usage },
+  })));
+}
+
+function emitCompactionResponse(
+  socket: FakeWebSocket,
+  responseId: string,
+  encryptedContent: string,
+  usage?: {
+    input_tokens: number;
+    input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+    output_tokens: number;
+  },
+): void {
+  socket.emit('message', Buffer.from(JSON.stringify({
+    type: 'response.created', response: { id: responseId },
+  })));
+  socket.emit('message', Buffer.from(JSON.stringify({
+    type: 'response.output_item.added',
+    output_index: 0,
+    item: { type: 'compaction', id: `cmp_${responseId}` },
+  })));
+  socket.emit('message', Buffer.from(JSON.stringify({
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: {
+      type: 'compaction',
+      id: `cmp_${responseId}`,
+      encrypted_content: encryptedContent,
+    },
+  })));
+  socket.emit('message', Buffer.from(JSON.stringify({
+    type: 'response.completed', response: { id: responseId, usage },
   })));
 }
 
@@ -1142,6 +1183,647 @@ describe('createResponsesWebSocketFetch', () => {
 
     emitTextResponse(socket, 'resp_2', 'hello again');
     await readAll(second);
+  });
+
+  it('compacts once at the measured threshold, starts a fresh chain, then resumes delta-only', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const canonical = [{ type: 'compaction', encrypted_content: 'opaque-summary' }];
+    const compactFetch = vi.fn();
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      providerId: 'openai',
+      accountId: 'acct-native-compact',
+      compactThreshold: 900,
+      compactFetch: compactFetch as typeof fetch,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const firstUser = { role: 'user', content: [{ type: 'input_text', text: 'first' }] };
+    const first = await wsFetch('https://chatgpt.com/backend-api/codex/responses', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token' },
+      body: JSON.stringify(sessionPayload([firstUser])),
+    });
+    const originalSocket = lastSocket();
+    originalSocket.emit('open');
+    emitTextResponse(originalSocket, 'resp_before_compact', 'first answer', {
+      input_tokens: 950,
+      input_tokens_details: { cached_tokens: 800 },
+      output_tokens: 20,
+    });
+    await readAll(first);
+
+    const firstAssistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'first answer' }],
+    };
+    const secondUser = { role: 'user', content: [{ type: 'input_text', text: 'second' }] };
+    const secondInput = [firstUser, firstAssistant, secondUser];
+    const secondPromise = wsFetch('https://chatgpt.com/backend-api/codex/responses', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token' },
+      body: JSON.stringify(sessionPayload(secondInput)),
+    });
+
+    await vi.waitFor(() => expect(originalSocket.send).toHaveBeenCalledTimes(2));
+    const trigger = JSON.parse(originalSocket.send.mock.calls[1]![0] as string);
+    expect(trigger.previous_response_id).toBe('resp_before_compact');
+    expect(trigger.input).toEqual([secondUser, { type: 'compaction_trigger' }]);
+    emitCompactionResponse(originalSocket, 'resp_compaction_trigger', 'opaque-summary', {
+      input_tokens: 1_000,
+      input_tokens_details: { cached_tokens: 950, cache_write_tokens: 25 },
+      output_tokens: 25,
+    });
+    const second = await secondPromise;
+    expect(compactFetch).not.toHaveBeenCalled();
+
+    expect(fakeSockets).toHaveLength(2);
+    const compactedSocket = lastSocket();
+    compactedSocket.emit('open');
+    const compactedHead = JSON.parse(compactedSocket.send.mock.calls[0]![0] as string);
+    expect(compactedHead.previous_response_id).toBeUndefined();
+    expect(compactedHead.input).toEqual([firstUser, secondUser, ...canonical]);
+    emitTextResponse(compactedSocket, 'resp_compacted', 'second answer', {
+      input_tokens: 120,
+      input_tokens_details: { cached_tokens: 75 },
+      output_tokens: 20,
+    });
+    await readAll(second);
+    expect(originalSocket.close).toHaveBeenCalledOnce();
+
+    const secondAssistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'second answer' }],
+    };
+    const thirdUser = { role: 'user', content: [{ type: 'input_text', text: 'third' }] };
+    const third = await wsFetch('https://chatgpt.com/backend-api/codex/responses', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer test-token' },
+      body: JSON.stringify(sessionPayload([...secondInput, secondAssistant, thirdUser])),
+    });
+    expect(compactFetch).not.toHaveBeenCalled();
+    expect(fakeSockets).toHaveLength(2);
+    const continued = JSON.parse(compactedSocket.send.mock.calls[1]![0] as string);
+    expect(continued.previous_response_id).toBe('resp_compacted');
+    expect(continued.input).toEqual([thirdUser]);
+    compactedSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: { code: 'previous_response_not_found', message: 'compacted head expired' },
+    })));
+    expect(fakeSockets).toHaveLength(3);
+    const restoredSocket = lastSocket();
+    restoredSocket.emit('open');
+    const restored = JSON.parse(restoredSocket.send.mock.calls[0]![0] as string);
+    expect(restored.previous_response_id).toBeUndefined();
+    expect(restored.input).toEqual([
+      firstUser,
+      secondUser,
+      ...canonical,
+      secondAssistant,
+      thirdUser,
+    ]);
+    emitTextResponse(restoredSocket, 'resp_after_compact', 'third answer');
+    await readAll(third);
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_compaction',
+      outcome: 'completed',
+      reason: 'measured_threshold',
+      threshold: 900,
+      transport: 'previous_response_compaction_trigger',
+      inputTokens: 1_000,
+      cachedTokens: 950,
+      cacheWriteTokens: 25,
+      outputTokens: 25,
+    }));
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_head_decision',
+      decision: 'compaction_trigger_new_head',
+      compactThreshold: 900,
+    }));
+  });
+
+  it('re-anchors Claude rewritten history to native compacted state by portable-summary hash', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const compactFetch = vi.fn();
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-claude-summary-anchor',
+      compactThreshold: 900,
+      compactFetch: compactFetch as typeof fetch,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const firstUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'Investigate the original task.' }],
+    };
+    const first = await wsFetch('https://example.test/responses', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([firstUser])),
+    });
+    const originalSocket = lastSocket();
+    originalSocket.emit('open');
+    emitTextResponse(originalSocket, 'resp_anchor_base', 'Original answer.');
+    await readAll(first);
+
+    const firstAssistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'Original answer.' }],
+    };
+    const compactInstruction = {
+      role: 'user',
+      content: [{
+        type: 'input_text',
+        text: 'Your task is to create a detailed summary of the conversation so far.',
+      }],
+    };
+    const compactRequestInput = [firstUser, firstAssistant, compactInstruction];
+    const compactRequestPromise = withResponsesWebSocketDiagnosticContext(
+      { forceCompaction: true },
+      () => wsFetch('https://example.test/responses', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload(compactRequestInput)),
+      }),
+    );
+
+    await vi.waitFor(() => expect(originalSocket.send).toHaveBeenCalledTimes(2));
+    expect(JSON.parse(originalSocket.send.mock.calls[1]![0] as string)).toMatchObject({
+      previous_response_id: 'resp_anchor_base',
+      input: [compactInstruction, { type: 'compaction_trigger' }],
+    });
+    emitCompactionResponse(originalSocket, 'resp_anchor_trigger', 'opaque-anchor');
+    const compactRequest = await compactRequestPromise;
+
+    const compactedSocket = lastSocket();
+    compactedSocket.emit('open');
+    const portableSummary =
+      'The original task and its verified answer are preserved in this portable summary.';
+    const modelSummary =
+      `<analysis>private preparation</analysis>\n<summary>${portableSummary}</summary>`;
+    emitTextResponse(compactedSocket, 'resp_anchor_summary', modelSummary);
+    await readAll(compactRequest);
+    expect(originalSocket.close).toHaveBeenCalledOnce();
+
+    const continuationPrefix =
+      'This session is being continued from a previous conversation that ran out of context. '
+      + 'The summary below covers the earlier portion of the conversation.\n\n';
+    const continuationSuffix =
+      'Continue the conversation from where it left off without asking the user any further questions. '
+      + 'Resume directly — do not acknowledge the summary, do not recap what was happening, '
+      + 'do not preface with "I\'ll continue" or similar. Pick up the last task as if the break never happened.';
+    const currentPrompt = { type: 'input_text', text: 'Now implement the next change.' };
+    const mismatchedUser = {
+      role: 'user',
+      content: [{
+        type: 'input_text',
+        text: `${continuationPrefix}Summary:\nA different portable summary must not select opaque state.`
+          + `\n${continuationSuffix}`,
+      }, currentPrompt],
+    };
+    const mismatched = await wsFetch('https://example.test/responses', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([mismatchedUser])),
+    });
+    expect(fakeSockets).toHaveLength(3);
+    const mismatchedSocket = lastSocket();
+    mismatchedSocket.emit('open');
+    const mismatchedSent = JSON.parse(mismatchedSocket.send.mock.calls[0]![0] as string);
+    expect(mismatchedSent.previous_response_id).toBeUndefined();
+    expect(mismatchedSent.input).toEqual([mismatchedUser]);
+    emitTextResponse(mismatchedSocket, 'resp_anchor_mismatch', 'Safe fallback.');
+    await readAll(mismatched);
+
+    const rewrittenUser = {
+      role: 'user',
+      content: [
+        {
+          type: 'input_text',
+          text: `${continuationPrefix}Summary:\n${portableSummary}`
+            + '\n\nIf you need specific details from before compaction, consult the transcript.'
+            + `\n${continuationSuffix}`,
+        },
+        currentPrompt,
+      ],
+    };
+    const continued = await wsFetch('https://example.test/responses', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([rewrittenUser])),
+    });
+
+    expect(fakeSockets).toHaveLength(3);
+    const sent = JSON.parse(compactedSocket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_anchor_summary');
+    expect(sent.input).toEqual([{
+      role: 'user',
+      content: [currentPrompt],
+    }]);
+    expect(compactFetch).not.toHaveBeenCalled();
+    expect(diagnostics.at(-1)).toMatchObject({
+      event: 'ws_head_decision',
+      decision: 'continuation',
+      continuationMatchMode: 'claude_compaction_summary',
+      selectedConnectionId: 2,
+    });
+    expect(JSON.stringify(diagnostics)).not.toContain(portableSummary);
+
+    emitTextResponse(compactedSocket, 'resp_anchor_continued', 'Implemented.');
+    await readAll(continued);
+  });
+
+  it('bounds retained user messages to the Codex 64K policy during a native rebase', async () => {
+    const compactFetch = vi.fn();
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-compact-retention-budget',
+      compactThreshold: 100,
+      compactFetch: compactFetch as typeof fetch,
+    });
+    const hugeUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: `begin-${'old-context-'.repeat(30_000)}-end` }],
+    };
+    const first = await wsFetch('https://example.test/responses', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([hugeUser])),
+    });
+    const originalSocket = lastSocket();
+    originalSocket.emit('open');
+    emitTextResponse(originalSocket, 'resp_retention_base', 'answer', {
+      input_tokens: 150,
+      output_tokens: 10,
+    });
+    await readAll(first);
+
+    const latestUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'preserve this latest request exactly' }],
+    };
+    const fullInput = [
+      hugeUser,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+      latestUser,
+    ];
+    const secondPromise = wsFetch('https://example.test/responses', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(fullInput)),
+    });
+    await vi.waitFor(() => expect(originalSocket.send).toHaveBeenCalledTimes(2));
+    emitCompactionResponse(originalSocket, 'resp_retention_trigger', 'bounded-summary');
+    const second = await secondPromise;
+
+    const rebasedSocket = lastSocket();
+    rebasedSocket.emit('open');
+    const rebased = JSON.parse(rebasedSocket.send.mock.calls[0]![0] as string);
+    expect(rebased.input).toHaveLength(3);
+    expect(rebased.input[1]).toEqual(latestUser);
+    expect(rebased.input[2]).toEqual({
+      type: 'compaction',
+      encrypted_content: 'bounded-summary',
+    });
+    const truncatedText = rebased.input[0].content[0].text as string;
+    expect(truncatedText).toContain('retained message truncated during native compaction');
+    expect(truncatedText.length).toBeLessThan(hugeUser.content[0]!.text.length);
+    expect(JSON.stringify(rebased.input.slice(0, 2)).length).toBeLessThan(260_000);
+    expect(compactFetch).not.toHaveBeenCalled();
+    emitTextResponse(rebasedSocket, 'resp_retention_done', 'done');
+    await readAll(second);
+  });
+
+  it('falls back to a normal full-context head when both native compaction routes are unavailable', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const compactFetch = vi.fn(async () => new Response(JSON.stringify({
+      error: { message: 'private compact failure' },
+    }), {
+      status: 503,
+      headers: { 'content-type': 'application/json' },
+    }));
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-compact-fallback',
+      compactThreshold: 100,
+      compactFetch: compactFetch as typeof fetch,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const firstUser = { role: 'user', content: [{ type: 'input_text', text: 'first' }] };
+    const first = await wsFetch('https://example.test/responses', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([firstUser])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    emitTextResponse(socket, 'resp_fallback_base', 'answer', {
+      input_tokens: 150,
+      output_tokens: 10,
+    });
+    await readAll(first);
+
+    const nextUser = { role: 'user', content: [{ type: 'input_text', text: 'next' }] };
+    const fullInput = [
+      firstUser,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+      nextUser,
+    ];
+    const secondPromise = wsFetch('https://example.test/responses', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(fullInput)),
+    });
+
+    await vi.waitFor(() => expect(socket.send).toHaveBeenCalledTimes(2));
+    expect(JSON.parse(socket.send.mock.calls[1]![0] as string)).toMatchObject({
+      previous_response_id: 'resp_fallback_base',
+      input: [nextUser, { type: 'compaction_trigger' }],
+    });
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: { code: 'compaction_trigger_unavailable', message: 'private trigger failure' },
+    })));
+    const second = await secondPromise;
+    expect(compactFetch).toHaveBeenCalledOnce();
+    expect(fakeSockets).toHaveLength(2);
+    const replacement = lastSocket();
+    replacement.emit('open');
+    const sent = JSON.parse(replacement.send.mock.calls[0]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    expect(sent.input).toEqual(fullInput);
+    emitTextResponse(replacement, 'resp_fallback_next', 'done');
+    await readAll(second);
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_compaction',
+      outcome: 'fallback',
+      transport: 'previous_response_compaction_trigger',
+    }));
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_compaction',
+      outcome: 'fallback',
+      transport: 'responses_compact_endpoint',
+      statusCode: 503,
+    }));
+    expect(JSON.stringify(diagnostics)).not.toContain('private compact failure');
+    expect(JSON.stringify(diagnostics)).not.toContain('private trigger failure');
+  });
+
+  it('uses standalone compact output when a live compaction trigger fails', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const canonical = [
+      { role: 'user', content: [{ type: 'input_text', text: 'retained' }] },
+      { type: 'compaction_summary', encrypted_content: 'endpoint-summary' },
+    ];
+    const compactFetch = vi.fn(async () => new Response(JSON.stringify({
+      output: canonical,
+      usage: {
+        input_tokens: 200,
+        input_tokens_details: { cached_tokens: 0 },
+        output_tokens: 30,
+      },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-compact-endpoint-fallback',
+      compactThreshold: 100,
+      compactFetch: compactFetch as typeof fetch,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const firstUser = { role: 'user', content: [{ type: 'input_text', text: 'first' }] };
+    const first = await wsFetch('https://example.test/responses', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([firstUser])),
+    });
+    const originalSocket = lastSocket();
+    originalSocket.emit('open');
+    emitTextResponse(originalSocket, 'resp_endpoint_fallback_base', 'answer', {
+      input_tokens: 150,
+      output_tokens: 10,
+    });
+    await readAll(first);
+
+    const fullInput = [
+      firstUser,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'next' }] },
+    ];
+    const secondPromise = wsFetch('https://example.test/responses', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(fullInput)),
+    });
+    await vi.waitFor(() => expect(originalSocket.send).toHaveBeenCalledTimes(2));
+    originalSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: { code: 'compaction_trigger_unavailable', message: 'private trigger failure' },
+    })));
+
+    const second = await secondPromise;
+    expect(compactFetch).toHaveBeenCalledOnce();
+    const replacement = lastSocket();
+    replacement.emit('open');
+    const sent = JSON.parse(replacement.send.mock.calls[0]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    expect(sent.input).toEqual(canonical);
+    emitTextResponse(replacement, 'resp_endpoint_fallback_next', 'done');
+    await readAll(second);
+    expect(originalSocket.close).toHaveBeenCalledOnce();
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_compaction',
+      outcome: 'completed',
+      transport: 'responses_compact_endpoint',
+      inputTokens: 200,
+      outputTokens: 30,
+    }));
+  });
+
+  it('recompacts canonical opaque state when an in-band trigger falls back to HTTP', async () => {
+    const firstCanonical = [{ type: 'compaction', encrypted_content: 'first-opaque-state' }];
+    const secondCanonical = [{ type: 'compaction', encrypted_content: 'second-opaque-state' }];
+    const compactFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      expect(body.input).toEqual([
+        firstUser,
+        secondUser,
+        ...firstCanonical,
+        secondAssistant,
+        thirdUser,
+      ]);
+      return new Response(JSON.stringify({ output: secondCanonical }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-recompact-http-fallback',
+      compactThreshold: 100,
+      compactFetch: compactFetch as typeof fetch,
+    });
+    const firstUser = { role: 'user', content: [{ type: 'input_text', text: 'first' }] };
+    const first = await wsFetch('https://example.test/responses', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([firstUser])),
+    });
+    const originalSocket = lastSocket();
+    originalSocket.emit('open');
+    emitTextResponse(originalSocket, 'resp_recompact_base', 'first answer', {
+      input_tokens: 150,
+      output_tokens: 10,
+    });
+    await readAll(first);
+
+    const firstAssistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'first answer' }],
+    };
+    const secondUser = { role: 'user', content: [{ type: 'input_text', text: 'second' }] };
+    const secondInput = [firstUser, firstAssistant, secondUser];
+    const secondPromise = wsFetch('https://example.test/responses', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(secondInput)),
+    });
+    await vi.waitFor(() => expect(originalSocket.send).toHaveBeenCalledTimes(2));
+    emitCompactionResponse(originalSocket, 'resp_recompact_first_trigger', 'first-opaque-state');
+    const second = await secondPromise;
+    const compactedSocket = lastSocket();
+    compactedSocket.emit('open');
+    const secondAssistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'second answer' }],
+    };
+    emitTextResponse(compactedSocket, 'resp_recompact_first_head', 'second answer', {
+      input_tokens: 150,
+      output_tokens: 10,
+    });
+    await readAll(second);
+
+    const thirdUser = { role: 'user', content: [{ type: 'input_text', text: 'third' }] };
+    const thirdPromise = wsFetch('https://example.test/responses', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([...secondInput, secondAssistant, thirdUser])),
+    });
+    await vi.waitFor(() => expect(compactedSocket.send).toHaveBeenCalledTimes(2));
+    compactedSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: { code: 'compaction_trigger_unavailable', message: 'trigger unavailable' },
+    })));
+    const third = await thirdPromise;
+
+    expect(compactFetch).toHaveBeenCalledOnce();
+    const recompactedSocket = lastSocket();
+    recompactedSocket.emit('open');
+    const sent = JSON.parse(recompactedSocket.send.mock.calls[0]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    expect(sent.input).toEqual(secondCanonical);
+    emitTextResponse(recompactedSocket, 'resp_recompact_second_head', 'third answer');
+    await readAll(third);
+    expect(compactedSocket.close).toHaveBeenCalledOnce();
+  });
+
+  it('retries a compacted fresh head with canonical compact input, not the full transcript', async () => {
+    const canonical = [{ type: 'compaction', encrypted_content: 'retry-summary' }];
+    const compactFetch = vi.fn();
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-compact-retry',
+      compactThreshold: 100,
+      compactFetch: compactFetch as typeof fetch,
+    });
+    const firstUser = { role: 'user', content: [{ type: 'input_text', text: 'first' }] };
+    const first = await wsFetch('https://example.test/responses', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([firstUser])),
+    });
+    const originalSocket = lastSocket();
+    originalSocket.emit('open');
+    emitTextResponse(originalSocket, 'resp_retry_base', 'answer', {
+      input_tokens: 150,
+      output_tokens: 10,
+    });
+    await readAll(first);
+
+    const nextUser = { role: 'user', content: [{ type: 'input_text', text: 'next' }] };
+    const fullInput = [
+      firstUser,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+      nextUser,
+    ];
+    const secondPromise = wsFetch('https://example.test/responses', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(fullInput)),
+    });
+    await vi.waitFor(() => expect(originalSocket.send).toHaveBeenCalledTimes(2));
+    emitCompactionResponse(originalSocket, 'resp_retry_trigger', 'retry-summary');
+    const second = await secondPromise;
+    const compactedSocket = lastSocket();
+    compactedSocket.emit('open');
+    const compactedInput = [firstUser, nextUser, ...canonical];
+    expect(JSON.parse(compactedSocket.send.mock.calls[0]![0] as string).input)
+      .toEqual(compactedInput);
+
+    compactedSocket.emit(
+      'error',
+      Object.assign(new Error('compacted transport failure'), { code: 'ECONNRESET' }),
+    );
+    const replacement = lastSocket();
+    replacement.emit('open');
+    const replay = JSON.parse(replacement.send.mock.calls[0]![0] as string);
+    expect(replay.previous_response_id).toBeUndefined();
+    expect(replay.input).toEqual(compactedInput);
+    expect(replay.input).not.toEqual(fullInput);
+    emitTextResponse(replacement, 'resp_compact_retry', 'recovered');
+    await readAll(second);
+    expect(compactFetch).not.toHaveBeenCalled();
+  });
+
+  it('restores a compact checkpoint after every matching live head has closed', async () => {
+    const canonical = [{ type: 'compaction', encrypted_content: 'checkpoint-summary' }];
+    const compactFetch = vi.fn();
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-compact-checkpoint',
+      compactThreshold: 100,
+      compactFetch: compactFetch as typeof fetch,
+    });
+    const firstUser = { role: 'user', content: [{ type: 'input_text', text: 'first' }] };
+    const first = await wsFetch('https://example.test/responses', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([firstUser])),
+    });
+    const originalSocket = lastSocket();
+    originalSocket.emit('open');
+    emitTextResponse(originalSocket, 'resp_checkpoint_base', 'first answer', {
+      input_tokens: 150,
+      output_tokens: 10,
+    });
+    await readAll(first);
+
+    const firstAssistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'first answer' }],
+    };
+    const secondUser = { role: 'user', content: [{ type: 'input_text', text: 'second' }] };
+    const secondInput = [firstUser, firstAssistant, secondUser];
+    const secondPromise = wsFetch('https://example.test/responses', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(secondInput)),
+    });
+    await vi.waitFor(() => expect(originalSocket.send).toHaveBeenCalledTimes(2));
+    emitCompactionResponse(originalSocket, 'resp_checkpoint_trigger', 'checkpoint-summary');
+    const second = await secondPromise;
+    const compactedSocket = lastSocket();
+    compactedSocket.emit('open');
+    emitTextResponse(compactedSocket, 'resp_checkpoint_compact', 'second answer', {
+      input_tokens: 50,
+      output_tokens: 10,
+    });
+    await readAll(second);
+
+    originalSocket.emit('close', 1000, Buffer.from(''));
+    compactedSocket.emit('close', 1000, Buffer.from(''));
+    const secondAssistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'second answer' }],
+    };
+    const thirdUser = { role: 'user', content: [{ type: 'input_text', text: 'third' }] };
+    await wsFetch('https://example.test/responses', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([...secondInput, secondAssistant, thirdUser])),
+    });
+
+    const restoredSocket = lastSocket();
+    restoredSocket.emit('open');
+    const restored = JSON.parse(restoredSocket.send.mock.calls[0]![0] as string);
+    expect(restored.previous_response_id).toBeUndefined();
+    expect(restored.input).toEqual([
+      firstUser,
+      secondUser,
+      ...canonical,
+      secondAssistant,
+      thirdUser,
+    ]);
+    expect(compactFetch).not.toHaveBeenCalled();
   });
 
   it('reuses a socket only while the authorization credential is unchanged', async () => {

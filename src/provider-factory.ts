@@ -110,6 +110,8 @@ export interface ProviderModelSpec {
   useResponsesLite?: boolean;
   /** Backend capability: model must use the WebSocket Responses transport instead of HTTP. */
   preferWebSockets?: boolean;
+  /** Native compaction token threshold for OAuth Responses models. */
+  openAiCompactThreshold?: number;
   /** Optional debug logger (wired to the proxy trace log) for transport-level diagnostics. */
   onDebug?: (msg: string) => void;
   /** Optional privacy-safe structured WebSocket diagnostics. */
@@ -190,6 +192,7 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
                 fetch: createResponsesWebSocketFetch(CODEX_RESPONSES_LITE_WS_URL, spec.onDebug, {
                   providerId: spec.providerId ?? 'openai',
                   accountId,
+                  compactThreshold: spec.openAiCompactThreshold,
                   onDiagnostic: spec.onWebSocketDiagnostic,
                 }),
               }

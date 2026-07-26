@@ -56,9 +56,11 @@ import {
   silenceSdkWarnings,
   anthropicEffortFromRequest,
   extractClaudeSessionId,
+  isClaudeCodeCompactRequest,
   type AnthropicRequest,
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
+import { resolveOpenAiCompactionThreshold } from '../oauth/responses-compaction.js';
 import { listenTcpServer, tcpListenerUrlHost } from '../listener-ready.js';
 
 export interface ServerOptions {
@@ -396,6 +398,9 @@ async function handleAnthropicMessages(
       plog(`tools truncated: ${toolCount} → ${npmMaxTools} (provider limit)`);
     }
     const openAiOAuth = model.npm === '@ai-sdk/openai' && model.authType === 'oauth';
+    const estimatedInputTokens = estimateAnthropicInputTokens(body);
+    const forceCompaction = openAiOAuth
+      && isClaudeCodeCompactRequest(body as AnthropicRequest);
     const params = sdkTranslateRequest(body as unknown as AnthropicRequest, model.npm!, {
       defaultEffort: anthropicEffortFromRequest(body as AnthropicRequest) ? undefined : model.defaultEffort,
       openAiOAuth,
@@ -441,9 +446,9 @@ async function handleAnthropicMessages(
             res.write(chunk);
           };
           await withResponsesWebSocketDiagnosticContext(
-            { requestId, claudeSessionId },
+            { requestId, claudeSessionId, estimatedInputTokens, forceCompaction },
             () => streamAnthropicResponse(languageModel, params, responseModelId, writeStreamChunk, undefined, {
-              initialInputTokens: estimateAnthropicInputTokens(body),
+              initialInputTokens: estimatedInputTokens,
             }),
           );
           if (!res.headersSent) writeStreamChunk('');
@@ -453,7 +458,7 @@ async function handleAnthropicMessages(
           // returns text/event-stream unconditionally), so stream internally and
           // collect the result instead of issuing a non-streaming SDK request.
           const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
-            { requestId, claudeSessionId },
+            { requestId, claudeSessionId, estimatedInputTokens, forceCompaction },
             () => generateAnthropicResponse(languageModel, params, responseModelId, { forceStream: openAiOAuth }),
           );
           sendJson(res, 200, anthropicResponse);
@@ -725,6 +730,9 @@ async function getOrInitLanguageModel(
       headers: model.headers,
       useResponsesLite: model.useResponsesLite,
       preferWebSockets: model.preferWebSockets,
+      openAiCompactThreshold: model.authType === 'oauth'
+        ? resolveOpenAiCompactionThreshold(model.contextWindow)
+        : undefined,
       onWebSocketDiagnostic: webSocketDiagnosticsLogPath
         ? event => writeWebSocketDiagnosticLog(webSocketDiagnosticsLogPath, event)
         : undefined,
