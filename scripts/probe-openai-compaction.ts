@@ -20,7 +20,8 @@ interface ProbeResult {
   cacheWriteTokens?: number;
   outputTokens?: number;
   cacheReadRatio?: number;
-  wireBytes?: number;
+  responseWireBytes?: number;
+  triggerWireBytes?: number;
   eventTypes?: string[];
   upstreamErrorCode?: string;
   upstreamErrorCategory?: string;
@@ -287,7 +288,7 @@ async function probeContextManagement(
       cacheReadRatio: inputTokens
         ? Number((cachedTokens / inputTokens).toFixed(4))
         : undefined,
-      wireBytes: summary.wireBytes,
+      responseWireBytes: summary.wireBytes,
       eventTypes: summary.eventTypes,
       upstreamErrorCode: summary.upstreamErrorCode,
       upstreamErrorCategory: summary.upstreamErrorCategory,
@@ -353,7 +354,7 @@ async function probeIntegratedCompaction(
         attempt: 1,
         ok: false,
         outputItemTypes: firstSummary.outputItemTypes,
-        wireBytes: firstSummary.wireBytes,
+        responseWireBytes: firstSummary.wireBytes,
         eventTypes: firstSummary.eventTypes,
         upstreamErrorCode: firstSummary.upstreamErrorCode,
         upstreamErrorCategory: firstSummary.upstreamErrorCategory,
@@ -409,7 +410,10 @@ async function probeIntegratedCompaction(
       cacheReadRatio: inputTokens
         ? Number((cachedTokens / inputTokens).toFixed(4))
         : undefined,
-      wireBytes: secondSummary.wireBytes,
+      responseWireBytes: secondSummary.wireBytes,
+      triggerWireBytes: typeof compaction?.triggerWireBytes === 'number'
+        ? compaction.triggerWireBytes
+        : undefined,
       eventTypes: secondSummary.eventTypes,
       upstreamErrorCode: secondSummary.upstreamErrorCode,
       upstreamErrorCategory: secondSummary.upstreamErrorCategory,

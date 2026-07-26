@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 
 type JsonObject = Record<string, unknown>;
 
-const DISABLED_VALUES = new Set(['0', 'false', 'off', 'disabled']);
+const ENABLED_VALUES = new Set(['1', 'true', 'on', 'enabled']);
 const COMPACT_BODY_FIELDS = [
   'model',
   'input',
@@ -16,7 +16,10 @@ const COMPACT_BODY_FIELDS = [
 ] as const;
 
 export const OPENAI_COMPACTION_DEFAULT_RATIO = 0.9;
-export const RESPONSES_COMPACT_TIMEOUT_MS = 10 * 60_000;
+// Compaction runs before the downstream SSE response exists. Keep its budget
+// comfortably below Claude Code's 120s no-data watchdog so expiry can fall back
+// to the normal request path instead of surfacing as a downstream idle timeout.
+export const RESPONSES_COMPACT_TIMEOUT_MS = 60_000;
 
 export interface ResponsesCompactionUsage {
   inputTokens: number;
@@ -53,15 +56,15 @@ export class ResponsesCompactionError extends Error {
  * Resolve the native-compaction threshold. The default mirrors Codex:
  * compact at 90% of the model's advertised context window.
  *
- * Native compaction is on by default for OAuth Responses models. Set
- * CLODEX_OPENAI_COMPACTION=0 to disable it.
+ * Native compaction is experimental and off by default. Set
+ * CLODEX_OPENAI_COMPACTION=1 to opt in.
  */
 export function resolveOpenAiCompactionThreshold(
   contextWindow: number | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): number | undefined {
   const configured = env.CLODEX_OPENAI_COMPACTION?.trim().toLowerCase();
-  if (configured && DISABLED_VALUES.has(configured)) return undefined;
+  if (!configured || !ENABLED_VALUES.has(configured)) return undefined;
 
   const explicit = env.CLODEX_OPENAI_COMPACT_THRESHOLD?.trim();
   if (explicit) {

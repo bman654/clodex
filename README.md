@@ -251,6 +251,13 @@ clodex --version    # version
 - `CLODEX_CLAUDE_PATH` overrides Claude Code binary discovery.
 - **Outbound proxy:** when `HTTP_PROXY`/`HTTPS_PROXY` (and optionally `NO_PROXY`) are set in clodex's environment, all clodex-originated network calls honor them — OAuth sign-in and token refresh, model-list and models.dev refreshes, upstream OpenAI API calls, and the ChatGPT/Codex OAuth WebSocket transport (tunneled via HTTP CONNECT).
 
+## Experimental OpenAI compaction
+
+ChatGPT/Codex OAuth sessions can opt into OpenAI's native opaque Responses
+compaction. It is off by default because OpenAI-side compaction does not shrink
+Claude Code's saved transcript. Read [How to configure OpenAI
+compaction](docs/native-codex-compaction.md) before enabling it.
+
 ## Known limitations
 
 - Cost display inside Claude Code is inaccurate for OpenAI models (Claude Code applies its own pricing table).

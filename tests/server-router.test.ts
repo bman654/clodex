@@ -12,6 +12,7 @@ import { generateOpenAiResponse, streamOpenAiResponse } from '../src/openai-adap
 import { resolveProviderCredential } from '../src/env.js';
 
 const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:oauth-provider`;
+const ORIGINAL_COMPACTION_FLAG = process.env.CLODEX_OPENAI_COMPACTION;
 
 vi.mock('../src/env.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/env.js')>();
@@ -195,6 +196,8 @@ afterEach(async () => {
   vi.mocked(resolveProviderCredential).mockReset();
   vi.mocked(streamAnthropicResponse).mockClear();
   vi.mocked(streamOpenAiResponse).mockClear();
+  if (ORIGINAL_COMPACTION_FLAG === undefined) delete process.env.CLODEX_OPENAI_COMPACTION;
+  else process.env.CLODEX_OPENAI_COMPACTION = ORIGINAL_COMPACTION_FLAG;
   while (handles.length > 0) {
     const handle = handles.pop();
     if (handle) await closeHandle(handle);
@@ -552,6 +555,40 @@ describe('server router', () => {
     expect(await response.json()).toMatchObject({
       error: { message: expect.stringContaining('No SDK provider') },
     });
+  });
+
+  it('injects the opt-in native-compaction threshold in endpoint mode', async () => {
+    process.env.CLODEX_OPENAI_COMPACTION = '1';
+    vi.mocked(resolveProviderCredential).mockResolvedValue('oauth-token');
+    const catalog = createGatewayModelCatalog([{
+      id: 'gpt-5.6-sol',
+      name: 'GPT-5.6 Sol',
+      isFree: false,
+      brand: 'OpenAI',
+      providerId: 'oauth-provider',
+      sourceBackend: 'oauth-provider',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      authType: 'oauth',
+      authRef: TEST_HELPER_REF,
+      apiKey: 'launch-token',
+      contextWindow: 272_000,
+    }]);
+    const server = await startTestServer({ catalog });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'anthropic-oauth-provider__gpt-5.6-sol',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(createLanguageModel).toHaveBeenCalledWith(expect.objectContaining({
+      openAiCompactThreshold: 244_800,
+    }));
   });
 
   it('returns Anthropic prompt-too-long shape for a translated context overflow', async () => {

@@ -1,152 +1,151 @@
-# Native OpenAI/Codex compaction
+# Experimental native OpenAI/Codex compaction
 
-Status: implemented for ChatGPT/Codex OAuth Responses models.
+Native compaction is an experimental, opt-in feature for ChatGPT/Codex OAuth
+Responses models. It replaces part of a long OpenAI-side response chain with
+OpenAI's opaque `compaction` item.
 
-## Outcome
+It is off by default because Claude Code and OpenAI maintain different views of
+the conversation. OpenAI can compact its chain without shrinking Claude Code's
+local transcript. If the live OpenAI state is later lost, Claude may try to
+replay a transcript that no longer fits the model's context window.
 
-clodex now uses the same native opaque compaction item as Codex while preserving
-Claude Code's Anthropic-compatible session and its existing prompt-cache and
-`previous_response_id` optimizations.
+## Enable it
 
-The default threshold mirrors Codex: 90% of the model's advertised context
-window. For a 272,000-token model, compaction starts at 244,800 tokens.
+Set the opt-in flag in the environment that launches Clodex:
 
-Set `CLODEX_OPENAI_COMPACTION=0` to disable native compaction. For testing, an
-explicit positive token threshold can be set with
-`CLODEX_OPENAI_COMPACT_THRESHOLD`.
+```sh
+CLODEX_OPENAI_COMPACTION=1 clodex claude
+```
 
-## Efficient live-chain path
+The default trigger is 90% of the model's advertised context window. A positive
+integer override can be used in production or tests:
 
-When a completed OpenAI response reports input usage at or above the threshold,
-the next matching request is handled transactionally:
+```sh
+CLODEX_OPENAI_COMPACTION=1 \
+CLODEX_OPENAI_COMPACT_THRESHOLD=220000 \
+clodex claude
+```
 
-1. Exact Claude lineage selects one idle Responses head.
-2. clodex appends the current delta plus `{ "type": "compaction_trigger" }`
-   using that head's `previous_response_id`.
-3. OpenAI returns one opaque `compaction` item.
-4. clodex keeps the old head as a transactional fallback and builds a new
-   canonical input from:
-   - recent user messages, bounded to Codex's 64K retained-message policy;
-   - the opaque native compaction item.
-5. The actual Claude request starts a fresh Responses chain from that compacted
-   input, without the old `previous_response_id`.
-6. After `response.completed`, clodex closes the old head and later Claude turns
-   continue on the new head with delta-only input.
+`CLODEX_OPENAI_COMPACT_THRESHOLD` does not enable the feature by itself.
+Invalid, fractional, zero, and negative thresholds are ignored.
 
-This is Codex's newer remote-compaction-v2 protocol. It avoids sending the full
-transcript to a second HTTP endpoint. A live synthetic probe sent a 455-byte
-incremental trigger; OpenAI reported 6,912 of 7,665 logical input tokens as
-cached (90.2%).
+## Keep Claude Code's transcript bounded
 
-## Standalone recovery path
+Configure Claude Code's own auto-compact window even when native compaction is
+enabled. For example, in `.claude/settings.json`:
 
-`POST /responses/compact` remains a fallback when no usable live head exists,
-such as:
+```json
+{
+  "env": {
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "230000"
+  }
+}
+```
 
-- the first request after a process restart is already over the threshold;
-- a compacted checkpoint needs another compaction but has no live socket;
-- the in-band trigger fails before producing a valid compaction item.
+If Claude's effective auto-compact point is below Clodex's native threshold,
+Claude compacts first and the native path normally stays dormant. This is the
+conservative configuration.
 
-The request preserves the exact model, instructions, tools, reasoning,
-`prompt_cache_key`, service tier, and text settings used by Codex's compact
-client. Its canonical output is forwarded as-is to a fresh response chain.
+Lowering `CLODEX_OPENAI_COMPACT_THRESHOLD` below Claude's effective trigger lets
+you evaluate native compaction, but accepts the transcript-growth risk: usage
+reported after the OpenAI rebase is smaller even though Claude's saved
+transcript is still large.
 
-Standalone compaction consumes a separate inference request. In a live repeated
-probe, two identical 7,613-token compact calls both reported zero cached input.
-It is therefore deliberately a recovery path, not the normal live-session path.
+Claude-initiated compaction turns, including `/compact`, never trigger an
+additional hidden native compaction. They run against the existing response
+chain so the portable summary sees the full available history.
 
-## State and branch safety
+## Operations that can lose native state
 
-Claude transcript lineage and OpenAI canonical compacted input are kept
-separately:
+After native compaction has occurred, these operations can abandon the live
+response chain or select a different partition:
 
-- Claude lineage is used only for exact-prefix branch selection.
-- Opaque reasoning and compaction items are allowed to be absent from Claude's
-  echo, but every remaining assistant/tool item must still match exactly.
-- Compaction applies to one selected head, never an entire session partition.
-- Hidden parallel requests keep their existing isolated-socket behavior.
-- A compacted head is promoted only after the first post-compact response
-  completes.
+- restarting Clodex or using `--resume`;
+- leaving the session idle beyond the WebSocket/checkpoint lifetime;
+- switching the model or reasoning effort;
+- `/rewind`, `/fork`, or `/btw`;
+- checkpoint eviction;
+- a failed standalone recovery request.
 
-Completed compacted heads also create bounded process-local checkpoints:
+Process-local compact checkpoints expire after 30 minutes and are capped at
+eight per model/account/session partition and 32 globally. They are not written
+to disk.
 
-- at most 8 per partition and 32 globally;
-- keyed by the full model/effort/account/cache/session partition;
-- selected only by exact Claude lineage;
-- used to restore canonical compacted input after socket expiry or replacement.
+Before a planned restart, model switch, or resume, use Claude's normal
+`/compact` while the transcript still fits. If native state is already gone and
+the saved transcript is over the model window, start a new session with a
+portable handoff rather than repeatedly retrying the oversized transcript.
 
-Cross-process checkpoint persistence is intentionally not implemented. After a
-restart, clodex safely falls back to standalone compaction or the normal full
-request because Claude's saved transcript cannot reconstruct OpenAI's opaque
-item.
+## Request and cache behavior
 
-## Claude's local compaction handoff
+For a matching live response head:
 
-Native OpenAI compaction does not replace or suppress Claude Code's own
-compaction. Claude still asks the model for a portable summary and then rewrites
-its local transcript around that summary. That changes Claude's source lineage,
-so an ordinary exact-prefix match can no longer find the compacted OpenAI head.
+1. Clodex sends only the current delta plus
+   `{ "type": "compaction_trigger" }` with `previous_response_id`.
+2. OpenAI returns exactly one opaque compaction item.
+3. Clodex starts a fresh response chain from recent retained user input followed
+   by that opaque item.
+4. The new head is recorded only after `response.completed`; later turns return
+   to delta-only continuation.
 
-clodex bridges the boundary without retaining the summary text:
+The trigger request is cache-warm by construction because it continues the live
+response chain. The fresh post-compaction chain is a new prefix and can incur a
+one-time cache write before later turns can reuse that new cached prefix.
+Native compaction is an additional inference request and consumes plan/API
+usage.
 
-1. The post-compact response completes on the new OpenAI chain.
-2. If that response is Claude's compaction turn, clodex normalizes Claude's
-   `<analysis>`/`<summary>` output exactly as the current Claude Code client
-   does and stores only its SHA-256 hash beside the compacted head.
-3. On the next request, clodex recognizes Claude's standard continuation
-   wrapper and requires the wrapped portable summary to match that hash exactly.
-4. The summary wrapper is removed, the remaining current input becomes the
-   delta, and the request continues from the compacted head's
-   `previous_response_id`.
-5. After that response completes, Claude's rewritten transcript is once again
-   an ordinary exact-prefix lineage.
+Retained user messages use a 64K approximate-token budget. Text is counted by
+UTF-8 bytes and media is charged the same flat vision estimate used elsewhere
+in Clodex, so base64 payload size is not mistaken for text tokens.
 
-An absent, short, malformed, duplicated, or non-matching summary never selects
-the opaque head. It falls through to checkpoint or full-context recovery.
-Neither the summary plaintext nor the opaque compaction item is written to
-diagnostics.
+## Recovery path and time budget
 
-## Failure behavior
+`POST /responses/compact` is used only when no live head is available or the
+in-band trigger fails. Its returned array is canonical and is forwarded as-is;
+Clodex does not prune or reinterpret it.
 
-- Invalid or failed trigger: try standalone `/responses/compact`.
-- Failed standalone compact: continue through the normal full-context path.
-- Claude portable-summary mismatch: do not attach the rewritten transcript to
-  opaque state; use the ordinary safe fallback path.
-- Pre-frame transport failure after compaction: retry once with canonical
-  compacted input, never the old full transcript.
-- `previous_response_not_found`: retry once on a fresh chain using the canonical
-  compacted checkpoint when available.
-- Failure after model output: do not replay the request.
+Both the in-band trigger and standalone call have a 60-second budget. Timeout is
+treated as a fallback before Claude Code's 120-second no-data watchdog can fire.
+A failed compact attempt preserves the ordinary request path where possible.
 
-Compaction diagnostics record only bounded metadata: trigger reason, transport,
-threshold, item counts, input/cache/output usage, status code, and hashed
-correlation identifiers. Conversation and compacted content are never logged.
+## Claude transcript handoff
 
-## Capability findings
+When Claude later writes a portable summary, Clodex stores only an SHA-256 hash
+of the normalized summary beside an already compacted head. The next rewritten
+request can reattach only when exactly one continuation envelope has the exact
+hash. Missing, short, malformed, duplicated, or non-matching envelopes fall
+back without selecting opaque state. Diagnostics report an `anchor_missed`
+outcome without recording summary text.
 
-Live ChatGPT/Codex OAuth probes confirmed:
+Summary extraction mirrors the client: the last assistant message containing a
+`<summary>` block supplies the first text part used for the anchor.
 
-- `/responses/compact` works for GPT-5.6 Sol and GPT-5.6 Luna.
-- `compaction_trigger` works over a Sol WebSocket continuation.
-- automatic `context_management` is currently rejected by the ChatGPT/Codex
-  backend, even though the pinned OpenAI AI SDK supports the field.
+## Diagnostics and live probe
 
-The implementation therefore does not send `context_management`.
+`--trace` or `--ws-diagnostics` emits bounded `ws_compaction` metadata without
+conversation text or opaque content. The guarded probe is available with:
 
-## Prior art and references
+```sh
+CLODEX_LIVE_COMPACTION_PROBE=1 \
+pnpm dlx tsx scripts/probe-openai-compaction.ts
+```
 
-[`raine/claude-code-proxy`](https://github.com/raine/claude-code-proxy)
-demonstrated the portable-summary anchor needed to reconnect Claude's rewritten
-transcript to a native Codex compaction artifact. Its
-[`compaction.rs`](https://github.com/raine/claude-code-proxy/blob/main/src/providers/codex/compaction.rs)
-implementation sends the translated conversation plus a compaction trigger as
-an additional request. clodex adopts the exact-anchor safety property, stores a
-hash rather than summary plaintext, and uses the live
-`previous_response_id` chain when available so the trigger itself contains only
-the incremental delta.
+The probe reports trigger request bytes as `triggerWireBytes` and received SSE
+bytes as `responseWireBytes`; these are deliberately separate measurements. It
+also reports input, cached-input, cache-write, and output token usage when the
+backend supplies it.
 
-OpenAI protocol references:
+Live capability checks established that Sol and Luna accept
+`/responses/compact`, and Sol accepts an in-band `compaction_trigger`.
+Automatic `context_management` was rejected by the ChatGPT/Codex backend during
+testing, so Clodex does not send it.
 
-- [Compaction](https://developers.openai.com/api/docs/guides/compaction)
-- [Responses WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode)
-- [Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
+## Protocol references
+
+- [OpenAI compaction guide](https://developers.openai.com/api/docs/guides/compaction)
+- [OpenAI Responses WebSocket mode](https://developers.openai.com/api/docs/guides/websocket-mode)
+- [OpenAI prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)
+- [Codex remote-compaction-v2 source](https://github.com/openai/codex/blob/main/codex-rs/core/src/compact_remote_v2.rs)
+
+The portable-summary anchor was informed by
+[`raine/claude-code-proxy`](https://github.com/raine/claude-code-proxy).

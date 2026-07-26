@@ -33,7 +33,7 @@ const NON_CONTEXT_FIELDS = new Set([
  * (never inline base64 text), so they cost tile-based vision tokens — for a
  * typical screenshot on GPT-family and Claude models that lands around 1-2k.
  */
-const IMAGE_INPUT_TOKEN_ESTIMATE = 1600;
+export const IMAGE_INPUT_TOKEN_ESTIMATE = 1600;
 
 function isAnthropicImageBlock(value: unknown): boolean {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;

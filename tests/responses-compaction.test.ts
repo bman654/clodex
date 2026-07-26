@@ -9,9 +9,8 @@ import {
 } from '../src/oauth/responses-compaction.js';
 
 describe('Responses standalone compaction', () => {
-  it('defaults to Codex-compatible 90% context utilization and can be disabled', () => {
-    expect(resolveOpenAiCompactionThreshold(272_000, {}))
-      .toBe(Math.floor(272_000 * OPENAI_COMPACTION_DEFAULT_RATIO));
+  it('is opt-in and defaults enabled sessions to Codex-compatible 90% utilization', () => {
+    expect(resolveOpenAiCompactionThreshold(272_000, {})).toBeUndefined();
     expect(resolveOpenAiCompactionThreshold(272_000, {
       CLODEX_OPENAI_COMPACTION: '0',
     })).toBeUndefined();
@@ -23,6 +22,17 @@ describe('Responses standalone compaction', () => {
       CLODEX_OPENAI_COMPACTION: 'true',
       CLODEX_OPENAI_COMPACT_THRESHOLD: 'not-a-token-count',
     })).toBe(244_800);
+    expect(resolveOpenAiCompactionThreshold(272_000, {
+      CLODEX_OPENAI_COMPACTION: 'true',
+      CLODEX_OPENAI_COMPACT_THRESHOLD: '-1',
+    })).toBe(Math.floor(272_000 * OPENAI_COMPACTION_DEFAULT_RATIO));
+    expect(resolveOpenAiCompactionThreshold(272_000, {
+      CLODEX_OPENAI_COMPACTION: 'true',
+      CLODEX_OPENAI_COMPACT_THRESHOLD: '1.5',
+    })).toBe(Math.floor(272_000 * OPENAI_COMPACTION_DEFAULT_RATIO));
+    expect(resolveOpenAiCompactionThreshold(undefined, {
+      CLODEX_OPENAI_COMPACTION: 'true',
+    })).toBeUndefined();
   });
 
   it('targets /responses/compact for both canonical and provider-prefixed URLs', () => {
@@ -35,7 +45,10 @@ describe('Responses standalone compaction', () => {
   });
 
   it('sends the Codex compact fields, preserves the cache key, and returns canonical output', async () => {
-    const compacted = [{ type: 'compaction', encrypted_content: 'opaque-summary' }];
+    const compacted = [
+      { role: 'user', content: [{ type: 'input_text', text: 'hello' }] },
+      { type: 'compaction', encrypted_content: 'opaque-summary' },
+    ];
     const requestFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
       expect(headers.get('authorization')).toBe('Bearer test-token');
@@ -85,11 +98,18 @@ describe('Responses standalone compaction', () => {
     expect(requestFetch.mock.calls[0]![0])
       .toBe('https://chatgpt.com/backend-api/codex/responses/compact');
     const body = JSON.parse(String(requestFetch.mock.calls[0]![1]?.body));
-    expect(body).toEqual(compactRequestPayload(payload));
-    expect(body.prompt_cache_key).toBe('stable-session-key');
-    expect(body.previous_response_id).toBeUndefined();
-    expect(body.store).toBeUndefined();
-    expect(body.stream).toBeUndefined();
+    expect(body).toEqual({
+      model: 'gpt-5.6-sol',
+      input: [{ role: 'user', content: [{ type: 'input_text', text: 'hello' }] }],
+      instructions: 'Stable prefix.',
+      tools: [{ type: 'function', name: 'Read' }],
+      parallel_tool_calls: false,
+      reasoning: { effort: 'medium' },
+      service_tier: 'default',
+      prompt_cache_key: 'stable-session-key',
+      text: { verbosity: 'medium' },
+    });
+    expect(compactRequestPayload(payload)).toEqual(body);
     expect(result).toEqual({
       output: compacted,
       usage: {
@@ -125,5 +145,21 @@ describe('Responses standalone compaction', () => {
     expect((thrown as ResponsesCompactionError).statusCode).toBe(400);
     expect(String(thrown)).not.toContain('sensitive upstream detail');
     expect(String(thrown)).toMatch(/error [0-9a-f]{16}/);
+  });
+
+  it('aborts a compact request at its own bounded timeout', async () => {
+    const requestFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => (
+      await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true });
+      })
+    ));
+
+    await expect(compactResponsesWindow({
+      requestUrl: 'https://example.test/responses',
+      headers: {},
+      payload: { model: 'gpt-5.6-sol', input: [] },
+      fetch: requestFetch as typeof fetch,
+      timeoutMs: 5,
+    })).rejects.toThrow(/compaction exceeded/);
   });
 });

@@ -249,6 +249,44 @@ describe('effortProviderOptions + deepMergeProviderOptions', () => {
 });
 
 describe('createLanguageModel', () => {
+  it('passes the resolved native-compaction threshold into the OAuth transport', async () => {
+    vi.resetModules();
+    const responsesFetch = vi.fn();
+    const createResponsesWebSocketFetch = vi.fn(() => responsesFetch);
+    vi.doMock('../src/oauth/responses-websocket.js', async importOriginal => {
+      const actual = await importOriginal<typeof import('../src/oauth/responses-websocket.js')>();
+      return { ...actual, createResponsesWebSocketFetch };
+    });
+    const responses = vi.fn((modelId: string) => ({ modelId, provider: 'openai-responses' }));
+    const chat = vi.fn((modelId: string) => ({ modelId, provider: 'openai-chat' }));
+    const createOpenAI = vi.fn(() => ({ responses, chat }));
+    vi.doMock('@ai-sdk/openai', () => ({ createOpenAI }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai',
+      modelId: 'gpt-5.6-sol',
+      apiKey: 'oauth-token',
+      authType: 'oauth',
+      oauthAccountId: 'acct-transport-threshold',
+      openAiCompactThreshold: 244_800,
+    });
+
+    expect(createResponsesWebSocketFetch).toHaveBeenCalledWith(
+      expect.any(String),
+      undefined,
+      expect.objectContaining({
+        accountId: 'acct-transport-threshold',
+        compactThreshold: 244_800,
+      }),
+    );
+    expect(createOpenAI).toHaveBeenCalledWith(expect.objectContaining({
+      fetch: responsesFetch,
+    }));
+    vi.doUnmock('../src/oauth/responses-websocket.js');
+    vi.doUnmock('@ai-sdk/openai');
+  });
+
   it('prefers the current OpenAI OAuth token account claim over stored metadata', async () => {
     vi.resetModules();
     const responses = vi.fn((modelId: string) => ({ modelId, provider: 'openai-responses' }));

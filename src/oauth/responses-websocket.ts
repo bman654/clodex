@@ -10,11 +10,13 @@ import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { FetchFunction } from '@ai-sdk/provider-utils';
 import type { RawData, WebSocket as WsWebSocket } from 'ws';
+import { IMAGE_INPUT_TOKEN_ESTIMATE } from '../anthropic-endpoints.js';
 import { CODEX_RESPONSES_WEBSOCKETS_BETA } from '../constants.js';
 import { outboundWsProxyAgent } from '../outbound-proxy.js';
 import { anthropicErrorType, clampRetryAfterSeconds } from '../upstream-error.js';
 import {
   compactResponsesWindow,
+  RESPONSES_COMPACT_TIMEOUT_MS,
   ResponsesCompactionError,
   type ResponsesCompactionUsage,
 } from './responses-compaction.js';
@@ -29,6 +31,7 @@ export const RESPONSES_WS_NURSERY_IDLE_TTL_MS = 5 * 60_000;
 export const RESPONSES_WS_MAX_CONNECTIONS = 32;
 export const RESPONSES_WS_MAX_NURSERY_CONNECTIONS = 8;
 export const RESPONSES_COMPACTION_RETAINED_USER_TOKENS = 64_000;
+export const RESPONSES_COMPACTION_CHECKPOINT_TTL_MS = 30 * 60_000;
 
 export interface ResponsesWebSocketFetchOptions {
   providerId?: string;
@@ -492,38 +495,95 @@ function isOpaqueCompactionKind(kind: string): boolean {
   return kind === 'compaction' || kind === 'compaction_summary';
 }
 
-function approximateItemTokens(value: unknown): number {
-  return Math.max(1, Math.ceil(canonicalJson(value).length / 4));
+function approximateTextTokens(text: string): number {
+  return Math.ceil(Buffer.byteLength(text, 'utf8') / 4);
+}
+
+function retainedContentPartTokens(value: unknown): number {
+  if (!value || typeof value !== 'object') return 0;
+  const record = value as JsonObject;
+  if (typeof record.text === 'string') return approximateTextTokens(record.text);
+  return record.type === 'input_image' || record.type === 'input_audio'
+    ? IMAGE_INPUT_TOKEN_ESTIMATE
+    : 0;
+}
+
+function approximateRetainedMessageTokens(value: unknown): number {
+  if (!value || typeof value !== 'object') return 1;
+  const content = (value as JsonObject).content;
+  if (!Array.isArray(content)) return 1;
+  return Math.max(1, content.reduce(
+    (tokens, part) => tokens + retainedContentPartTokens(part),
+    0,
+  ));
+}
+
+function utf8Prefix(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  let bytes = 0;
+  let end = 0;
+  for (const character of text) {
+    const characterBytes = Buffer.byteLength(character, 'utf8');
+    if (bytes + characterBytes > maxBytes) break;
+    bytes += characterBytes;
+    end += character.length;
+  }
+  return text.slice(0, end);
+}
+
+function utf8Suffix(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return '';
+  let bytes = 0;
+  let start = text.length;
+  while (start > 0) {
+    let previous = start - 1;
+    const code = text.charCodeAt(previous);
+    if (code >= 0xDC00 && code <= 0xDFFF && previous > 0) previous -= 1;
+    const character = text.slice(previous, start);
+    const characterBytes = Buffer.byteLength(character, 'utf8');
+    if (bytes + characterBytes > maxBytes) break;
+    bytes += characterBytes;
+    start = previous;
+  }
+  return text.slice(start);
+}
+
+function truncateRetainedText(text: string, maxTokens: number): string {
+  const maxBytes = Math.max(0, maxTokens) * 4;
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  const marker = '\n…[retained text truncated]…\n';
+  const markerBytes = Buffer.byteLength(marker, 'utf8');
+  if (maxBytes <= markerBytes) return utf8Prefix(text, maxBytes);
+  const bodyBytes = maxBytes - markerBytes;
+  const head = utf8Prefix(text, Math.ceil(bodyBytes / 2));
+  const tail = utf8Suffix(text, Math.floor(bodyBytes / 2));
+  return `${head}${marker}${tail}`;
 }
 
 function truncateRetainedUserMessage(value: unknown, maxTokens: number): unknown | undefined {
   if (!value || typeof value !== 'object' || maxTokens <= 0) return undefined;
   const record = value as JsonObject;
   if (record.role !== 'user' || !Array.isArray(record.content)) return undefined;
-  const maxCharacters = maxTokens * 4;
-  let remainingCharacters = maxCharacters;
+  let remainingTokens = maxTokens;
   const content = record.content.flatMap(part => {
     if (!part || typeof part !== 'object') return [];
     const partRecord = part as JsonObject;
     if (typeof partRecord.text !== 'string') {
-      const serializedCharacters = canonicalJson(part).length;
-      if (serializedCharacters > remainingCharacters) return [];
-      remainingCharacters -= serializedCharacters;
+      const partTokens = retainedContentPartTokens(part);
+      if (partTokens > remainingTokens) return [];
+      remainingTokens -= partTokens;
       return [part];
     }
-    if (remainingCharacters <= 0) return [];
+    if (remainingTokens <= 0) return [];
     const text = partRecord.text;
-    const available = Math.min(remainingCharacters, text.length);
-    remainingCharacters -= available;
-    if (available >= text.length) return [part];
-    const marker = '\n…[retained message truncated during native compaction]…\n';
-    const bodyBudget = Math.max(0, available - marker.length);
-    const head = Math.ceil(bodyBudget / 2);
-    const tail = Math.floor(bodyBudget / 2);
-    return [{
-      ...partRecord,
-      text: `${text.slice(0, head)}${marker}${tail > 0 ? text.slice(-tail) : ''}`,
-    }];
+    const partTokens = retainedContentPartTokens(part);
+    if (partTokens <= remainingTokens) {
+      remainingTokens -= partTokens;
+      return [part];
+    }
+    const truncatedText = truncateRetainedText(text, remainingTokens);
+    remainingTokens = 0;
+    return truncatedText ? [{ ...partRecord, text: truncatedText }] : [];
   });
   return content.length ? { ...record, content } : undefined;
 }
@@ -538,7 +598,7 @@ function retainedUserMessages(input: unknown[]): unknown[] {
   const retainedReversed: unknown[] = [];
   for (const item of [...input].reverse()) {
     if (!item || typeof item !== 'object' || (item as JsonObject).role !== 'user') continue;
-    const itemTokens = approximateItemTokens(item);
+    const itemTokens = approximateRetainedMessageTokens(item);
     if (itemTokens <= remaining) {
       retainedReversed.push(item);
       remaining -= itemTokens;
@@ -576,19 +636,24 @@ function compactionSummaryHash(text: string): string | undefined {
   return createHash('sha256').update(normalized).digest('hex');
 }
 
-function assistantOutputText(items: unknown[]): string {
-  return items.flatMap(item => {
-    if (!item || typeof item !== 'object') return [];
+function assistantCompactionSummaryText(items: unknown[]): string {
+  let selected = '';
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
     const record = item as JsonObject;
-    if (record.role !== 'assistant' || !Array.isArray(record.content)) return [];
-    return record.content.flatMap(part => (
+    if (record.role !== 'assistant' || !Array.isArray(record.content)) continue;
+    const textParts = record.content.flatMap(part => (
       part
       && typeof part === 'object'
       && typeof (part as JsonObject).text === 'string'
         ? [(part as JsonObject).text as string]
         : []
     ));
-  }).join('');
+    if (textParts.some(text => text.includes('<summary>'))) {
+      selected = textParts[0] ?? '';
+    }
+  }
+  return selected;
 }
 
 interface ClaudeCompactionEnvelope {
@@ -596,9 +661,37 @@ interface ClaudeCompactionEnvelope {
   trailingText?: string;
 }
 
+function claudeCompactionEnvelopeOccurrenceCount(payload: JsonObject): number {
+  let count = 0;
+  for (const item of inputArray(payload)) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as JsonObject;
+    if (record.role !== 'user' || !Array.isArray(record.content)) continue;
+    for (const part of record.content) {
+      if (!part || typeof part !== 'object') continue;
+      const text = (part as JsonObject).text;
+      if (typeof text !== 'string') continue;
+      let offset = 0;
+      while (true) {
+        const index = text.indexOf(CLAUDE_COMPACTION_CONTINUATION_PREFIX, offset);
+        if (index === -1) break;
+        count += 1;
+        offset = index + CLAUDE_COMPACTION_CONTINUATION_PREFIX.length;
+      }
+    }
+  }
+  return count;
+}
+
 function parseClaudeCompactionEnvelope(text: string): ClaudeCompactionEnvelope | undefined {
   const prefixIndex = text.indexOf(CLAUDE_COMPACTION_CONTINUATION_PREFIX);
   if (prefixIndex === -1) return undefined;
+  if (text.indexOf(
+    CLAUDE_COMPACTION_CONTINUATION_PREFIX,
+    prefixIndex + CLAUDE_COMPACTION_CONTINUATION_PREFIX.length,
+  ) !== -1) {
+    return undefined;
+  }
   const body = text.slice(prefixIndex + CLAUDE_COMPACTION_CONTINUATION_PREFIX.length);
   let summaryEnd = body.length;
   for (const marker of CLAUDE_COMPACTION_SUMMARY_TRAILERS) {
@@ -625,6 +718,7 @@ function claudeCompactionContinuationMatch(
   payload: JsonObject,
 ): ContinuationMatch | undefined {
   if (!entry.claudeCompactionSummaryHash) return undefined;
+  if (claudeCompactionEnvelopeOccurrenceCount(payload) !== 1) return undefined;
   const full = inputArray(payload);
   for (let itemIndex = 0; itemIndex < full.length; itemIndex += 1) {
     const item = full[itemIndex];
@@ -1116,14 +1210,33 @@ function closeContext(ctx: RequestContext): void {
   try { ctx.controller.close(); } catch { /* already closed */ }
 }
 
-function deleteEntry(entry: ConnectionEntry, closeSocket = true): void {
-  saveCompactionCheckpoint(entry);
+function discardCompactionCheckpoints(entry: ConnectionEntry): void {
+  if (!entry.key) return;
+  const retained = (compactionCheckpoints.get(entry.key) ?? [])
+    .filter(checkpoint => checkpoint.connectionId !== entry.debugId);
+  if (retained.length) compactionCheckpoints.set(entry.key, retained);
+  else compactionCheckpoints.delete(entry.key);
+}
+
+function deleteEntry(
+  entry: ConnectionEntry,
+  closeSocket = true,
+  saveCheckpoint = true,
+): void {
+  if (saveCheckpoint) saveCompactionCheckpoint(entry);
+  else discardCompactionCheckpoints(entry);
   entry.inFlight = false;
   entry.current = undefined;
   unregisterEntry(entry);
   if (closeSocket) {
     try { entry.socket.close(); } catch { /* ignore */ }
   }
+}
+
+function retireSupersededEntry(ctx: RequestContext): void {
+  if (!ctx.supersededEntry || ctx.supersededEntry === ctx.entry) return;
+  deleteEntry(ctx.supersededEntry, true, false);
+  ctx.supersededEntry = undefined;
 }
 
 function failContext(
@@ -1152,6 +1265,7 @@ function failContext(
       ...(retryAfterSeconds !== undefined ? { retry_after_seconds: retryAfterSeconds } : {}),
     },
   });
+  retireSupersededEntry(ctx);
   deleteEntry(entry);
   closeContext(ctx);
 }
@@ -1245,6 +1359,22 @@ function cleanupExpiredConnections(now: number): Array<Record<string, unknown>> 
       });
       deleteEntry(entry);
     }
+  }
+  for (const [key, checkpoints] of compactionCheckpoints) {
+    const retained = checkpoints.filter(checkpoint => {
+      const expired = now - checkpoint.lastUsedAt >= RESPONSES_COMPACTION_CHECKPOINT_TTL_MS;
+      if (expired) {
+        evictions.push({
+          connectionId: checkpoint.connectionId,
+          partitionKey: checkpoint.key,
+          generation: 'checkpoint',
+          reason: 'checkpoint_ttl',
+        });
+      }
+      return !expired;
+    });
+    if (retained.length) compactionCheckpoints.set(key, retained);
+    else compactionCheckpoints.delete(key);
   }
   return evictions;
 }
@@ -1446,7 +1576,7 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
         ? [...ctx.compactedInputBase, ...assistantItems]
         : undefined;
       entry.claudeCompactionSummaryHash = ctx.claudeCompactionRequest && entry.compactedInput
-        ? compactionSummaryHash(assistantOutputText(assistantItems))
+        ? compactionSummaryHash(assistantCompactionSummaryText(assistantItems))
         : undefined;
       entry.lastInputTokens = ctx.responseUsage?.inputTokens;
       entry.promptFieldHashes = ctx.promptFieldHashes;
@@ -1455,12 +1585,10 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
       entry.inFlight = false;
       entry.current = undefined;
       saveCompactionCheckpoint(entry);
-      if (ctx.supersededEntry && ctx.supersededEntry !== entry) {
-        deleteEntry(ctx.supersededEntry);
-        ctx.supersededEntry = undefined;
-      }
+      retireSupersededEntry(ctx);
       entry.debug(`chain head updated; socket retained (${ctx.frameCount} frame(s))`);
     } else {
+      retireSupersededEntry(ctx);
       deleteEntry(entry);
     }
     if (!entry.persistent) {
@@ -1641,20 +1769,10 @@ export function createResponsesWebSocketFetch(
     const runCompactionTrigger = async (
       entry: ConnectionEntry,
       delta: unknown[],
-    ): Promise<{ output: unknown[]; usage?: ResponseUsage }> => {
+    ): Promise<{ output: unknown[]; usage?: ResponseUsage; triggerWireBytes: number }> => {
       if (!entry.responseId) {
         throw new ResponsesCompactionError('Native compaction trigger requires a live response chain');
       }
-      const previousHead = {
-        responseId: entry.responseId,
-        requestInput: entry.requestInput,
-        expectedAssistant: entry.expectedAssistant,
-        compactedInput: entry.compactedInput,
-        lastInputTokens: entry.lastInputTokens,
-        claudeCompactionSummaryHash: entry.claudeCompactionSummaryHash,
-        promptFieldHashes: entry.promptFieldHashes,
-        instructionsSnapshot: entry.instructionsSnapshot,
-      };
       const trigger = { type: 'compaction_trigger' };
       const triggerPayload: JsonObject = {
         ...payload,
@@ -1666,6 +1784,7 @@ export function createResponsesWebSocketFetch(
         input: [...delta, trigger],
         previous_response_id: entry.responseId,
       };
+      const triggerWireBytes = Buffer.byteLength(outgoingPayload(triggerSendPayload), 'utf8');
       let ctx: RequestContext | undefined;
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -1725,41 +1844,42 @@ export function createResponsesWebSocketFetch(
           closeContext(ctx);
         },
       });
-      await new Response(stream).arrayBuffer();
-      const completedEntry = ctx?.entry;
-      if (
-        completedEntry === entry
-        && ctx?.responseId
-        && connectionEntries(partitionKey).includes(entry)
-      ) {
-        // Keep the pre-compaction head available until the post-compact turn
-        // completes. A later exact-prefix lookup prefers the newer compacted
-        // head, while a failed rebase can still fall back transactionally.
-        entry.responseId = previousHead.responseId;
-        entry.requestInput = previousHead.requestInput;
-        entry.expectedAssistant = previousHead.expectedAssistant;
-        entry.compactedInput = previousHead.compactedInput;
-        entry.lastInputTokens = previousHead.lastInputTokens;
-        entry.claudeCompactionSummaryHash = previousHead.claudeCompactionSummaryHash;
-        entry.promptFieldHashes = previousHead.promptFieldHashes;
-        entry.instructionsSnapshot = previousHead.instructionsSnapshot;
-        entry.lastUsedAt = resolvedOptions.now();
-        entry.inFlight = false;
-        entry.current = undefined;
-      } else if (completedEntry && connectionEntries(partitionKey).includes(completedEntry)) {
-        deleteEntry(completedEntry);
+      const compactTimeoutMs = options.compactTimeoutMs ?? RESPONSES_COMPACT_TIMEOUT_MS;
+      let timedOut = false;
+      const compactTimer = setTimeout(() => {
+        timedOut = true;
+        if (!ctx || ctx.closed) return;
+        if (ctx.entry) deleteEntry(ctx.entry);
+        closeContext(ctx);
+      }, compactTimeoutMs);
+      compactTimer.unref();
+      try {
+        await new Response(stream).arrayBuffer();
+      } finally {
+        clearTimeout(compactTimer);
       }
+      if (timedOut) {
+        throw new ResponsesCompactionError(
+          `Native compaction trigger exceeded ${Math.round(compactTimeoutMs / 1000)}s`,
+        );
+      }
+      const completedEntry = ctx?.entry;
       if (!ctx?.responseId) {
         throw new ResponsesCompactionError('Native compaction trigger did not complete');
       }
       const output = expectedAssistantItems(ctx)
         .filter(item => isOpaqueCompactionKind(conversationItemKind(item)));
+      if (completedEntry && connectionEntries(partitionKey).includes(completedEntry)) {
+        // The trigger advances the connection-local previous-response slot, so
+        // the pre-trigger response id is no longer a usable recovery head.
+        deleteEntry(completedEntry, true, false);
+      }
       if (output.length !== 1) {
         throw new ResponsesCompactionError(
           `Native compaction trigger returned ${output.length} compaction items`,
         );
       }
-      return { output, usage: ctx.responseUsage };
+      return { output, usage: ctx.responseUsage, triggerWireBytes };
     };
 
     const candidates = partitionKey ? connectionEntries(partitionKey) : [];
@@ -1785,6 +1905,26 @@ export function createResponsesWebSocketFetch(
       : [];
     const selectedCheckpoint = selected ? undefined : checkpointMatches[0]?.checkpoint;
     const checkpointMatch = selected ? undefined : checkpointMatches[0]?.match;
+    const compactionEnvelopeCount = claudeCompactionEnvelopeOccurrenceCount(payload);
+    const anchored = selectedMatch?.mode === 'claude_compaction_summary'
+      || checkpointMatch?.mode === 'claude_compaction_summary';
+    if (
+      compactionEnvelopeCount > 0
+      && !anchored
+      && (
+        candidates.some(entry => entry.claudeCompactionSummaryHash)
+        || (partitionKey
+          ? checkpointEntries(partitionKey).some(checkpoint => checkpoint.claudeCompactionSummaryHash)
+          : false)
+      )
+    ) {
+      emitDiagnostic(options, {
+        event: 'ws_compaction',
+        outcome: 'anchor_missed',
+        reason: 'claude_compaction_summary',
+        envelopeCount: compactionEnvelopeCount,
+      }, diagnosticCorrelation);
+    }
     const diagnosticEntry = selected
       ?? [...idleCandidates].sort((left, right) => right.lastUsedAt - left.lastUsedAt)[0]
       ?? candidates[0];
@@ -1821,7 +1961,7 @@ export function createResponsesWebSocketFetch(
     const estimatedInputTokens = diagnosticCorrelation?.estimatedInputTokens;
     const forceCompaction = diagnosticCorrelation?.forceCompaction === true;
     const compactionReason = forceCompaction
-      ? 'claude_compaction'
+      ? undefined
       : compactThreshold !== undefined
         && measuredInputTokens !== undefined
         && measuredInputTokens >= compactThreshold
@@ -1840,7 +1980,7 @@ export function createResponsesWebSocketFetch(
       compactThreshold !== undefined
       && compactionReason
       && inputArray(payload).length > 0
-      && (selected !== undefined || selectedCheckpoint !== undefined || !candidates.some(entry => entry.inFlight) || forceCompaction)
+      && (selected !== undefined || selectedCheckpoint !== undefined || !candidates.some(entry => entry.inFlight))
     ) {
       if (selected && selectedDelta) {
         const triggerEntry = selected;
@@ -1857,7 +1997,7 @@ export function createResponsesWebSocketFetch(
           delete sendPayload.previous_response_id;
           retryPayload = sendPayload;
           compactedInputBase = compactedInput;
-          supersededEntry = triggerEntry;
+          supersededEntry = undefined;
           selected = undefined;
           continued = false;
           compacted = true;
@@ -1878,6 +2018,7 @@ export function createResponsesWebSocketFetch(
             sourceItems: inputArray(payload).length,
             retainedItems: compactedInput.length - result.output.length,
             compactedItems: result.output.length,
+            triggerWireBytes: result.triggerWireBytes,
             ...(result.usage ?? {}),
           }, diagnosticCorrelation);
         } catch (error) {
