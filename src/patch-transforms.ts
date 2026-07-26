@@ -65,7 +65,7 @@ export function formatPatchSiteLine(result: PatchSiteResult): string {
 }
 
 /**
- * Apply the clodex patch sites (PATCH 1–7) to the Claude Code source.
+ * Apply the clodex patch sites (PATCH 1–9) to the Claude Code source.
  * Pure: source string in → patched string + per-site results out. Throws
  * `PatchApplyError` when the config is invalid or a required site fails —
  * nothing should be written to the binary in that case.
@@ -347,6 +347,54 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         { required: true }
       );
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 8 — opt in to Claude Code's bundled native Computer Use MCP.
+  //
+  // Claude Code ships a macOS-native computer-use MCP server and guards both
+  // its dynamic registration and its tools/list response through one predicate.
+  // Keep Claude's HIPAA guard authoritative, but permit an explicit Clodex env
+  // opt-in to bypass the Anthropic subscription-tier / rollout checks. The
+  // surrounding upstream call site still limits automatic registration to
+  // interactive macOS sessions.
+  //
+  // Off by default: users must set CLODEX_NATIVE_COMPUTER_USE=1.
+  // ---------------------------------------------------------------------------
+  {
+    const MARKER = '/*clodex:native-computer-use*/';
+    applyOnce(
+      'PATCH 8: native Computer Use opt-in',
+      /function ([\w$]+)\(\)\{if\(([\w$]+)\("hipaa"\)\)return!1;return ([\w$]+)\(\)&&([\w$]+)\(\)\.enabled\}/,
+      (_m, predicate, hipaaGate, tierGate, rolloutGate) =>
+        'function ' + predicate + '(){if(' + hipaaGate + '("hipaa"))return!1;'
+        + MARKER + 'if(process.env.CLODEX_NATIVE_COMPUTER_USE==="1")return!0;'
+        + 'return ' + tierGate + '()&&' + rolloutGate + '().enabled}',
+      { marker: MARKER, required: false }
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 9 — make the explicit native Computer Use opt-in global.
+  //
+  // Upstream requires enabling the built-in `computer-use` server separately
+  // in every project. When the same Clodex env opt-in is set, treat that server
+  // as enabled without changing the normal project-scoped behavior for any
+  // other MCP. Removing the env restores Claude Code's upstream toggle logic.
+  // ---------------------------------------------------------------------------
+  {
+    const MARKER = '/*clodex:native-computer-use-default*/';
+    applyOnce(
+      'PATCH 9: native Computer Use default enable',
+      /function ([\w$]+)\(e\)\{let t=([\w$]+)\(\);if\(([\w$]+)\(e\)\)return!([\w$]+)\(t\.enabledMcpServers\)\.includes\(e\);return ([\w$]+)\(t\.disabledMcpServers\)\.includes\(e\)\}/,
+      (_m, predicate, readProject, isBuiltin, normalizeEnabled, normalizeDisabled) =>
+        'function ' + predicate + '(e){'
+        + MARKER + 'if(' + isBuiltin + '(e)&&process.env.CLODEX_NATIVE_COMPUTER_USE==="1")return!1;'
+        + 'let t=' + readProject + '();if(' + isBuiltin + '(e))return!'
+        + normalizeEnabled + '(t.enabledMcpServers).includes(e);return '
+        + normalizeDisabled + '(t.disabledMcpServers).includes(e)}',
+      { marker: MARKER, required: false }
+    );
   }
 
   return { content: js, results: report };
