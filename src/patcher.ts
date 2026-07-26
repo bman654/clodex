@@ -103,6 +103,11 @@ export interface PatchModelMeta {
   displayName?: string;
 }
 
+// Bump whenever the binary transform set changes so existing installations are
+// restored from their pristine backup and repatched instead of being mistaken
+// for current solely because their model map is unchanged.
+const PATCH_SCHEMA_VERSION = 2;
+
 /**
  * Build the patch model config from favorites + aliases.
  * Keys are the bare `clodex:<provider>:<model>` ids (no [1m] suffix — the
@@ -141,7 +146,9 @@ export function computePatchConfigHash(config: PatchScriptModelConfig): string {
     const entry = config[key]!;
     return [key, entry.alias ?? null, entry.context ?? null, entry.display ?? null];
   });
-  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+  return createHash('sha256')
+    .update(JSON.stringify([PATCH_SCHEMA_VERSION, canonical]))
+    .digest('hex');
 }
 
 /** Read favorites + aliases + registry model metadata from disk (no network, no credentials). */
