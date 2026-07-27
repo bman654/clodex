@@ -16,9 +16,9 @@ const COMPACT_BODY_FIELDS = [
 ] as const;
 
 export const OPENAI_COMPACTION_DEFAULT_RATIO = 0.9;
-// Compaction runs before the downstream SSE response exists. Keep its budget
-// comfortably below Claude Code's 120s no-data watchdog so expiry can fall back
-// to the normal request path instead of surfacing as a downstream idle timeout.
+// Compaction runs before the downstream SSE response exists. An in-band trigger
+// can consume this budget before a standalone retry consumes it again, reaching
+// Claude Code's 120s no-data watchdog before the normal fallback can start.
 export const RESPONSES_COMPACT_TIMEOUT_MS = 60_000;
 
 export interface ResponsesCompactionUsage {

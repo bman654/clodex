@@ -10,6 +10,7 @@ import { createLanguageModel } from '../src/provider-factory.js';
 import { generateAnthropicResponse, streamAnthropicResponse } from '../src/sdk-adapter.js';
 import { generateOpenAiResponse, streamOpenAiResponse } from '../src/openai-adapter.js';
 import { resolveProviderCredential } from '../src/env.js';
+import { withResponsesWebSocketDiagnosticContext } from '../src/oauth/responses-websocket.js';
 
 const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:oauth-provider`;
 const ORIGINAL_COMPACTION_FLAG = process.env.CLODEX_OPENAI_COMPACTION;
@@ -27,6 +28,16 @@ vi.mock('../src/provider-factory.js', async importOriginal => {
   return {
     ...actual,
     createLanguageModel: vi.fn(async (spec: unknown) => ({ spec })),
+  };
+});
+
+vi.mock('../src/oauth/responses-websocket.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/oauth/responses-websocket.js')>();
+  return {
+    ...actual,
+    withResponsesWebSocketDiagnosticContext: vi.fn(
+      actual.withResponsesWebSocketDiagnosticContext,
+    ),
   };
 });
 
@@ -196,6 +207,7 @@ afterEach(async () => {
   vi.mocked(resolveProviderCredential).mockReset();
   vi.mocked(streamAnthropicResponse).mockClear();
   vi.mocked(streamOpenAiResponse).mockClear();
+  vi.mocked(withResponsesWebSocketDiagnosticContext).mockClear();
   if (ORIGINAL_COMPACTION_FLAG === undefined) delete process.env.CLODEX_OPENAI_COMPACTION;
   else process.env.CLODEX_OPENAI_COMPACTION = ORIGINAL_COMPACTION_FLAG;
   while (handles.length > 0) {
@@ -589,6 +601,49 @@ describe('server router', () => {
     expect(createLanguageModel).toHaveBeenCalledWith(expect.objectContaining({
       openAiCompactThreshold: 244_800,
     }));
+  });
+
+  it('passes Claude compact requests through to the Responses transport context', async () => {
+    vi.mocked(resolveProviderCredential).mockResolvedValue('oauth-token');
+    const catalog = createGatewayModelCatalog([{
+      id: 'gpt-5.6-sol',
+      name: 'GPT-5.6 Sol',
+      isFree: false,
+      brand: 'OpenAI',
+      providerId: 'oauth-provider',
+      sourceBackend: 'oauth-provider',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      authType: 'oauth',
+      authRef: TEST_HELPER_REF,
+      apiKey: 'launch-token',
+    }]);
+    const server = await startTestServer({ catalog });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'anthropic-oauth-provider__gpt-5.6-sol',
+        messages: [{
+          role: 'user',
+          content: [
+            'CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.',
+            'Summarize the conversation.',
+            'REMINDER: Do NOT call any tools. Respond with plain text only',
+          ].join('\n'),
+        }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(withResponsesWebSocketDiagnosticContext).toHaveBeenCalledWith(
+      expect.objectContaining({
+        estimatedInputTokens: expect.any(Number),
+        forceCompaction: true,
+      }),
+      expect.any(Function),
+    );
   });
 
   it('returns Anthropic prompt-too-long shape for a translated context overflow', async () => {

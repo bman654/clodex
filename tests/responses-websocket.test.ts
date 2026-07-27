@@ -2179,20 +2179,36 @@ describe('createResponsesWebSocketFetch', () => {
     expect(compactFetch).not.toHaveBeenCalled();
   });
 
-  it('does not re-fire compaction after the post-compact response fails', async () => {
+  it('retries compaction after a post-compact failure and recovers after success', async () => {
+    const retryCanonical = [{
+      type: 'compaction',
+      encrypted_content: 'retry-loop-summary',
+    }];
+    const compactFetch = vi.fn(async () => new Response(JSON.stringify({
+      output: retryCanonical,
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
       accountId: 'acct-compact-failure-loop',
       compactThreshold: 100,
+      compactFetch: compactFetch as typeof fetch,
     });
+    const fetchWithEstimate = (input: unknown[], estimatedInputTokens: number) =>
+      withResponsesWebSocketDiagnosticContext(
+        { estimatedInputTokens },
+        () => wsFetch('https://example.test/responses', {
+          method: 'POST',
+          headers: {},
+          body: JSON.stringify(sessionPayload(input)),
+        }),
+      );
     const firstUser = {
       role: 'user',
       content: [{ type: 'input_text', text: 'first' }],
     };
-    const first = await wsFetch('https://example.test/responses', {
-      method: 'POST',
-      headers: {},
-      body: JSON.stringify(sessionPayload([firstUser])),
-    });
+    const first = await fetchWithEstimate([firstUser], 50);
     const originalSocket = lastSocket();
     originalSocket.emit('open');
     emitTextResponse(originalSocket, 'resp_failure_loop_base', 'answer', {
@@ -2206,11 +2222,7 @@ describe('createResponsesWebSocketFetch', () => {
       { role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
       { role: 'user', content: [{ type: 'input_text', text: 'next' }] },
     ];
-    const secondPromise = wsFetch('https://example.test/responses', {
-      method: 'POST',
-      headers: {},
-      body: JSON.stringify(sessionPayload(fullInput)),
-    });
+    const secondPromise = fetchWithEstimate(fullInput, 150);
     await vi.waitFor(() => expect(originalSocket.send).toHaveBeenCalledTimes(2));
     emitCompactionResponse(originalSocket, 'resp_failure_loop_trigger', 'loop-summary');
     const second = await secondPromise;
@@ -2225,19 +2237,38 @@ describe('createResponsesWebSocketFetch', () => {
     })));
     await readAll(second);
 
-    const retry = await wsFetch('https://example.test/responses', {
-      method: 'POST',
-      headers: {},
-      body: JSON.stringify(sessionPayload(fullInput)),
-    });
+    const retry = await fetchWithEstimate(fullInput, 150);
+    expect(compactFetch).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(compactFetch.mock.calls[0]![1]?.body)).input).toEqual(fullInput);
     expect(originalSocket.send).toHaveBeenCalledTimes(2);
     const retrySocket = lastSocket();
     retrySocket.emit('open');
     const retryFrame = JSON.parse(retrySocket.send.mock.calls[0]![0] as string);
     expect(retryFrame.previous_response_id).toBeUndefined();
-    expect(retryFrame.input).toEqual(fullInput);
-    emitTextResponse(retrySocket, 'resp_failure_loop_recovered', 'done');
+    expect(retryFrame.input).toEqual(retryCanonical);
+    emitTextResponse(retrySocket, 'resp_failure_loop_recovered', 'done', {
+      input_tokens: 50,
+      output_tokens: 10,
+    });
     await readAll(retry);
+
+    const finalUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'after recovery' }],
+    };
+    const recoveredInput = [
+      ...fullInput,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'done' }] },
+      finalUser,
+    ];
+    const recovered = await fetchWithEstimate(recoveredInput, 150);
+    expect(compactFetch).toHaveBeenCalledOnce();
+    expect(retrySocket.send).toHaveBeenCalledTimes(2);
+    const recoveredFrame = JSON.parse(retrySocket.send.mock.calls[1]![0] as string);
+    expect(recoveredFrame.previous_response_id).toBe('resp_failure_loop_recovered');
+    expect(recoveredFrame.input).toEqual([finalUser]);
+    emitTextResponse(retrySocket, 'resp_failure_loop_done', 'fully recovered');
+    await readAll(recovered);
   });
 
   it('restores a compact checkpoint after every matching live head has closed', async () => {

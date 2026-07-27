@@ -42,6 +42,10 @@ enabled. For example, in `.claude/settings.json`:
 }
 ```
 
+Claude Code does not proactively auto-compact OpenAI model IDs unless the user
+configures an auto-compact window; its built-in model-default window table
+contains Anthropic model IDs only.
+
 If Claude's effective auto-compact point is below Clodex's native threshold,
 Claude compacts first and the native path normally stays dormant. This is the
 conservative configuration.
@@ -73,8 +77,9 @@ to disk.
 
 Before a planned restart, model switch, or resume, use Claude's normal
 `/compact` while the transcript still fits. If native state is already gone and
-the saved transcript is over the model window, start a new session with a
-portable handoff rather than repeatedly retrying the oversized transcript.
+the saved transcript is over the model window, the session is not recoverable
+in-session: start a new session with a portable handoff rather than repeatedly
+retrying the oversized transcript.
 
 ## Request and cache behavior
 
@@ -104,9 +109,10 @@ in Clodex, so base64 payload size is not mistaken for text tokens.
 in-band trigger fails. Its returned array is canonical and is forwarded as-is;
 Clodex does not prune or reinterpret it.
 
-Both the in-band trigger and standalone call have a 60-second budget. Timeout is
-treated as a fallback before Claude Code's 120-second no-data watchdog can fire.
-A failed compact attempt preserves the ordinary request path where possible.
+The in-band trigger and standalone call each have a 60-second budget and run
+sequentially inside one fetch. Together they can consume the full 120-second
+Claude Code no-data watchdog before the ordinary fallback starts. A failed
+compact attempt preserves the ordinary request path where possible.
 
 ## Claude transcript handoff
 
