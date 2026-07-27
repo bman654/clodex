@@ -259,6 +259,7 @@ const CLAUDE_FIXTURE = [
   'function Lbo(){if(lK("hipaa"))return!1;return QE_()&&iEs().enabled}',
   'function Fw(e){let t=Rd();if(oSs(e))return!Syo(t.enabledMcpServers).includes(e);return Syo(t.disabledMcpServers).includes(e)}',
   'const workflowNote=`NOTE: You are running inside a workflow script. Be concise \\u2014 the script will parse your output.`,aa,bb,cc,dd,sj_=180000,attempts=5,retries=5;var runtime={};',
+  'function runWorkflow(events){let last,messages=[],tokens=0,baseTokens=0,baseTools=0,toolCalls=0,progress=[];const countUsage=(usage)=>usage.total;const emit=(state,data)=>progress.push(data.tokens);for(const msg of events){if(msg.type==="user"){continue}if(msg.type==="assistant"){if(last=msg,messages?.push(msg),!msg.isApiErrorMessage){tokens=countUsage(msg.message.usage);let model=msg.message.model;emit("progress",{tokens:baseTokens+tokens,toolCalls:baseTools+toolCalls})}}}return{tokens,progress}}/*workflow-end*/',
 ].join('\n');
 
 function runPatchScript(config: Parameters<typeof applyClodexPatches>[1], source = CLAUDE_FIXTURE): string {
@@ -347,6 +348,7 @@ describe('patch script identity naming', () => {
       ['PATCH 8: native Computer Use opt-in', 'OK'],
       ['PATCH 9: native Computer Use default enable', 'OK'],
       ['PATCH 10: Workflow agent stall timeout', 'OK'],
+      ['PATCH 11: Workflow token progress', 'OK'],
     ]);
     const rerun = applyClodexPatches(fresh.content, config);
     expect(rerun.results.map(r => [r.name, r.status])).toEqual([
@@ -361,6 +363,7 @@ describe('patch script identity naming', () => {
       ['PATCH 8: native Computer Use opt-in', 'SKIP'],
       ['PATCH 9: native Computer Use default enable', 'SKIP'],
       ['PATCH 10: Workflow agent stall timeout', 'SKIP'],
+      ['PATCH 11: Workflow token progress', 'SKIP'],
     ]);
   });
 
@@ -389,6 +392,40 @@ describe('patch script identity naming', () => {
       'sj_=/*clodex:workflow-stall-timeout*/'
       + 'Math.min(Math.max(Number(process.env.CLODEX_WORKFLOW_STALL_TIMEOUT_MS)||180000,180000),1800000)'
     );
+  });
+
+  it('retains the last nonzero Workflow token sample across streaming placeholders', () => {
+    const out = runPatchScript(config);
+    expect(out).toContain(
+      '/*clodex:workflow-token-progress*/'
+      + 'let __clodexWorkflowUsage=last?countUsage(last.message.usage):0;'
+      + 'if(__clodexWorkflowUsage>0){tokens=__clodexWorkflowUsage;'
+      + 'emit("progress",{tokens:baseTokens+tokens,toolCalls:baseTools+toolCalls})}'
+      + 'continue}if(msg.type==="assistant"){'
+      + 'if(last=msg,messages?.push(msg),!msg.isApiErrorMessage){'
+      + 'let __clodexAssistantUsage=countUsage(msg.message.usage);'
+      + 'if(__clodexAssistantUsage>0)tokens=__clodexAssistantUsage;'
+      + 'let model=msg.message.model;'
+    );
+
+    const start = out.indexOf('function runWorkflow');
+    const end = out.indexOf('/*workflow-end*/', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const runWorkflow = new Function(`${out.slice(start, end)};return runWorkflow;`)() as
+      (events: unknown[]) => { tokens: number; progress: number[] };
+    let usageReads = 0;
+    const deferredUsage = {
+      get total() {
+        usageReads += 1;
+        return usageReads === 1 ? 0 : 120;
+      },
+    };
+    expect(runWorkflow([
+      { type: 'assistant', isApiErrorMessage: false, message: { usage: deferredUsage, model: 'luna' } },
+      { type: 'user' },
+      { type: 'assistant', isApiErrorMessage: false, message: { usage: { total: 0 }, model: 'luna' } },
+    ])).toEqual({ tokens: 120, progress: [0, 120, 120] });
   });
 
   it('refreshes the baked context table in place when only the window changes', () => {

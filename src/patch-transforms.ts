@@ -65,7 +65,7 @@ export function formatPatchSiteLine(result: PatchSiteResult): string {
 }
 
 /**
- * Apply the clodex patch sites (PATCH 1–10) to the Claude Code source.
+ * Apply the clodex patch sites (PATCH 1–11) to the Claude Code source.
  * Pure: source string in → patched string + per-site results out. Throws
  * `PatchApplyError` when the config is invalid or a required site fails —
  * nothing should be written to the binary in that case.
@@ -420,6 +420,75 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         + suffix,
       { marker: MARKER, required: false }
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 11 — retain the last nonzero Workflow agent usage sample.
+  //
+  // Translated streams begin with an Anthropic-shaped message_start carrying
+  // zero usage because OpenAI reports authoritative cache-aware usage only at
+  // completion. Claude's Workflow loop replaces its progress counter for every
+  // assistant event, so a subsequent zero-valued streaming placeholder erases
+  // the last completed response's real token count and leaves the UI at 0 tok.
+  //
+  // Preserve the previous sample when the incoming total is zero. Native Claude
+  // streams are unchanged because their message_start usage is already nonzero.
+  // ---------------------------------------------------------------------------
+  {
+    const MARKER = '/*clodex:workflow-token-progress*/';
+    const name = 'PATCH 11: Workflow token progress';
+    if (js.includes(MARKER)) {
+      log('SKIP', name, 'already patched');
+    } else {
+      const assistantRe = /if\(([\w$]+)=([\w$]+),([\w$]+)\?\.\push\(\2\),!\2\.isApiErrorMessage\)\{([\w$]+)=([\w$]+)\(\2\.message\.usage\);let ([\w$]+)=\2\.message\.model;/g;
+      const matches = [...js.matchAll(assistantRe)];
+      if (matches.length !== 1) {
+        log('FAIL', name, matches.length === 0
+          ? 'anchor not found'
+          : 'anchor matched ' + matches.length + ' times (expected 1)');
+      } else {
+        const match = matches[0]!;
+        const index = match.index!;
+        const [whole, lastMessage, message, messages, tokens, countUsage, model] = match;
+        const progressSlice = js.slice(index, index + 3000);
+        const progressRe = new RegExp(
+          '([\\w$]+)\\("progress",\\{tokens:([\\w$]+)\\+' + reEsc(tokens!)
+          + ',toolCalls:([\\w$]+)\\+([\\w$]+)\\}\\)'
+        );
+        const progress = progressSlice.match(progressRe);
+        const outerAssistant = 'if(' + message + '.type==="assistant"){';
+        const outerAssistantIndex = js.lastIndexOf(outerAssistant, index);
+        const previousContinue = js.lastIndexOf('continue}', outerAssistantIndex);
+        const continueAdjacent = previousContinue >= 0
+          && previousContinue + 'continue}'.length === outerAssistantIndex;
+
+        if (!progress || !continueAdjacent) {
+          log('FAIL', name, !continueAdjacent
+            ? 'user/assistant boundary not found'
+            : 'progress emitter not found');
+        } else {
+          const [, emitProgress, priorTokens, priorTools, toolCalls] = progress;
+          const refresh =
+            MARKER
+            + 'let __clodexWorkflowUsage=' + lastMessage + '?'
+            + countUsage + '(' + lastMessage + '.message.usage):0;'
+            + 'if(__clodexWorkflowUsage>0){' + tokens + '=__clodexWorkflowUsage;'
+            + emitProgress + '("progress",{tokens:' + priorTokens + '+' + tokens
+            + ',toolCalls:' + priorTools + '+' + toolCalls + '})}';
+          const before = js.slice(0, previousContinue);
+          const between = js.slice(previousContinue + 'continue}'.length, index);
+          const afterAssistant = js.slice(index + whole.length);
+          const retainedAssistant =
+            'if(' + lastMessage + '=' + message + ',' + messages + '?.push(' + message + '),!'
+            + message + '.isApiErrorMessage){let __clodexAssistantUsage='
+            + countUsage + '(' + message + '.message.usage);'
+            + 'if(__clodexAssistantUsage>0)' + tokens + '=__clodexAssistantUsage;'
+            + 'let ' + model + '=' + message + '.message.model;';
+          js = before + refresh + 'continue}' + between + retainedAssistant + afterAssistant;
+          log('OK', name);
+        }
+      }
+    }
   }
 
   return { content: js, results: report };
