@@ -1,16 +1,27 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  applyPatch,
   buildPatchModelConfig,
+  buildDesiredPatchConfig,
   computePatchConfigHash,
   evaluatePatchState,
+  getPatchManifestPath,
   summarizePatchResults,
   tryAcquirePatchLock,
   type PatchManifest,
 } from '../src/patcher.js';
 import { applyClodexPatches, PatchApplyError } from '../src/patch-transforms.js';
+
+const tweakccMocks = vi.hoisted(() => ({
+  tryDetectInstallation: vi.fn(),
+  readContent: vi.fn(),
+  writeContent: vi.fn(),
+}));
+
+vi.mock('tweakcc', () => tweakccMocks);
 
 describe('buildPatchModelConfig', () => {
   const favorites = [
@@ -53,7 +64,7 @@ describe('buildPatchModelConfig', () => {
       display: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
       effort: {
         levels: ['low', 'medium', 'high', 'xhigh', 'max'],
-        defaultLevel: 'medium',
+        defaultLevel: 'high',
       },
     });
     expect(config['clodex:openai-oauth:gpt-5.6-luna']).toEqual({
@@ -61,7 +72,7 @@ describe('buildPatchModelConfig', () => {
       display: 'GPT-5.6 Luna (OpenAI (ChatGPT))',
       effort: {
         levels: ['low', 'medium', 'high', 'xhigh', 'max'],
-        defaultLevel: 'medium',
+        defaultLevel: 'high',
       },
     });
     // Unknown window → no context (Claude Code's 200k default) + warning entry
@@ -109,6 +120,128 @@ describe('buildPatchModelConfig', () => {
       }),
     );
     expect(config['clodex:openai:reasoning-model']).toEqual({});
+  });
+});
+
+describe('buildDesiredPatchConfig', () => {
+  const previousHome = process.env.CLODEX_HOME;
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'clodex-desired-patch-'));
+    process.env.CLODEX_HOME = home;
+  });
+
+  afterEach(() => {
+    if (previousHome === undefined) delete process.env.CLODEX_HOME;
+    else process.env.CLODEX_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function writeInputs(
+    model: Record<string, unknown>,
+    provider: {
+      id?: string;
+      templateId?: string;
+      name?: string;
+      npm?: string;
+    } = {},
+  ): void {
+    const providerId = provider.id ?? 'openai';
+    writeFileSync(
+      join(home, 'config.json'),
+      JSON.stringify({
+        favoriteModels: [{ providerId, modelId: model.id }],
+      }),
+    );
+    writeFileSync(
+      join(home, 'providers.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        providers: [{
+          id: providerId,
+          templateId: provider.templateId ?? 'openai',
+          name: provider.name ?? 'OpenAI',
+          enabled: true,
+          authRef: 'env:OPENAI_API_KEY',
+          api: { npm: provider.npm ?? '@ai-sdk/openai' },
+          modelsCache: {
+            fetchedAt: '2026-07-27T00:00:00.000Z',
+            models: [model],
+          },
+          addedAt: '2026-07-27T00:00:00.000Z',
+        }],
+      }),
+    );
+  }
+
+  it('preserves the native high default when provider metadata defaults to medium', () => {
+    writeInputs({
+      id: 'gpt-5.6-sol',
+      upstreamModelId: 'gpt-5.6-sol',
+      name: 'GPT-5.6 Sol',
+      contextWindow: 272_000,
+      modelFormat: 'openai',
+    });
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(desired.config['clodex:openai:gpt-5.6-sol']?.effort).toEqual({
+      levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultLevel: 'high',
+    });
+  });
+
+  it('does not leak provider-only extended levels through the production config path', () => {
+    writeInputs({
+      id: 'gpt-5.5',
+      upstreamModelId: 'gpt-5.5',
+      name: 'GPT-5.5',
+      contextWindow: 272_000,
+      modelFormat: 'openai',
+    });
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(desired.config['clodex:openai:gpt-5.5']?.effort).toEqual({
+      levels: ['low', 'medium', 'high'],
+      defaultLevel: 'high',
+    });
+  });
+
+  it('uses the catalog id when an older cache entry lacks upstreamModelId', () => {
+    writeInputs({
+      id: 'gpt-5.5',
+      name: 'GPT-5.5',
+      contextWindow: 272_000,
+      modelFormat: 'openai',
+    });
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(desired.config['clodex:openai:gpt-5.5']?.effort).toEqual({
+      levels: ['low', 'medium', 'high'],
+      defaultLevel: 'high',
+    });
+  });
+
+  it('omits effort when enriched catalog metadata explicitly disables reasoning', () => {
+    writeInputs({
+      id: 'kimi-k2',
+      upstreamModelId: 'kimi-k2',
+      name: 'Kimi K2',
+      contextWindow: 128_000,
+      modelFormat: 'openai',
+    }, {
+      id: 'qiniu-ai',
+      templateId: 'qiniu-ai',
+      name: 'Qiniu',
+      npm: '@ai-sdk/openai-compatible',
+    });
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(desired.config['clodex:qiniu-ai:kimi-k2']?.effort).toBeUndefined();
   });
 });
 
@@ -290,6 +423,20 @@ describe('applyClodexPatches input validation', () => {
     })).toThrow(/not a safe lowercase alias/);
   });
 
+  it('rejects one lowercase alias assigned to multiple models', () => {
+    expect(() => applyClodexPatches('var x = 1;', {
+      'clodex:openai:first': { alias: 'fast' },
+      'clodex:openai:second': { alias: 'fast' },
+    })).toThrow(/assigned to multiple models/);
+  });
+
+  it('rejects aliases that collide after context suffix normalization', () => {
+    expect(() => applyClodexPatches('var x = 1;', {
+      'clodex:openai:first': { alias: 'fast' },
+      'clodex:openai:second': { alias: 'fast[1m]' },
+    })).toThrow(/conflicts with another configured model/);
+  });
+
   it('rejects an explicit context on a [1m]-suffixed id (the suffix already forces 1M)', () => {
     expect(() => applyClodexPatches('var x = 1;', {
       'clodex:openai:model[1m]': { context: 1_000_000 },
@@ -352,6 +499,66 @@ const CLAUDE_CORE_FIXTURE = [
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
 ].join('\n');
 
+describe('applyPatch', () => {
+  it('does not write the binary or a current manifest when effort anchors fail', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-effort-anchor-failure-'));
+    const binaryPath = join(dir, 'claude');
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    writeFileSync(binaryPath, 'pristine-native');
+    process.env.CLODEX_HOME = join(dir, 'app-home');
+    process.env.TWEAKCC_CONFIG_DIR = join(dir, 'tweakcc-home');
+
+    tweakccMocks.tryDetectInstallation.mockReset();
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+    tweakccMocks.tryDetectInstallation.mockResolvedValue({
+      path: binaryPath,
+      version: 'test-version',
+      kind: 'native',
+    });
+    tweakccMocks.readContent.mockResolvedValue(CLAUDE_CORE_FIXTURE);
+
+    try {
+      const outcome = await applyPatch(
+        binaryPath,
+        'test-version',
+        {
+          config: {
+            'clodex:test:extended': {
+              alias: 'extended',
+              effort: {
+                levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+                defaultLevel: 'high',
+              },
+            },
+          },
+          unknownWindows: [],
+        },
+        'desired-config-hash',
+        { trace: false, restoreFirst: false },
+      );
+
+      expect(outcome.ok).toBe(false);
+      expect(outcome.message).toContain('required effort patches failed');
+      expect(outcome.detailLines).toContain(
+        'clodex patch: FAILED patches: PATCH 8a: effort capability; '
+          + 'PATCH 8b: xhigh effort capability; '
+          + 'PATCH 8c: max effort capability; PATCH 9: default effort',
+      );
+      expect(tweakccMocks.writeContent).not.toHaveBeenCalled();
+      expect(readFileSync(binaryPath, 'utf8')).toBe('pristine-native');
+      expect(existsSync(getPatchManifestPath())).toBe(false);
+    } finally {
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 const CLAUDE_FIXTURE = [
   CLAUDE_CORE_FIXTURE,
   'function OI(e){if(SNr(e))return!1;let t=Ede(e,"effort");if(t!==void 0)return t;return!1}',
@@ -360,9 +567,72 @@ const CLAUDE_FIXTURE = [
   'function ait(e){return ww(lo(e))?.default_effort??"high"}',
 ].join('\n');
 
+const CLAUDE_PROXY_EFFORT_FIXTURE = [
+  CLAUDE_CORE_FIXTURE,
+  'function OI(e){if(SNr(e))return!1;let t=Ede(e,"effort");if(t!==void 0)return t;return proxyMode(e)}',
+  'function I_e(e){if(SNr(e))return!1;let t=Ede(e,"xhigh_effort");if(t!==void 0)return t;return proxyMode(e)}',
+  'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return proxyMode(e)}',
+  'function ait(e){return ww(lo(e))?.default_effort??"high"}',
+].join('\n');
+
 function runPatchScript(config: Parameters<typeof applyClodexPatches>[1], source = CLAUDE_FIXTURE): string {
   return applyClodexPatches(source, config).content;
 }
+
+type CapabilityFunctionName = 'OI' | 'I_e' | 'eqe';
+
+function executeCapability(
+  source: string,
+  functionName: CapabilityFunctionName,
+  modelId: string,
+  nativeFallback: boolean,
+  denied = false,
+): boolean {
+  const declaration = source
+    .split('\n')
+    .find(line => line.startsWith(`function ${functionName}(`));
+  expect(declaration).toBeDefined();
+  const capability = Function(
+    'SNr',
+    'Ede',
+    'proxyMode',
+    `${declaration};return ${functionName};`,
+  )(
+    () => denied,
+    () => undefined,
+    () => nativeFallback,
+  ) as (id: string) => boolean;
+  return capability(modelId);
+}
+
+function executeDefaultEffort(
+  source: string,
+  modelId: string,
+  nativeDefault: string,
+): string {
+  const declaration = source
+    .split('\n')
+    .find(line => line.startsWith('function ait('));
+  expect(declaration).toBeDefined();
+  const defaultEffort = Function(
+    'lo',
+    'ww',
+    `${declaration};return ait;`,
+  )(
+    (id: string) => id,
+    () => ({ default_effort: nativeDefault }),
+  ) as (id: string) => string;
+  return defaultEffort(modelId);
+}
+
+const CAPABILITY_GATES: Array<{
+  name: string;
+  functionName: CapabilityFunctionName;
+}> = [
+  { name: 'base effort', functionName: 'OI' },
+  { name: 'xhigh effort', functionName: 'I_e' },
+  { name: 'max effort', functionName: 'eqe' },
+];
 
 describe('patch script identity naming', () => {
   const config = {
@@ -377,6 +647,30 @@ describe('patch script identity naming', () => {
     },
     'clodex:openai:mystery': { context: 128_000, display: 'Mystery (OpenAI)' },
   };
+
+  const capabilityConfig = {
+    'clodex:openai:gpt-5.5': {
+      alias: 'standard',
+      effort: {
+        levels: ['low', 'medium', 'high'],
+        defaultLevel: 'high',
+      },
+    },
+    'clodex:openai:gpt-5.6-sol': {
+      alias: 'extended',
+      effort: {
+        levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'high',
+      },
+    },
+    'clodex:openai:no-effort': {
+      alias: 'disabled',
+    },
+  };
+
+  function runCapabilityPatch(): string {
+    return runPatchScript(capabilityConfig, CLAUDE_PROXY_EFFORT_FIXTURE);
+  }
 
   it('injects the ALIAS — not the canonical id — as the model identity', () => {
     const out = runPatchScript(config);
@@ -410,13 +704,13 @@ describe('patch script identity naming', () => {
     expect(parsed['clodex:openai:mystery']).toBe(128_000);
   });
 
-  it('enables GPT-5.6 effort, xhigh, max, and the medium default for its alias', () => {
+  it('enables GPT-5.6 effort, xhigh, max, and the native high default for its alias', () => {
     const out = runPatchScript(config);
     expect(out).toContain('/*ccpatch:effort*/');
     expect(out).toContain('/*ccpatch:xhigh-effort*/');
     expect(out).toContain('/*ccpatch:max-effort*/');
     expect(out).toContain('/*ccpatch:default-effort*/');
-    expect(out).toContain('"sol":"medium"');
+    expect(out).toContain('"sol":"high"');
   });
 
   it.each([
@@ -446,8 +740,95 @@ describe('patch script identity naming', () => {
     });
     expect(out).toContain('/*ccpatch:effort*/');
     expect(out).toContain('/*ccpatch:default-effort*/');
-    expect(out.includes('/*ccpatch:xhigh-effort*/')).toBe(xhigh);
-    expect(out.includes('/*ccpatch:max-effort*/')).toBe(max);
+    const xhighVerdicts = out.match(
+      /\/\*ccpatch:xhigh-effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/,
+    )?.[1];
+    const maxVerdicts = out.match(
+      /\/\*ccpatch:max-effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/,
+    )?.[1];
+    expect(JSON.parse(xhighVerdicts!)).toEqual({
+      'clodex:openai:reasoning-model': xhigh,
+      'clodex:openai:reasoning-model[1m]': xhigh,
+    });
+    expect(JSON.parse(maxVerdicts!)).toEqual({
+      'clodex:openai:reasoning-model': max,
+      'clodex:openai:reasoning-model[1m]': max,
+    });
+  });
+
+  it.each([
+    { name: 'xhigh effort', functionName: 'I_e' as const },
+    { name: 'max effort', functionName: 'eqe' as const },
+  ])('overrides native true with an explicit false $name verdict', ({ functionName }) => {
+    expect(executeCapability(runCapabilityPatch(), functionName, 'standard', true)).toBe(false);
+  });
+
+  it.each(CAPABILITY_GATES)(
+    'overrides native false with an explicit true $name verdict',
+    ({ functionName }) => {
+      expect(executeCapability(runCapabilityPatch(), functionName, 'extended', false)).toBe(true);
+      expect(executeCapability(runCapabilityPatch(), functionName, 'extended[1m]', false)).toBe(true);
+    },
+  );
+
+  it.each(CAPABILITY_GATES)(
+    'keeps configured no-effort identities false at the $name gate',
+    ({ functionName }) => {
+      const out = runCapabilityPatch();
+      expect(executeCapability(out, functionName, 'disabled', true)).toBe(false);
+      expect(executeCapability(out, functionName, 'clodex:openai:no-effort', true)).toBe(false);
+      expect(executeCapability(out, functionName, 'clodex:openai:no-effort[1m]', true)).toBe(false);
+    },
+  );
+
+  it.each(CAPABILITY_GATES)(
+    'falls through only for an unconfigured identity at the $name gate',
+    ({ functionName }) => {
+      const out = runCapabilityPatch();
+      expect(executeCapability(out, functionName, 'unconfigured', false)).toBe(false);
+      expect(executeCapability(out, functionName, 'unconfigured', true)).toBe(true);
+    },
+  );
+
+  it.each(['constructor', 'toString', '__proto__'])(
+    'falls through for unconfigured object prototype identity %s',
+    modelId => {
+      const out = runCapabilityPatch();
+      for (const { functionName } of CAPABILITY_GATES) {
+        expect(executeCapability(out, functionName, modelId, false)).toBe(false);
+        expect(executeCapability(out, functionName, modelId, true)).toBe(true);
+      }
+      expect(executeDefaultEffort(out, modelId, 'medium')).toBe('medium');
+    },
+  );
+
+  it.each(CAPABILITY_GATES)(
+    'keeps the native denylist ahead of the configured $name verdict',
+    ({ functionName }) => {
+      const out = runCapabilityPatch();
+      for (const modelId of ['extended', 'extended[1m]']) {
+        expect(executeCapability(
+          out,
+          functionName,
+          modelId,
+          false,
+          true,
+        )).toBe(false);
+      }
+    },
+  );
+
+  it.each([
+    'sol',
+    'sol[1m]',
+    'clodex:openai-oauth:gpt-5.6-sol',
+    'clodex:openai-oauth:gpt-5.6-sol[1m]',
+  ])('returns high for configured default key %s against native medium', modelId => {
+    expect(executeDefaultEffort(runPatchScript(config), modelId, 'medium')).toBe('high');
+  });
+
+  it('falls through to the native default for an unconfigured identity', () => {
+    expect(executeDefaultEffort(runPatchScript(config), 'unconfigured', 'medium')).toBe('medium');
   });
 
   it('falls back to the canonical id as the identity when a model has no alias', () => {
@@ -457,6 +838,16 @@ describe('patch script identity naming', () => {
     // No alias → nothing to resolve and no picker entry.
     expect(out).not.toContain('case"clodex:openai:mystery":return');
     expect(out).not.toContain('value:"clodex:openai:mystery"');
+  });
+
+  it('supports a configured alias that matches an object prototype name', () => {
+    const out = runPatchScript({
+      'clodex:openai:model': { alias: 'constructor' },
+    });
+    expect(out).toContain('case"constructor":return "constructor";');
+    for (const { functionName } of CAPABILITY_GATES) {
+      expect(executeCapability(out, functionName, 'constructor', true)).toBe(false);
+    }
   });
 
   it('uses the real display label in the /model picker and the Agent tool description', () => {
@@ -542,7 +933,7 @@ describe('patch script identity naming', () => {
     ]);
   });
 
-  it('refreshes every baked effort table when capabilities and the default change', () => {
+  it('refreshes every baked effort table when extended capabilities are removed', () => {
     const once = runPatchScript(config);
     const updatedConfig: Parameters<typeof applyClodexPatches>[1] = {
       ...config,
@@ -556,21 +947,44 @@ describe('patch script identity naming', () => {
     };
     const updated = runPatchScript(updatedConfig, once);
 
-    const base = updated.match(/\/\*ccpatch:effort\*\/if\(\((\{[^{}]*\})\)\[/)?.[1];
-    const xhigh = updated.match(/\/\*ccpatch:xhigh-effort\*\/if\(\((\{[^{}]*\})\)\[/)?.[1];
-    const max = updated.match(/\/\*ccpatch:max-effort\*\/if\(\((\{[^{}]*\})\)\[/)?.[1];
-    const defaults = updated.match(/\/\*ccpatch:default-effort\*\/var _cce=\((\{[^{}]*\})\)/)?.[1];
+    const base = updated.match(/\/\*ccpatch:effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+    const xhigh = updated.match(/\/\*ccpatch:xhigh-effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+    const max = updated.match(/\/\*ccpatch:max-effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+    const defaults = updated.match(/\/\*ccpatch:default-effort\*\/var _cce=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
 
-    expect(JSON.parse(base!)).toEqual({ sol: 1, 'clodex:openai-oauth:gpt-5.6-sol': 1 });
-    expect(JSON.parse(xhigh!)).toEqual({});
-    expect(JSON.parse(max!)).toEqual({});
+    expect(JSON.parse(base!)).toEqual({
+      sol: true,
+      'sol[1m]': true,
+      'clodex:openai-oauth:gpt-5.6-sol': true,
+      'clodex:openai-oauth:gpt-5.6-sol[1m]': true,
+      'clodex:openai:mystery': false,
+      'clodex:openai:mystery[1m]': false,
+    });
+    expect(JSON.parse(xhigh!)).toEqual({
+      sol: false,
+      'sol[1m]': false,
+      'clodex:openai-oauth:gpt-5.6-sol': false,
+      'clodex:openai-oauth:gpt-5.6-sol[1m]': false,
+      'clodex:openai:mystery': false,
+      'clodex:openai:mystery[1m]': false,
+    });
+    expect(JSON.parse(max!)).toEqual({
+      sol: false,
+      'sol[1m]': false,
+      'clodex:openai-oauth:gpt-5.6-sol': false,
+      'clodex:openai-oauth:gpt-5.6-sol[1m]': false,
+      'clodex:openai:mystery': false,
+      'clodex:openai:mystery[1m]': false,
+    });
     expect(JSON.parse(defaults!)).toEqual({
       sol: 'high',
+      'sol[1m]': 'high',
       'clodex:openai-oauth:gpt-5.6-sol': 'high',
+      'clodex:openai-oauth:gpt-5.6-sol[1m]': 'high',
     });
   });
 
-  it('clears every baked effort table when the last capability is removed', () => {
+  it('keeps capability denials and clears defaults when effort is removed', () => {
     const once = runPatchScript(config);
     const { effort: _effort, ...withoutEffort } = config['clodex:openai-oauth:gpt-5.6-sol'];
     const updated = runPatchScript({
@@ -578,14 +992,51 @@ describe('patch script identity naming', () => {
       'clodex:openai-oauth:gpt-5.6-sol': withoutEffort,
     }, once);
 
-    const base = updated.match(/\/\*ccpatch:effort\*\/if\(\((\{[^{}]*\})\)\[/)?.[1];
-    const xhigh = updated.match(/\/\*ccpatch:xhigh-effort\*\/if\(\((\{[^{}]*\})\)\[/)?.[1];
-    const max = updated.match(/\/\*ccpatch:max-effort\*\/if\(\((\{[^{}]*\})\)\[/)?.[1];
-    const defaults = updated.match(/\/\*ccpatch:default-effort\*\/var _cce=\((\{[^{}]*\})\)/)?.[1];
+    const base = updated.match(/\/\*ccpatch:effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+    const xhigh = updated.match(/\/\*ccpatch:xhigh-effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+    const max = updated.match(/\/\*ccpatch:max-effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+    const defaults = updated.match(/\/\*ccpatch:default-effort\*\/var _cce=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
 
-    expect(JSON.parse(base!)).toEqual({});
-    expect(JSON.parse(xhigh!)).toEqual({});
-    expect(JSON.parse(max!)).toEqual({});
+    const disabledVerdicts = {
+      sol: false,
+      'sol[1m]': false,
+      'clodex:openai-oauth:gpt-5.6-sol': false,
+      'clodex:openai-oauth:gpt-5.6-sol[1m]': false,
+      'clodex:openai:mystery': false,
+      'clodex:openai:mystery[1m]': false,
+    };
+    expect(JSON.parse(base!)).toEqual(disabledVerdicts);
+    expect(JSON.parse(xhigh!)).toEqual(disabledVerdicts);
+    expect(JSON.parse(max!)).toEqual(disabledVerdicts);
     expect(JSON.parse(defaults!)).toEqual({});
+
+    for (const { functionName } of CAPABILITY_GATES) {
+      expect(executeCapability(updated, functionName, 'sol', true)).toBe(false);
+      expect(executeCapability(updated, functionName, 'sol[1m]', true)).toBe(false);
+      expect(executeCapability(
+        updated,
+        functionName,
+        'clodex:openai-oauth:gpt-5.6-sol',
+        true,
+      )).toBe(false);
+      expect(executeCapability(
+        updated,
+        functionName,
+        'clodex:openai-oauth:gpt-5.6-sol[1m]',
+        true,
+      )).toBe(false);
+    }
+    expect(executeDefaultEffort(updated, 'sol', 'medium')).toBe('medium');
+    expect(executeDefaultEffort(updated, 'sol[1m]', 'medium')).toBe('medium');
+    expect(executeDefaultEffort(
+      updated,
+      'clodex:openai-oauth:gpt-5.6-sol',
+      'medium',
+    )).toBe('medium');
+    expect(executeDefaultEffort(
+      updated,
+      'clodex:openai-oauth:gpt-5.6-sol[1m]',
+      'medium',
+    )).toBe('medium');
   });
 });

@@ -795,6 +795,14 @@ export function getPatchReasoningCapabilities(
   modelId: string,
   metadata?: ReasoningMetadata,
 ): ReasoningCapabilities {
+  if (
+    metadata?.reasoning === false
+    && !hasSupportedParameter(metadata, 'reasoning_effort')
+    && !hasSupportedParameter(metadata, 'reasoning')
+  ) {
+    return EMPTY_REASONING;
+  }
+
   const capabilities = getReasoningCapabilities(npm, modelId, metadata);
   const seenProviderOptions = new Set<string>();
 

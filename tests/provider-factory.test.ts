@@ -204,6 +204,28 @@ describe('getReasoningCapabilities', () => {
     expect(caps.defaultLevel).toBe('high');
   });
 
+  it('does not advertise effort when model metadata explicitly disables reasoning', () => {
+    const caps = getPatchReasoningCapabilities(
+      '@ai-sdk/openai-compatible',
+      'kimi-k2',
+      { reasoning: false },
+    );
+    expect(caps.levels).toEqual([]);
+    expect(caps.mode).toBe('none');
+  });
+
+  it('honors an explicit effort parameter even when broad reasoning metadata is false', () => {
+    const caps = getPatchReasoningCapabilities(
+      '@ai-sdk/openai-compatible',
+      'custom-model',
+      {
+        reasoning: false,
+        supportedParameters: ['reasoning_effort'],
+      },
+    );
+    expect(caps.levels).toEqual(['low', 'medium', 'high']);
+  });
+
   it('returns empty levels for grok-build-0.1 (internal reasoning only)', () => {
     const caps = getReasoningCapabilities('@ai-sdk/xai', 'grok-build-0.1');
     expect(caps.levels).toEqual([]);

@@ -48,7 +48,8 @@ export function projectNativeEffort(
   const levels = NATIVE_EFFORT_LEVELS.filter(level => declared.has(level));
   if (!BASE_EFFORT_LEVELS.every(level => declared.has(level))) return undefined;
   if (!levels.some(level => level === effort.defaultLevel)) return undefined;
-  return { levels, defaultLevel: effort.defaultLevel };
+  // The native client defaults custom identities to high; preserve that contract.
+  return { levels, defaultLevel: 'high' };
 }
 
 export type PatchSiteStatus = 'OK' | 'SKIP' | 'FAIL';
@@ -97,7 +98,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
 
   // ---- derive helpers ------------------------------------------------------
   // alias -> model id (only for entries that define an alias)
-  const ALIAS_TO_ID: Record<string, string> = {};
+  const ALIAS_TO_ID = Object.create(null) as Record<string, string>;
   // The name Claude Code knows a model by: its alias when it has one, else its
   // canonical id. This single value is used for the Agent-tool enum, the
   // known-alias validator, the /model picker value, and the context-window table,
@@ -105,23 +106,53 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // the proxy echoes back == the key its context window is stored under.
   const IDENTITIES: string[] = [];
   // identity -> human label for the /model picker (falls back at use site)
-  const DISPLAY_BY_IDENTITY: Record<string, string> = {};
+  const DISPLAY_BY_IDENTITY = Object.create(null) as Record<string, string>;
   // lowercased alias AND id -> context-window tokens (only for models that set it)
-  const CONTEXT_BY_KEY: Record<string, number> = {};
+  const CONTEXT_BY_KEY = Object.create(null) as Record<string, number>;
+  // lowercased alias AND id for every configured model. Capability verdicts
+  // must distinguish configured-false from an unknown identity that may use
+  // the native fallback.
+  const CONFIGURED_CAPABILITY_KEYS = new Set<string>();
+  const CAPABILITY_OWNER_BY_KEY = new Map<string, string>();
   // lowercased alias AND id -> effort metadata for Claude Code's capability gates.
-  const EFFORT_BY_KEY: Record<string, PatchScriptModelEntry['effort']> = {};
+  const EFFORT_BY_KEY = Object.create(null) as Record<
+    string,
+    PatchScriptModelEntry['effort']
+  >;
 
   const report: PatchSiteResult[] = [];
   const fail = (message: string): never => {
     throw new PatchApplyError(message, report);
   };
+  const capabilityKeys = (value: string): string[] => {
+    const normalized = value.trim().toLowerCase();
+    const bare = normalized.replace(/\[1m\]$/i, '');
+    return [...new Set([bare, `${bare}[1m]`])];
+  };
+  const registerCapabilityKeys = (value: string, ownerId: string): void => {
+    for (const key of capabilityKeys(value)) {
+      const previousOwner = CAPABILITY_OWNER_BY_KEY.get(key);
+      if (previousOwner !== undefined && previousOwner !== ownerId) {
+        fail(`clodex patch: identity "${value}" conflicts with another configured model`);
+      }
+      CAPABILITY_OWNER_BY_KEY.set(key, ownerId);
+      CONFIGURED_CAPABILITY_KEYS.add(key);
+    }
+  };
 
   for (const [id, value] of Object.entries(MODEL_CONFIG)) {
     const spec: PatchScriptModelEntry = value && typeof value === 'object' ? value : { alias: value as unknown as string };
     if (spec.alias !== undefined) {
-      const a = String(spec.alias).trim().toLowerCase();
+      const rawAlias = String(spec.alias).trim();
+      const a = rawAlias.toLowerCase();
       if (!/^[a-z0-9][a-z0-9._-]*(\[1m\])?$/.test(a)) {
         fail('clodex patch: alias "' + spec.alias + '" is not a safe lowercase alias');
+      }
+      const previousId = ALIAS_TO_ID[a];
+      if (previousId !== undefined && previousId !== String(id)) {
+        fail(
+          'clodex patch: alias "' + spec.alias + '" is assigned to multiple models',
+        );
       }
       ALIAS_TO_ID[a] = String(id);
       IDENTITIES.push(a);
@@ -130,6 +161,10 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       IDENTITIES.push(String(id));
       if (spec.display) DISPLAY_BY_IDENTITY[String(id)] = String(spec.display);
     }
+    if (spec.alias !== undefined) {
+      registerCapabilityKeys(String(spec.alias), String(id));
+    }
+    registerCapabilityKeys(String(id), String(id));
 
     if (spec.context !== undefined) {
       const n = Number(spec.context);
@@ -155,8 +190,14 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
           `clodex patch: effort for "${id}" must include low, medium, and high with a native default`,
         );
       }
-      if (spec.alias !== undefined) EFFORT_BY_KEY[String(spec.alias).trim().toLowerCase()] = effort;
-      EFFORT_BY_KEY[String(id).trim().toLowerCase()] = effort;
+      if (spec.alias !== undefined) {
+        for (const key of capabilityKeys(String(spec.alias))) {
+          EFFORT_BY_KEY[key] = effort;
+        }
+      }
+      for (const key of capabilityKeys(String(id))) {
+        EFFORT_BY_KEY[key] = effort;
+      }
     }
   }
   const ALIASES = Object.keys(ALIAS_TO_ID);
@@ -388,7 +429,8 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   //
   // Claude Code checks three separate resolvers before it exposes effort at all,
   // includes xhigh/max in the picker, and emits effort.level in status hooks.
-  // Inject model-specific lookups before the built-in and environment checks.
+  // Inject model-specific lookups after the native denylist, but before the
+  // built-in metadata and provider-fallback checks.
   // ---------------------------------------------------------------------------
   function patchEffortCapability(
     capability: 'effort' | 'xhigh_effort' | 'max_effort',
@@ -396,19 +438,26 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     name: string,
     anchor: RegExp,
   ): void {
-    const enabled = Object.fromEntries(
-      Object.entries(EFFORT_BY_KEY)
-        .filter(([, effort]) => capability === 'effort' || effort?.levels.includes(
-          capability === 'xhigh_effort' ? 'xhigh' : 'max',
-        ))
-        .map(([key]) => [key, 1]),
+    const verdicts = Object.fromEntries(
+      [...CONFIGURED_CAPABILITY_KEYS].map(key => {
+        const effort = EFFORT_BY_KEY[key];
+        return [
+          key,
+          effort !== undefined && (
+            capability === 'effort'
+            || effort.levels.includes(capability === 'xhigh_effort' ? 'xhigh' : 'max')
+          ),
+        ];
+      }),
     );
     const hasMarker = js.includes(marker);
-    if (Object.keys(enabled).length === 0 && !hasMarker) return;
+    if (Object.keys(verdicts).length === 0 && !hasMarker) return;
 
     const snippet = (arg: string) =>
       marker
-      + 'if((' + JSON.stringify(enabled) + ')[String(' + arg + '||"").trim().toLowerCase()]!==void 0)return!0;';
+      + 'var _ccv=Object.assign(Object.create(null),' + JSON.stringify(verdicts)
+      + ')[String(' + arg + '||"").trim().toLowerCase()];'
+      + 'if(_ccv!==void 0)return _ccv;';
 
     if (hasMarker) {
       const markerPattern = reEsc(marker);
@@ -416,7 +465,9 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         name + ' (refresh)',
         new RegExp(
           markerPattern
-          + 'if\\(\\(\\{[^{}]*\\}\\)\\[String\\(([\\w$]+)\\|\\|""\\)\\.trim\\(\\)\\.toLowerCase\\(\\)\\]!==void 0\\)return!0;',
+          + 'var _ccv=Object\\.assign\\(Object\\.create\\(null\\),\\{[^{}]*\\}\\)'
+          + '\\[String\\(([\\w$]+)\\|\\|""\\)\\.trim\\(\\)\\.toLowerCase\\(\\)\\];'
+          + 'if\\(_ccv!==void 0\\)return _ccv;',
         ),
         (_m, arg) => snippet(arg!),
         { required: false, noopIsSkip: true },
@@ -436,19 +487,19 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     'effort',
     '/*ccpatch:effort*/',
     'PATCH 8a: effort capability',
-    /(function [\w$]+\(([\w$]+)\)\{)(if\([\w$]+\(\2\)\)return!1;let [\w$]+=[\w$]+\(\2,"effort"\);)/,
+    /(function [\w$]+\(([\w$]+)\)\{if\([\w$]+\(\2\)\)return!1;)(let [\w$]+=[\w$]+\(\2,"effort"\);)/,
   );
   patchEffortCapability(
     'xhigh_effort',
     '/*ccpatch:xhigh-effort*/',
     'PATCH 8b: xhigh effort capability',
-    /(function [\w$]+\(([\w$]+)\)\{)(if\([\w$]+\(\2\)\)return!1;let [\w$]+=[\w$]+\(\2,"xhigh_effort"\);)/,
+    /(function [\w$]+\(([\w$]+)\)\{if\([\w$]+\(\2\)\)return!1;)(let [\w$]+=[\w$]+\(\2,"xhigh_effort"\);)/,
   );
   patchEffortCapability(
     'max_effort',
     '/*ccpatch:max-effort*/',
     'PATCH 8c: max effort capability',
-    /(function [\w$]+\(([\w$]+)\)\{)(if\([\w$]+\(\2\)\)return!1;let [\w$]+=[\w$]+\(\2,"max_effort"\);)/,
+    /(function [\w$]+\(([\w$]+)\)\{if\([\w$]+\(\2\)\)return!1;)(let [\w$]+=[\w$]+\(\2,"max_effort"\);)/,
   );
 
   // ---------------------------------------------------------------------------
@@ -461,13 +512,14 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   if (Object.keys(defaults).length || js.includes(DEFAULT_EFFORT_MARKER)) {
     const snippet = (arg: string) =>
       DEFAULT_EFFORT_MARKER
-      + 'var _cce=(' + JSON.stringify(defaults) + ')[String(' + arg + '||"").trim().toLowerCase()];'
+      + 'var _cce=Object.assign(Object.create(null),' + JSON.stringify(defaults)
+      + ')[String(' + arg + '||"").trim().toLowerCase()];'
       + 'if(_cce!==void 0)return _cce;';
 
     if (js.includes(DEFAULT_EFFORT_MARKER)) {
       applyOnce(
         'PATCH 9: default effort (refresh)',
-        /\/\*ccpatch:default-effort\*\/var _cce=\(\{[^{}]*\}\)\[String\(([\w$]+)\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_cce!==void 0\)return _cce;/,
+        /\/\*ccpatch:default-effort\*\/var _cce=Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\(([\w$]+)\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_cce!==void 0\)return _cce;/,
         (_m, arg) => snippet(arg!),
         { required: false, noopIsSkip: true },
       );

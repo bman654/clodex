@@ -34,6 +34,7 @@ import * as p from '@clack/prompts';
 import { getAppHome } from './paths.js';
 import { loadPreferences } from './config.js';
 import { loadRegistry } from './registry/io.js';
+import { findModelsDevModel } from './registry/models-dev.js';
 import { findClaudeBinary, getInstalledClaudeVersion } from './launch.js';
 import { httpProxyDisplayName, httpProxyModelId } from './http-proxy/routes.js';
 import { stripOneMContextSuffix } from './context-model-id.js';
@@ -171,12 +172,14 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
     for (const model of provider.modelsCache?.models ?? []) {
       const npm = model.npm ?? provider.api.npm ?? '';
       const upstreamModelId = model.upstreamModelId ?? model.id;
+      const modelsDev = findModelsDevModel(provider.id, model.id);
       const effort = getPatchReasoningCapabilities(npm, upstreamModelId, {
         providerId: provider.id,
         apiBaseUrl: model.apiUrl ?? provider.api.url,
         supportedParameters: model.supportedParameters,
-        reasoning: model.reasoning,
-        interleavedReasoningField: model.interleavedReasoningField,
+        reasoning: model.reasoning ?? modelsDev?.reasoning,
+        interleavedReasoningField:
+          model.interleavedReasoningField ?? modelsDev?.interleaved?.field,
         upstreamModelId,
       });
       meta.set(`${provider.id}:${model.id}`, {
@@ -338,13 +341,25 @@ export function summarizePatchResults(results: PatchSiteResult[]): string[] {
 
 // ── Apply / restore ─────────────────────────────────────────────────────────
 
-interface ApplyOutcome {
+export interface ApplyOutcome {
   ok: boolean;
   message: string;
   detailLines?: string[];
 }
 
-async function applyPatch(
+function requiredEffortPatchFailures(results: PatchSiteResult[]): PatchSiteResult[] {
+  return results.filter(result =>
+    result.status === 'FAIL'
+    && (
+      result.name.startsWith('PATCH 8a:')
+      || result.name.startsWith('PATCH 8b:')
+      || result.name.startsWith('PATCH 8c:')
+      || result.name.startsWith('PATCH 9:')
+    ),
+  );
+}
+
+export async function applyPatch(
   binaryPath: string,
   version: string,
   desired: DesiredPatchConfig,
@@ -376,6 +391,15 @@ async function applyPatch(
     const source = await readContent(installation);
     const patched = applyClodexPatches(source, desired.config);
     results = patched.results;
+    const failedEffortPatches = requiredEffortPatchFailures(results);
+    if (failedEffortPatches.length > 0) {
+      throw new PatchApplyError(
+        `clodex patch: required effort patches failed: ${
+          failedEffortPatches.map(result => result.name).join('; ')
+        }`,
+        results,
+      );
+    }
     await writeContent(installation, patched.content);
   } catch (err) {
     const detailLines = err instanceof PatchApplyError ? summarizePatchResults(err.results) : [];
