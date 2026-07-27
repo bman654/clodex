@@ -65,7 +65,7 @@ export function formatPatchSiteLine(result: PatchSiteResult): string {
 }
 
 /**
- * Apply the clodex patch sites (PATCH 1–10) to the Claude Code source.
+ * Apply the clodex patch sites (PATCH 1–11) to the Claude Code source.
  * Pure: source string in → patched string + per-site results out. Throws
  * `PatchApplyError` when the config is invalid or a required site fails —
  * nothing should be written to the binary in that case.
@@ -418,6 +418,33 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         prefix + timeoutName + '=' + MARKER
         + 'Math.min(Math.max(Number(process.env.CLODEX_WORKFLOW_STALL_TIMEOUT_MS)||180000,180000),1800000)'
         + suffix,
+      { marker: MARKER, required: false }
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 11 — retain the last nonzero Workflow agent usage sample.
+  //
+  // Translated streams begin with an Anthropic-shaped message_start carrying
+  // zero usage because OpenAI reports authoritative cache-aware usage only at
+  // completion. Claude's Workflow loop replaces its progress counter for every
+  // assistant event, so a subsequent zero-valued streaming placeholder erases
+  // the last completed response's real token count and leaves the UI at 0 tok.
+  //
+  // Preserve the previous sample when the incoming total is zero. Native Claude
+  // streams are unchanged because their message_start usage is already nonzero.
+  // ---------------------------------------------------------------------------
+  {
+    const MARKER = '/*clodex:workflow-token-progress*/';
+    applyOnce(
+      'PATCH 11: Workflow token progress',
+      /if\(([\w$]+)=([\w$]+),([\w$]+)\?\.\push\(\2\),!\2\.isApiErrorMessage\)\{([\w$]+)=([\w$]+)\(\2\.message\.usage\);let ([\w$]+)=\2\.message\.model;/,
+      (_m, lastMessage, message, messages, tokens, countUsage, model) =>
+        'if(' + lastMessage + '=' + message + ',' + messages + '?.push(' + message + '),!'
+        + message + '.isApiErrorMessage){' + MARKER
+        + 'let __clodexWorkflowUsage=' + countUsage + '(' + message + '.message.usage);'
+        + 'if(__clodexWorkflowUsage>0)' + tokens + '=__clodexWorkflowUsage;'
+        + 'let ' + model + '=' + message + '.message.model;',
       { marker: MARKER, required: false }
     );
   }
