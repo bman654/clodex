@@ -60,6 +60,7 @@ import {
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
 import { listenTcpServer, tcpListenerUrlHost } from '../listener-ready.js';
+import { canonicalModelAliasName } from '../model-aliases.js';
 
 export interface ServerOptions {
   host: string;
@@ -740,7 +741,12 @@ function getResponseModelId(bodyModel: unknown, model: ServerModelInfo, options:
   // masking is on — Claude Code resolves context windows from the response
   // `model` field but preflights with the request alias, so rewriting it here
   // would break auto-compaction (see CLAUDE.md).
-  if (typeof bodyModel === 'string' && options.aliasNames?.has(bodyModel)) return bodyModel;
+  if (
+    typeof bodyModel === 'string'
+    && options.aliasNames?.has(canonicalModelAliasName(bodyModel))
+  ) {
+    return bodyModel;
+  }
   return options.gateway?.maskGatewayIds
     ? gatewayDisplayName(model, options.gateway)
     : (typeof bodyModel === 'string' ? bodyModel : model.id);

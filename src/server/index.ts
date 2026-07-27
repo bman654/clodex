@@ -53,6 +53,7 @@ import {
   unregisterServerRuntimeState,
 } from '../server-runtime.js';
 import { getInferenceRequestLogPath, getSessionLogPath } from '../trace-log.js';
+import { normalizeModelAliases } from '../model-aliases.js';
 
 export interface ServerRunConfig {
   exposedProviders: string[] | null;
@@ -445,7 +446,9 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   // ids — the same alias table the proxy-mode MITM resolves — so a patched
   // Claude Code or a direct API client can send e.g. "luna". They are never
   // advertised in /models listings; see createGatewayModelCatalog.
-  const modelAliases = loadPreferences().modelAliases ?? [];
+  const modelAliases = normalizeModelAliases(
+    loadPreferences().modelAliases,
+  ).aliases;
   const inferenceLogPath = getInferenceRequestLogPath();
   const webSocketDiagnosticsLogPath = options.wsDiagnostics
     ? getSessionLogPath('server-websocket-diagnostics', 'jsonl')

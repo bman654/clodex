@@ -15,6 +15,7 @@ import {
   writeProxyLifecycleLog,
 } from '../trace-log.js';
 import { removeAnthropicProxyBypass } from '../wrapper-env.js';
+import { normalizeModelAliases } from '../model-aliases.js';
 
 export interface LoadedHttpProxyRoutes extends HttpProxyRouteResult {
   favoriteCount: number;
@@ -24,12 +25,16 @@ export async function loadHttpProxyRoutes(): Promise<LoadedHttpProxyRoutes> {
   const prefs = loadPreferences();
   const favorites = prefs.favoriteModels ?? [];
   if (favorites.length === 0) {
+    const normalizedAliases = normalizeModelAliases(prefs.modelAliases);
     return {
       routes: [],
       unavailable: [],
       unsupported: [],
       aliases: [],
-      unavailableAliases: prefs.modelAliases ?? [],
+      unavailableAliases: [
+        ...normalizedAliases.rejected,
+        ...normalizedAliases.aliases,
+      ],
       favoriteCount: 0,
     };
   }
@@ -89,7 +94,8 @@ export function reportSkippedHttpProxyFavorites(loaded: LoadedHttpProxyRoutes): 
   if (loaded.unavailableAliases.length > 0) {
     p.log.warn(
       `${loaded.unavailableAliases.length} model alias${loaded.unavailableAliases.length === 1 ? '' : 'es'} skipped — `
-      + 'its target must be an available HTTP-proxy favorite.',
+      + 'names must be valid and unambiguous, and targets must be available HTTP-proxy favorites. '
+      + 'Saved entries were preserved.',
     );
   }
 }

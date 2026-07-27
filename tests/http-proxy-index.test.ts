@@ -2,10 +2,12 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import * as p from '@clack/prompts';
 import {
   buildConfiguredHttpProxyOptions,
   formatHttpProxyEnvironmentLines,
   formatHttpProxyModelLines,
+  reportSkippedHttpProxyFavorites,
   runHttpProxyServerCommand,
   type LoadedHttpProxyRoutes,
 } from '../src/http-proxy/index.js';
@@ -113,6 +115,33 @@ describe('HTTP proxy startup model list', () => {
       reservedModelIds: ['missing-route'],
       inferenceLogPath: '/tmp/inference.jsonl',
     });
+  });
+
+  it('reports inactive legacy aliases to the operator', () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const loaded: LoadedHttpProxyRoutes = {
+      routes: [],
+      aliases: [],
+      unavailable: [],
+      unsupported: [],
+      unavailableAliases: [
+        { name: 'default', providerId: 'openai', modelId: 'model-a' },
+        { name: 'Orbit', providerId: 'openai', modelId: 'model-a' },
+      ],
+      favoriteCount: 1,
+    };
+
+    try {
+      reportSkippedHttpProxyFavorites(loaded);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('2 model aliases skipped'),
+      );
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('Saved entries were preserved.'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('prints proxy env values with the merged non-Anthropic bypass list', () => {

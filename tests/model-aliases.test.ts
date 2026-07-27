@@ -42,7 +42,7 @@ describe('model aliases', () => {
       modelId: 'gpt-5.6-luna',
     });
 
-    for (const name of ['sonnet', 'OpUs', 'HAIKU', 'fable', 'best', 'opusplan', 'inherit']) {
+    for (const name of ['sonnet', 'OpUs', 'HAIKU', 'fable', 'best', 'opusplan', 'inherit', 'DeFaUlT']) {
       expect(isValidModelAlias(name)).toBe(false);
       expect(parseModelAliasAssignment(`${name}=clodex:provider:model`)).toEqual({
         error: 'That alias name is reserved by the client.',
@@ -63,7 +63,6 @@ describe('model aliases', () => {
       { name: 'luna', providerId: 'one', modelId: 'model-a' },
     ]);
     expect(normalized.rejected).toEqual([
-      { name: 'luna', providerId: 'one', modelId: 'model-a' },
       { name: 'Orbit', providerId: 'one', modelId: 'model-a' },
       { name: 'ORBIT', providerId: 'two', modelId: 'model-b' },
       { name: 'best', providerId: 'one', modelId: 'model-a' },

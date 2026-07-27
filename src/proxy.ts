@@ -57,6 +57,7 @@ import {
 import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-websocket.js';
 import { resolveContextWindow } from './context-window.js';
 import { listenTcpServer } from './listener-ready.js';
+import { canonicalModelAliasName } from './model-aliases.js';
 
 type ProxyLog = (message: string | (() => string)) => void;
 
@@ -293,14 +294,21 @@ export async function startProxyCatalog(
   }
 
   const byAlias = new Map(routes.map(r => [normalizeRouteLookupId(r.aliasId), r]));
+  const routesByModelAlias = new Map<string, ProxyRoute>();
   const configuredAliasNames = new Set(
-    (modelAliases ?? []).map(alias => normalizeRouteLookupId(alias.name)),
+    (modelAliases ?? []).map(alias => (
+      canonicalModelAliasName(normalizeRouteLookupId(alias.name))
+    )),
   );
   for (const alias of modelAliases ?? []) {
     const route = lookupRoute(byAlias, alias.routeId);
-    const aliasId = normalizeRouteLookupId(alias.name);
-    if (route && !byAlias.has(aliasId)) byAlias.set(aliasId, route);
+    const aliasId = canonicalModelAliasName(normalizeRouteLookupId(alias.name));
+    if (route) routesByModelAlias.set(aliasId, route);
   }
+  const lookupCatalogRoute = (id: string) => (
+    lookupRoute(byAlias, id)
+    ?? routesByModelAlias.get(canonicalModelAliasName(normalizeRouteLookupId(id)))
+  );
   const defaultRoute = lookupRoute(byAlias, defaultAliasId) ?? routes[0]!;
 
   const plog = makeProxyLog(debug, debugLogPath);
@@ -335,7 +343,7 @@ export async function startProxyCatalog(
       const modelPathMatch = req.url.match(/^\/v1\/models\/([^?]+)/);
       if (modelPathMatch) {
         const id = decodeURIComponent(modelPathMatch[1]);
-        const route = lookupRoute(byAlias, id);
+        const route = lookupCatalogRoute(id);
         if (route) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(formatAnthropicModelEntry(route.aliasId, route.displayName, route.contextWindow)));
@@ -385,12 +393,14 @@ export async function startProxyCatalog(
 
       // Per-request route resolution: look up the alias, fall back to default
       const resolvedRoute = typeof originalModel === 'string'
-        ? lookupRoute(byAlias, originalModel)
+        ? lookupCatalogRoute(originalModel)
         : undefined;
       const configuredModelUnavailable = typeof originalModel === 'string'
         && (
           normalizeRouteLookupId(originalModel).startsWith('clodex:')
-          || configuredAliasNames.has(normalizeRouteLookupId(originalModel))
+          || configuredAliasNames.has(
+            canonicalModelAliasName(normalizeRouteLookupId(originalModel)),
+          )
         );
       if (!resolvedRoute && configuredModelUnavailable) {
         anthropicError(res, 400, routeUnavailableMessage(originalModel));

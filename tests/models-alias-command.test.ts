@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadPreferences, savePreferences } from '../src/config.js';
 import { runModelsCommand } from '../src/cli.js';
+import { getConfigPath } from '../src/paths.js';
 
 let tempHome: string;
 
@@ -56,5 +57,85 @@ describe('models alias command', () => {
       alias: 'BeSt=clodex:openai-oauth:gpt-5.6-sol',
     })).toBe(1);
     expect(loadPreferences().modelAliases).toEqual(before);
+  });
+
+  it('removes one alias without discarding unrelated inactive entries', async () => {
+    const aliases = [
+      { name: 'Active', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' },
+      { name: 'default', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+      { name: 'Orbit', providerId: 'one', modelId: 'model-a' },
+      { name: 'ORBIT', providerId: 'two', modelId: 'model-b' },
+      { name: 'bad:name', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+    ];
+    writeFileSync(getConfigPath(), JSON.stringify({
+      favoriteModels: loadPreferences().favoriteModels,
+      modelAliases: aliases,
+    }));
+
+    expect(await runModelsCommand({ unalias: 'ACTIVE' })).toBe(0);
+    expect(JSON.parse(readFileSync(getConfigPath(), 'utf8')).modelAliases).toEqual(aliases.slice(1));
+  });
+
+  it('replaces one canonical alias without discarding unrelated inactive entries', async () => {
+    const unrelated = [
+      { name: 'default', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+      { name: 'Orbit', providerId: 'one', modelId: 'model-a' },
+      { name: 'ORBIT', providerId: 'two', modelId: 'model-b' },
+      { name: 'bad:name', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+    ];
+    writeFileSync(getConfigPath(), JSON.stringify({
+      favoriteModels: loadPreferences().favoriteModels,
+      modelAliases: [
+        { name: 'LuNa', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' },
+        ...unrelated,
+      ],
+    }));
+
+    expect(await runModelsCommand({
+      alias: 'LUNA=clodex:openai-oauth:gpt-5.6-sol',
+    })).toBe(0);
+    const saved = JSON.parse(readFileSync(getConfigPath(), 'utf8')).modelAliases;
+    expect(saved.filter((alias: { name: string }) => alias.name.toLowerCase() === 'luna')).toEqual([
+      { name: 'luna', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+    ]);
+    expect(saved.filter((alias: { name: string }) => alias.name.toLowerCase() !== 'luna')).toEqual(unrelated);
+  });
+
+  it('adds one canonical alias without discarding unrelated inactive entries', async () => {
+    const unrelated = [
+      { name: 'default', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+      { name: 'Orbit', providerId: 'one', modelId: 'model-a' },
+      { name: 'ORBIT', providerId: 'two', modelId: 'model-b' },
+    ];
+    writeFileSync(getConfigPath(), JSON.stringify({
+      favoriteModels: loadPreferences().favoriteModels,
+      modelAliases: unrelated,
+    }));
+
+    expect(await runModelsCommand({
+      alias: 'Fresh=clodex:openai-oauth:gpt-5.6-luna',
+    })).toBe(0);
+    expect(JSON.parse(readFileSync(getConfigPath(), 'utf8')).modelAliases).toEqual([
+      ...unrelated,
+      { name: 'fresh', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' },
+    ]);
+  });
+
+  it('removes reserved and conflicting inactive aliases by canonical name', async () => {
+    writeFileSync(getConfigPath(), JSON.stringify({
+      favoriteModels: loadPreferences().favoriteModels,
+      modelAliases: [
+        { name: 'default', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+        { name: 'Orbit', providerId: 'one', modelId: 'model-a' },
+        { name: 'ORBIT', providerId: 'two', modelId: 'model-b' },
+        { name: 'safe', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' },
+      ],
+    }));
+
+    expect(await runModelsCommand({ unalias: 'DEFAULT' })).toBe(0);
+    expect(await runModelsCommand({ unalias: 'orbit' })).toBe(0);
+    expect(JSON.parse(readFileSync(getConfigPath(), 'utf8')).modelAliases).toEqual([
+      { name: 'safe', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' },
+    ]);
   });
 });

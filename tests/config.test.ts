@@ -74,14 +74,14 @@ describe('dotfolder config', () => {
 
     expect(loadPreferences()).toMatchObject({
       favoriteModels: [{ providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
-      modelAliases: [{ name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
+      modelAliases: [{ name: 'Sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
     });
     expect(JSON.parse(readFileSync(getConfigPath(), 'utf8')).modelAliases).toEqual([
-      { name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+      { name: 'Sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
     ]);
   });
 
-  it('normalizes legacy aliases and omits ambiguous or reserved entries', () => {
+  it('loads legacy aliases without mutating or filtering their stored form', () => {
     savePreferences({ lastProvider: 'openai-oauth' });
     const legacyPayload = JSON.stringify({
       lastProvider: 'openai-oauth',
@@ -97,9 +97,7 @@ describe('dotfolder config', () => {
 
     const prefs = loadPreferences();
     expect(prefs.lastProvider).toBe('openai-oauth');
-    expect(prefs.modelAliases).toEqual([
-      { name: 'luna', providerId: 'one', modelId: 'model-a' },
-    ]);
+    expect(prefs.modelAliases).toEqual(JSON.parse(legacyPayload).modelAliases);
     expect(readFileSync(getConfigPath(), 'utf8')).toBe(legacyPayload);
   });
 

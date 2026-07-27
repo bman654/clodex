@@ -14,6 +14,10 @@ import { listenTcpServer } from '../listener-ready.js';
 import { routeUnavailableMessage } from '../route-unavailable.js';
 import { HTTP_PROXY_MODEL_PREFIX, type ResolvedHttpProxyAlias } from './routes.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
+import {
+  canonicalModelAliasName,
+  isModelAliasNameSyntax,
+} from '../model-aliases.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
 import {
   getLatestMessagePreview,
@@ -705,19 +709,25 @@ function forwardPlainHttp(req: http.IncomingMessage, res: http.ServerResponse): 
 export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpProxyHandle> {
   const certificates = ensureHttpProxyCertificates();
   const routesById = new Map<string, ProxyRoute>();
+  const routesByModelAlias = new Map<string, ProxyRoute>();
   const reservedModelIds = new Set<string>();
+  const reservedModelAliases = new Set<string>();
   for (const route of options.routes) {
     routesById.set(normalizeRouteLookupId(route.aliasId), route);
   }
   for (const alias of options.modelAliases ?? []) {
-    const aliasId = normalizeRouteLookupId(alias.name);
-    reservedModelIds.add(aliasId);
+    const aliasId = canonicalModelAliasName(normalizeRouteLookupId(alias.name));
+    reservedModelAliases.add(aliasId);
     const route = routesById.get(normalizeRouteLookupId(alias.routeId));
     if (!route) continue;
-    routesById.set(aliasId, route);
+    routesByModelAlias.set(aliasId, route);
   }
   for (const modelId of options.reservedModelIds ?? []) {
-    reservedModelIds.add(normalizeRouteLookupId(modelId));
+    const normalized = normalizeRouteLookupId(modelId);
+    reservedModelIds.add(normalized);
+    if (isModelAliasNameSyntax(normalized)) {
+      reservedModelAliases.add(canonicalModelAliasName(normalized));
+    }
   }
   const anthropicOrigin = new URL(options.anthropicOrigin ?? 'https://api.anthropic.com');
   let adapter: ProxyHandle | null = options.adapterHandle ?? null;
@@ -764,7 +774,9 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         parsed = JSON.parse(decodedBody) as AnthropicRequest;
         if (encodedRequestBody) adapterBody = Buffer.from(decodedBody);
         if (typeof parsed.model === 'string') {
-          route = routesById.get(normalizeRouteLookupId(parsed.model));
+          const lookupId = normalizeRouteLookupId(parsed.model);
+          route = routesById.get(lookupId)
+            ?? routesByModelAlias.get(canonicalModelAliasName(lookupId));
         }
       } catch {
         if (encodedRequestBody) {
@@ -789,6 +801,9 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       const unresolvedRoutedModel = !route && requestedModel !== undefined && (
         normalizeRouteLookupId(requestedModel).startsWith(HTTP_PROXY_MODEL_PREFIX)
         || reservedModelIds.has(normalizeRouteLookupId(requestedModel))
+        || reservedModelAliases.has(
+          canonicalModelAliasName(normalizeRouteLookupId(requestedModel)),
+        )
       );
 
       if (unresolvedRoutedModel) {

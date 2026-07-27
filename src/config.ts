@@ -2,7 +2,6 @@ import type { UserPreferences } from './types.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, renameSync, unlinkSync } from 'node:fs';
 import { getConfigPath } from './paths.js';
-import { normalizeModelAliases } from './model-aliases.js';
 import { syncParentDirectory, writeSecureFile } from './registry/io.js';
 import {
   assertRegistryWriteOwnership,
@@ -78,9 +77,7 @@ export function loadPreferences(): UserPreferences {
     lastProvider: config.lastProvider,
     recentModelsByProvider: config.recentModelsByProvider,
     favoriteModels: config.favoriteModels,
-    modelAliases: config.modelAliases === undefined
-      ? undefined
-      : normalizeModelAliases(config.modelAliases).aliases,
+    modelAliases: config.modelAliases,
     claudeBridgeMode: config.claudeBridgeMode,
     serverBridgeMode: config.serverBridgeMode,
     appPathOverrides: config.appPathOverrides,
@@ -95,9 +92,7 @@ export function savePreferences(prefs: Partial<Pick<UserPreferences, 'lastModel'
     if (prefs.lastProvider !== undefined) config.lastProvider = prefs.lastProvider;
     if (prefs.recentModelsByProvider !== undefined) config.recentModelsByProvider = prefs.recentModelsByProvider;
     if (prefs.favoriteModels !== undefined) config.favoriteModels = prefs.favoriteModels;
-    if (prefs.modelAliases !== undefined) {
-      config.modelAliases = normalizeModelAliases(prefs.modelAliases).aliases;
-    }
+    if (prefs.modelAliases !== undefined) config.modelAliases = prefs.modelAliases;
     if (prefs.claudeBridgeMode !== undefined) config.claudeBridgeMode = prefs.claudeBridgeMode;
     if (prefs.serverBridgeMode !== undefined) config.serverBridgeMode = prefs.serverBridgeMode;
     if (prefs.appPathOverrides !== undefined) config.appPathOverrides = prefs.appPathOverrides;

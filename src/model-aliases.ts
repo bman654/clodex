@@ -2,12 +2,14 @@ import type { ModelAlias } from './types.js';
 import { stripOneMContextSuffix } from './context-model-id.js';
 
 const MODEL_ALIAS_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+// Derived from Claude Code v2.1.220's built-in model resolver and sentinels.
 const RESERVED_MODEL_ALIASES = new Set([
   'sonnet',
   'opus',
   'haiku',
   'fable',
   'best',
+  'default',
   'opusplan',
   'inherit',
 ]);
@@ -27,9 +29,20 @@ export function isReservedModelAlias(name: string): boolean {
   );
 }
 
+export function isModelAliasNameSyntax(name: string): boolean {
+  return MODEL_ALIAS_PATTERN.test(canonicalModelAliasName(name));
+}
+
 export function isValidModelAlias(name: string): boolean {
   const canonical = canonicalModelAliasName(name);
-  return MODEL_ALIAS_PATTERN.test(canonical) && !isReservedModelAlias(canonical);
+  return isModelAliasNameSyntax(canonical) && !isReservedModelAlias(canonical);
+}
+
+export function modelAliasMatchesName(value: unknown, name: string): boolean {
+  if (!value || typeof value !== 'object' || !('name' in value)) return false;
+  const candidate = value.name;
+  return typeof candidate === 'string'
+    && canonicalModelAliasName(candidate) === canonicalModelAliasName(name);
 }
 
 /**
@@ -46,6 +59,7 @@ export function normalizeModelAliases(value: unknown): NormalizedModelAliases {
     source: ModelAlias;
     normalized?: ModelAlias;
     accepted?: boolean;
+    rejected?: boolean;
   }
 
   const candidates: Candidate[] = [];
@@ -76,6 +90,7 @@ export function normalizeModelAliases(value: unknown): NormalizedModelAliases {
       || !normalized.providerId
       || !normalized.modelId
     ) {
+      candidate.rejected = true;
       continue;
     }
 
@@ -91,7 +106,11 @@ export function normalizeModelAliases(value: unknown): NormalizedModelAliases {
         `${candidate.normalized!.providerId}\0${candidate.normalized!.modelId}`
       )),
     );
-    if (targets.size === 1) group[0]!.accepted = true;
+    if (targets.size === 1) {
+      group[0]!.accepted = true;
+    } else {
+      for (const candidate of group) candidate.rejected = true;
+    }
   }
 
   return {
@@ -99,7 +118,7 @@ export function normalizeModelAliases(value: unknown): NormalizedModelAliases {
       .filter(candidate => candidate.accepted)
       .map(candidate => candidate.normalized!),
     rejected: candidates
-      .filter(candidate => !candidate.accepted)
+      .filter(candidate => candidate.rejected)
       .map(candidate => candidate.source),
   };
 }

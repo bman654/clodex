@@ -785,7 +785,7 @@ describe('selective HTTP proxy', () => {
         statusCode: 200,
       }));
 
-      const aliasBody = JSON.stringify({ model: 'llama', messages: [], stream: true });
+      const aliasBody = JSON.stringify({ model: 'LLaMa', messages: [], stream: true });
       const aliasSocket = await connectMitm(proxy.port, certificates.caCert);
       aliasSocket.resume();
       aliasSocket.write([
@@ -804,11 +804,11 @@ describe('selective HTTP proxy', () => {
       // The alias name reaches the adapter unrewritten: the adapter resolves it
       // via its own modelAliases and echoes it back as the response model id.
       expect(JSON.parse(adapterBody)).toMatchObject({
-        model: 'llama',
+        model: 'LLaMa',
         messages: [],
       });
       const aliasEntries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-      expect(aliasEntries.find(entry => !entry.event && entry.modelId === 'llama')).toMatchObject({
+      expect(aliasEntries.find(entry => !entry.event && entry.modelId === 'LLaMa')).toMatchObject({
         provider: 'groq',
         route: 'translated',
       });

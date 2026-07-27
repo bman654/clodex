@@ -25,8 +25,8 @@ import type { ParsedArgs, FavoriteModel, LocalProvider, LocalProviderModel } fro
 import { addFavorite, removeFavorite, isFavorite } from './favorites.js';
 import {
   canonicalModelAliasName,
-  isReservedModelAlias,
-  isValidModelAlias,
+  isModelAliasNameSyntax,
+  modelAliasMatchesName,
   modelAliasTarget,
   parseModelAliasAssignment,
 } from './model-aliases.js';
@@ -527,6 +527,7 @@ ${pc.bold('Behavior:')}
   proxy mode, without opening the interactive manager.
   --alias <name=target> saves a short name for a proxy-mode favorite. The
   target is clodex:<provider-id>:<model-id> (the clodex: prefix is optional).
+  Alias names are stored lowercase and cannot use client-reserved model names.
   --unalias <name> removes a saved short name.
 
 ${pc.bold('How it works:')}
@@ -647,7 +648,8 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
       p.log.info('Add it with `clodex models`, then save the alias.');
       return 1;
     }
-    const modelAliases = (prefs.modelAliases ?? []).filter(alias => alias.name !== parsed.name);
+    const aliases = Array.isArray(prefs.modelAliases) ? prefs.modelAliases : [];
+    const modelAliases = aliases.filter(alias => !modelAliasMatchesName(alias, parsed.name));
     modelAliases.push(parsed);
     savePreferences({ modelAliases });
     p.log.success(`Saved model alias ${parsed.name} → ${modelAliasTarget(parsed)}.`);
@@ -655,17 +657,13 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
   }
   if (opts.unalias !== undefined) {
     const name = canonicalModelAliasName(opts.unalias);
-    if (isReservedModelAlias(name)) {
-      p.log.error('That alias name is reserved by the client.');
-      return 1;
-    }
-    if (!isValidModelAlias(name)) {
+    if (!isModelAliasNameSyntax(name)) {
       p.log.error('Alias names must be 1-64 letters, numbers, dots, underscores, or hyphens.');
       return 1;
     }
     const prefs = loadPreferences();
-    const aliases = prefs.modelAliases ?? [];
-    const modelAliases = aliases.filter(alias => alias.name !== name);
+    const aliases = Array.isArray(prefs.modelAliases) ? prefs.modelAliases : [];
+    const modelAliases = aliases.filter(alias => !modelAliasMatchesName(alias, name));
     if (modelAliases.length === aliases.length) {
       p.log.error(`No model alias named ${name} is saved.`);
       return 1;

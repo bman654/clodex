@@ -359,32 +359,32 @@ describe('catalog model aliases', () => {
       providerId: 'test-provider',
     };
     const providers: LocalProvider[] = [{
-      id: 'test-provider',
+      id: 'Test-Provider',
       name: 'Test Provider',
       apiKey: 'provider-key',
       models: [{
-        id: 'solver-v1',
+        id: 'Solver-V1',
         name: 'Solver V1',
         family: 'test',
         brand: 'Other',
         modelFormat: 'anthropic',
-        upstreamModelId: 'solver-v1',
+        upstreamModelId: 'Solver-V1',
         baseUrl: 'https://upstream-solver.example',
         contextWindow: 1_000_000,
       }],
     }];
     const savedAliases: ModelAlias[] = [{
       name: 'sol',
-      providerId: 'test-provider',
-      modelId: 'solver-v1',
+      providerId: 'Test-Provider',
+      modelId: 'Solver-V1',
     }];
     const resolveRoute = makeRouteResolver(providers);
-    const aliasTarget = resolveRoute('test-provider', 'solver-v1');
+    const aliasTarget = resolveRoute('Test-Provider', 'Solver-V1');
     const modelAliases = resolveCatalogModelAliases(savedAliases, resolveRoute);
-    expect(aliasTarget?.aliasId).toBe('anthropic-test-provider__solver-v1[1m]');
+    expect(aliasTarget?.aliasId).toBe('anthropic-test-provider__Solver-V1[1m]');
     expect(modelAliases).toEqual([{
       name: 'sol',
-      routeId: 'anthropic-test-provider__solver-v1[1m]',
+      routeId: 'anthropic-test-provider__Solver-V1[1m]',
     }]);
     const fetchMock = vi.fn(async () => new Response(
       JSON.stringify({ id: 'msg_1', type: 'message', role: 'assistant', model: 'solver-v1', content: [], usage: { input_tokens: 1, output_tokens: 1 } }),
@@ -404,7 +404,7 @@ describe('catalog model aliases', () => {
 
     try {
       const res = await postToProxy(handle.port, handle.token, {
-        model: 'sol',
+        model: 'SoL',
         max_tokens: 100,
         messages: [{ role: 'user', content: 'hi' }],
         stream: false,
@@ -415,12 +415,12 @@ describe('catalog model aliases', () => {
       expect(fetchMock).toHaveBeenCalledOnce();
       const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
       expect(String(url)).toContain('upstream-solver.example');
-      expect(JSON.parse(init.body as string).model).toBe('solver-v1');
+      expect(JSON.parse(init.body as string).model).toBe('Solver-V1');
 
       // GET /v1/models/<alias> resolves too
       const modelLookup = await new Promise<number>((resolve, reject) => {
         http.get(
-          { hostname: '127.0.0.1', port: handle.port, path: '/v1/models/sol' },
+          { hostname: '127.0.0.1', port: handle.port, path: '/v1/models/SoL' },
           res2 => { res2.resume(); resolve(res2.statusCode ?? 0); },
         ).on('error', reject);
       });
