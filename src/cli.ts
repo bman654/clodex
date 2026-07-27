@@ -23,7 +23,13 @@ import { fetchProviderCatalog, providersForPicker, resolveLocalProviderApiKey } 
 import { VERSION } from './constants.js';
 import type { ParsedArgs, FavoriteModel, LocalProvider, LocalProviderModel } from './types.js';
 import { addFavorite, removeFavorite, isFavorite } from './favorites.js';
-import { isValidModelAlias, modelAliasTarget, parseModelAliasAssignment } from './model-aliases.js';
+import {
+  canonicalModelAliasName,
+  isReservedModelAlias,
+  isValidModelAlias,
+  modelAliasTarget,
+  parseModelAliasAssignment,
+} from './model-aliases.js';
 import {
   browseByProviderChoice,
   buildGlobalFavoriteIndex,
@@ -648,7 +654,11 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
     return 0;
   }
   if (opts.unalias !== undefined) {
-    const name = opts.unalias.trim();
+    const name = canonicalModelAliasName(opts.unalias);
+    if (isReservedModelAlias(name)) {
+      p.log.error('That alias name is reserved by the client.');
+      return 1;
+    }
     if (!isValidModelAlias(name)) {
       p.log.error('Alias names must be 1-64 letters, numbers, dots, underscores, or hyphens.');
       return 1;

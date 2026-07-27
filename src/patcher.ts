@@ -37,6 +37,7 @@ import { loadRegistry } from './registry/io.js';
 import { findClaudeBinary, getInstalledClaudeVersion } from './launch.js';
 import { httpProxyDisplayName, httpProxyModelId } from './http-proxy/routes.js';
 import { stripOneMContextSuffix } from './context-model-id.js';
+import { normalizeModelAliases } from './model-aliases.js';
 import {
   applyClodexPatches,
   formatPatchSiteLine,
@@ -116,7 +117,12 @@ export function buildPatchModelConfig(
 ): DesiredPatchConfig {
   const config: PatchScriptModelConfig = {};
   const unknownWindows: string[] = [];
-  const aliasByFavorite = new Map(aliases.map(a => [`${a.providerId}:${a.modelId}`, a.name]));
+  const aliasByFavorite = new Map(
+    normalizeModelAliases(aliases).aliases.map(alias => [
+      `${alias.providerId}:${alias.modelId}`,
+      alias.name,
+    ]),
+  );
 
   for (const favorite of favorites) {
     const id = stripOneMContextSuffix(httpProxyModelId(favorite.providerId, favorite.modelId));

@@ -116,13 +116,16 @@ describe('server model catalog', () => {
 
   it('resolves canonical clodex ids and saved short aliases without advertising them', () => {
     const catalog = createGatewayModelCatalog(models, undefined, [
-      { name: 'deep', providerId: 'go', modelId: 'deepseek-test' },
+      { name: 'Deep', providerId: 'go', modelId: 'deepseek-test' },
       { name: 'ghost', providerId: 'go', modelId: 'not-in-catalog' },
+      { name: 'best', providerId: 'go', modelId: 'deepseek-test' },
     ]);
 
     expect(catalog.get('clodex:go:deepseek-test')).toMatchObject({ id: 'deepseek-test' });
     expect(catalog.get('clodex:openai:gpt-5')).toMatchObject({ id: 'gpt-5' });
     expect(catalog.get('deep')).toMatchObject({ id: 'deepseek-test' });
+    expect(catalog.get('Deep')).toBeUndefined();
+    expect(catalog.get('best')).toBeUndefined();
     // An alias whose target is not in the (possibly filtered) catalog stays unknown.
     expect(catalog.get('ghost')).toBeUndefined();
     // Accepted input forms never leak into the advertised catalog.

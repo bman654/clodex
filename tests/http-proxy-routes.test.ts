@@ -86,7 +86,7 @@ describe('HTTP proxy routes', () => {
       providers,
       [{ providerId: 'groq', modelId: 'llama-3.3-70b' }],
       [
-        { name: 'llama', providerId: 'groq', modelId: 'llama-3.3-70b' },
+        { name: 'LLaMa', providerId: 'groq', modelId: 'llama-3.3-70b' },
         { name: 'missing', providerId: 'groq', modelId: 'gone' },
         { name: 'bad:name', providerId: 'groq', modelId: 'llama-3.3-70b' },
       ],
@@ -98,8 +98,25 @@ describe('HTTP proxy routes', () => {
       displayName: 'Llama 3.3 70B (Groq Cloud)',
     }]);
     expect(result.unavailableAliases).toEqual([
-      { name: 'missing', providerId: 'groq', modelId: 'gone' },
       { name: 'bad:name', providerId: 'groq', modelId: 'llama-3.3-70b' },
+      { name: 'missing', providerId: 'groq', modelId: 'gone' },
+    ]);
+  });
+
+  it('fails closed when case variants point at different targets', () => {
+    const result = buildHttpProxyRoutes(
+      providers,
+      [{ providerId: 'groq', modelId: 'llama-3.3-70b' }],
+      [
+        { name: 'LLaMa', providerId: 'groq', modelId: 'llama-3.3-70b' },
+        { name: 'llama', providerId: 'groq', modelId: 'other' },
+      ],
+    );
+
+    expect(result.aliases).toEqual([]);
+    expect(result.unavailableAliases).toEqual([
+      { name: 'LLaMa', providerId: 'groq', modelId: 'llama-3.3-70b' },
+      { name: 'llama', providerId: 'groq', modelId: 'other' },
     ]);
   });
 });

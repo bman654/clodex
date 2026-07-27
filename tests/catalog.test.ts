@@ -58,11 +58,18 @@ describe('resolveCatalogModelAliases', () => {
         contextWindow: 1_000_000,
       }],
     }];
-    const aliases: ModelAlias[] = [{
-      name: 'fast',
-      providerId: 'test-provider',
-      modelId: 'model-v1',
-    }];
+    const aliases: ModelAlias[] = [
+      {
+        name: 'Fast',
+        providerId: 'test-provider',
+        modelId: 'model-v1',
+      },
+      {
+        name: 'best',
+        providerId: 'test-provider',
+        modelId: 'model-v1',
+      },
+    ];
 
     const resolved = resolveCatalogModelAliases(aliases, makeRouteResolver(providers));
 

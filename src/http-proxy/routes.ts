@@ -3,7 +3,7 @@ import { localModelToRoute } from '../catalog.js';
 import { isSdkMigratedNpm } from '../provider-factory.js';
 import { claudeCodeClientModelId } from '../context-model-id.js';
 import type { ProxyRoute } from '../proxy.js';
-import { isValidModelAlias } from '../model-aliases.js';
+import { normalizeModelAliases } from '../model-aliases.js';
 import { formatModelLabel } from '../ui.js';
 import type { FavoriteModel, LocalProvider, LocalProviderModel, ModelAlias } from '../types.js';
 
@@ -86,15 +86,14 @@ export function buildHttpProxyRoutes(
   }
 
   const aliases: ResolvedHttpProxyAlias[] = [];
-  const unavailableAliases: ModelAlias[] = [];
-  const seenAliases = new Set<string>();
-  for (const alias of modelAliases) {
+  const normalizedAliases = normalizeModelAliases(modelAliases);
+  const unavailableAliases: ModelAlias[] = [...normalizedAliases.rejected];
+  for (const alias of normalizedAliases.aliases) {
     const route = routesByFavorite.get(`${alias.providerId}:${alias.modelId}`);
-    if (!isValidModelAlias(alias.name) || seenAliases.has(alias.name) || !route) {
+    if (!route) {
       unavailableAliases.push(alias);
       continue;
     }
-    seenAliases.add(alias.name);
     aliases.push({ name: alias.name, routeId: route.aliasId, displayName: route.displayName });
   }
 

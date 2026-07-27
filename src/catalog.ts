@@ -2,7 +2,7 @@
 import { MAX_MODEL_CATALOG } from './constants.js';
 import { claudeCodeClientModelId } from './context-model-id.js';
 import { resolveProviderCredential } from './env.js';
-import { modelAliasTarget } from './model-aliases.js';
+import { modelAliasTarget, normalizeModelAliases } from './model-aliases.js';
 import { isSdkMigratedNpm } from './provider-factory.js';
 import { aliasModelId } from './proxy.js';
 import type { ProxyModelAlias, ProxyRoute } from './proxy.js';
@@ -64,7 +64,7 @@ export function resolveCatalogModelAliases(
   modelAliases: ModelAlias[],
   resolveRoute: (providerId: string, modelId: string) => ProxyRoute | undefined,
 ): ProxyModelAlias[] {
-  return modelAliases.map(alias => ({
+  return normalizeModelAliases(modelAliases).aliases.map(alias => ({
     name: alias.name,
     routeId: resolveRoute(alias.providerId, alias.modelId)?.aliasId
       ?? modelAliasTarget(alias),

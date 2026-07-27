@@ -65,6 +65,22 @@ describe('buildPatchModelConfig', () => {
     );
     expect(config['clodex:openai:davinci-002']).toEqual({ context: 272_000 });
   });
+
+  it('canonicalizes aliases and omits ambiguous case-fold collisions', () => {
+    const { config } = buildPatchModelConfig(
+      favorites,
+      [
+        { name: 'Sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+        { name: 'LUNA', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' },
+        { name: 'luna', providerId: 'openai', modelId: 'mystery-model' },
+      ],
+      (providerId, modelId) => meta.get(`${providerId}:${modelId}`),
+    );
+
+    expect(config['clodex:openai-oauth:gpt-5.6-sol']?.alias).toBe('sol');
+    expect(config['clodex:openai-oauth:gpt-5.6-luna']?.alias).toBeUndefined();
+    expect(config['clodex:openai:mystery-model']?.alias).toBeUndefined();
+  });
 });
 
 describe('computePatchConfigHash', () => {
@@ -201,6 +217,17 @@ describe('applyClodexPatches input validation', () => {
     expect(() => applyClodexPatches('var x = 1;', {
       'clodex:openai:model': { alias: 'Bad Alias!' },
     })).toThrow(/not a safe lowercase alias/);
+  });
+
+  it('rejects reserved and duplicate aliases', () => {
+    expect(() => applyClodexPatches('var x = 1;', {
+      'clodex:openai:model': { alias: 'sonnet' },
+    })).toThrow(/reserved alias/);
+
+    expect(() => applyClodexPatches('var x = 1;', {
+      'clodex:openai:model-a': { alias: 'custom' },
+      'clodex:openai:model-b': { alias: 'CUSTOM' },
+    })).toThrow(/assigned to multiple models/);
   });
 
   it('rejects an explicit context on a [1m]-suffixed id (the suffix already forces 1M)', () => {

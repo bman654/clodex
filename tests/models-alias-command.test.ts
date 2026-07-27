@@ -11,7 +11,10 @@ beforeEach(() => {
   tempHome = mkdtempSync(join(tmpdir(), 'clodex-alias-command-'));
   process.env['CLODEX_HOME'] = tempHome;
   savePreferences({
-    favoriteModels: [{ providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' }],
+    favoriteModels: [
+      { providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' },
+      { providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+    ],
   });
 });
 
@@ -24,20 +27,34 @@ describe('models alias command', () => {
   it('saves, replaces, and removes an alias for a favorite', async () => {
     // The value can be copied directly from `clodex models --list`, including
     // Claude's synthetic context-window suffix.
-    expect(await runModelsCommand({ alias: 'luna=clodex:openai-oauth:gpt-5.6-luna[1m]' })).toBe(0);
+    expect(await runModelsCommand({ alias: 'LuNa=clodex:openai-oauth:gpt-5.6-luna[1m]' })).toBe(0);
     expect(loadPreferences().modelAliases).toEqual([
       { name: 'luna', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' },
     ]);
 
-    expect(await runModelsCommand({ alias: 'luna=openai-oauth:gpt-5.6-luna' })).toBe(0);
-    expect(loadPreferences().modelAliases).toHaveLength(1);
+    expect(await runModelsCommand({ alias: 'LUNA=openai-oauth:gpt-5.6-sol' })).toBe(0);
+    expect(loadPreferences().modelAliases).toEqual([
+      { name: 'luna', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+    ]);
 
-    expect(await runModelsCommand({ unalias: 'luna' })).toBe(0);
+    expect(await runModelsCommand({ unalias: 'Luna' })).toBe(0);
     expect(loadPreferences().modelAliases).toEqual([]);
   });
 
   it('rejects aliases whose targets are not saved favorites', async () => {
     expect(await runModelsCommand({ alias: 'other=clodex:openai-oauth:gpt-other' })).toBe(1);
     expect(loadPreferences().modelAliases).toBeUndefined();
+  });
+
+  it('rejects reserved names without changing saved aliases', async () => {
+    expect(await runModelsCommand({
+      alias: 'safe=clodex:openai-oauth:gpt-5.6-luna',
+    })).toBe(0);
+    const before = loadPreferences().modelAliases;
+
+    expect(await runModelsCommand({
+      alias: 'BeSt=clodex:openai-oauth:gpt-5.6-sol',
+    })).toBe(1);
+    expect(loadPreferences().modelAliases).toEqual(before);
   });
 });
