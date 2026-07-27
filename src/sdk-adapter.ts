@@ -474,14 +474,9 @@ export function isClaudeCodeCompactRequest(body: AnthropicRequest): boolean {
 }
 
 /**
- * Claude Code's structured-output agents inherit the terminal StructuredOutput
- * tool when they fork a reactive compaction turn, even though the compact prompt
- * requires plain text and rejects every tool call. OpenAI-family models tend to
- * call that highly salient tool, leaving Claude Code with an empty summary.
- *
- * Keep this narrower than the generic compaction detector. If Claude Code
- * changes the observed envelope, fail open rather than stripping tools from an
- * ordinary request.
+ * Classify the structured-output subset for callers that need to distinguish
+ * it. Translation now treats every recognized compact envelope as a plain-text
+ * turn; the marker pair keeps ordinary structured-output requests unchanged.
  */
 export function isClaudeCodeStructuredOutputCompactRequest(body: AnthropicRequest): boolean {
   return body.tools?.some(candidate => candidate.name === 'StructuredOutput') === true
@@ -507,7 +502,7 @@ export function translateRequest(
   // minimal request shapes, so cast at this boundary. Keep compact-request tool
   // definitions intact for prompt-cache prefix reuse; toolChoice='none' below
   // makes them unavailable at the provider API rather than by prompt compliance.
-  const compactRequest = isClaudeCodeStructuredOutputCompactRequest(body);
+  const compactRequest = isClaudeCodeCompactRequest(body);
   let upstreamTools = resolveUpstreamTools(
     body.tools as unknown as AnthropicToolDefinition[] | undefined,
     messages as unknown as AnthropicRequestMessage[],
@@ -515,7 +510,8 @@ export function translateRequest(
   if (options?.maxTools !== undefined && upstreamTools.length > options.maxTools) {
     upstreamTools = upstreamTools.slice(0, options.maxTools);
   }
-  const effort = anthropicEffortFromRequest(body) ?? options?.defaultEffort;
+  const configuredEffort = anthropicEffortFromRequest(body) ?? options?.defaultEffort;
+  const effort = npm === '@ai-sdk/openai' && compactRequest ? 'low' : configuredEffort;
   let providerOptions = deepMergeProviderOptions(
     thinkingProviderOptions(npm),
     effortProviderOptions(npm, effort, options?.reasoningMetadata?.upstreamModelId ?? body.model, options?.reasoningMetadata),

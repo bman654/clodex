@@ -8,7 +8,18 @@ import { aliasModelId, startProxy, startProxyCatalog, type ProxyRoute } from '..
 import { makeRouteResolver, resolveCatalogModelAliases } from '../src/catalog.js';
 import { getProxyDebugLogPath } from '../src/trace-log.js';
 import { anthropicMessagesEndpoint, estimateAnthropicInputTokens } from '../src/anthropic-endpoints.js';
+import { withResponsesWebSocketDiagnosticContext } from '../src/oauth/responses-websocket.js';
 import type { LocalProvider, ModelAlias } from '../src/types.js';
+
+vi.mock('../src/oauth/responses-websocket.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/oauth/responses-websocket.js')>();
+  return {
+    ...actual,
+    withResponsesWebSocketDiagnosticContext: vi.fn(
+      actual.withResponsesWebSocketDiagnosticContext,
+    ),
+  };
+});
 
 /** POST JSON to a local proxy via node:http (avoids vi.stubGlobal('fetch') interception). */
 function postToProxy(
@@ -1285,6 +1296,58 @@ describe('OAuth route credential resolution', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+  });
+
+  it('passes Claude compact requests through to the Responses transport context', async () => {
+    const route: ProxyRoute = {
+      aliasId: 'anthropic-oauth-provider__gpt-3-5-turbo-compact',
+      realModelId: 'gpt-3.5-turbo-compact',
+      displayName: 'OAuth Compact Route',
+      upstreamUrl: '',
+      apiKey: 'oauth-token',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      providerId: 'oauth-provider',
+      authType: 'oauth',
+      refreshToken: vi.fn(async () => 'oauth-token'),
+    };
+    vi.mocked(withResponsesWebSocketDiagnosticContext).mockReturnValueOnce({
+      id: 'msg-compact',
+      type: 'message',
+      role: 'assistant',
+      model: route.realModelId,
+      content: [{ type: 'text', text: 'summary' }],
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 1, output_tokens: 1 },
+    } as never);
+
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{
+          role: 'user',
+          content: [
+            'CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.',
+            'Summarize the conversation.',
+            'REMINDER: Do NOT call any tools. Respond with plain text only',
+          ].join('\n'),
+        }],
+        stream: false,
+      });
+
+      expect(response.status).toBe(200);
+      expect(withResponsesWebSocketDiagnosticContext).toHaveBeenCalledWith(
+        expect.objectContaining({
+          estimatedInputTokens: expect.any(Number),
+          forceCompaction: true,
+        }),
+        expect.any(Function),
+      );
+    } finally {
+      handle.close();
+    }
   });
 
   it('resolves the current token before dispatch and updates the route cache', async () => {
