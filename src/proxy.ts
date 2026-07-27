@@ -59,6 +59,7 @@ import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-webso
 import { resolveOpenAiCompactionThreshold } from './oauth/responses-compaction.js';
 import { resolveContextWindow } from './context-window.js';
 import { listenTcpServer } from './listener-ready.js';
+import { getOrCreateProxyToken } from './proxy-token.js';
 
 type ProxyLog = (message: string | (() => string)) => void;
 
@@ -287,7 +288,7 @@ export async function startProxyCatalog(
   webSocketDiagnosticsLogPath?: string,
   modelAliases?: ProxyModelAlias[],
 ): Promise<ProxyHandle> {
-  const proxyToken = randomUUID();
+  const proxyToken = getOrCreateProxyToken();
   silenceSdkWarnings();
 
   if (routes.length === 0) {
