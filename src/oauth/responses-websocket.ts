@@ -65,6 +65,7 @@ export interface ResponsesWebSocketDiagnosticEvent extends Record<string, unknow
 export interface ResponsesWebSocketDiagnosticContext {
   requestId?: string;
   claudeSessionId?: string;
+  claudeAgentId?: string;
   estimatedInputTokens?: number;
   forceCompaction?: boolean;
 }
@@ -102,6 +103,7 @@ interface RequestContext {
   supersededEntry?: ConnectionEntry;
   /** This request is Claude Code's own portable-summary compaction turn. */
   claudeCompactionRequest?: boolean;
+  claudeAgentId?: string;
   promptFieldHashes: Record<string, string>;
   instructionsSnapshot?: string;
   continued: boolean;
@@ -147,6 +149,8 @@ interface ConnectionEntry {
   compactedInput?: unknown[];
   lastInputTokens?: number;
   claudeCompactionSummaryHash?: string;
+  claudeAgentId?: string;
+  recyclableAgentHead?: boolean;
   options: Required<Pick<ResponsesWebSocketFetchOptions, 'hardTtlMs' | 'idleTtlMs' | 'nurseryIdleTtlMs' | 'maxConnections' | 'now'>>;
   debug: (message: string) => void;
 }
@@ -169,10 +173,10 @@ interface CompactionCheckpoint {
 // all share its model/effort/cache key. Retain each head and select by exact
 // conversation prefix instead of letting the newest branch replace the rest.
 // New heads live in a separately capped nursery LRU until their first lineage
-// continuation. Idle nursery sockets are also the safe reuse pool for unrelated
-// full-history requests: this preserves physical-socket prompt-cache affinity
-// without overwriting established lineages. One-shot nursery traffic never
-// consumes the established LRU's 32 reserved slots.
+// continuation. Idle nursery sockets and terminal subagent heads are safe reuse
+// pools for unrelated full-history requests: this preserves physical-socket
+// prompt-cache affinity without overwriting active or same-agent lineages.
+// One-shot nursery traffic never consumes the established LRU's 32 reserved slots.
 const connections = new Map<string, Set<ConnectionEntry>>();
 const compactionCheckpoints = new Map<string, CompactionCheckpoint[]>();
 const MAX_COMPACTION_CHECKPOINTS_PER_PARTITION = 8;
@@ -1468,6 +1472,23 @@ function reusableNurseryHead(
     : undefined;
 }
 
+function reusableCacheAffinityHead(
+  key: string | undefined,
+  claudeAgentId: string | undefined,
+  promptFieldHashes: Record<string, string>,
+): ConnectionEntry | undefined {
+  return reusableNurseryHead(key)
+    ?? connectionEntries(key)
+      .filter(entry => (
+        !entry.inFlight
+        && entry.recyclableAgentHead === true
+        && claudeAgentId !== undefined
+        && entry.claudeAgentId !== claudeAgentId
+        && changedPromptFields(entry.promptFieldHashes, promptFieldHashes).length === 0
+      ))
+      .sort((left, right) => left.lastUsedAt - right.lastUsedAt)[0];
+}
+
 function isModelDataEvent(type: string | undefined): boolean {
   return Boolean(type && (
     type.includes('.delta')
@@ -1643,6 +1664,15 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
       entry.claudeCompactionSummaryHash = ctx.claudeCompactionRequest && entry.compactedInput
         ? compactionSummaryHash(assistantCompactionSummaryText(assistantItems))
         : undefined;
+      entry.claudeAgentId = ctx.claudeAgentId;
+      entry.recyclableAgentHead = Boolean(
+        ctx.claudeAgentId
+        && assistantItems.some(item => conversationItemKind(item) === 'assistant')
+        && !assistantItems.some(item => {
+          const kind = conversationItemKind(item);
+          return kind === 'function_call' || kind === 'custom_tool_call';
+        }),
+      );
       entry.lastInputTokens = ctx.responseUsage?.inputTokens;
       entry.promptFieldHashes = ctx.promptFieldHashes;
       entry.instructionsSnapshot = ctx.instructionsSnapshot;
@@ -2231,7 +2261,11 @@ export function createResponsesWebSocketFetch(
       // overlaps with an already-started sibling; otherwise give the branch a
       // retained new head. Fall back to isolation only when every nursery slot
       // is occupied by an active request.
-      const reusable = reusableNurseryHead(partitionKey);
+      const reusable = reusableCacheAffinityHead(
+        partitionKey,
+        diagnosticCorrelation?.claudeAgentId,
+        promptFieldHashes,
+      );
       if (reusable) {
         selected = reusable;
         decision = 'history_mismatch_reused_head';
@@ -2254,10 +2288,15 @@ export function createResponsesWebSocketFetch(
       }
     } else if (diagnosticEntry) {
       // Reuse an idle nursery socket once a partition already has two warm
-      // unproven heads. Full-history requests do not use previous_response_id,
-      // but controlled probes show that keeping the physical socket restores
-      // OpenAI prompt-cache affinity. Established heads are never recycled.
-      const reusable = reusableNurseryHead(partitionKey);
+      // unproven heads, or a terminal head from a different Claude subagent
+      // with an identical prompt shape. Full-history requests do not use
+      // previous_response_id, but controlled probes show that keeping the
+      // physical socket restores OpenAI prompt-cache affinity.
+      const reusable = reusableCacheAffinityHead(
+        partitionKey,
+        diagnosticCorrelation?.claudeAgentId,
+        promptFieldHashes,
+      );
       if (reusable) {
         selected = reusable;
         decision = 'history_mismatch_reused_head';
@@ -2343,6 +2382,10 @@ export function createResponsesWebSocketFetch(
         idleMs: Math.max(0, now - entry.lastUsedAt),
         promptChanges: changedPromptFields(entry.promptFieldHashes, promptFieldHashes),
         mismatch: continuationMismatchDetails(entry, payload),
+        claudeAgentIdHash: entry.claudeAgentId
+          ? createHash('sha256').update(entry.claudeAgentId).digest('hex').slice(0, 12)
+          : undefined,
+        recyclableAgentHead: entry.recyclableAgentHead,
       })),
       evictions,
     }, diagnosticCorrelation);
@@ -2359,6 +2402,7 @@ export function createResponsesWebSocketFetch(
           compactedInputBase,
           supersededEntry,
           claudeCompactionRequest: forceCompaction,
+          claudeAgentId: diagnosticCorrelation?.claudeAgentId,
           promptFieldHashes,
           instructionsSnapshot,
           continued,
