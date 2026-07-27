@@ -787,8 +787,8 @@ export function getReasoningCapabilities(
  *
  * Provider capabilities describe accepted Clodex inputs, including values that
  * a provider adapter may approximate on the wire. Native client metadata must
- * be stricter: exposing a level whose wire mapping changes its value would make
- * the selected effort diverge from the upstream request.
+ * be stricter: every advertised level must emit a distinct provider option so
+ * the selected effort cannot silently collapse onto another choice.
  */
 export function getPatchReasoningCapabilities(
   npm: string,
@@ -796,13 +796,18 @@ export function getPatchReasoningCapabilities(
   metadata?: ReasoningMetadata,
 ): ReasoningCapabilities {
   const capabilities = getReasoningCapabilities(npm, modelId, metadata);
-  if (npm !== '@ai-sdk/openai' && npm !== '@ai-sdk/azure') return capabilities;
+  const seenProviderOptions = new Set<string>();
 
   return {
     ...capabilities,
-    levels: capabilities.levels.filter(
-      level => mapCodexEffortToOpenAI(level, modelId) === level,
-    ),
+    levels: capabilities.levels.filter(level => {
+      const providerOptions = effortProviderOptions(npm, level, modelId, metadata);
+      if (!providerOptions) return false;
+      const fingerprint = JSON.stringify(providerOptions);
+      if (seenProviderOptions.has(fingerprint)) return false;
+      seenProviderOptions.add(fingerprint);
+      return true;
+    }),
   };
 }
 

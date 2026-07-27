@@ -569,4 +569,23 @@ describe('patch script identity naming', () => {
       'clodex:openai-oauth:gpt-5.6-sol': 'high',
     });
   });
+
+  it('clears every baked effort table when the last capability is removed', () => {
+    const once = runPatchScript(config);
+    const { effort: _effort, ...withoutEffort } = config['clodex:openai-oauth:gpt-5.6-sol'];
+    const updated = runPatchScript({
+      ...config,
+      'clodex:openai-oauth:gpt-5.6-sol': withoutEffort,
+    }, once);
+
+    const base = updated.match(/\/\*ccpatch:effort\*\/if\(\((\{[^{}]*\})\)\[/)?.[1];
+    const xhigh = updated.match(/\/\*ccpatch:xhigh-effort\*\/if\(\((\{[^{}]*\})\)\[/)?.[1];
+    const max = updated.match(/\/\*ccpatch:max-effort\*\/if\(\((\{[^{}]*\})\)\[/)?.[1];
+    const defaults = updated.match(/\/\*ccpatch:default-effort\*\/var _cce=\((\{[^{}]*\})\)/)?.[1];
+
+    expect(JSON.parse(base!)).toEqual({});
+    expect(JSON.parse(xhigh!)).toEqual({});
+    expect(JSON.parse(max!)).toEqual({});
+    expect(JSON.parse(defaults!)).toEqual({});
+  });
 });

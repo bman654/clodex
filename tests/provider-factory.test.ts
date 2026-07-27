@@ -185,6 +185,25 @@ describe('getReasoningCapabilities', () => {
     expect(caps.defaultLevel).toBe('medium');
   });
 
+  it.each(['gpt-5', 'o1'])(
+    'does not advertise effort when %s emits no provider option',
+    modelId => {
+      const caps = getPatchReasoningCapabilities('@ai-sdk/openai', modelId, {
+        reasoning: true,
+      });
+      expect(caps.levels).toEqual([]);
+    },
+  );
+
+  it('does not advertise a Kimi level that duplicates another wire option', () => {
+    const caps = getPatchReasoningCapabilities(
+      '@ai-sdk/openai-compatible',
+      'kimi-k2-thinking',
+    );
+    expect(caps.levels).toEqual(['low', 'medium', 'high']);
+    expect(caps.defaultLevel).toBe('high');
+  });
+
   it('returns empty levels for grok-build-0.1 (internal reasoning only)', () => {
     const caps = getReasoningCapabilities('@ai-sdk/xai', 'grok-build-0.1');
     expect(caps.levels).toEqual([]);

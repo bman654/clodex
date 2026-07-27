@@ -454,17 +454,17 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // ---------------------------------------------------------------------------
   // PATCH 9 — per-model default effort.
   // ---------------------------------------------------------------------------
-  if (Object.keys(EFFORT_BY_KEY).length) {
-    const MARKER = '/*ccpatch:default-effort*/';
-    const defaults = Object.fromEntries(
-      Object.entries(EFFORT_BY_KEY).map(([key, effort]) => [key, effort!.defaultLevel]),
-    );
+  const DEFAULT_EFFORT_MARKER = '/*ccpatch:default-effort*/';
+  const defaults = Object.fromEntries(
+    Object.entries(EFFORT_BY_KEY).map(([key, effort]) => [key, effort!.defaultLevel]),
+  );
+  if (Object.keys(defaults).length || js.includes(DEFAULT_EFFORT_MARKER)) {
     const snippet = (arg: string) =>
-      MARKER
+      DEFAULT_EFFORT_MARKER
       + 'var _cce=(' + JSON.stringify(defaults) + ')[String(' + arg + '||"").trim().toLowerCase()];'
       + 'if(_cce!==void 0)return _cce;';
 
-    if (js.includes(MARKER)) {
+    if (js.includes(DEFAULT_EFFORT_MARKER)) {
       applyOnce(
         'PATCH 9: default effort (refresh)',
         /\/\*ccpatch:default-effort\*\/var _cce=\(\{[^{}]*\}\)\[String\(([\w$]+)\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_cce!==void 0\)return _cce;/,
