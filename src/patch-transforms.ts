@@ -403,13 +403,14 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         ))
         .map(([key]) => [key, 1]),
     );
-    if (Object.keys(enabled).length === 0) return;
+    const hasMarker = js.includes(marker);
+    if (Object.keys(enabled).length === 0 && !hasMarker) return;
 
     const snippet = (arg: string) =>
       marker
       + 'if((' + JSON.stringify(enabled) + ')[String(' + arg + '||"").trim().toLowerCase()]!==void 0)return!0;';
 
-    if (js.includes(marker)) {
+    if (hasMarker) {
       const markerPattern = reEsc(marker);
       applyOnce(
         name + ' (refresh)',
@@ -418,7 +419,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
           + 'if\\(\\(\\{[^{}]*\\}\\)\\[String\\(([\\w$]+)\\|\\|""\\)\\.trim\\(\\)\\.toLowerCase\\(\\)\\]!==void 0\\)return!0;',
         ),
         (_m, arg) => snippet(arg!),
-        { required: true, noopIsSkip: true },
+        { required: false, noopIsSkip: true },
       );
       return;
     }
@@ -427,7 +428,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       name,
       anchor,
       (_m, head, arg, body) => head! + snippet(arg!) + body!,
-      { required: true },
+      { required: false },
     );
   }
 
@@ -468,14 +469,14 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         'PATCH 9: default effort (refresh)',
         /\/\*ccpatch:default-effort\*\/var _cce=\(\{[^{}]*\}\)\[String\(([\w$]+)\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_cce!==void 0\)return _cce;/,
         (_m, arg) => snippet(arg!),
-        { required: true, noopIsSkip: true },
+        { required: false, noopIsSkip: true },
       );
     } else {
       applyOnce(
         'PATCH 9: default effort',
         /(function [\w$]+\(([\w$]+)\)\{)(return [\w$]+\([\w$]+\(\2\)\)\?\.default_effort\?\?"high"\})/,
         (_m, head, arg, body) => head! + snippet(arg!) + body!,
-        { required: true },
+        { required: false },
       );
     }
   }

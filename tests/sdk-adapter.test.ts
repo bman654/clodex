@@ -249,6 +249,19 @@ describe('translateRequest', () => {
     });
   });
 
+  it('maps GPT-5.5 output_config.effort without dropping OpenAI store/include', () => {
+    const params = translateRequest({
+      model: 'gpt-5.5',
+      output_config: { effort: 'high' },
+      messages: [{ role: 'user', content: 'hi' }],
+    }, '@ai-sdk/openai');
+    expect(params.providerOptions?.openai).toMatchObject({
+      store: false,
+      include: ['reasoning.encrypted_content'],
+      reasoningEffort: 'high',
+    });
+  });
+
   it('preserves GPT-5.6 xhigh effort without dropping OpenAI store/include', () => {
     const params = translateRequest({
       model: 'gpt-5.6-sol',

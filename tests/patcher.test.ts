@@ -134,6 +134,48 @@ describe('computePatchConfigHash', () => {
       computePatchConfigHash({ 'clodex:p:m1': { alias: 'x', context: 1000, display: 'M One (Q)' } }),
     );
   });
+
+  it('changes when only the supported effort levels change', () => {
+    const base = {
+      'clodex:p:m1': {
+        effort: {
+          levels: ['low', 'medium', 'high'],
+          defaultLevel: 'medium',
+        },
+      },
+    };
+    expect(computePatchConfigHash(base)).not.toBe(
+      computePatchConfigHash({
+        'clodex:p:m1': {
+          effort: {
+            levels: ['low', 'medium', 'high', 'xhigh'],
+            defaultLevel: 'medium',
+          },
+        },
+      }),
+    );
+  });
+
+  it('changes when only the default effort level changes', () => {
+    const base = {
+      'clodex:p:m1': {
+        effort: {
+          levels: ['low', 'medium', 'high'],
+          defaultLevel: 'medium',
+        },
+      },
+    };
+    expect(computePatchConfigHash(base)).not.toBe(
+      computePatchConfigHash({
+        'clodex:p:m1': {
+          effort: {
+            levels: ['low', 'medium', 'high'],
+            defaultLevel: 'high',
+          },
+        },
+      }),
+    );
+  });
 });
 
 describe('evaluatePatchState', () => {
@@ -302,12 +344,16 @@ describe('summarizePatchResults', () => {
 
 // A minified stand-in for the Claude Code bundle carrying every anchor the
 // patch transforms key on, so they can be executed end to end.
-const CLAUDE_FIXTURE = [
+const CLAUDE_CORE_FIXTURE = [
   '.enum(["sonnet","opus","haiku","fable"]).optional().describe(`Optional model override for this agent. Defaults to inherit.`)',
   'var KNOWN=["sonnet","opus","haiku","fable","opusplan"];',
   'function rz(x){switch(x){case"best":{return "opus"}default:return null}}',
   'function opts(e,t,r){let n=cur(),o=(n==="opus")?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}',
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
+].join('\n');
+
+const CLAUDE_FIXTURE = [
+  CLAUDE_CORE_FIXTURE,
   'function OI(e){if(SNr(e))return!1;let t=Ede(e,"effort");if(t!==void 0)return t;return!1}',
   'function I_e(e){if(SNr(e))return!1;let t=Ede(e,"xhigh_effort");if(t!==void 0)return t;return!1}',
   'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return!1}',
@@ -473,5 +519,54 @@ describe('patch script identity naming', () => {
     const parsed = JSON.parse(table!) as Record<string, number>;
     expect(parsed['clodex:openai:mystery']).toBe(131_072);
     expect(parsed['sol']).toBe(272_000);
+  });
+
+  it('keeps identity and context patches when every effort anchor drifts', () => {
+    const patched = applyClodexPatches(CLAUDE_CORE_FIXTURE, config);
+
+    expect(patched.content).toContain('.enum(["sonnet","opus","haiku","fable","sol","clodex:openai:mystery"])');
+    expect(patched.content).toContain('/*ccpatch:ctx*/');
+    expect(patched.results.slice(0, 6).map(result => [result.name, result.status])).toEqual([
+      ['PATCH 1: Agent tool model enum', 'OK'],
+      ['PATCH 3: known-alias validator list', 'OK'],
+      ['PATCH 6: alias resolver switch', 'OK'],
+      ['PATCH 5: model picker options', 'OK'],
+      ['PATCH 4: Agent tool model description', 'OK'],
+      ['PATCH 7: per-model context window', 'OK'],
+    ]);
+    expect(patched.results.slice(6)).toEqual([
+      { status: 'FAIL', name: 'PATCH 8a: effort capability', extra: 'anchor not found' },
+      { status: 'FAIL', name: 'PATCH 8b: xhigh effort capability', extra: 'anchor not found' },
+      { status: 'FAIL', name: 'PATCH 8c: max effort capability', extra: 'anchor not found' },
+      { status: 'FAIL', name: 'PATCH 9: default effort', extra: 'anchor not found' },
+    ]);
+  });
+
+  it('refreshes every baked effort table when capabilities and the default change', () => {
+    const once = runPatchScript(config);
+    const updatedConfig: Parameters<typeof applyClodexPatches>[1] = {
+      ...config,
+      'clodex:openai-oauth:gpt-5.6-sol': {
+        ...config['clodex:openai-oauth:gpt-5.6-sol'],
+        effort: {
+          levels: ['low', 'medium', 'high'],
+          defaultLevel: 'high',
+        },
+      },
+    };
+    const updated = runPatchScript(updatedConfig, once);
+
+    const base = updated.match(/\/\*ccpatch:effort\*\/if\(\((\{[^{}]*\})\)\[/)?.[1];
+    const xhigh = updated.match(/\/\*ccpatch:xhigh-effort\*\/if\(\((\{[^{}]*\})\)\[/)?.[1];
+    const max = updated.match(/\/\*ccpatch:max-effort\*\/if\(\((\{[^{}]*\})\)\[/)?.[1];
+    const defaults = updated.match(/\/\*ccpatch:default-effort\*\/var _cce=\((\{[^{}]*\})\)/)?.[1];
+
+    expect(JSON.parse(base!)).toEqual({ sol: 1, 'clodex:openai-oauth:gpt-5.6-sol': 1 });
+    expect(JSON.parse(xhigh!)).toEqual({});
+    expect(JSON.parse(max!)).toEqual({});
+    expect(JSON.parse(defaults!)).toEqual({
+      sol: 'high',
+      'clodex:openai-oauth:gpt-5.6-sol': 'high',
+    });
   });
 });

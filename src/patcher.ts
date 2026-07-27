@@ -37,7 +37,7 @@ import { loadRegistry } from './registry/io.js';
 import { findClaudeBinary, getInstalledClaudeVersion } from './launch.js';
 import { httpProxyDisplayName, httpProxyModelId } from './http-proxy/routes.js';
 import { stripOneMContextSuffix } from './context-model-id.js';
-import { getReasoningCapabilities } from './provider-factory.js';
+import { getPatchReasoningCapabilities } from './provider-factory.js';
 import {
   applyClodexPatches,
   formatPatchSiteLine,
@@ -170,13 +170,14 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
   for (const provider of registry.providers) {
     for (const model of provider.modelsCache?.models ?? []) {
       const npm = model.npm ?? provider.api.npm ?? '';
-      const effort = getReasoningCapabilities(npm, model.upstreamModelId, {
+      const upstreamModelId = model.upstreamModelId ?? model.id;
+      const effort = getPatchReasoningCapabilities(npm, upstreamModelId, {
         providerId: provider.id,
         apiBaseUrl: model.apiUrl ?? provider.api.url,
         supportedParameters: model.supportedParameters,
         reasoning: model.reasoning,
         interleavedReasoningField: model.interleavedReasoningField,
-        upstreamModelId: model.upstreamModelId,
+        upstreamModelId,
       });
       meta.set(`${provider.id}:${model.id}`, {
         contextWindow: model.contextWindow && model.contextWindow > 0 ? model.contextWindow : undefined,

@@ -782,6 +782,30 @@ export function getReasoningCapabilities(
   return EMPTY_REASONING;
 }
 
+/**
+ * Capabilities safe to advertise through the patched client's native effort UI.
+ *
+ * Provider capabilities describe accepted Clodex inputs, including values that
+ * a provider adapter may approximate on the wire. Native client metadata must
+ * be stricter: exposing a level whose wire mapping changes its value would make
+ * the selected effort diverge from the upstream request.
+ */
+export function getPatchReasoningCapabilities(
+  npm: string,
+  modelId: string,
+  metadata?: ReasoningMetadata,
+): ReasoningCapabilities {
+  const capabilities = getReasoningCapabilities(npm, modelId, metadata);
+  if (npm !== '@ai-sdk/openai' && npm !== '@ai-sdk/azure') return capabilities;
+
+  return {
+    ...capabilities,
+    levels: capabilities.levels.filter(
+      level => mapCodexEffortToOpenAI(level, modelId) === level,
+    ),
+  };
+}
+
 export function buildCodexReasoningLevels(
   capabilities: Pick<ReasoningCapabilities, 'levels'>,
 ): Array<{ effort: string; description: string }> {

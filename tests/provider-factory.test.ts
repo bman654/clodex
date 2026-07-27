@@ -3,6 +3,7 @@ import {
   createLanguageModel,
   deepMergeProviderOptions,
   effortProviderOptions,
+  getPatchReasoningCapabilities,
   getReasoningCapabilities,
   isSdkMigratedNpm,
   maxToolsForNpm,
@@ -172,6 +173,18 @@ describe('getReasoningCapabilities', () => {
     expect(caps.defaultLevel).toBe('medium');
   });
 
+  it('retains every GPT-5.6 effort level in patched-client metadata', () => {
+    const caps = getPatchReasoningCapabilities('@ai-sdk/openai', 'gpt-5.6-sol');
+    expect(caps.levels).toEqual(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
+    expect(caps.defaultLevel).toBe('medium');
+  });
+
+  it('does not advertise GPT-5.5 levels that change on the patched-client wire', () => {
+    const caps = getPatchReasoningCapabilities('@ai-sdk/openai', 'gpt-5.5');
+    expect(caps.levels).toEqual(['low', 'medium', 'high']);
+    expect(caps.defaultLevel).toBe('medium');
+  });
+
   it('returns empty levels for grok-build-0.1 (internal reasoning only)', () => {
     const caps = getReasoningCapabilities('@ai-sdk/xai', 'grok-build-0.1');
     expect(caps.levels).toEqual([]);
@@ -232,6 +245,12 @@ describe('effortProviderOptions + deepMergeProviderOptions', () => {
       });
     },
   );
+
+  it('keeps GPT-5.5 outside the GPT-5.6 wire-effort scope', () => {
+    expect(effortProviderOptions('@ai-sdk/openai', 'xhigh', 'gpt-5.5')).toEqual({
+      openai: { reasoningEffort: 'high' },
+    });
+  });
 
   it('merges OpenAI thinking + effort without dropping store/include', () => {
     const merged = deepMergeProviderOptions(
