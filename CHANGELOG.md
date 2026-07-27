@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.1.4](https://github.com/bman654/clodex/compare/v2.1.3...v2.1.4) (2026-07-27)
+
+
+### Bug Fixes
+
+* **adapter:** prevent cached input usage inflation ([#56](https://github.com/bman654/clodex/issues/56)) ([4d96f54](https://github.com/bman654/clodex/commit/4d96f5462c793fcf9e1677d07aedc8fe2cc954bd))
+* **proxy:** reuse private adapter connections ([#54](https://github.com/bman654/clodex/issues/54)) ([6de7af9](https://github.com/bman654/clodex/commit/6de7af96b957630dc2a4ea1fc7cfdd7481501685))
+
 ## [2.1.3](https://github.com/bman654/clodex/compare/v2.1.2...v2.1.3) (2026-07-25)
 
 
