@@ -778,7 +778,7 @@ describe('writeAnthropicStream', () => {
     ]);
     const start = events.find(e => e.event === 'message_start')!;
     expect(start.data.message.usage).toEqual({
-      input_tokens: 37,
+      input_tokens: 0,
       output_tokens: 0,
       cache_creation_input_tokens: 0,
       cache_read_input_tokens: 0,
@@ -788,6 +788,57 @@ describe('writeAnthropicStream', () => {
     expect(delta.data.usage).toEqual({
       input_tokens: 5,
       output_tokens: 2,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    });
+  });
+
+  it('does not double-count the local estimate when final input is fully cached', async () => {
+    const { events } = await collect([
+      { type: 'start' },
+      {
+        type: 'finish',
+        finishReason: 'stop',
+        totalUsage: {
+          inputTokens: 173_000,
+          outputTokens: 100,
+          inputTokenDetails: { cacheReadTokens: 173_000 },
+        },
+      },
+    ], 'm', { initialInputTokens: 61_500 });
+
+    const start = events.find(e => e.event === 'message_start')!.data.message.usage;
+    const delta = events.find(e => e.event === 'message_delta')!.data.usage;
+    const claudeMergedUsage = {
+      input_tokens: delta.input_tokens > 0 ? delta.input_tokens : start.input_tokens,
+      cache_creation_input_tokens: delta.cache_creation_input_tokens > 0
+        ? delta.cache_creation_input_tokens
+        : start.cache_creation_input_tokens,
+      cache_read_input_tokens: delta.cache_read_input_tokens > 0
+        ? delta.cache_read_input_tokens
+        : start.cache_read_input_tokens,
+    };
+
+    expect(
+      claudeMergedUsage.input_tokens
+      + claudeMergedUsage.cache_creation_input_tokens
+      + claudeMergedUsage.cache_read_input_tokens,
+    ).toBe(173_000);
+  });
+
+  it('uses the local input estimate when final usage omits input tokens', async () => {
+    const { events } = await collect([
+      { type: 'start' },
+      {
+        type: 'finish',
+        finishReason: 'stop',
+        totalUsage: { inputTokens: 0, outputTokens: 7 },
+      },
+    ], 'm', { initialInputTokens: 37 });
+
+    expect(events.find(e => e.event === 'message_delta')!.data.usage).toEqual({
+      input_tokens: 37,
+      output_tokens: 7,
       cache_creation_input_tokens: 0,
       cache_read_input_tokens: 0,
     });

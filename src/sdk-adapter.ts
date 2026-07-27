@@ -607,7 +607,7 @@ type LogFn = (msg: () => string) => void;
 export interface AnthropicStreamObserver {
   /** Called for every AI SDK fullStream part before Relay translates it. */
   onPart?: (partType: string) => void;
-  /** Local estimate used until the provider reports actual usage at stream completion. */
+  /** Local fallback used when the provider omits usage at stream completion. */
   initialInputTokens?: number;
   abortSignal?: AbortSignal;
   /** Abort if the provider produces no stream event for this long. */
@@ -666,7 +666,7 @@ export async function writeAnthropicStream(
   let openToolId: string | null = null;
   let finishReason = 'end_turn';
   let usage: AnthropicUsage = {
-    input_tokens: 0,
+    input_tokens: observer?.initialInputTokens ?? 0,
     output_tokens: 0,
     cache_creation_input_tokens: 0,
     cache_read_input_tokens: 0,
@@ -681,7 +681,7 @@ export async function writeAnthropicStream(
         id: messageId, type: 'message', role: 'assistant', content: [],
         model: modelId, stop_reason: null, stop_sequence: null,
         usage: {
-          input_tokens: observer?.initialInputTokens ?? 0,
+          input_tokens: 0,
           output_tokens: 0,
           cache_creation_input_tokens: 0,
           cache_read_input_tokens: 0,
@@ -814,7 +814,13 @@ export async function writeAnthropicStream(
 
       case 'finish':
         if (part.totalUsage) {
-          usage = toAnthropicUsage(part.totalUsage);
+          const finalUsage = toAnthropicUsage(part.totalUsage);
+          const hasFinalInputUsage = finalUsage.input_tokens
+            + finalUsage.cache_creation_input_tokens
+            + finalUsage.cache_read_input_tokens > 0;
+          usage = hasFinalInputUsage
+            ? finalUsage
+            : { ...usage, output_tokens: finalUsage.output_tokens };
         }
         if (part.finishReason === 'tool-calls') finishReason = 'tool_use';
         else if (part.finishReason === 'length') finishReason = 'max_tokens';
