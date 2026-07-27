@@ -65,7 +65,7 @@ export function formatPatchSiteLine(result: PatchSiteResult): string {
 }
 
 /**
- * Apply the clodex patch sites (PATCH 1–9) to the Claude Code source.
+ * Apply the clodex patch sites (PATCH 1–10) to the Claude Code source.
  * Pure: source string in → patched string + per-site results out. Throws
  * `PatchApplyError` when the config is invalid or a required site fails —
  * nothing should be written to the binary in that case.
@@ -393,6 +393,31 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         + 'let t=' + readProject + '();if(' + isBuiltin + '(e))return!'
         + normalizeEnabled + '(t.enabledMcpServers).includes(e);return '
         + normalizeDisabled + '(t.disabledMcpServers).includes(e)}',
+      { marker: MARKER, required: false }
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 10 — make Workflow's agent stall watchdog configurable.
+  //
+  // Claude Code's Workflow runtime abandons an agent after 180 seconds without
+  // a semantic content event. OpenAI-family models can remain active beyond
+  // that while producing a large tool argument that Clodex must buffer until it
+  // can sanitize the complete JSON object. HTTP keepalive pings intentionally
+  // do not count as agent progress, so expose a bounded opt-in override.
+  //
+  // The upstream default remains 180 seconds. Values are clamped to 3–30
+  // minutes to prevent accidental zero/negative or effectively unbounded waits.
+  // ---------------------------------------------------------------------------
+  {
+    const MARKER = '/*clodex:workflow-stall-timeout*/';
+    applyOnce(
+      'PATCH 10: Workflow agent stall timeout',
+      /(Be concise \\u2014 the script will parse your output\.`(?:,[\w$]+){4},)([\w$]+)=180000(,[\w$]+=5,[\w$]+=5;var)/,
+      (_m, prefix, timeoutName, suffix) =>
+        prefix + timeoutName + '=' + MARKER
+        + 'Math.min(Math.max(Number(process.env.CLODEX_WORKFLOW_STALL_TIMEOUT_MS)||180000,180000),1800000)'
+        + suffix,
       { marker: MARKER, required: false }
     );
   }

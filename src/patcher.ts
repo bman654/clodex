@@ -106,7 +106,7 @@ export interface PatchModelMeta {
 // Bump whenever the binary transform set changes so existing installations are
 // restored from their pristine backup and repatched instead of being mistaken
 // for current solely because their model map is unchanged.
-const PATCH_SCHEMA_VERSION = 2;
+const PATCH_SCHEMA_VERSION = 3;
 
 /**
  * Build the patch model config from favorites + aliases.

@@ -258,6 +258,7 @@ const CLAUDE_FIXTURE = [
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
   'function Lbo(){if(lK("hipaa"))return!1;return QE_()&&iEs().enabled}',
   'function Fw(e){let t=Rd();if(oSs(e))return!Syo(t.enabledMcpServers).includes(e);return Syo(t.disabledMcpServers).includes(e)}',
+  'const workflowNote=`NOTE: You are running inside a workflow script. Be concise \\u2014 the script will parse your output.`,aa,bb,cc,dd,sj_=180000,attempts=5,retries=5;var runtime={};',
 ].join('\n');
 
 function runPatchScript(config: Parameters<typeof applyClodexPatches>[1], source = CLAUDE_FIXTURE): string {
@@ -345,6 +346,7 @@ describe('patch script identity naming', () => {
       ['PATCH 7: per-model context window', 'OK'],
       ['PATCH 8: native Computer Use opt-in', 'OK'],
       ['PATCH 9: native Computer Use default enable', 'OK'],
+      ['PATCH 10: Workflow agent stall timeout', 'OK'],
     ]);
     const rerun = applyClodexPatches(fresh.content, config);
     expect(rerun.results.map(r => [r.name, r.status])).toEqual([
@@ -358,6 +360,7 @@ describe('patch script identity naming', () => {
       ['PATCH 7: per-model context window (refresh)', 'SKIP'],
       ['PATCH 8: native Computer Use opt-in', 'SKIP'],
       ['PATCH 9: native Computer Use default enable', 'SKIP'],
+      ['PATCH 10: Workflow agent stall timeout', 'SKIP'],
     ]);
   });
 
@@ -377,6 +380,14 @@ describe('patch script identity naming', () => {
       + 'if(oSs(e)&&process.env.CLODEX_NATIVE_COMPUTER_USE==="1")return!1;'
       + 'let t=Rd();if(oSs(e))return!Syo(t.enabledMcpServers).includes(e);'
       + 'return Syo(t.disabledMcpServers).includes(e)}'
+    );
+  });
+
+  it('keeps the upstream Workflow watchdog default while allowing a bounded opt-in override', () => {
+    const out = runPatchScript(config);
+    expect(out).toContain(
+      'sj_=/*clodex:workflow-stall-timeout*/'
+      + 'Math.min(Math.max(Number(process.env.CLODEX_WORKFLOW_STALL_TIMEOUT_MS)||180000,180000),1800000)'
     );
   });
 
