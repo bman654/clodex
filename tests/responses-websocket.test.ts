@@ -2977,6 +2977,145 @@ describe('createResponsesWebSocketFetch', () => {
     expect(fakeSockets).toHaveLength(3);
   });
 
+  it('continues a workflow tool loop when Claude replays a reshaped reasoning envelope', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const root = [
+      { role: 'user', content: [{ type: 'input_text', text: 'run pwd' }] },
+      { role: 'developer', content: [{ type: 'input_text', text: 'workflow agent' }] },
+    ];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-workflow-replayed-reasoning',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const first = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload(root)),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.created',
+      response: { id: 'resp_workflow_reasoning' },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done',
+      output_index: 0,
+      item: {
+        type: 'reasoning',
+        id: 'rs_original',
+        encrypted_content: 'opaque-original',
+        summary: [{ type: 'summary_text', text: 'Use Bash.' }],
+      },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done',
+      output_index: 1,
+      item: {
+        type: 'function_call',
+        id: 'fc_original',
+        call_id: 'call_pwd',
+        name: 'Bash',
+        arguments: '{"command":"pwd"}',
+        status: 'completed',
+      },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.completed',
+      response: { id: 'resp_workflow_reasoning' },
+    })));
+    await readAll(first);
+
+    const toolOutput = {
+      type: 'function_call_output',
+      call_id: 'call_pwd',
+      output: '/tmp/workflow',
+    };
+    const next = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([
+        ...root,
+        {
+          type: 'reasoning',
+          encrypted_content: 'opaque-round-tripped',
+          summary: [],
+        },
+        {
+          type: 'function_call',
+          call_id: 'call_pwd',
+          name: 'Bash',
+          arguments: '{ "command": "pwd" }',
+        },
+        toolOutput,
+      ])),
+    });
+    const sent = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_workflow_reasoning');
+    expect(sent.input).toEqual([toolOutput]);
+    expect(diagnostics.at(-1)).toMatchObject({
+      event: 'ws_head_decision',
+      decision: 'continuation',
+      continuationMatchMode: 'replayed_reasoning',
+      selectedConnectionId: 1,
+    });
+    emitTextResponse(socket, 'resp_workflow_done', 'done');
+    await readAll(next);
+  });
+
+  it('retains the full 16-agent Claude workflow concurrency ceiling', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-full-width-workflow',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const pending: Response[] = [];
+    for (let index = 0; index < 16; index += 1) {
+      pending.push(await wsFetch('https://x', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload([
+          { role: 'user', content: [{ type: 'input_text', text: `agent ${index}` }] },
+        ])),
+      }));
+    }
+
+    expect(fakeSockets).toHaveLength(16);
+    expect(diagnostics.filter(
+      event => event.event === 'ws_head_decision' && event.decision === 'parallel_isolated',
+    )).toHaveLength(0);
+    expect(diagnostics.at(-1)).toMatchObject({
+      event: 'ws_head_decision',
+      decision: 'parallel_new_head',
+      nurseryConnectionCount: 15,
+      maxNurseryConnections: 16,
+      createdGeneration: 'nursery',
+    });
+
+    fakeSockets.forEach((socket, index) => {
+      socket.emit('open');
+      emitTextResponse(socket, `resp_full_width_${index}`, `answer ${index}`);
+    });
+    await Promise.all(pending.map(readAll));
+
+    const nextUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'continue agent 15' }],
+    };
+    await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([
+        { role: 'user', content: [{ type: 'input_text', text: 'agent 15' }] },
+        { role: 'assistant', content: [{ type: 'output_text', text: 'answer 15' }] },
+        nextUser,
+      ])),
+    });
+    const sent = JSON.parse(fakeSockets[15]!.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_full_width_15');
+    expect(sent.input).toEqual([nextUser]);
+  });
+
   it('falls back to an isolated parallel socket when every nursery slot is active', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
@@ -3062,6 +3201,50 @@ describe('createResponsesWebSocketFetch', () => {
       selectedGeneration: 'nursery',
       createdConnectionId: undefined,
     });
+  });
+
+  it('reuses completed nursery heads across consecutive concurrent workflow waves', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-two-wave-workflow',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+
+    const runWave = async (labels: string[]): Promise<void> => {
+      const pending: Response[] = [];
+      const sendCounts = fakeSockets.map(socket => socket.send.mock.calls.length);
+      for (const label of labels) {
+        pending.push(await wsFetch('https://x', {
+          method: 'POST',
+          headers: {},
+          body: JSON.stringify(sessionPayload([
+            { role: 'user', content: [{ type: 'input_text', text: label }] },
+          ])),
+        }));
+      }
+      fakeSockets.forEach((socket, index) => {
+        if (sendCounts[index] === undefined) socket.emit('open');
+        if (socket.send.mock.calls.length <= (sendCounts[index] ?? 0)) return;
+        emitTextResponse(socket, `resp_${labels.join('')}_${index}`, `answer ${index}`);
+      });
+      await Promise.all(pending.map(readAll));
+    };
+
+    await runWave(['A', 'B', 'C']);
+    expect(fakeSockets).toHaveLength(3);
+    await runWave(['D', 'E', 'F']);
+
+    // Two warm heads are recycled. One anchor is preserved, so the third
+    // concurrent branch creates exactly one new retained head.
+    expect(fakeSockets).toHaveLength(4);
+    expect(diagnostics.filter(
+      event => event.event === 'ws_head_decision'
+        && event.decision === 'history_mismatch_reused_head',
+    )).toHaveLength(2);
+    expect(diagnostics.filter(
+      event => event.event === 'ws_head_decision'
+        && event.decision === 'parallel_isolated',
+    )).toHaveLength(0);
   });
 
   it('retains the main head when a completed auxiliary request starts another branch', async () => {

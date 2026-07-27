@@ -29,7 +29,11 @@ export const RESPONSES_WS_HARD_TTL_MS = 55 * 60_000;
 export const RESPONSES_WS_IDLE_TTL_MS = 30 * 60_000;
 export const RESPONSES_WS_NURSERY_IDLE_TTL_MS = 5 * 60_000;
 export const RESPONSES_WS_MAX_CONNECTIONS = 32;
-export const RESPONSES_WS_MAX_NURSERY_CONNECTIONS = 8;
+// Claude dynamic workflows permit up to 16 concurrent agents. Retain one
+// unproven head per possible workflow branch so every agent can establish a
+// reusable previous_response_id lineage instead of making the upper half of a
+// full-width workflow fall back to disposable sockets.
+export const RESPONSES_WS_MAX_NURSERY_CONNECTIONS = 16;
 export const RESPONSES_WS_WARM_NURSERY_CONNECTIONS_PER_PARTITION = 2;
 export const RESPONSES_COMPACTION_RETAINED_USER_TOKENS = 64_000;
 export const RESPONSES_COMPACTION_CHECKPOINT_TTL_MS = 30 * 60_000;
@@ -449,14 +453,16 @@ function arraysEqual(left: unknown[], right: unknown[]): boolean {
 
 type ContinuationMatchMode =
   | 'exact'
+  | 'replayed_reasoning'
   | 'omitted_reasoning'
   | 'claude_compaction_summary';
 
 function continuationMatchRank(mode: ContinuationMatchMode): number {
   switch (mode) {
     case 'exact': return 0;
-    case 'omitted_reasoning': return 1;
-    case 'claude_compaction_summary': return 2;
+    case 'replayed_reasoning': return 1;
+    case 'omitted_reasoning': return 2;
+    case 'claude_compaction_summary': return 3;
   }
 }
 
@@ -797,6 +803,50 @@ function historyContinuationMatch(
   const exactPrefix = [...entry.requestInput, ...entry.expectedAssistant];
   if (full.length > exactPrefix.length && arraysEqual(full.slice(0, exactPrefix.length), exactPrefix)) {
     return { delta: full.slice(exactPrefix.length), mode: 'exact' };
+  }
+
+  // Claude can round-trip OpenAI's encrypted reasoning through an Anthropic
+  // thinking block, but the SDK reconstructs a semantically equivalent
+  // Responses reasoning envelope whose non-semantic fields/summary need not be
+  // byte-identical. The opaque reasoning already belongs to
+  // previous_response_id. Ignore only those envelopes while still requiring
+  // the request history and every visible assistant item/tool call to match
+  // exactly, then send only the items after Claude's echoed assistant output.
+  const expectedAssistant = entry.expectedAssistant;
+  if (
+    expectedAssistant.some(item => conversationItemKind(item) === 'reasoning')
+    && arraysEqual(full.slice(0, entry.requestInput.length), entry.requestInput)
+  ) {
+    let fullIndex = entry.requestInput.length;
+    let expectedIndex = 0;
+    let ignoredReasoning = false;
+    let replayedReasoning = false;
+    while (expectedIndex < expectedAssistant.length) {
+      const expected = expectedAssistant[expectedIndex];
+      if (conversationItemKind(expected) === 'reasoning') {
+        ignoredReasoning = true;
+        expectedIndex += 1;
+        while (
+          fullIndex < full.length
+          && conversationItemKind(full[fullIndex]) === 'reasoning'
+        ) {
+          replayedReasoning = true;
+          fullIndex += 1;
+        }
+        continue;
+      }
+      if (fullIndex >= full.length || !arraysEqual([full[fullIndex]], [expected])) break;
+      expectedIndex += 1;
+      fullIndex += 1;
+    }
+    if (
+      ignoredReasoning
+      && replayedReasoning
+      && expectedIndex === expectedAssistant.length
+      && fullIndex < full.length
+    ) {
+      return { delta: full.slice(fullIndex), mode: 'replayed_reasoning' };
+    }
   }
 
   // Claude cannot echo opaque OpenAI reasoning/compaction items through its
@@ -2156,8 +2206,10 @@ export function createResponsesWebSocketFetch(
       decision = 'continuation';
       debug(
         `continuing chain with ${selectedDelta.length} incremental input item(s)`
-        + (selectedMatch.mode === 'omitted_reasoning'
-          ? ' after accepting omitted reasoning'
+        + (selectedMatch.mode === 'replayed_reasoning'
+          ? ' after accepting replayed opaque reasoning'
+          : selectedMatch.mode === 'omitted_reasoning'
+            ? ' after accepting omitted reasoning'
           : selectedMatch.mode === 'claude_compaction_summary'
             ? ' after re-anchoring Claude compacted history'
             : ''),
@@ -2175,21 +2227,31 @@ export function createResponsesWebSocketFetch(
       );
     } else if (candidates.some(entry => entry.inFlight)) {
       // Claude workflow agents share the parent session id but carry divergent
-      // histories. Give each parallel branch a retained nursery head so its
-      // next turn can continue on the same socket. Fall back to isolation only
-      // when every nursery slot is already occupied by an active request.
-      selected = undefined;
-      const nurseryAtCapacity = connectionCountByGeneration('nursery')
-        >= resolvedOptions.maxNurseryConnections;
-      const hasIdleNursery = connectionEntries()
-        .some(entry => !entry.inFlight && entry.generation === 'nursery');
-      persistent = !nurseryAtCapacity || hasIdleNursery;
-      decision = persistent ? 'parallel_new_head' : 'parallel_isolated';
-      debug(
-        persistent
-          ? 'parallel request starting a retained nursery head'
-          : 'parallel request using an isolated socket at nursery capacity',
-      );
+      // histories. Reuse a warm idle nursery head when a later workflow wave
+      // overlaps with an already-started sibling; otherwise give the branch a
+      // retained new head. Fall back to isolation only when every nursery slot
+      // is occupied by an active request.
+      const reusable = reusableNurseryHead(partitionKey);
+      if (reusable) {
+        selected = reusable;
+        decision = 'history_mismatch_reused_head';
+        debug(
+          `parallel history mismatch reusing idle nursery connection=${reusable.debugId}`,
+        );
+      } else {
+        selected = undefined;
+        const nurseryAtCapacity = connectionCountByGeneration('nursery')
+          >= resolvedOptions.maxNurseryConnections;
+        const hasIdleNursery = connectionEntries()
+          .some(entry => !entry.inFlight && entry.generation === 'nursery');
+        persistent = !nurseryAtCapacity || hasIdleNursery;
+        decision = persistent ? 'parallel_new_head' : 'parallel_isolated';
+        debug(
+          persistent
+            ? 'parallel request starting a retained nursery head'
+            : 'parallel request using an isolated socket at nursery capacity',
+        );
+      }
     } else if (diagnosticEntry) {
       // Reuse an idle nursery socket once a partition already has two warm
       // unproven heads. Full-history requests do not use previous_response_id,
