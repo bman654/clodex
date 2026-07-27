@@ -264,6 +264,21 @@ describe('translateRequest', () => {
     });
   });
 
+  it('preserves configured and default OpenAI reasoning effort for normal requests', () => {
+    const configured = translateRequest({
+      model: 'gpt-5.6-sol',
+      output_config: { effort: 'medium' },
+      messages: [{ role: 'user', content: 'hi' }],
+    }, '@ai-sdk/openai', { defaultEffort: 'high' });
+    const fallback = translateRequest({
+      model: 'gpt-5.6-sol',
+      messages: [{ role: 'user', content: 'hi' }],
+    }, '@ai-sdk/openai', { defaultEffort: 'medium' });
+
+    expect(configured.providerOptions?.openai?.reasoningEffort).toBe('medium');
+    expect(fallback.providerOptions?.openai?.reasoningEffort).toBe('medium');
+  });
+
   it('maps output_config.effort to OpenRouter reasoning when provider metadata allows it', () => {
     const params = translateRequest({
       model: 'z-ai/glm-5.2',
@@ -422,7 +437,7 @@ describe('translateRequest', () => {
     expect(params.tools && Object.keys(params.tools)).toEqual(['Read']);
   });
 
-  it('disables tools for Claude Code compact requests without changing ordinary structured output', () => {
+  it('uses low OpenAI reasoning and disables tools for generic and structured compact requests', () => {
     const compactInstruction = [
       'CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.',
       'Your task is to create a detailed summary of the conversation so far.',
@@ -443,17 +458,38 @@ describe('translateRequest', () => {
       }],
       tools,
       tool_choice: { type: 'any' as const },
+      output_config: { effort: 'high' },
     };
 
     const compact = translateRequest(compactBody, '@ai-sdk/openai', { openAiOAuth: true });
-    expect(isClaudeCodeCompactRequest(compactBody)).toBe(true);
-    expect(isClaudeCodeStructuredOutputCompactRequest(compactBody)).toBe(true);
-    expect(isClaudeCodeCompactRequest({
+    const genericCompactBody = {
       ...compactBody,
       tools: [{ name: 'Read', input_schema: { type: 'object' } }],
-    })).toBe(true);
+      output_config: undefined,
+    };
+    const genericCompact = translateRequest(
+      genericCompactBody,
+      '@ai-sdk/openai',
+      { openAiOAuth: true, defaultEffort: 'medium' },
+    );
+    expect(isClaudeCodeCompactRequest(compactBody)).toBe(true);
+    expect(isClaudeCodeStructuredOutputCompactRequest(compactBody)).toBe(true);
+    expect(isClaudeCodeCompactRequest(genericCompactBody)).toBe(true);
+    expect(isClaudeCodeStructuredOutputCompactRequest(genericCompactBody)).toBe(false);
     expect(compact.tools && Object.keys(compact.tools)).toEqual(['Read', 'StructuredOutput']);
     expect(compact.toolChoice).toBe('none');
+    expect(compact.providerOptions?.openai).toMatchObject({
+      store: false,
+      include: ['reasoning.encrypted_content'],
+      reasoningEffort: 'low',
+    });
+    expect(genericCompact.tools && Object.keys(genericCompact.tools)).toEqual(['Read']);
+    expect(genericCompact.toolChoice).toBe('none');
+    expect(genericCompact.providerOptions?.openai).toMatchObject({
+      store: false,
+      include: ['reasoning.encrypted_content'],
+      reasoningEffort: 'low',
+    });
     expect(compact.messages.map(message => message.role)).toEqual(['tool', 'user']);
     expect(compact.messages[1]).toMatchObject({
       role: 'user',
@@ -491,6 +527,7 @@ describe('translateRequest', () => {
     })).toBe(false);
     expect(ordinary.tools && Object.keys(ordinary.tools)).toEqual(['Read', 'StructuredOutput']);
     expect(ordinary.toolChoice).toBe('required');
+    expect(ordinary.providerOptions?.openai?.reasoningEffort).toBe('high');
     expect(compact.providerOptions?.openai?.promptCacheKey)
       .toBe(ordinary.providerOptions?.openai?.promptCacheKey);
   });
