@@ -2,9 +2,9 @@
 // ChatGPT/Codex Responses backend.
 //
 // The Vercel AI SDK still sees a fetch-like SSE response per model call. Behind
-// that interface, clodex retains one sequential WebSocket chain per opaque
+// that interface, clodex retains bounded sequential WebSocket heads per opaque
 // Claude session/model/effort/account partition and uses previous_response_id
-// only after proving the next translated conversation appends to the chain head.
+// only after proving the next translated conversation appends to a chain head.
 
 import { createHash } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -30,6 +30,7 @@ export const RESPONSES_WS_IDLE_TTL_MS = 30 * 60_000;
 export const RESPONSES_WS_NURSERY_IDLE_TTL_MS = 5 * 60_000;
 export const RESPONSES_WS_MAX_CONNECTIONS = 32;
 export const RESPONSES_WS_MAX_NURSERY_CONNECTIONS = 8;
+export const RESPONSES_WS_WARM_NURSERY_CONNECTIONS_PER_PARTITION = 2;
 export const RESPONSES_COMPACTION_RETAINED_USER_TOKENS = 64_000;
 export const RESPONSES_COMPACTION_CHECKPOINT_TTL_MS = 30 * 60_000;
 
@@ -163,9 +164,11 @@ interface CompactionCheckpoint {
 // once: rewinds/branches, hidden title-generation requests, and stop hooks can
 // all share its model/effort/cache key. Retain each head and select by exact
 // conversation prefix instead of letting the newest branch replace the rest.
-// New heads live in a separately capped nursery LRU until their first reuse;
-// established heads therefore never consume nursery capacity, and one-shot
-// nursery traffic never consumes the established LRU's 32 reserved slots.
+// New heads live in a separately capped nursery LRU until their first lineage
+// continuation. Idle nursery sockets are also the safe reuse pool for unrelated
+// full-history requests: this preserves physical-socket prompt-cache affinity
+// without overwriting established lineages. One-shot nursery traffic never
+// consumes the established LRU's 32 reserved slots.
 const connections = new Map<string, Set<ConnectionEntry>>();
 const compactionCheckpoints = new Map<string, CompactionCheckpoint[]>();
 const MAX_COMPACTION_CHECKPOINTS_PER_PARTITION = 8;
@@ -1403,6 +1406,18 @@ function evictOldestIdleGeneration(
   return evictions;
 }
 
+function reusableNurseryHead(
+  key: string | undefined,
+): ConnectionEntry | undefined {
+  if (!key) return undefined;
+  const idleNursery = connectionEntries(key)
+    .filter(entry => !entry.inFlight && entry.generation === 'nursery')
+    .sort((left, right) => left.lastUsedAt - right.lastUsedAt);
+  return idleNursery.length >= RESPONSES_WS_WARM_NURSERY_CONNECTIONS_PER_PARTITION
+    ? idleNursery[0]
+    : undefined;
+}
+
 function isModelDataEvent(type: string | undefined): boolean {
   return Boolean(type && (
     type.includes('.delta')
@@ -1949,7 +1964,9 @@ export function createResponsesWebSocketFetch(
       | 'compaction_new_head'
       | 'compaction_trigger_new_head'
       | 'compaction_checkpoint'
+      | 'parallel_new_head'
       | 'parallel_isolated'
+      | 'history_mismatch_reused_head'
       | 'history_mismatch_new_head'
       | 'new_partition_head'
       | 'unpartitioned_socket' = partitionKey
@@ -2157,20 +2174,43 @@ export function createResponsesWebSocketFetch(
         `restored compact checkpoint with ${checkpointMatch.delta.length} incremental input item(s)`,
       );
     } else if (candidates.some(entry => entry.inFlight)) {
-      // Claude auxiliary requests can share a session id. Never multiplex or
-      // queue a request whose lineage cannot yet include the active response.
+      // Claude workflow agents share the parent session id but carry divergent
+      // histories. Give each parallel branch a retained nursery head so its
+      // next turn can continue on the same socket. Fall back to isolation only
+      // when every nursery slot is already occupied by an active request.
       selected = undefined;
-      persistent = false;
-      decision = 'parallel_isolated';
-      debug('parallel request using an isolated socket');
-    } else if (diagnosticEntry) {
-      // A rewind, branch, or hidden auxiliary inference gets its own full-context
-      // head. Existing heads remain eligible for later exact-prefix matches.
+      const nurseryAtCapacity = connectionCountByGeneration('nursery')
+        >= resolvedOptions.maxNurseryConnections;
+      const hasIdleNursery = connectionEntries()
+        .some(entry => !entry.inFlight && entry.generation === 'nursery');
+      persistent = !nurseryAtCapacity || hasIdleNursery;
+      decision = persistent ? 'parallel_new_head' : 'parallel_isolated';
       debug(
-        `history mismatch starting an additional chain; retained ${candidates.length} existing head(s) `
-        + `(${continuationMismatchSummary(diagnosticEntry, payload)})`,
+        persistent
+          ? 'parallel request starting a retained nursery head'
+          : 'parallel request using an isolated socket at nursery capacity',
       );
-      decision = 'history_mismatch_new_head';
+    } else if (diagnosticEntry) {
+      // Reuse an idle nursery socket once a partition already has two warm
+      // unproven heads. Full-history requests do not use previous_response_id,
+      // but controlled probes show that keeping the physical socket restores
+      // OpenAI prompt-cache affinity. Established heads are never recycled.
+      const reusable = reusableNurseryHead(partitionKey);
+      if (reusable) {
+        selected = reusable;
+        decision = 'history_mismatch_reused_head';
+        debug(
+          `history mismatch reusing idle nursery connection=${reusable.debugId}; `
+          + `retained ${candidates.length - 1} other head(s) `
+          + `(${continuationMismatchSummary(diagnosticEntry, payload)})`,
+        );
+      } else {
+        debug(
+          `history mismatch starting an additional chain; retained ${candidates.length} existing head(s) `
+          + `(${continuationMismatchSummary(diagnosticEntry, payload)})`,
+        );
+        decision = 'history_mismatch_new_head';
+      }
     } else if (partitionKey) {
       decision = 'new_partition_head';
     } else {

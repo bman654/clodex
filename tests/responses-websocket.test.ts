@@ -644,7 +644,7 @@ describe('createResponsesWebSocketFetch', () => {
     await readAll(continued);
   });
 
-  it('keeps a retried parallel auxiliary request isolated from reusable heads', async () => {
+  it('retains a retried parallel auxiliary request as a reusable head', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
       accountId: 'acct-parallel-transport',
@@ -691,17 +691,19 @@ describe('createResponsesWebSocketFetch', () => {
       headers: {},
       body: JSON.stringify(sessionPayload(nextAuxiliaryInput)),
     });
-    expect(fakeSockets).toHaveLength(4);
-    const nextAuxiliarySocket = lastSocket();
-    expect(nextAuxiliarySocket).not.toBe(auxiliaryReplacement);
-    nextAuxiliarySocket.emit('open');
+    expect(fakeSockets).toHaveLength(3);
+    const nextAuxiliarySocket = auxiliaryReplacement;
+    expect(JSON.parse(nextAuxiliarySocket.send.mock.calls[1]![0] as string)).toMatchObject({
+      previous_response_id: 'resp_auxiliary',
+      input: [nextAuxiliaryInput.at(-1)],
+    });
     emitTextResponse(nextAuxiliarySocket, 'resp_auxiliary_next', 'done');
     await readAll(nextAuxiliary);
 
     expect(diagnostics).toContainEqual(expect.objectContaining({
       event: 'ws_transport_retry',
       outcome: 'recovered',
-      generation: 'isolated',
+      generation: 'nursery',
     }));
   });
 
@@ -2878,7 +2880,7 @@ describe('createResponsesWebSocketFetch', () => {
     expect(fakeSockets).toHaveLength(2);
   });
 
-  it('isolates an unrelated parallel request and preserves the main chain head', async () => {
+  it('retains an unrelated parallel request and preserves both branch heads', async () => {
     const input = [{ role: 'user', content: [{ type: 'input_text', text: 'main' }] }];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-parallel' });
     const main = await wsFetch('https://x', {
@@ -2914,6 +2916,152 @@ describe('createResponsesWebSocketFetch', () => {
     expect(sent.input).toEqual([nextUser]);
     emitTextResponse(mainSocket, 'resp_next', 'next answer');
     await readAll(next);
+
+    const nextAuxiliaryUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'revise title' }],
+    };
+    await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([
+        { role: 'user', content: [{ type: 'input_text', text: 'make a title' }] },
+        { role: 'assistant', content: [{ type: 'output_text', text: 'title' }] },
+        nextAuxiliaryUser,
+      ])),
+    });
+    expect(fakeSockets).toHaveLength(2);
+    const auxiliarySent = JSON.parse(auxiliarySocket.send.mock.calls[1]![0] as string);
+    expect(auxiliarySent.previous_response_id).toBe('resp_aux');
+    expect(auxiliarySent.input).toEqual([nextAuxiliaryUser]);
+  });
+
+  it('retains parallel workflow-agent heads for independent continuation', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-parallel-workflow',
+    });
+    const roots = ['agent one', 'agent two', 'agent three'].map(text => [
+      { role: 'user', content: [{ type: 'input_text', text }] },
+    ]);
+    const pending: Response[] = [];
+    for (const input of roots) {
+      pending.push(await wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+      }));
+    }
+    expect(fakeSockets).toHaveLength(3);
+
+    fakeSockets.forEach((socket, index) => {
+      socket.emit('open');
+      emitTextResponse(socket, `resp_agent_${index}`, `answer ${index}`);
+    });
+    await Promise.all(pending.map(readAll));
+
+    for (let index = 0; index < roots.length; index += 1) {
+      const nextUser = {
+        role: 'user',
+        content: [{ type: 'input_text', text: `continue ${index}` }],
+      };
+      await wsFetch('https://x', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload([
+          ...roots[index]!,
+          { role: 'assistant', content: [{ type: 'output_text', text: `answer ${index}` }] },
+          nextUser,
+        ])),
+      });
+      const sent = JSON.parse(fakeSockets[index]!.send.mock.calls[1]![0] as string);
+      expect(sent.previous_response_id).toBe(`resp_agent_${index}`);
+      expect(sent.input).toEqual([nextUser]);
+      emitTextResponse(fakeSockets[index]!, `resp_agent_${index}_next`, `done ${index}`);
+    }
+    expect(fakeSockets).toHaveLength(3);
+  });
+
+  it('falls back to an isolated parallel socket when every nursery slot is active', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-parallel-cap',
+      maxNurseryConnections: 2,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const pending: Response[] = [];
+    for (const text of ['one', 'two', 'overflow']) {
+      pending.push(await wsFetch('https://x', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload([
+          { role: 'user', content: [{ type: 'input_text', text }] },
+        ])),
+      }));
+    }
+    expect(fakeSockets).toHaveLength(3);
+    expect(diagnostics.at(-1)).toMatchObject({
+      event: 'ws_head_decision',
+      decision: 'parallel_isolated',
+      createdGeneration: 'isolated',
+    });
+
+    fakeSockets.forEach((socket, index) => {
+      socket.emit('open');
+      emitTextResponse(socket, `resp_cap_${index}`, `answer ${index}`);
+    });
+    await Promise.all(pending.map(readAll));
+
+    const overflowContinuation = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([
+        { role: 'user', content: [{ type: 'input_text', text: 'overflow' }] },
+        { role: 'assistant', content: [{ type: 'output_text', text: 'answer 2' }] },
+        { role: 'user', content: [{ type: 'input_text', text: 'continue overflow' }] },
+      ])),
+    });
+    expect(fakeSockets).toHaveLength(3);
+    const reusedNursery = fakeSockets.find(socket => socket.send.mock.calls.length === 2);
+    expect(reusedNursery).toBeDefined();
+    const sent = JSON.parse(reusedNursery!.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    emitTextResponse(reusedNursery!, 'resp_overflow_next', 'done');
+    await readAll(overflowContinuation);
+  });
+
+  it('reuses a warm nursery socket for sequential divergent full-history requests', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-nursery-reuse',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const roots = ['branch one', 'branch two', 'branch three'].map(text => [
+      { role: 'user', content: [{ type: 'input_text', text }] },
+    ]);
+
+    for (let index = 0; index < roots.length; index += 1) {
+      const sendCounts = fakeSockets.map(socket => socket.send.mock.calls.length);
+      const response = await wsFetch('https://x', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload(roots[index]!)),
+      });
+      const socket = fakeSockets.find(
+        (candidate, socketIndex) => candidate.send.mock.calls.length > (sendCounts[socketIndex] ?? 0),
+      ) ?? lastSocket();
+      if (index < 2) socket.emit('open');
+      const sent = JSON.parse(socket.send.mock.calls.at(-1)![0] as string);
+      expect(sent.previous_response_id).toBeUndefined();
+      expect(sent.input).toEqual(roots[index]);
+      emitTextResponse(socket, `resp_branch_${index}`, `answer ${index}`);
+      await readAll(response);
+    }
+
+    expect(fakeSockets).toHaveLength(2);
+    expect(fakeSockets[0]!.send).toHaveBeenCalledTimes(2);
+    expect(diagnostics.at(-1)).toMatchObject({
+      event: 'ws_head_decision',
+      decision: 'history_mismatch_reused_head',
+      selectedConnectionId: 1,
+      selectedGeneration: 'nursery',
+      createdConnectionId: undefined,
+    });
   });
 
   it('retains the main head when a completed auxiliary request starts another branch', async () => {
