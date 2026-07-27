@@ -193,7 +193,9 @@ async function closeHandle(handle: ServerHandle | { close: () => Promise<void> }
 afterEach(async () => {
   vi.mocked(createLanguageModel).mockClear();
   vi.mocked(resolveProviderCredential).mockReset();
+  vi.mocked(generateAnthropicResponse).mockClear();
   vi.mocked(streamAnthropicResponse).mockClear();
+  vi.mocked(generateOpenAiResponse).mockClear();
   vi.mocked(streamOpenAiResponse).mockClear();
   while (handles.length > 0) {
     const handle = handles.pop();
