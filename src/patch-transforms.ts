@@ -20,6 +20,8 @@
 // as the identity (they still join the enum, validator, and context table, but
 // skip the resolver and /model picker patches).
 
+import { isReservedModelAlias } from './model-aliases.js';
+
 export interface PatchScriptModelEntry {
   alias?: string;
   context?: number;
@@ -98,7 +100,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
 
   // ---- derive helpers ------------------------------------------------------
   // alias -> model id (only for entries that define an alias)
-  const ALIAS_TO_ID = Object.create(null) as Record<string, string>;
+  const ALIAS_TO_ID: Record<string, string> = Object.create(null);
   // The name Claude Code knows a model by: its alias when it has one, else its
   // canonical id. This single value is used for the Agent-tool enum, the
   // known-alias validator, the /model picker value, and the context-window table,
@@ -106,14 +108,13 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // the proxy echoes back == the key its context window is stored under.
   const IDENTITIES: string[] = [];
   // identity -> human label for the /model picker (falls back at use site)
-  const DISPLAY_BY_IDENTITY = Object.create(null) as Record<string, string>;
+  const DISPLAY_BY_IDENTITY: Record<string, string> = Object.create(null);
   // lowercased alias AND id -> context-window tokens (only for models that set it)
-  const CONTEXT_BY_KEY = Object.create(null) as Record<string, number>;
+  const CONTEXT_BY_KEY: Record<string, number> = Object.create(null);
   // lowercased alias AND id for every configured model. Capability verdicts
   // must distinguish configured-false from an unknown identity that may use
   // the native fallback.
   const CONFIGURED_CAPABILITY_KEYS = new Set<string>();
-  const CAPABILITY_OWNER_BY_KEY = new Map<string, string>();
   // lowercased alias AND id -> effort metadata for Claude Code's capability gates.
   const EFFORT_BY_KEY = Object.create(null) as Record<
     string,
@@ -129,13 +130,8 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     const bare = normalized.replace(/\[1m\]$/i, '');
     return [...new Set([bare, `${bare}[1m]`])];
   };
-  const registerCapabilityKeys = (value: string, ownerId: string): void => {
+  const registerCapabilityKeys = (value: string): void => {
     for (const key of capabilityKeys(value)) {
-      const previousOwner = CAPABILITY_OWNER_BY_KEY.get(key);
-      if (previousOwner !== undefined && previousOwner !== ownerId) {
-        fail(`clodex patch: identity "${value}" conflicts with another configured model`);
-      }
-      CAPABILITY_OWNER_BY_KEY.set(key, ownerId);
       CONFIGURED_CAPABILITY_KEYS.add(key);
     }
   };
@@ -148,11 +144,8 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       if (!/^[a-z0-9][a-z0-9._-]*(\[1m\])?$/.test(a)) {
         fail('clodex patch: alias "' + spec.alias + '" is not a safe lowercase alias');
       }
-      const previousId = ALIAS_TO_ID[a];
-      if (previousId !== undefined && previousId !== String(id)) {
-        fail(
-          'clodex patch: alias "' + spec.alias + '" is assigned to multiple models',
-        );
+      if (isReservedModelAlias(a)) {
+        fail('clodex patch: reserved alias "' + a + '" cannot be reassigned');
       }
       ALIAS_TO_ID[a] = String(id);
       IDENTITIES.push(a);
@@ -162,9 +155,9 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       if (spec.display) DISPLAY_BY_IDENTITY[String(id)] = String(spec.display);
     }
     if (spec.alias !== undefined) {
-      registerCapabilityKeys(String(spec.alias), String(id));
+      registerCapabilityKeys(String(spec.alias));
     }
-    registerCapabilityKeys(String(id), String(id));
+    registerCapabilityKeys(String(id));
 
     if (spec.context !== undefined) {
       const n = Number(spec.context);

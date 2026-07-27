@@ -304,9 +304,10 @@ describe('catalog model aliases', () => {
           type: 'error',
           error: {
             type: 'invalid_request_error',
-            message: `Clodex model route '${testCase.model}' is unavailable. Run \`clodex models --list\` to see available routes, or \`clodex patch\` to refresh saved aliases.`,
+            message: `Clodex model route '${testCase.model}' is unavailable. Run \`clodex models --list\` to inspect saved routes and aliases.`,
           },
         });
+        expect(response.body).not.toContain('clodex patch');
       }
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {
@@ -347,6 +348,136 @@ describe('catalog model aliases', () => {
     }
   });
 
+  it('rejects a configured alias whose saved targets conflict instead of using the default route', async () => {
+    const defaultRoute: ProxyRoute = {
+      aliasId: 'clodex:test:default-model',
+      realModelId: 'default-model',
+      displayName: 'Default Model',
+      upstreamUrl: 'https://default.example',
+      apiKey: 'provider-key',
+      modelFormat: 'anthropic',
+      providerId: 'test-provider',
+    };
+    const firstRoute: ProxyRoute = {
+      ...defaultRoute,
+      aliasId: 'clodex:first:model-a',
+      realModelId: 'model-a',
+      displayName: 'Model A',
+      upstreamUrl: 'https://first.example',
+      providerId: 'first',
+    };
+    const secondRoute: ProxyRoute = {
+      ...defaultRoute,
+      aliasId: 'clodex:second:model-b',
+      realModelId: 'model-b',
+      displayName: 'Model B',
+      upstreamUrl: 'https://second.example',
+      providerId: 'second',
+    };
+    const routeByTarget = new Map([
+      ['first:model-a', firstRoute],
+      ['second:model-b', secondRoute],
+    ]);
+    const modelAliases = resolveCatalogModelAliases([
+      { name: 'Orbit', providerId: 'first', modelId: 'model-a' },
+      { name: 'ORBIT', providerId: 'second', modelId: 'model-b' },
+    ], (providerId, modelId) => routeByTarget.get(`${providerId}:${modelId}`));
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const handle = await startProxyCatalog(
+      [defaultRoute, firstRoute, secondRoute],
+      defaultRoute.aliasId,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      modelAliases,
+    );
+
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: 'orbit',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+
+      expect(response.status).toBe(400);
+      const message = JSON.parse(response.body).error.message as string;
+      expect(message).toContain('orbit');
+      expect(message).toMatch(/conflict/i);
+      expect(message).not.toContain('clodex patch');
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('routes only the canonical alias and blocks every equivalent saved spelling', async () => {
+    const defaultRoute: ProxyRoute = {
+      aliasId: 'clodex:test:default-model',
+      realModelId: 'default-model',
+      displayName: 'Default Model',
+      upstreamUrl: 'https://default.example',
+      apiKey: 'provider-key',
+      modelFormat: 'anthropic',
+      providerId: 'test-provider',
+    };
+    const aliasRoute: ProxyRoute = {
+      ...defaultRoute,
+      aliasId: 'clodex:test:alias-model',
+      realModelId: 'alias-model',
+      displayName: 'Alias Model',
+      upstreamUrl: 'https://alias.example',
+    };
+    const modelAliases = resolveCatalogModelAliases([
+      { name: 'LuNa', providerId: 'test-provider', modelId: 'alias-model' },
+      { name: 'LUNA', providerId: 'test-provider', modelId: 'alias-model' },
+    ], (_providerId, modelId) => (
+      modelId === 'alias-model' ? aliasRoute : undefined
+    ));
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ type: 'message', model: 'alias-model' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    const handle = await startProxyCatalog(
+      [defaultRoute, aliasRoute],
+      defaultRoute.aliasId,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      modelAliases,
+    );
+
+    try {
+      const canonical = await postToProxy(handle.port, handle.token, {
+        model: 'luna',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+      expect(canonical.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      for (const savedName of ['LuNa', 'LUNA']) {
+        const blocked = await postToProxy(handle.port, handle.token, {
+          model: savedName,
+          max_tokens: 100,
+          messages: [{ role: 'user', content: 'hi' }],
+          stream: false,
+        });
+        expect(blocked.status, savedName).toBe(400);
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('routes alias names to their target route without rewriting the requested model id', async () => {
     const defaultRoute: ProxyRoute = {
       aliasId: 'anthropic-test-provider__default-model',
@@ -359,32 +490,32 @@ describe('catalog model aliases', () => {
       providerId: 'test-provider',
     };
     const providers: LocalProvider[] = [{
-      id: 'test-provider',
+      id: 'Test-Provider',
       name: 'Test Provider',
       apiKey: 'provider-key',
       models: [{
-        id: 'solver-v1',
+        id: 'Solver-V1',
         name: 'Solver V1',
         family: 'test',
         brand: 'Other',
         modelFormat: 'anthropic',
-        upstreamModelId: 'solver-v1',
+        upstreamModelId: 'Solver-V1',
         baseUrl: 'https://upstream-solver.example',
         contextWindow: 1_000_000,
       }],
     }];
     const savedAliases: ModelAlias[] = [{
       name: 'sol',
-      providerId: 'test-provider',
-      modelId: 'solver-v1',
+      providerId: 'Test-Provider',
+      modelId: 'Solver-V1',
     }];
     const resolveRoute = makeRouteResolver(providers);
-    const aliasTarget = resolveRoute('test-provider', 'solver-v1');
+    const aliasTarget = resolveRoute('Test-Provider', 'Solver-V1');
     const modelAliases = resolveCatalogModelAliases(savedAliases, resolveRoute);
-    expect(aliasTarget?.aliasId).toBe('anthropic-test-provider__solver-v1[1m]');
+    expect(aliasTarget?.aliasId).toBe('anthropic-test-provider__Solver-V1[1m]');
     expect(modelAliases).toEqual([{
       name: 'sol',
-      routeId: 'anthropic-test-provider__solver-v1[1m]',
+      routeId: 'anthropic-test-provider__Solver-V1[1m]',
     }]);
     const fetchMock = vi.fn(async () => new Response(
       JSON.stringify({ id: 'msg_1', type: 'message', role: 'assistant', model: 'solver-v1', content: [], usage: { input_tokens: 1, output_tokens: 1 } }),
@@ -415,7 +546,7 @@ describe('catalog model aliases', () => {
       expect(fetchMock).toHaveBeenCalledOnce();
       const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
       expect(String(url)).toContain('upstream-solver.example');
-      expect(JSON.parse(init.body as string).model).toBe('solver-v1');
+      expect(JSON.parse(init.body as string).model).toBe('Solver-V1');
 
       // GET /v1/models/<alias> resolves too
       const modelLookup = await new Promise<number>((resolve, reject) => {
@@ -971,6 +1102,16 @@ describe('SDK translated error logging', () => {
         .find(block => block.startsWith('event: message_start'))!;
       const messageStart = JSON.parse(messageStartBlock.split('\n')[1]!.replace('data: ', ''));
       expect(messageStart.message.usage).toEqual({
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      });
+      const messageDeltaBlock = res.body
+        .split('\n\n')
+        .find(block => block.startsWith('event: message_delta'))!;
+      const messageDelta = JSON.parse(messageDeltaBlock.split('\n')[1]!.replace('data: ', ''));
+      expect(messageDelta.usage).toEqual({
         input_tokens: expectedInputTokens,
         output_tokens: 0,
         cache_creation_input_tokens: 0,

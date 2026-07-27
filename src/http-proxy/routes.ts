@@ -3,9 +3,12 @@ import { localModelToRoute } from '../catalog.js';
 import { isSdkMigratedNpm } from '../provider-factory.js';
 import { claudeCodeClientModelId } from '../context-model-id.js';
 import type { ProxyRoute } from '../proxy.js';
-import { isValidModelAlias } from '../model-aliases.js';
+import {
+  normalizeModelAliases,
+  type StoredModelAlias,
+} from '../model-aliases.js';
 import { formatModelLabel } from '../ui.js';
-import type { FavoriteModel, LocalProvider, LocalProviderModel, ModelAlias } from '../types.js';
+import type { FavoriteModel, LocalProvider, LocalProviderModel } from '../types.js';
 
 export const HTTP_PROXY_MODEL_PREFIX = 'clodex:';
 
@@ -31,20 +34,22 @@ export interface HttpProxyRouteResult {
   unavailable: FavoriteModel[];
   unsupported: FavoriteModel[];
   aliases: ResolvedHttpProxyAlias[];
-  unavailableAliases: ModelAlias[];
+  unavailableAliases: StoredModelAlias[];
 }
 
 export interface ResolvedHttpProxyAlias {
   name: string;
   routeId: string;
   displayName: string;
+  /** Exact saved spellings represented by this canonical route. Never routed. */
+  sourceNames?: string[];
 }
 
 /** Build a positive allowlist: only favorite AI-SDK routes can leave Anthropic's path. */
 export function buildHttpProxyRoutes(
   providers: LocalProvider[],
   favorites: FavoriteModel[],
-  modelAliases: ModelAlias[] = [],
+  modelAliases: unknown = undefined,
   max = MAX_MODEL_CATALOG,
 ): HttpProxyRouteResult {
   const routes: ProxyRoute[] = [];
@@ -86,16 +91,25 @@ export function buildHttpProxyRoutes(
   }
 
   const aliases: ResolvedHttpProxyAlias[] = [];
-  const unavailableAliases: ModelAlias[] = [];
-  const seenAliases = new Set<string>();
-  for (const alias of modelAliases) {
+  const normalizedAliases = normalizeModelAliases(modelAliases);
+  const unavailableAliases: StoredModelAlias[] = [...normalizedAliases.rejected];
+  for (const { alias, sources } of normalizedAliases.accepted) {
     const route = routesByFavorite.get(`${alias.providerId}:${alias.modelId}`);
-    if (!isValidModelAlias(alias.name) || seenAliases.has(alias.name) || !route) {
-      unavailableAliases.push(alias);
+    if (!route) {
+      unavailableAliases.push(...sources);
       continue;
     }
-    seenAliases.add(alias.name);
-    aliases.push({ name: alias.name, routeId: route.aliasId, displayName: route.displayName });
+    const sourceNames = [...new Set(sources.map(source => source.name))];
+    aliases.push({
+      name: alias.name,
+      routeId: route.aliasId,
+      displayName: route.displayName,
+      ...(
+        sourceNames.length === 1 && sourceNames[0] === alias.name
+          ? {}
+          : { sourceNames }
+      ),
+    });
   }
 
   return { routes, unavailable, unsupported, aliases, unavailableAliases };
