@@ -16,7 +16,36 @@ const RESERVED_MODEL_ALIASES = new Set([
 
 export interface NormalizedModelAliases {
   aliases: ModelAlias[];
-  rejected: ModelAlias[];
+  accepted: NormalizedModelAliasSource[];
+  rejected: StoredModelAlias[];
+  rejections: ModelAliasRejection[];
+}
+
+export type ModelAliasRejectionReason =
+  | 'invalid-name'
+  | 'reserved-name'
+  | 'invalid-target'
+  | 'conflicting-targets'
+  | 'target-not-favorite';
+
+/** Unvalidated saved alias record retained exactly as read from configuration. */
+export interface StoredModelAlias {
+  name: string;
+  providerId?: unknown;
+  modelId?: unknown;
+}
+
+export interface NormalizedModelAliasSource {
+  alias: ModelAlias;
+  /** First saved record retained for compatibility with single-source consumers. */
+  source: StoredModelAlias;
+  /** Every equivalent saved record that collapsed to this canonical alias. */
+  sources: StoredModelAlias[];
+}
+
+export interface ModelAliasRejection {
+  alias: StoredModelAlias;
+  reason: ModelAliasRejectionReason;
 }
 
 export function canonicalModelAliasName(name: string): string {
@@ -45,6 +74,31 @@ export function modelAliasMatchesName(value: unknown, name: string): boolean {
     && canonicalModelAliasName(candidate) === canonicalModelAliasName(name);
 }
 
+export function modelAliasMatchesStoredName(value: unknown, name: string): boolean {
+  if (!value || typeof value !== 'object' || !('name' in value)) return false;
+  const candidate = value.name;
+  if (typeof candidate !== 'string') return false;
+  const requested = name.trim();
+  return isModelAliasNameSyntax(requested)
+    ? canonicalModelAliasName(candidate) === canonicalModelAliasName(requested)
+    : candidate.trim() === requested;
+}
+
+export function describeModelAliasRejection(reason: ModelAliasRejectionReason): string {
+  switch (reason) {
+    case 'invalid-name':
+      return 'invalid name';
+    case 'reserved-name':
+      return 'reserved client name';
+    case 'invalid-target':
+      return 'invalid target';
+    case 'conflicting-targets':
+      return 'conflicting targets';
+    case 'target-not-favorite':
+      return 'target is not a saved favorite';
+  }
+}
+
 /**
  * Produce the lowercase alias view consumed by patching and routing.
  *
@@ -53,44 +107,64 @@ export function modelAliasMatchesName(value: unknown, name: string): boolean {
  * cannot silently choose a route.
  */
 export function normalizeModelAliases(value: unknown): NormalizedModelAliases {
-  if (!Array.isArray(value)) return { aliases: [], rejected: [] };
+  if (value === undefined) {
+    return { aliases: [], accepted: [], rejected: [], rejections: [] };
+  }
+  if (!Array.isArray(value)) {
+    throw new TypeError('Saved model aliases are malformed: "modelAliases" must be an array.');
+  }
 
   interface Candidate {
-    source: ModelAlias;
+    source: StoredModelAlias;
     normalized?: ModelAlias;
     accepted?: boolean;
-    rejected?: boolean;
+    sources?: StoredModelAlias[];
+    rejectionReason?: ModelAliasRejectionReason;
   }
 
   const candidates: Candidate[] = [];
   const groups = new Map<string, Candidate[]>();
 
-  for (const item of value) {
+  for (const [index, item] of value.entries()) {
     if (
       !item
       || typeof item !== 'object'
       || typeof item.name !== 'string'
-      || typeof item.providerId !== 'string'
-      || typeof item.modelId !== 'string'
     ) {
-      continue;
+      throw new TypeError(
+        `Saved model aliases are malformed: "modelAliases[${index}]" `
+        + 'must be an object with a string "name".',
+      );
     }
 
-    const source = item as ModelAlias;
-    const normalized = {
-      name: canonicalModelAliasName(source.name),
-      providerId: source.providerId.trim(),
-      modelId: source.modelId.trim(),
-    };
+    const source = item as StoredModelAlias;
     const candidate: Candidate = { source };
     candidates.push(candidate);
 
     if (
-      !isValidModelAlias(normalized.name)
-      || !normalized.providerId
-      || !normalized.modelId
+      typeof source.providerId !== 'string'
+      || typeof source.modelId !== 'string'
     ) {
-      candidate.rejected = true;
+      candidate.rejectionReason = 'invalid-target';
+      continue;
+    }
+
+    const normalized = {
+      name: canonicalModelAliasName(source.name),
+      providerId: source.providerId,
+      modelId: source.modelId,
+    };
+
+    if (!isModelAliasNameSyntax(normalized.name)) {
+      candidate.rejectionReason = 'invalid-name';
+      continue;
+    }
+    if (isReservedModelAlias(normalized.name)) {
+      candidate.rejectionReason = 'reserved-name';
+      continue;
+    }
+    if (!normalized.providerId.trim() || !normalized.modelId.trim()) {
+      candidate.rejectionReason = 'invalid-target';
       continue;
     }
 
@@ -108,18 +182,35 @@ export function normalizeModelAliases(value: unknown): NormalizedModelAliases {
     );
     if (targets.size === 1) {
       group[0]!.accepted = true;
+      group[0]!.sources = group.map(candidate => candidate.source);
     } else {
-      for (const candidate of group) candidate.rejected = true;
+      for (const candidate of group) candidate.rejectionReason = 'conflicting-targets';
     }
   }
 
+  const rejections = candidates
+    .filter((candidate): candidate is Candidate & { rejectionReason: ModelAliasRejectionReason } => (
+      candidate.rejectionReason !== undefined
+    ))
+    .map(candidate => ({
+      alias: candidate.source,
+      reason: candidate.rejectionReason,
+    }));
+  const accepted = candidates
+    .filter((candidate): candidate is Candidate & { normalized: ModelAlias } => (
+      candidate.accepted === true && candidate.normalized !== undefined
+    ))
+    .map(candidate => ({
+      alias: candidate.normalized,
+      source: candidate.source,
+      sources: candidate.sources ?? [candidate.source],
+    }));
+
   return {
-    aliases: candidates
-      .filter(candidate => candidate.accepted)
-      .map(candidate => candidate.normalized!),
-    rejected: candidates
-      .filter(candidate => candidate.rejected)
-      .map(candidate => candidate.source),
+    aliases: accepted.map(entry => entry.alias),
+    accepted,
+    rejected: rejections.map(rejection => rejection.alias),
+    rejections,
   };
 }
 

@@ -37,7 +37,12 @@ import { loadRegistry } from './registry/io.js';
 import { findClaudeBinary, getInstalledClaudeVersion } from './launch.js';
 import { httpProxyDisplayName, httpProxyModelId } from './http-proxy/routes.js';
 import { stripOneMContextSuffix } from './context-model-id.js';
-import { normalizeModelAliases } from './model-aliases.js';
+import {
+  describeModelAliasRejection,
+  normalizeModelAliases,
+  type ModelAliasRejection,
+  type StoredModelAlias,
+} from './model-aliases.js';
 import {
   applyClodexPatches,
   formatPatchSiteLine,
@@ -95,6 +100,9 @@ export interface DesiredPatchConfig {
   config: PatchScriptModelConfig;
   /** Model ids whose context window is unknown (defaulting to Claude Code's 200k). */
   unknownWindows: string[];
+  /** Saved aliases excluded from the patch while remaining in configuration. */
+  rejectedAliases: StoredModelAlias[];
+  rejectedAliasRejections: ModelAliasRejection[];
 }
 
 /** Model metadata the patch bakes in, resolved from the registry models cache. */
@@ -112,16 +120,30 @@ export interface PatchModelMeta {
  */
 export function buildPatchModelConfig(
   favorites: Array<{ providerId: string; modelId: string }>,
-  aliases: Array<{ name: string; providerId: string; modelId: string }>,
+  aliases: unknown,
   modelMetaFor: (providerId: string, modelId: string) => PatchModelMeta | undefined,
 ): DesiredPatchConfig {
   const config: PatchScriptModelConfig = {};
   const unknownWindows: string[] = [];
+  const normalizedAliases = normalizeModelAliases(aliases);
+  const favoriteTargets = new Set(
+    favorites.map(favorite => `${favorite.providerId}:${favorite.modelId}`),
+  );
+  const targetRejections: ModelAliasRejection[] = normalizedAliases.accepted
+    .filter(({ alias }) => (
+      !favoriteTargets.has(`${alias.providerId}:${alias.modelId}`)
+    ))
+    .flatMap(({ sources }) => sources.map(source => ({
+      alias: source,
+      reason: 'target-not-favorite',
+    })));
   const aliasByFavorite = new Map(
-    normalizeModelAliases(aliases).aliases.map(alias => [
-      `${alias.providerId}:${alias.modelId}`,
-      alias.name,
-    ]),
+    normalizedAliases.aliases
+      .filter(alias => favoriteTargets.has(`${alias.providerId}:${alias.modelId}`))
+      .map(alias => [
+        `${alias.providerId}:${alias.modelId}`,
+        alias.name,
+      ]),
   );
 
   for (const favorite of favorites) {
@@ -138,7 +160,29 @@ export function buildPatchModelConfig(
     if (display) entry.display = display;
     config[id] = entry;
   }
-  return { config, unknownWindows };
+  return {
+    config,
+    unknownWindows,
+    rejectedAliases: [
+      ...normalizedAliases.rejected,
+      ...targetRejections.map(rejection => rejection.alias),
+    ],
+    rejectedAliasRejections: [
+      ...normalizedAliases.rejections,
+      ...targetRejections,
+    ],
+  };
+}
+
+export function reportRejectedModelAliases(
+  rejections: ModelAliasRejection[],
+): void {
+  for (const rejection of rejections) {
+    p.log.warn(
+      `Saved model alias ${JSON.stringify(rejection.alias.name)} was not patched — `
+      + `${describeModelAliasRejection(rejection.reason)}. The saved entry was preserved.`,
+    );
+  }
 }
 
 /** Canonical (key-sorted) hash of a patch model config. */
@@ -154,7 +198,7 @@ export function computePatchConfigHash(config: PatchScriptModelConfig): string {
 export function buildDesiredPatchConfig(): DesiredPatchConfig {
   const prefs = loadPreferences();
   const favorites = prefs.favoriteModels ?? [];
-  const aliases = prefs.modelAliases ?? [];
+  const aliases = prefs.modelAliases;
   const registry = loadRegistry();
 
   const meta = new Map<string, PatchModelMeta>();
@@ -427,6 +471,7 @@ export async function runPatchCommand(opts: { restore?: boolean; trace?: boolean
   for (const id of desired.unknownWindows) {
     p.log.warn(`No context window metadata for ${id} — Claude Code will assume the 200k default.`);
   }
+  reportRejectedModelAliases(desired.rejectedAliasRejections);
 
   const configHash = computePatchConfigHash(desired.config);
   const manifest = readPatchManifest();

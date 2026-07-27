@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as p from '@clack/prompts';
 import type { ModelInfo } from '../src/types.js';
 import type { ServerModelInfo } from '../src/server/models.js';
 
@@ -16,6 +17,7 @@ const state = vi.hoisted(() => ({
   favoritesOnly: false,
   maskGatewayIds: true,
   startMode: 'quick' as 'configure' | 'quick' | null,
+  modelAliases: [] as Array<{ name: string; providerId: string; modelId: string }>,
   startServerOptions: null as any,
   close: vi.fn<() => Promise<void>>(async () => undefined),
   askServerStartMode: vi.fn(async () => 'quick' as 'configure' | 'quick' | null),
@@ -47,7 +49,10 @@ vi.mock('../src/config.js', () => ({
   getServerFavoritesOnly: () => false,
   getServerFreeModelsOnly: () => false,
   getServerListenMode: () => state.savedListenMode,
-  loadPreferences: () => ({ favoriteModels: [] }),
+  loadPreferences: () => ({
+    favoriteModels: [],
+    modelAliases: state.modelAliases,
+  }),
   setSavedServerPassword: (password: string) => {
     state.savedPassword = password;
   },
@@ -147,6 +152,7 @@ describe('runServerCommand', () => {
     state.favoritesOnly = false;
     state.maskGatewayIds = true;
     state.startMode = 'configure';
+    state.modelAliases = [];
     state.startServerOptions = null;
     state.close.mockClear();
     state.askServerStartMode.mockClear();
@@ -202,6 +208,46 @@ describe('runServerCommand', () => {
       pid: process.pid,
     }));
     expect(discovery.unregister).toHaveBeenCalledOnce();
+  });
+
+  it('reports exact inactive aliases and passes only accepted names to the server', async () => {
+    state.modelAliases = [
+      { name: 'Active', providerId: 'zen', modelId: 'claude-test' },
+      { name: 'Orbit', providerId: 'zen', modelId: 'claude-test' },
+      { name: 'ORBIT', providerId: 'other', modelId: 'model-b' },
+      { name: 'default', providerId: 'zen', modelId: 'claude-test' },
+      { name: 'ArChIvEd', providerId: 'missing', modelId: 'gone' },
+      { name: 'ARCHIVED', providerId: 'missing', modelId: 'gone' },
+      { name: 'CLAUDE-TEST', providerId: 'zen', modelId: 'claude-test' },
+    ];
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+
+    try {
+      const { runServerCommand } = await import('../src/server/index.js');
+      const result = runServerCommand({ quick: true, noDiscovery: true });
+      await vi.waitFor(() => expect(state.startServerOptions).not.toBeNull());
+      process.emit('SIGINT');
+
+      await expect(result).resolves.toBe(0);
+      expect(warn).toHaveBeenCalledWith(
+        '6 saved model aliases inactive. Saved entries were preserved.\n'
+        + '  "Orbit" — conflicting targets\n'
+        + '  "ORBIT" — conflicting targets\n'
+        + '  "default" — reserved client name\n'
+        + '  "ArChIvEd" — target unavailable\n'
+        + '  "ARCHIVED" — target unavailable\n'
+        + '  "CLAUDE-TEST" — conflicts with a catalog model id',
+      );
+      expect(state.startServerOptions.aliasNames).toEqual(new Set(['active']));
+      expect(state.startServerOptions.catalog.get('active')).toMatchObject({
+        id: 'claude-test',
+        providerId: 'zen',
+      });
+      expect(state.startServerOptions.catalog.get('orbit')).toBeUndefined();
+      expect(state.startServerOptions.catalog.get('archived')).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('--no-discovery starts the server without registering it for wrapper discovery', async () => {

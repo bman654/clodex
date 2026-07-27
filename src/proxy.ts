@@ -57,7 +57,6 @@ import {
 import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-websocket.js';
 import { resolveContextWindow } from './context-window.js';
 import { listenTcpServer } from './listener-ready.js';
-import { canonicalModelAliasName } from './model-aliases.js';
 
 type ProxyLog = (message: string | (() => string)) => void;
 
@@ -273,7 +272,24 @@ function lookupRoute(byAlias: Map<string, ProxyRoute>, id: string): ProxyRoute |
 /** Short alias name → route id, resolvable in request bodies alongside route aliasIds. */
 export interface ProxyModelAlias {
   name: string;
-  routeId: string;
+  /** Exact spelling retained in configuration, used only for diagnostics and blocking. */
+  savedName?: string;
+  /** All exact saved spellings represented by this canonical alias. Never routed. */
+  sourceNames?: string[];
+  routeId?: string;
+  unavailableReason?: string;
+}
+
+function configuredAliasLookupNames(alias: ProxyModelAlias): string[] {
+  const sourceNames = [
+    alias.name,
+    ...(alias.savedName === undefined ? [] : [alias.savedName]),
+    ...(alias.sourceNames ?? []),
+  ];
+  return [...new Set(sourceNames.flatMap(name => {
+    const trimmed = name.trim();
+    return trimmed === name ? [name] : [name, trimmed];
+  }))].map(normalizeRouteLookupId);
 }
 
 /** Multi-model proxy: routes each request by body.model to the correct upstream. */
@@ -294,21 +310,22 @@ export async function startProxyCatalog(
   }
 
   const byAlias = new Map(routes.map(r => [normalizeRouteLookupId(r.aliasId), r]));
-  const routesByModelAlias = new Map<string, ProxyRoute>();
   const configuredAliasNames = new Set(
-    (modelAliases ?? []).map(alias => (
-      canonicalModelAliasName(normalizeRouteLookupId(alias.name))
-    )),
+    (modelAliases ?? []).flatMap(configuredAliasLookupNames),
+  );
+  const unavailableAliasReasons = new Map(
+    (modelAliases ?? [])
+      .filter(alias => alias.unavailableReason !== undefined)
+      .flatMap(alias => configuredAliasLookupNames(alias).map(name => (
+        [name, alias.unavailableReason!] as const
+      ))),
   );
   for (const alias of modelAliases ?? []) {
+    if (alias.routeId === undefined || alias.unavailableReason !== undefined) continue;
     const route = lookupRoute(byAlias, alias.routeId);
-    const aliasId = canonicalModelAliasName(normalizeRouteLookupId(alias.name));
-    if (route) routesByModelAlias.set(aliasId, route);
+    const aliasId = normalizeRouteLookupId(alias.name);
+    if (route && !byAlias.has(aliasId)) byAlias.set(aliasId, route);
   }
-  const lookupCatalogRoute = (id: string) => (
-    lookupRoute(byAlias, id)
-    ?? routesByModelAlias.get(canonicalModelAliasName(normalizeRouteLookupId(id)))
-  );
   const defaultRoute = lookupRoute(byAlias, defaultAliasId) ?? routes[0]!;
 
   const plog = makeProxyLog(debug, debugLogPath);
@@ -343,7 +360,7 @@ export async function startProxyCatalog(
       const modelPathMatch = req.url.match(/^\/v1\/models\/([^?]+)/);
       if (modelPathMatch) {
         const id = decodeURIComponent(modelPathMatch[1]);
-        const route = lookupCatalogRoute(id);
+        const route = lookupRoute(byAlias, id);
         if (route) {
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify(formatAnthropicModelEntry(route.aliasId, route.displayName, route.contextWindow)));
@@ -393,17 +410,22 @@ export async function startProxyCatalog(
 
       // Per-request route resolution: look up the alias, fall back to default
       const resolvedRoute = typeof originalModel === 'string'
-        ? lookupCatalogRoute(originalModel)
+        ? lookupRoute(byAlias, originalModel)
         : undefined;
       const configuredModelUnavailable = typeof originalModel === 'string'
         && (
           normalizeRouteLookupId(originalModel).startsWith('clodex:')
-          || configuredAliasNames.has(
-            canonicalModelAliasName(normalizeRouteLookupId(originalModel)),
-          )
+          || configuredAliasNames.has(normalizeRouteLookupId(originalModel))
         );
       if (!resolvedRoute && configuredModelUnavailable) {
-        anthropicError(res, 400, routeUnavailableMessage(originalModel));
+        anthropicError(
+          res,
+          400,
+          routeUnavailableMessage(
+            originalModel,
+            unavailableAliasReasons.get(normalizeRouteLookupId(originalModel)),
+          ),
+        );
         return;
       }
       const route = resolvedRoute ?? defaultRoute;

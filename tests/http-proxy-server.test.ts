@@ -702,8 +702,9 @@ describe('selective HTTP proxy', () => {
         name: 'llama',
         routeId: 'clodex:groq:llama-3.3-70b',
         displayName: 'Llama 3.3 70B (Groq)',
+        sourceNames: ['LLaMa', 'LLAMA'],
       }],
-      reservedModelIds: ['missing-route'],
+      reservedModelIds: ['missing-route', 'orbit', 'Orbit', 'ORBIT'],
       adapterHandle: {
         port: adapterPort,
         token: 'adapter-local-token',
@@ -785,7 +786,7 @@ describe('selective HTTP proxy', () => {
         statusCode: 200,
       }));
 
-      const aliasBody = JSON.stringify({ model: 'LLaMa', messages: [], stream: true });
+      const aliasBody = JSON.stringify({ model: 'llama', messages: [], stream: true });
       const aliasSocket = await connectMitm(proxy.port, certificates.caCert);
       aliasSocket.resume();
       aliasSocket.write([
@@ -804,11 +805,11 @@ describe('selective HTTP proxy', () => {
       // The alias name reaches the adapter unrewritten: the adapter resolves it
       // via its own modelAliases and echoes it back as the response model id.
       expect(JSON.parse(adapterBody)).toMatchObject({
-        model: 'LLaMa',
+        model: 'llama',
         messages: [],
       });
       const aliasEntries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-      expect(aliasEntries.find(entry => !entry.event && entry.modelId === 'LLaMa')).toMatchObject({
+      expect(aliasEntries.find(entry => !entry.event && entry.modelId === 'llama')).toMatchObject({
         provider: 'groq',
         route: 'translated',
       });
@@ -840,6 +841,9 @@ describe('selective HTTP proxy', () => {
 
       const rejectedCases = [
         { model: 'clodex:groq:typo', path: '/v1/messages' },
+        { model: 'LLaMa', path: '/v1/messages' },
+        { model: 'LLAMA', path: '/v1/messages' },
+        { model: 'orbit', path: '/v1/messages' },
         { model: 'missing-route', path: '/v1/messages' },
         { model: 'missing-route[1m]', path: '/v1/messages' },
         { model: 'missing-route[1M]', path: '/v1/messages' },
@@ -858,7 +862,7 @@ describe('selective HTTP proxy', () => {
         expect(response, `${testCase.path} ${testCase.model}`).toContain('400 Bad Request');
         expect(response).toContain('invalid_request_error');
         expect(response).toContain('clodex models --list');
-        expect(response).toContain('clodex patch');
+        expect(response).not.toContain('clodex patch');
       }
 
       const compressedUnavailableBody = JSON.stringify({ model: 'missing-route', messages: [] });
@@ -871,6 +875,8 @@ describe('selective HTTP proxy', () => {
       );
       expect(compressedUnavailableResponse).toContain('400 Bad Request');
       expect(compressedUnavailableResponse).toContain('invalid_request_error');
+      expect(compressedUnavailableResponse).toContain('clodex models --list');
+      expect(compressedUnavailableResponse).not.toContain('clodex patch');
 
       const unreadableCompressedResponse = await requestMitm(
         proxy.port,

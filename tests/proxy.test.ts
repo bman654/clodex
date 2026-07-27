@@ -304,9 +304,10 @@ describe('catalog model aliases', () => {
           type: 'error',
           error: {
             type: 'invalid_request_error',
-            message: `Clodex model route '${testCase.model}' is unavailable. Run \`clodex models --list\` to see available routes, or \`clodex patch\` to refresh saved aliases.`,
+            message: `Clodex model route '${testCase.model}' is unavailable. Run \`clodex models --list\` to inspect saved routes and aliases.`,
           },
         });
+        expect(response.body).not.toContain('clodex patch');
       }
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {
@@ -341,6 +342,136 @@ describe('catalog model aliases', () => {
         expect(JSON.parse(response.body).error.type).toBe('invalid_request_error');
       }
       expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects a configured alias whose saved targets conflict instead of using the default route', async () => {
+    const defaultRoute: ProxyRoute = {
+      aliasId: 'clodex:test:default-model',
+      realModelId: 'default-model',
+      displayName: 'Default Model',
+      upstreamUrl: 'https://default.example',
+      apiKey: 'provider-key',
+      modelFormat: 'anthropic',
+      providerId: 'test-provider',
+    };
+    const firstRoute: ProxyRoute = {
+      ...defaultRoute,
+      aliasId: 'clodex:first:model-a',
+      realModelId: 'model-a',
+      displayName: 'Model A',
+      upstreamUrl: 'https://first.example',
+      providerId: 'first',
+    };
+    const secondRoute: ProxyRoute = {
+      ...defaultRoute,
+      aliasId: 'clodex:second:model-b',
+      realModelId: 'model-b',
+      displayName: 'Model B',
+      upstreamUrl: 'https://second.example',
+      providerId: 'second',
+    };
+    const routeByTarget = new Map([
+      ['first:model-a', firstRoute],
+      ['second:model-b', secondRoute],
+    ]);
+    const modelAliases = resolveCatalogModelAliases([
+      { name: 'Orbit', providerId: 'first', modelId: 'model-a' },
+      { name: 'ORBIT', providerId: 'second', modelId: 'model-b' },
+    ], (providerId, modelId) => routeByTarget.get(`${providerId}:${modelId}`));
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const handle = await startProxyCatalog(
+      [defaultRoute, firstRoute, secondRoute],
+      defaultRoute.aliasId,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      modelAliases,
+    );
+
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: 'orbit',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+
+      expect(response.status).toBe(400);
+      const message = JSON.parse(response.body).error.message as string;
+      expect(message).toContain('orbit');
+      expect(message).toMatch(/conflict/i);
+      expect(message).not.toContain('clodex patch');
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('routes only the canonical alias and blocks every equivalent saved spelling', async () => {
+    const defaultRoute: ProxyRoute = {
+      aliasId: 'clodex:test:default-model',
+      realModelId: 'default-model',
+      displayName: 'Default Model',
+      upstreamUrl: 'https://default.example',
+      apiKey: 'provider-key',
+      modelFormat: 'anthropic',
+      providerId: 'test-provider',
+    };
+    const aliasRoute: ProxyRoute = {
+      ...defaultRoute,
+      aliasId: 'clodex:test:alias-model',
+      realModelId: 'alias-model',
+      displayName: 'Alias Model',
+      upstreamUrl: 'https://alias.example',
+    };
+    const modelAliases = resolveCatalogModelAliases([
+      { name: 'LuNa', providerId: 'test-provider', modelId: 'alias-model' },
+      { name: 'LUNA', providerId: 'test-provider', modelId: 'alias-model' },
+    ], (_providerId, modelId) => (
+      modelId === 'alias-model' ? aliasRoute : undefined
+    ));
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ type: 'message', model: 'alias-model' }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    const handle = await startProxyCatalog(
+      [defaultRoute, aliasRoute],
+      defaultRoute.aliasId,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      modelAliases,
+    );
+
+    try {
+      const canonical = await postToProxy(handle.port, handle.token, {
+        model: 'luna',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+      expect(canonical.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      for (const savedName of ['LuNa', 'LUNA']) {
+        const blocked = await postToProxy(handle.port, handle.token, {
+          model: savedName,
+          max_tokens: 100,
+          messages: [{ role: 'user', content: 'hi' }],
+          stream: false,
+        });
+        expect(blocked.status, savedName).toBe(400);
+      }
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       handle.close();
       vi.unstubAllGlobals();
@@ -404,7 +535,7 @@ describe('catalog model aliases', () => {
 
     try {
       const res = await postToProxy(handle.port, handle.token, {
-        model: 'SoL',
+        model: 'sol',
         max_tokens: 100,
         messages: [{ role: 'user', content: 'hi' }],
         stream: false,
@@ -420,7 +551,7 @@ describe('catalog model aliases', () => {
       // GET /v1/models/<alias> resolves too
       const modelLookup = await new Promise<number>((resolve, reject) => {
         http.get(
-          { hostname: '127.0.0.1', port: handle.port, path: '/v1/models/SoL' },
+          { hostname: '127.0.0.1', port: handle.port, path: '/v1/models/sol' },
           res2 => { res2.resume(); resolve(res2.statusCode ?? 0); },
         ).on('error', reject);
       });

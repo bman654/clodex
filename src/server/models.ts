@@ -2,10 +2,7 @@
 import { resolveContextWindow } from '../context-window.js';
 import { aliasModelId } from '../proxy.js';
 import { httpProxyModelId } from '../http-proxy/routes.js';
-import {
-  canonicalModelAliasName,
-  normalizeModelAliases,
-} from '../model-aliases.js';
+import { normalizeModelAliases } from '../model-aliases.js';
 import { maskGatewayModelId } from './vendor-mask.js';
 import type { FreeStatus } from '../free-models.js';
 import type { ModelAlias } from '../types.js';
@@ -64,7 +61,6 @@ export interface ServerModelInfo {
 
 export interface ModelCatalog {
   get: (id: string) => ServerModelInfo | undefined;
-  isAlias: (id: string) => boolean;
   list: () => ServerModelInfo[];
 }
 
@@ -92,7 +88,6 @@ export function createModelCatalog(models: ServerModelInfo[]): ModelCatalog {
 
   return {
     get: (id: string) => byId.get(id),
-    isAlias: () => false,
     list: () => [...models],
   };
 }
@@ -173,7 +168,6 @@ export function createGatewayModelCatalog(
   modelAliases?: ModelAlias[],
 ): ModelCatalog {
   const byId = new Map<string, ServerModelInfo>();
-  const byModelAlias = new Map<string, ServerModelInfo>();
   for (const model of models) {
     byId.set(model.id, model);
     const alias = exposedGatewayAliasId(model, opts);
@@ -192,18 +186,11 @@ export function createGatewayModelCatalog(
     const target = models.find(
       model => gatewayProviderId(model) === alias.providerId && model.id === alias.modelId,
     );
-    if (target) byModelAlias.set(canonicalModelAliasName(alias.name), target);
+    if (target) byId.set(alias.name, target);
   }
 
   return {
-    get: (id: string) => (
-      byId.get(id)
-      ?? byModelAlias.get(canonicalModelAliasName(id))
-    ),
-    isAlias: (id: string) => (
-      !byId.has(id)
-      && byModelAlias.has(canonicalModelAliasName(id))
-    ),
+    get: (id: string) => byId.get(id),
     list: () => [...models],
   };
 }

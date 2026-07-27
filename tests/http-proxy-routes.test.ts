@@ -87,7 +87,7 @@ describe('HTTP proxy routes', () => {
       providers,
       [{ providerId: 'groq', modelId: 'llama-3.3-70b' }],
       [
-        { name: 'LLaMa', providerId: 'groq', modelId: 'llama-3.3-70b' },
+        { name: 'llama', providerId: 'groq', modelId: 'llama-3.3-70b' },
         { name: 'missing', providerId: 'groq', modelId: 'gone' },
         { name: 'bad:name', providerId: 'groq', modelId: 'llama-3.3-70b' },
         { name: 'DeFaUlT', providerId: 'groq', modelId: 'llama-3.3-70b' },
@@ -129,7 +129,7 @@ describe('HTTP proxy routes', () => {
       [{ providerId: 'groq', modelId: 'llama-3.3-70b' }],
       [
         { name: 'LLaMa', providerId: 'groq', modelId: 'llama-3.3-70b' },
-        { name: 'llama', providerId: 'groq', modelId: 'llama-3.3-70b' },
+        { name: 'LLAMA', providerId: 'groq', modelId: 'llama-3.3-70b' },
       ],
     );
 
@@ -137,6 +137,7 @@ describe('HTTP proxy routes', () => {
       name: 'llama',
       routeId: 'clodex:groq:llama-3.3-70b[1m]',
       displayName: 'Llama 3.3 70B (Groq Cloud)',
+      sourceNames: ['LLaMa', 'LLAMA'],
     }]);
     expect(result.unavailableAliases).toEqual([]);
   });
@@ -154,5 +155,6 @@ describe('HTTP proxy routes', () => {
     expect(routes.aliases[0]?.name).toBe(
       patch.config['clodex:groq:llama-3.3-70b']?.alias,
     );
+    expect(routes.aliases[0]?.sourceNames).toEqual(['LLaMa']);
   });
 });

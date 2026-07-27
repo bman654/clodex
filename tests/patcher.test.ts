@@ -1,4 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as p from '@clack/prompts';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,6 +7,7 @@ import {
   buildPatchModelConfig,
   computePatchConfigHash,
   evaluatePatchState,
+  reportRejectedModelAliases,
   summarizePatchResults,
   tryAcquirePatchLock,
   type PatchManifest,
@@ -25,6 +27,20 @@ describe('buildPatchModelConfig', () => {
     ['openai-oauth:gpt-5.6-sol', { contextWindow: 272_000, displayName: 'GPT-5.6 Sol (OpenAI (ChatGPT))' }],
     ['openai-oauth:gpt-5.6-luna', { contextWindow: 272_000, displayName: 'GPT-5.6 Luna (OpenAI (ChatGPT))' }],
   ]);
+  const rejectedAliases = [
+    { name: 'Orbit', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+    { name: 'ORBIT', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' },
+    { name: 'default', providerId: 'openai', modelId: 'davinci-002' },
+    { name: 'bad:name', providerId: 'openai', modelId: 'mystery-model' },
+    { name: 'ArChIvEd', providerId: 'openai', modelId: 'not-a-favorite' },
+  ];
+  const rejectedAliasRejections = [
+    { alias: rejectedAliases[0]!, reason: 'conflicting-targets' as const },
+    { alias: rejectedAliases[1]!, reason: 'conflicting-targets' as const },
+    { alias: rejectedAliases[2]!, reason: 'reserved-name' as const },
+    { alias: rejectedAliases[3]!, reason: 'invalid-name' as const },
+    { alias: rejectedAliases[4]!, reason: 'target-not-favorite' as const },
+  ];
 
   it('builds clodex-prefixed entries with aliases, context windows, and display labels', () => {
     const { config, unknownWindows } = buildPatchModelConfig(
@@ -80,6 +96,35 @@ describe('buildPatchModelConfig', () => {
     expect(config['clodex:openai-oauth:gpt-5.6-sol']?.alias).toBe('sol');
     expect(config['clodex:openai-oauth:gpt-5.6-luna']?.alias).toBeUndefined();
     expect(config['clodex:openai:mystery-model']?.alias).toBeUndefined();
+  });
+
+  it('returns every rejected saved alias so the patch command can report it', () => {
+    const desired = buildPatchModelConfig(
+      favorites,
+      rejectedAliases,
+      (providerId, modelId) => meta.get(`${providerId}:${modelId}`),
+    );
+
+    expect(desired.rejectedAliases).toEqual(rejectedAliases);
+    expect(desired.rejectedAliasRejections).toEqual(rejectedAliasRejections);
+  });
+
+  it('reports each rejected alias with its exact stored name and reason', () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+
+    try {
+      reportRejectedModelAliases(rejectedAliasRejections);
+
+      expect(warn.mock.calls.map(([message]) => String(message))).toEqual([
+        'Saved model alias "Orbit" was not patched — conflicting targets. The saved entry was preserved.',
+        'Saved model alias "ORBIT" was not patched — conflicting targets. The saved entry was preserved.',
+        'Saved model alias "default" was not patched — reserved client name. The saved entry was preserved.',
+        'Saved model alias "bad:name" was not patched — invalid name. The saved entry was preserved.',
+        'Saved model alias "ArChIvEd" was not patched — target is not a saved favorite. The saved entry was preserved.',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
@@ -344,6 +389,19 @@ describe('patch script identity naming', () => {
     const out = runPatchScript({ 'clodex:openai-oauth:gpt-5.6-sol': { alias: 'sol', context: 272_000 } });
     expect(out).toContain('{value:"sol",label:"Sol",description:"Custom model (clodex:openai-oauth:gpt-5.6-sol)"}');
     expect(out).toContain('Additional custom models: sol.');
+  });
+
+  it('supports aliases that match object prototype property names', () => {
+    const out = runPatchScript({
+      'clodex:openai:model': {
+        alias: 'constructor',
+        context: 128_000,
+        display: 'Model',
+      },
+    });
+
+    expect(out).toContain('case"constructor":return "constructor";');
+    expect(out).toContain('{value:"constructor",label:"Constructor",description:"Model"}');
   });
 
   it('is idempotent — re-running the same patch changes nothing', () => {

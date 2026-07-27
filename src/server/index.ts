@@ -25,6 +25,7 @@ import { loadRegistry } from '../registry/io.js';
 import type { ServerModelInfo, GatewayModelOptions } from './models.js';
 import {
   upstreamModelId,
+  gatewayProviderId,
   gatewayProviderLabel,
   buildDedupedModelRows,
 } from './models.js';
@@ -53,7 +54,10 @@ import {
   unregisterServerRuntimeState,
 } from '../server-runtime.js';
 import { getInferenceRequestLogPath, getSessionLogPath } from '../trace-log.js';
-import { normalizeModelAliases } from '../model-aliases.js';
+import {
+  describeModelAliasRejection,
+  normalizeModelAliases,
+} from '../model-aliases.js';
 
 export interface ServerRunConfig {
   exposedProviders: string[] | null;
@@ -446,9 +450,43 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   // ids — the same alias table the proxy-mode MITM resolves — so a patched
   // Claude Code or a direct API client can send e.g. "luna". They are never
   // advertised in /models listings; see createGatewayModelCatalog.
-  const modelAliases = normalizeModelAliases(
-    loadPreferences().modelAliases,
-  ).aliases;
+  const normalizedAliases = normalizeModelAliases(loadPreferences().modelAliases);
+  const baseCatalog = createGatewayModelCatalog(models, gateway);
+  const unavailableAliases = normalizedAliases.accepted.filter(({ alias }) => (
+    !models.some(model => (
+      gatewayProviderId(model) === alias.providerId
+      && model.id === alias.modelId
+    ))
+  ));
+  const collidingAliases = normalizedAliases.accepted.filter(({ alias }) => (
+    baseCatalog.get(alias.name) !== undefined
+  ));
+  const collidingAliasNames = new Set(collidingAliases.map(({ alias }) => alias.name));
+  const targetUnavailableAliases = unavailableAliases.filter(({ alias }) => (
+    !collidingAliasNames.has(alias.name)
+  ));
+  const inactiveAliasNames = new Set([
+    ...targetUnavailableAliases.map(({ alias }) => alias.name),
+    ...collidingAliasNames,
+  ]);
+  const modelAliases = normalizedAliases.aliases.filter(alias => !inactiveAliasNames.has(alias.name));
+  const aliasWarnings = [
+    ...normalizedAliases.rejections.map(rejection => (
+      `${JSON.stringify(rejection.alias.name)} — ${describeModelAliasRejection(rejection.reason)}`
+    )),
+    ...targetUnavailableAliases.flatMap(({ sources }) => sources.map(source => (
+      `${JSON.stringify(source.name)} — target unavailable`
+    ))),
+    ...collidingAliases.flatMap(({ sources }) => sources.map(source => (
+      `${JSON.stringify(source.name)} — conflicts with a catalog model id`
+    ))),
+  ];
+  if (aliasWarnings.length > 0) {
+    p.log.warn(
+      `${aliasWarnings.length} saved model alias${aliasWarnings.length === 1 ? '' : 'es'} inactive. `
+      + `Saved entries were preserved.\n  ${aliasWarnings.join('\n  ')}`,
+    );
+  }
   const inferenceLogPath = getInferenceRequestLogPath();
   const webSocketDiagnosticsLogPath = options.wsDiagnostics
     ? getSessionLogPath('server-websocket-diagnostics', 'jsonl')
@@ -460,6 +498,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     serverPassword,
     catalog: createGatewayModelCatalog(models, gateway, modelAliases),
     gateway,
+    aliasNames: new Set(modelAliases.map(alias => alias.name)),
     inferenceLogPath,
     webSocketDiagnosticsLogPath,
   });

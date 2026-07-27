@@ -1245,6 +1245,7 @@ describe('server router', () => {
       return startTestServer({
         catalog: createGatewayModelCatalog([lunaModel], gateway, aliases),
         gateway,
+        aliasNames: new Set(aliases.map(alias => alias.name)),
       });
     }
 
@@ -1260,38 +1261,6 @@ describe('server router', () => {
       expect(response.status).toBe(200);
       // Echo invariant: the alias the client sent, not the canonical/display id.
       expect(await response.json()).toMatchObject({ id: 'msg-test', model: 'luna' });
-    });
-
-    it('keeps exact catalog-id precedence when its case fold collides with an alias', async () => {
-      const exactModel: ServerModelInfo = {
-        ...lunaModel,
-        id: 'Model-X',
-        name: 'Exact Model',
-        providerId: 'exact-provider',
-        providerLabel: 'Exact Provider',
-        sourceBackend: 'exact-provider',
-      };
-      const collision = [{
-        name: 'model-x',
-        providerId: lunaModel.providerId!,
-        modelId: lunaModel.id,
-      }];
-      const server = await startTestServer({
-        catalog: createGatewayModelCatalog([exactModel, lunaModel], gateway, collision),
-        gateway,
-      });
-
-      const response = await fetch(`${server.url}/anthropic/v1/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'Model-X', messages: [{ role: 'user', content: 'hi' }] }),
-      });
-
-      expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({
-        id: 'msg-test',
-        model: 'Exact Model (Exact Provider)',
-      });
     });
 
     it('resolves masked and canonical clodex ids when masking is on', async () => {
@@ -1321,6 +1290,57 @@ describe('server router', () => {
 
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ id: 'chatcmpl-test', model: 'luna' });
+    });
+
+    it('rejects conflicting saved aliases on both request formats without selecting a provider', async () => {
+      const solModel: ServerModelInfo = {
+        ...lunaModel,
+        id: 'gpt-5.6-sol',
+        name: 'GPT-5.6 Sol',
+      };
+      const conflictingAliases = [
+        { name: 'Orbit', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' },
+        { name: 'ORBIT', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+      ];
+      const server = await startTestServer({
+        catalog: createGatewayModelCatalog(
+          [lunaModel, solModel],
+          gateway,
+          conflictingAliases,
+        ),
+        gateway,
+        aliasNames: new Set(),
+      });
+      await vi.waitFor(async () => {
+        const health = await fetch(`${server.url}/health`);
+        expect(health.status).toBe(200);
+      });
+
+      for (const path of [
+        '/anthropic/v1/messages',
+        '/openai/v1/chat/completions',
+      ]) {
+        expect(server.server.listening, path).toBe(true);
+        const response = await fetch(`${server.url}${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'orbit',
+            messages: [{ role: 'user', content: 'hi' }],
+          }),
+        });
+
+        expect(response.status, path).toBe(400);
+        expect(await response.json()).toMatchObject({
+          error: { message: 'Unknown model: orbit' },
+        });
+      }
+
+      expect(createLanguageModel).not.toHaveBeenCalled();
+      expect(generateAnthropicResponse).not.toHaveBeenCalled();
+      expect(streamAnthropicResponse).not.toHaveBeenCalled();
+      expect(generateOpenAiResponse).not.toHaveBeenCalled();
+      expect(streamOpenAiResponse).not.toHaveBeenCalled();
     });
 
     it('still rejects unknown model ids with 400', async () => {
