@@ -42,6 +42,7 @@ import {
   applyClodexPatches,
   formatPatchSiteLine,
   PatchApplyError,
+  projectNativeEffort,
   type PatchSiteResult,
   type PatchScriptModelConfig,
 } from './patch-transforms.js';
@@ -135,12 +136,8 @@ export function buildPatchModelConfig(
     else if (context !== 200_000) entry.context = context;
     const display = meta?.displayName?.trim();
     if (display) entry.display = display;
-    if (meta?.effort?.levels.length) {
-      entry.effort = {
-        levels: [...meta.effort.levels],
-        defaultLevel: meta.effort.defaultLevel,
-      };
-    }
+    const effort = projectNativeEffort(meta?.effort);
+    if (effort) entry.effort = effort;
     config[id] = entry;
   }
   return { config, unknownWindows };

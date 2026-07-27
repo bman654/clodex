@@ -52,7 +52,7 @@ describe('buildPatchModelConfig', () => {
       context: 272_000,
       display: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
       effort: {
-        levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+        levels: ['low', 'medium', 'high', 'xhigh', 'max'],
         defaultLevel: 'medium',
       },
     });
@@ -60,7 +60,7 @@ describe('buildPatchModelConfig', () => {
       context: 272_000,
       display: 'GPT-5.6 Luna (OpenAI (ChatGPT))',
       effort: {
-        levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+        levels: ['low', 'medium', 'high', 'xhigh', 'max'],
         defaultLevel: 'medium',
       },
     });
@@ -86,6 +86,29 @@ describe('buildPatchModelConfig', () => {
       () => ({ contextWindow: 272_000, displayName: '   ' }),
     );
     expect(config['clodex:openai:davinci-002']).toEqual({ context: 272_000 });
+  });
+
+  it.each([
+    {
+      name: 'an incomplete base',
+      levels: ['high', 'xhigh'],
+      defaultLevel: 'high',
+    },
+    {
+      name: 'a transport-only default',
+      levels: ['none', 'low', 'medium', 'high'],
+      defaultLevel: 'none',
+    },
+  ])('omits client effort metadata for $name', ({ levels, defaultLevel }) => {
+    const { config } = buildPatchModelConfig(
+      [{ providerId: 'openai', modelId: 'reasoning-model' }],
+      [],
+      () => ({
+        contextWindow: 200_000,
+        effort: { levels, defaultLevel },
+      }),
+    );
+    expect(config['clodex:openai:reasoning-model']).toEqual({});
   });
 });
 
@@ -231,6 +254,21 @@ describe('applyClodexPatches input validation', () => {
     })).toThrow(/keeps the \[1m\] suffix/);
   });
 
+  it.each([
+    {
+      levels: ['low', 'high'],
+      defaultLevel: 'high',
+    },
+    {
+      levels: ['low', 'medium', 'high'],
+      defaultLevel: 'max',
+    },
+  ])('rejects effort metadata outside the native client contract', effort => {
+    expect(() => applyClodexPatches('var x = 1;', {
+      'clodex:openai:model': { effort },
+    })).toThrow(/must include low, medium, and high with a native default/);
+  });
+
   it('throws PatchApplyError carrying per-site results when a required anchor is missing', () => {
     let caught: unknown;
     try {
@@ -333,6 +371,37 @@ describe('patch script identity naming', () => {
     expect(out).toContain('/*ccpatch:max-effort*/');
     expect(out).toContain('/*ccpatch:default-effort*/');
     expect(out).toContain('"sol":"medium"');
+  });
+
+  it.each([
+    {
+      name: 'base only',
+      levels: ['low', 'medium', 'high'],
+      xhigh: false,
+      max: false,
+    },
+    {
+      name: 'xhigh',
+      levels: ['low', 'medium', 'high', 'xhigh'],
+      xhigh: true,
+      max: false,
+    },
+    {
+      name: 'max',
+      levels: ['low', 'medium', 'high', 'max'],
+      xhigh: false,
+      max: true,
+    },
+  ])('exposes $name effort capabilities independently', ({ levels, xhigh, max }) => {
+    const out = runPatchScript({
+      'clodex:openai:reasoning-model': {
+        effort: { levels, defaultLevel: 'high' },
+      },
+    });
+    expect(out).toContain('/*ccpatch:effort*/');
+    expect(out).toContain('/*ccpatch:default-effort*/');
+    expect(out.includes('/*ccpatch:xhigh-effort*/')).toBe(xhigh);
+    expect(out.includes('/*ccpatch:max-effort*/')).toBe(max);
   });
 
   it('falls back to the canonical id as the identity when a model has no alias', () => {

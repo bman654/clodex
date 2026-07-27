@@ -25,15 +25,31 @@ export interface PatchScriptModelEntry {
   context?: number;
   /** Human label for the /model picker, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. */
   display?: string;
-  /** Reasoning levels Claude Code should expose for this custom model. */
-  effort?: {
-    levels: string[];
-    defaultLevel: string;
-  };
+  /** Provider reasoning levels projected onto Claude Code's native effort ladder. */
+  effort?: PatchScriptEffort;
+}
+
+export interface PatchScriptEffort {
+  levels: string[];
+  defaultLevel: string;
 }
 
 /** Real model id (e.g. `clodex:openai-oauth:gpt-5.6-sol`) → alias/context. */
 export type PatchScriptModelConfig = Record<string, PatchScriptModelEntry>;
+
+const NATIVE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+const BASE_EFFORT_LEVELS = ['low', 'medium', 'high'] as const;
+
+export function projectNativeEffort(
+  effort: PatchScriptEffort | undefined,
+): PatchScriptEffort | undefined {
+  if (!effort || !Array.isArray(effort.levels) || typeof effort.defaultLevel !== 'string') return undefined;
+  const declared = new Set(effort.levels);
+  const levels = NATIVE_EFFORT_LEVELS.filter(level => declared.has(level));
+  if (!BASE_EFFORT_LEVELS.every(level => declared.has(level))) return undefined;
+  if (!levels.some(level => level === effort.defaultLevel)) return undefined;
+  return { levels, defaultLevel: effort.defaultLevel };
+}
 
 export type PatchSiteStatus = 'OK' | 'SKIP' | 'FAIL';
 
@@ -132,11 +148,13 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       CONTEXT_BY_KEY[String(id).trim().toLowerCase()] = n;
     }
 
-    if (spec.effort && spec.effort.levels.length > 0) {
-      const effort = {
-        levels: [...spec.effort.levels],
-        defaultLevel: spec.effort.defaultLevel,
-      };
+    if (spec.effort) {
+      const effort = projectNativeEffort(spec.effort);
+      if (!effort) {
+        fail(
+          `clodex patch: effort for "${id}" must include low, medium, and high with a native default`,
+        );
+      }
       if (spec.alias !== undefined) EFFORT_BY_KEY[String(spec.alias).trim().toLowerCase()] = effort;
       EFFORT_BY_KEY[String(id).trim().toLowerCase()] = effort;
     }
@@ -380,8 +398,8 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   ): void {
     const enabled = Object.fromEntries(
       Object.entries(EFFORT_BY_KEY)
-        .filter(([, effort]) => effort?.levels.includes(
-          capability === 'effort' ? 'low' : capability === 'xhigh_effort' ? 'xhigh' : 'max',
+        .filter(([, effort]) => capability === 'effort' || effort?.levels.includes(
+          capability === 'xhigh_effort' ? 'xhigh' : 'max',
         ))
         .map(([key]) => [key, 1]),
     );
