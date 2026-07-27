@@ -436,17 +436,59 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // ---------------------------------------------------------------------------
   {
     const MARKER = '/*clodex:workflow-token-progress*/';
-    applyOnce(
-      'PATCH 11: Workflow token progress',
-      /if\(([\w$]+)=([\w$]+),([\w$]+)\?\.\push\(\2\),!\2\.isApiErrorMessage\)\{([\w$]+)=([\w$]+)\(\2\.message\.usage\);let ([\w$]+)=\2\.message\.model;/,
-      (_m, lastMessage, message, messages, tokens, countUsage, model) =>
-        'if(' + lastMessage + '=' + message + ',' + messages + '?.push(' + message + '),!'
-        + message + '.isApiErrorMessage){' + MARKER
-        + 'let __clodexWorkflowUsage=' + countUsage + '(' + message + '.message.usage);'
-        + 'if(__clodexWorkflowUsage>0)' + tokens + '=__clodexWorkflowUsage;'
-        + 'let ' + model + '=' + message + '.message.model;',
-      { marker: MARKER, required: false }
-    );
+    const name = 'PATCH 11: Workflow token progress';
+    if (js.includes(MARKER)) {
+      log('SKIP', name, 'already patched');
+    } else {
+      const assistantRe = /if\(([\w$]+)=([\w$]+),([\w$]+)\?\.\push\(\2\),!\2\.isApiErrorMessage\)\{([\w$]+)=([\w$]+)\(\2\.message\.usage\);let ([\w$]+)=\2\.message\.model;/g;
+      const matches = [...js.matchAll(assistantRe)];
+      if (matches.length !== 1) {
+        log('FAIL', name, matches.length === 0
+          ? 'anchor not found'
+          : 'anchor matched ' + matches.length + ' times (expected 1)');
+      } else {
+        const match = matches[0]!;
+        const index = match.index!;
+        const [whole, lastMessage, message, messages, tokens, countUsage, model] = match;
+        const progressSlice = js.slice(index, index + 3000);
+        const progressRe = new RegExp(
+          '([\\w$]+)\\("progress",\\{tokens:([\\w$]+)\\+' + reEsc(tokens!)
+          + ',toolCalls:([\\w$]+)\\+([\\w$]+)\\}\\)'
+        );
+        const progress = progressSlice.match(progressRe);
+        const outerAssistant = 'if(' + message + '.type==="assistant"){';
+        const outerAssistantIndex = js.lastIndexOf(outerAssistant, index);
+        const previousContinue = js.lastIndexOf('continue}', outerAssistantIndex);
+        const continueAdjacent = previousContinue >= 0
+          && previousContinue + 'continue}'.length === outerAssistantIndex;
+
+        if (!progress || !continueAdjacent) {
+          log('FAIL', name, !continueAdjacent
+            ? 'user/assistant boundary not found'
+            : 'progress emitter not found');
+        } else {
+          const [, emitProgress, priorTokens, priorTools, toolCalls] = progress;
+          const refresh =
+            MARKER
+            + 'let __clodexWorkflowUsage=' + lastMessage + '?'
+            + countUsage + '(' + lastMessage + '.message.usage):0;'
+            + 'if(__clodexWorkflowUsage>0){' + tokens + '=__clodexWorkflowUsage;'
+            + emitProgress + '("progress",{tokens:' + priorTokens + '+' + tokens
+            + ',toolCalls:' + priorTools + '+' + toolCalls + '})}';
+          const before = js.slice(0, previousContinue);
+          const between = js.slice(previousContinue + 'continue}'.length, index);
+          const afterAssistant = js.slice(index + whole.length);
+          const retainedAssistant =
+            'if(' + lastMessage + '=' + message + ',' + messages + '?.push(' + message + '),!'
+            + message + '.isApiErrorMessage){let __clodexAssistantUsage='
+            + countUsage + '(' + message + '.message.usage);'
+            + 'if(__clodexAssistantUsage>0)' + tokens + '=__clodexAssistantUsage;'
+            + 'let ' + model + '=' + message + '.message.model;';
+          js = before + refresh + 'continue}' + between + retainedAssistant + afterAssistant;
+          log('OK', name);
+        }
+      }
+    }
   }
 
   return { content: js, results: report };
