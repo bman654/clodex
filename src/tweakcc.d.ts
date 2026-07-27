@@ -1,6 +1,6 @@
 // Ambient types for tweakcc's programmatic API (dist/lib/index.mjs).
 //
-// tweakcc 4.3.0 declares `"types": "./dist/lib/index.d.ts"` but does not ship
+// tweakcc 4.3.2 declares `"types": "./dist/lib/index.d.ts"` but does not ship
 // that file in the npm tarball, so we declare the (verified) surface we use.
 // Signatures confirmed against the installed dist/lib source: an Installation
 // is `{ path, version, kind }`; `readContent` extracts the bundled JS from a
