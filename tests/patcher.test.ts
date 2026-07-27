@@ -632,6 +632,35 @@ const CLAUDE_CORE_FIXTURE = [
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
 ].join('\n');
 
+const digestOf = (text: string) => createHash('sha256').update(text).digest('hex');
+
+/**
+ * The re-patch tests below all start from the same state: a live binary holding
+ * a previous clodex patch, plus an ESTABLISHED pristine backup — content-addressed
+ * (so no version probe is needed to trust it) and recorded in the manifest. That
+ * is what makes `applyPatch` plan a `restore`, i.e. seed the candidate from the
+ * backup rather than from the patched binary. Spelling it out matters: with a
+ * manifest that does not identify the live bytes as clodex's own patch, the
+ * planner would fall through to inspecting them and could snapshot a PATCHED
+ * binary as "pristine" — the exact thing the backup rules exist to prevent.
+ */
+const PATCHED_BINARY = 'previously-patched-native';
+const PRISTINE_BINARY = 'pristine-native';
+const PRISTINE_BACKUP_NAME = `claude-test-version-${digestOf(PRISTINE_BINARY).slice(0, 16)}.orig`;
+
+function priorPatchManifest(binaryPath: string, backupPath: string): PatchManifest {
+  return {
+    binaryPath,
+    claudeVersion: 'test-version',
+    configHash: 'previous-config-hash',
+    patchedSize: Buffer.byteLength(PATCHED_BINARY),
+    patchedSha256: digestOf(PATCHED_BINARY),
+    backupPath,
+    pristineSha256: digestOf(PRISTINE_BINARY),
+    patchedAt: '2026-01-01T00:00:00.000Z',
+  };
+}
+
 describe('applyPatch', () => {
   it('does not write the binary or a current manifest when effort anchors fail', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-effort-anchor-failure-'));
@@ -675,7 +704,7 @@ describe('applyPatch', () => {
           unknownWindows: [],
         },
         'desired-config-hash',
-        { trace: false, restoreFirst: false },
+        { trace: false, manifest: null },
       );
 
       expect(outcome.ok).toBe(false);
@@ -701,7 +730,7 @@ describe('applyPatch', () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-repatch-validation-failure-'));
     const binaryPath = join(dir, 'claude');
     const tweakccHome = join(dir, 'tweakcc-home');
-    const pristinePath = join(tweakccHome, 'claude-test-version.orig');
+    const pristinePath = join(tweakccHome, PRISTINE_BACKUP_NAME);
     const previousAppHome = process.env.CLODEX_HOME;
     const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
     const previousManifest = '{"existing":"manifest"}\n';
@@ -745,7 +774,7 @@ describe('applyPatch', () => {
           unknownWindows: [],
         },
         'desired-config-hash',
-        { trace: false, restoreFirst: true },
+        { trace: false, manifest: priorPatchManifest(binaryPath, pristinePath) },
       );
 
       expect(outcome.ok).toBe(false);
@@ -768,7 +797,7 @@ describe('applyPatch', () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-repatch-write-failure-'));
     const binaryPath = join(dir, 'claude');
     const tweakccHome = join(dir, 'tweakcc-home');
-    const pristinePath = join(tweakccHome, 'claude-test-version.orig');
+    const pristinePath = join(tweakccHome, PRISTINE_BACKUP_NAME);
     const previousAppHome = process.env.CLODEX_HOME;
     const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
     const previousManifest = '{"existing":"manifest"}\n';
@@ -809,7 +838,7 @@ describe('applyPatch', () => {
           unknownWindows: [],
         },
         'desired-config-hash',
-        { trace: false, restoreFirst: true },
+        { trace: false, manifest: priorPatchManifest(binaryPath, pristinePath) },
       );
 
       expect(outcome.ok).toBe(false);
@@ -831,7 +860,7 @@ describe('applyPatch', () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-repatch-success-'));
     const binaryPath = join(dir, 'claude');
     const tweakccHome = join(dir, 'tweakcc-home');
-    const pristinePath = join(tweakccHome, 'claude-test-version.orig');
+    const pristinePath = join(tweakccHome, PRISTINE_BACKUP_NAME);
     const previousAppHome = process.env.CLODEX_HOME;
     const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
     const previousManifest = '{"existing":"manifest"}\n';
@@ -877,7 +906,7 @@ describe('applyPatch', () => {
           unknownWindows: [],
         },
         'desired-config-hash',
-        { trace: false, restoreFirst: true },
+        { trace: false, manifest: priorPatchManifest(binaryPath, pristinePath) },
       );
 
       const manifestBytes = readFileSync(getPatchManifestPath(), 'utf8');
