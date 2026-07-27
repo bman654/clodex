@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as p from '@clack/prompts';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -565,11 +566,17 @@ describe('applyPatch', () => {
     tweakccMocks.tryDetectInstallation.mockReset();
     tweakccMocks.readContent.mockReset();
     tweakccMocks.writeContent.mockReset();
-    tweakccMocks.tryDetectInstallation.mockResolvedValue({
-      path: binaryPath,
-      version: 'test-version',
-      kind: 'native',
-    });
+    tweakccMocks.tryDetectInstallation.mockImplementation(
+      async ({ path }: { path: string }) => {
+        expect(path).not.toBe(binaryPath);
+        expect(readFileSync(path, 'utf8')).toBe('pristine-native');
+        return {
+          path,
+          version: 'test-version',
+          kind: 'native',
+        };
+      },
+    );
     tweakccMocks.readContent.mockResolvedValue(CLAUDE_CORE_FIXTURE);
 
     try {
@@ -602,6 +609,213 @@ describe('applyPatch', () => {
       expect(tweakccMocks.writeContent).not.toHaveBeenCalled();
       expect(readFileSync(binaryPath, 'utf8')).toBe('pristine-native');
       expect(existsSync(getPatchManifestPath())).toBe(false);
+    } finally {
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves the working binary and manifest when a re-patch fails validation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-repatch-validation-failure-'));
+    const binaryPath = join(dir, 'claude');
+    const tweakccHome = join(dir, 'tweakcc-home');
+    const pristinePath = join(tweakccHome, 'claude-test-version.orig');
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    const previousManifest = '{"existing":"manifest"}\n';
+    mkdirSync(tweakccHome, { recursive: true });
+    writeFileSync(binaryPath, 'previously-patched-native');
+    writeFileSync(pristinePath, 'pristine-native');
+    process.env.CLODEX_HOME = dir;
+    process.env.TWEAKCC_CONFIG_DIR = tweakccHome;
+    writeFileSync(getPatchManifestPath(), previousManifest);
+
+    tweakccMocks.tryDetectInstallation.mockReset();
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+    tweakccMocks.tryDetectInstallation.mockImplementation(
+      async ({ path }: { path: string }) => {
+        expect(path).not.toBe(binaryPath);
+        expect(readFileSync(path, 'utf8')).toBe('pristine-native');
+        return {
+          path,
+          version: 'test-version',
+          kind: 'native',
+        };
+      },
+    );
+    tweakccMocks.readContent.mockResolvedValue(CLAUDE_CORE_FIXTURE);
+
+    try {
+      const outcome = await applyPatch(
+        binaryPath,
+        'test-version',
+        {
+          config: {
+            'clodex:test:extended': {
+              alias: 'extended',
+              effort: {
+                levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+                defaultLevel: 'high',
+              },
+            },
+          },
+          unknownWindows: [],
+        },
+        'desired-config-hash',
+        { trace: false, restoreFirst: true },
+      );
+
+      expect(outcome.ok).toBe(false);
+      expect(outcome.message).toContain('required effort patches failed');
+      expect(tweakccMocks.writeContent).not.toHaveBeenCalled();
+      expect(readFileSync(binaryPath, 'utf8')).toBe('previously-patched-native');
+      expect(readFileSync(pristinePath, 'utf8')).toBe('pristine-native');
+      expect(readFileSync(getPatchManifestPath(), 'utf8')).toBe(previousManifest);
+      expect(readFileSync(join(tweakccHome, 'native-binary.backup'), 'utf8')).toBe('pristine-native');
+    } finally {
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves the working binary and manifest when candidate repacking fails', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-repatch-write-failure-'));
+    const binaryPath = join(dir, 'claude');
+    const tweakccHome = join(dir, 'tweakcc-home');
+    const pristinePath = join(tweakccHome, 'claude-test-version.orig');
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    const previousManifest = '{"existing":"manifest"}\n';
+    mkdirSync(tweakccHome, { recursive: true });
+    writeFileSync(binaryPath, 'previously-patched-native');
+    writeFileSync(pristinePath, 'pristine-native');
+    process.env.CLODEX_HOME = dir;
+    process.env.TWEAKCC_CONFIG_DIR = tweakccHome;
+    writeFileSync(getPatchManifestPath(), previousManifest);
+
+    tweakccMocks.tryDetectInstallation.mockReset();
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+    tweakccMocks.tryDetectInstallation.mockImplementation(
+      async ({ path }: { path: string }) => ({
+        path,
+        version: 'test-version',
+        kind: 'native',
+      }),
+    );
+    tweakccMocks.readContent.mockResolvedValue(CLAUDE_FIXTURE);
+    tweakccMocks.writeContent.mockRejectedValue(new Error('candidate repack failed'));
+
+    try {
+      const outcome = await applyPatch(
+        binaryPath,
+        'test-version',
+        {
+          config: {
+            'clodex:test:extended': {
+              alias: 'extended',
+              effort: {
+                levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+                defaultLevel: 'high',
+              },
+            },
+          },
+          unknownWindows: [],
+        },
+        'desired-config-hash',
+        { trace: false, restoreFirst: true },
+      );
+
+      expect(outcome.ok).toBe(false);
+      expect(outcome.message).toContain('candidate repack failed');
+      expect(tweakccMocks.writeContent).toHaveBeenCalledOnce();
+      expect(readFileSync(binaryPath, 'utf8')).toBe('previously-patched-native');
+      expect(readFileSync(pristinePath, 'utf8')).toBe('pristine-native');
+      expect(readFileSync(getPatchManifestPath(), 'utf8')).toBe(previousManifest);
+    } finally {
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('publishes the replacement and updates the manifest after a successful re-patch', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-repatch-success-'));
+    const binaryPath = join(dir, 'claude');
+    const tweakccHome = join(dir, 'tweakcc-home');
+    const pristinePath = join(tweakccHome, 'claude-test-version.orig');
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    const previousManifest = '{"existing":"manifest"}\n';
+    const replacement = 'newly-patched-native';
+    mkdirSync(tweakccHome, { recursive: true });
+    writeFileSync(binaryPath, 'previously-patched-native');
+    writeFileSync(pristinePath, 'pristine-native');
+    process.env.CLODEX_HOME = dir;
+    process.env.TWEAKCC_CONFIG_DIR = tweakccHome;
+    writeFileSync(getPatchManifestPath(), previousManifest);
+
+    tweakccMocks.tryDetectInstallation.mockReset();
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+    tweakccMocks.tryDetectInstallation.mockImplementation(
+      async ({ path }: { path: string }) => ({
+        path,
+        version: 'test-version',
+        kind: 'native',
+      }),
+    );
+    tweakccMocks.readContent.mockResolvedValue(CLAUDE_FIXTURE);
+    tweakccMocks.writeContent.mockImplementation(
+      async ({ path }: { path: string }) => {
+        writeFileSync(path, replacement);
+      },
+    );
+
+    try {
+      const outcome = await applyPatch(
+        binaryPath,
+        'test-version',
+        {
+          config: {
+            'clodex:test:extended': {
+              alias: 'extended',
+              effort: {
+                levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+                defaultLevel: 'high',
+              },
+            },
+          },
+          unknownWindows: [],
+        },
+        'desired-config-hash',
+        { trace: false, restoreFirst: true },
+      );
+
+      const manifestBytes = readFileSync(getPatchManifestPath(), 'utf8');
+      const manifest = JSON.parse(manifestBytes) as PatchManifest;
+      expect(outcome.ok).toBe(true);
+      expect(readFileSync(binaryPath, 'utf8')).toBe(replacement);
+      expect(readFileSync(pristinePath, 'utf8')).toBe('pristine-native');
+      expect(readFileSync(join(tweakccHome, 'native-binary.backup'), 'utf8')).toBe('pristine-native');
+      expect(manifestBytes).not.toBe(previousManifest);
+      expect(manifest).toMatchObject({
+        binaryPath,
+        claudeVersion: 'test-version',
+        configHash: 'desired-config-hash',
+        patchedSize: Buffer.byteLength(replacement),
+        patchedSha256: createHash('sha256').update(replacement).digest('hex'),
+        backupPath: pristinePath,
+      });
     } finally {
       if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
       else process.env.CLODEX_HOME = previousAppHome;
