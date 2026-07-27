@@ -36,6 +36,10 @@ export function getCredentialCleanupPath(env: HomeEnv = process.env): string {
   return join(getAppHome(env), 'credential-cleanup.json');
 }
 
+export function getProxyTokenPath(env: HomeEnv = process.env): string {
+  return join(getAppHome(env), 'proxy-token');
+}
+
 export function getLogsPath(env: HomeEnv = process.env): string {
   return join(getAppHome(env), 'logs');
 }
