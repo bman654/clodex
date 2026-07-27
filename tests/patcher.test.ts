@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as p from '@clack/prompts';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,7 +13,28 @@ import {
   tryAcquirePatchLock,
   type PatchManifest,
 } from '../src/patcher.js';
-import { applyClodexPatches, PatchApplyError } from '../src/patch-transforms.js';
+import {
+  applyClodexPatches,
+  PATCH_TRANSFORMS_VERSION,
+  PatchApplyError,
+  type PatchScriptModelConfig,
+} from '../src/patch-transforms.js';
+
+/**
+ * The digest a pre-versioning clodex wrote into `patch-state.json`: the bare
+ * key-sorted 4-field tuple, with no version wrapper. This is DELIBERATELY FROZEN
+ * — it models bytes that already exist on real users' disks, so it must NOT be
+ * updated to track future changes to the production canonical tuple. (The
+ * "version participates in the digest" property is pinned by the
+ * transform-set-version test below, which is immune to tuple drift.)
+ */
+function computeLegacyPatchConfigHash(config: PatchScriptModelConfig): string {
+  const canonical = Object.keys(config).sort().map(key => {
+    const entry = config[key]!;
+    return [key, entry.alias ?? null, entry.context ?? null, entry.display ?? null];
+  });
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
 
 describe('buildPatchModelConfig', () => {
   const favorites = [
@@ -150,6 +172,54 @@ describe('computePatchConfigHash', () => {
       computePatchConfigHash({ 'clodex:p:m1': { alias: 'x', context: 1000, display: 'M One (Q)' } }),
     );
   });
+
+  it('differs from the legacy model-config-only hash', () => {
+    const config = { 'clodex:p:m1': { alias: 'x', context: 1000, display: 'M One (P)' } };
+    expect(computePatchConfigHash(config)).not.toBe(computeLegacyPatchConfigHash(config));
+  });
+
+  it('changes when the transform-set version changes', () => {
+    const config = { 'clodex:p:m1': { alias: 'x', context: 1000 } };
+    expect(computePatchConfigHash(config)).toBe(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION));
+    expect(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION + 1)).not.toBe(
+      computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION),
+    );
+  });
+});
+
+describe('PATCH_TRANSFORMS_VERSION', () => {
+  // Folding the version into the config hash only helps if somebody actually
+  // bumps it. Nothing else couples an edit of patch-transforms.ts to the
+  // constant, and a forgotten bump reproduces exactly the silent staleness this
+  // mechanism exists to prevent — with a fully green suite. So pin the file.
+  //
+  // WHEN THIS FAILS: patch-transforms.ts changed. Decide, deliberately:
+  //   * transform set changed materially (site added/removed, or a site's regex,
+  //     replacement, or ordering changed) -> bump PATCH_TRANSFORMS_VERSION AND
+  //     update the digest below, in the same commit;
+  //   * comment/formatting/type-only edit -> update the digest below and leave
+  //     the version alone (no need to make every install repatch).
+  //
+  // Scope caveat: this hashes THIS FILE only. patch-transforms.ts imports
+  // `isReservedModelAlias`, so a change reaching the transforms from
+  // model-aliases.ts will not trip this guard. That import feeds a `fail()` gate
+  // only, so it can turn a patch into a hard PatchApplyError but cannot silently
+  // alter the bytes of a patch that succeeds — the failure mode this guard exists
+  // to prevent. It catches the common case (a direct edit), not every possible one.
+  it('is re-pinned deliberately whenever patch-transforms.ts changes', () => {
+    // Normalize line endings: a Windows checkout with core.autocrlf=true would
+    // otherwise fail this guard with zero source change, which is exactly the
+    // "re-pin without thinking" reflex the guard is meant to avoid.
+    const source = readFileSync(
+      new URL('../src/patch-transforms.ts', import.meta.url),
+      'utf8',
+    ).replace(/\r\n/g, '\n');
+    const digest = createHash('sha256').update(source).digest('hex');
+    expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
+      version: 1,
+      digest: 'fd5d2e0f6493d35fb9548d61a5517e0197bdab4a586dbe61e0560766d70204fc',
+    });
+  });
 });
 
 describe('evaluatePatchState', () => {
@@ -182,6 +252,17 @@ describe('evaluatePatchState', () => {
       binaryPath: '/opt/claude/claude',
       claudeVersion: '2.1.183',
       configHash: 'hash-2',
+      binarySize: 1234,
+    })).toBe('stale-config');
+  });
+
+  it('reports stale-config for a manifest hashed before transform-set versioning', () => {
+    const config = { 'clodex:p:m1': { alias: 'x', context: 1000 } };
+    const legacyManifest = { ...manifest, configHash: computeLegacyPatchConfigHash(config) };
+    expect(evaluatePatchState(legacyManifest, {
+      binaryPath: '/opt/claude/claude',
+      claudeVersion: '2.1.183',
+      configHash: computePatchConfigHash(config),
       binarySize: 1234,
     })).toBe('stale-config');
   });

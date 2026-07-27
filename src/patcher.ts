@@ -47,6 +47,7 @@ import {
   applyClodexPatches,
   formatPatchSiteLine,
   PatchApplyError,
+  PATCH_TRANSFORMS_VERSION,
   type PatchSiteResult,
   type PatchScriptModelConfig,
 } from './patch-transforms.js';
@@ -58,7 +59,7 @@ export interface PatchManifest {
   binaryPath: string;
   /** `claude --version` at patch time. */
   claudeVersion: string;
-  /** sha256 of the desired patch model config (canonical JSON). */
+  /** sha256 of the transform-set version and desired patch model config. */
   configHash: string;
   /** Size in bytes of the binary after patching (cheap staleness probe). */
   patchedSize: number;
@@ -185,13 +186,16 @@ export function reportRejectedModelAliases(
   }
 }
 
-/** Canonical (key-sorted) hash of a patch model config. */
-export function computePatchConfigHash(config: PatchScriptModelConfig): string {
+/** Canonical (key-sorted) hash of the transform-set version and patch model config. */
+export function computePatchConfigHash(
+  config: PatchScriptModelConfig,
+  transformsVersion = PATCH_TRANSFORMS_VERSION,
+): string {
   const canonical = Object.keys(config).sort().map(key => {
     const entry = config[key]!;
     return [key, entry.alias ?? null, entry.context ?? null, entry.display ?? null];
   });
-  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+  return createHash('sha256').update(JSON.stringify([transformsVersion, canonical])).digest('hex');
 }
 
 /** Read favorites + aliases + registry model metadata from disk (no network, no credentials). */

@@ -22,6 +22,19 @@
 
 import { isReservedModelAlias } from './model-aliases.js';
 
+/**
+ * Version of the transform set below — NOT of the patch-state manifest, whose
+ * shape is unrelated. It is folded into `computePatchConfigHash`, so bumping it
+ * is what makes an existing install read as `stale-config` and repatch.
+ *
+ * IMPORTANT: bump this whenever the transform set changes materially — adding or
+ * removing a PATCH site, or changing a site's regex, replacement, or ordering.
+ * Without a bump, users whose favorites are unchanged keep the OLD patch forever
+ * and never receive the new transforms, silently. `tests/patcher.test.ts` pins a
+ * hash of this file to force that decision to be made rather than forgotten.
+ */
+export const PATCH_TRANSFORMS_VERSION = 1;
+
 export interface PatchScriptModelEntry {
   alias?: string;
   context?: number;
