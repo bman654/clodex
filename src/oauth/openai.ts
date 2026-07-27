@@ -10,6 +10,14 @@ const ISSUER = 'https://auth.openai.com';
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3_000;
 const DEVICE_CODE_DEFAULT_EXPIRES_MS = 5 * 60 * 1000;
 
+async function cancelResponseBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Preserve the OAuth failure when transport cleanup also fails.
+  }
+}
+
 export interface OpenAiIdTokenClaims {
   chatgpt_account_id?: string;
   organizations?: Array<{ id: string }>;
@@ -46,8 +54,10 @@ export async function requestOpenAiDeviceCode(): Promise<OpenAiDeviceCodeData> {
       'User-Agent': `clodex/${VERSION}`,
     },
     body: JSON.stringify({ client_id: CLIENT_ID }),
+    redirect: 'manual',
   });
   if (!response.ok) {
+    await cancelResponseBody(response);
     throw new Error('Failed to initiate OpenAI device authorization');
   }
   return response.json() as Promise<OpenAiDeviceCodeData>;
@@ -77,6 +87,7 @@ export async function pollOpenAiDeviceCodeToken(
         device_auth_id: deviceData.device_auth_id,
         user_code: deviceData.user_code,
       }),
+      redirect: 'manual',
     });
 
     if (response.ok) {
@@ -91,14 +102,17 @@ export async function pollOpenAiDeviceCodeToken(
           client_id: CLIENT_ID,
           code_verifier: data.code_verifier,
         }).toString(),
+        redirect: 'manual',
       });
       if (!tokenResponse.ok) {
+        await cancelResponseBody(tokenResponse);
         throw new Error(`OpenAI token exchange failed (${tokenResponse.status})`);
       }
       const tokens = await tokenResponse.json() as OAuthTokenResponse;
       return { tokens, accountId: extractOpenAiAccountId(tokens) };
     }
 
+    await cancelResponseBody(response);
     if (response.status !== 403 && response.status !== 404) {
       throw new Error(`OpenAI device authorization failed (${response.status})`);
     }

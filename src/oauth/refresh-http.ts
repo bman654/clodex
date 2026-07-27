@@ -34,6 +34,9 @@ export async function postOAuthRefresh(
         ...options.headers,
       },
       body: isJson ? JSON.stringify(body) : (body as URLSearchParams).toString(),
+      // Refresh tokens are carried in the request body, so never replay them to
+      // a redirect target.
+      redirect: 'manual',
     });
 
     if (!response.ok) {

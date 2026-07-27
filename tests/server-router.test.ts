@@ -1,4 +1,4 @@
-import { createServer, type Server } from 'node:http';
+import { createServer, request as httpRequest, type Server } from 'node:http';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { APICallError } from 'ai';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -199,6 +199,69 @@ afterEach(async () => {
     const handle = handles.pop();
     if (handle) await closeHandle(handle);
   }
+});
+
+/**
+ * fetch() refuses to set Host, so rebinding has to be simulated at the raw
+ * HTTP layer — which is exactly what a rebound browser connection looks like.
+ */
+function rawRequest(
+  port: number,
+  path: string,
+  headers: Record<string, string>,
+  method = 'GET',
+): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port, path, method, headers }, res => {
+      let body = '';
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, body }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+describe('server router browser guards', () => {
+  it('serves loopback callers that send no Origin', async () => {
+    const handle = await startTestServer();
+    expect((await rawRequest(handle.port, '/health', { Host: `127.0.0.1:${handle.port}` })).status).toBe(200);
+  });
+
+  it('serves Electron and loopback-web callers', async () => {
+    const handle = await startTestServer();
+    for (const origin of ['app://claude-desktop', `http://127.0.0.1:${handle.port}`]) {
+      const res = await rawRequest(handle.port, '/health', {
+        Host: `127.0.0.1:${handle.port}`,
+        Origin: origin,
+      });
+      expect(res.status, origin).toBe(200);
+    }
+  });
+
+  it('rejects a rebound Host before it can even probe /health', async () => {
+    const handle = await startTestServer();
+    const res = await rawRequest(handle.port, '/health', { Host: 'attacker.example' });
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body).error.message).toContain('Host');
+  });
+
+  it('rejects a CORS-simple POST from a page the user is visiting', async () => {
+    const handle = await startTestServer();
+    const res = await fetch(`${handle.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { origin: 'https://evil.example', 'content-type': 'text/plain' },
+      body: JSON.stringify({ model: 'claude-native', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    expect(res.status).toBe(403);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('leaves network-mode binds to the password gate', async () => {
+    const handle = await startTestServer({ host: '0.0.0.0', serverPassword: 'hunter2' });
+    const res = await rawRequest(handle.port, '/models', { Host: 'lan-box.local', 'x-api-key': 'hunter2' });
+    expect(res.status).toBe(200);
+  });
 });
 
 describe('server router', () => {

@@ -126,6 +126,11 @@ export async function relayAnthropicMessages(
       options.extraHeaders,
     ),
     body: JSON.stringify(body),
+    // Never auto-follow: anthropicUpstreamHeaders() attaches the credential as
+    // `x-api-key`, and the fetch spec only strips `authorization` on a
+    // cross-origin redirect — a custom header survives. Following a provider's
+    // 3xx would hand that key and the full request body to the redirect target.
+    redirect: 'manual',
     signal: options.signal,
   });
 
@@ -136,6 +141,20 @@ export async function relayAnthropicMessages(
     if (retryResult.refreshed) options.onTokenRefreshed?.(retryResult.apiKey);
   } catch (err) {
     throw new UpstreamUnreachableError(err);
+  }
+
+  if (upstreamRes.status >= 300 && upstreamRes.status < 400) {
+    const location = upstreamRes.headers.get('location') ?? '(none)';
+    try {
+      await upstreamRes.body?.cancel();
+    } catch {
+      // Preserve the redirect refusal when transport cleanup also fails.
+    }
+    options.log?.(`anthropic upstream refused redirect to ${location}`);
+    options.onUpstreamError?.(upstreamRes.status, `redirect to ${location}`);
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Upstream attempted a redirect; refusing to forward credentials' } }));
+    return;
   }
 
   if (!upstreamRes.ok) {

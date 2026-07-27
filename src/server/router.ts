@@ -1,6 +1,11 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { isAuthorized } from './auth.js';
+import {
+  isAllowedGatewayHost,
+  isAuthorized,
+  isDisallowedGatewayOrigin,
+  isLoopbackBind,
+} from './auth.js';
 import {
   formatGatewayAnthropicModels,
   formatOpenAIModels,
@@ -203,6 +208,20 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse, options: 
   try {
     const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname;
     plog(`${req.method} ${pathname}`);
+
+    // Runs ahead of /health so that a rebound page cannot even probe for us.
+    if (isLoopbackBind(options.host)) {
+      if (!isAllowedGatewayHost(req.headers.host)) {
+        plog(`blocked non-loopback Host header: ${req.headers.host}`);
+        sendJson(res, 403, { error: { message: 'Forbidden: unexpected Host header' } });
+        return;
+      }
+      if (isDisallowedGatewayOrigin(req.headers.origin)) {
+        plog(`blocked non-loopback browser Origin: ${req.headers.origin}`);
+        sendJson(res, 403, { error: { message: 'Forbidden: non-loopback browser origins are not accepted' } });
+        return;
+      }
+    }
 
     if (req.method === 'GET' && pathname === '/health') {
       sendJson(res, 200, { ok: true });

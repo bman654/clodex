@@ -264,6 +264,20 @@ describe('patch script identity naming', () => {
     'clodex:openai:mystery': { context: 128_000, display: 'Mystery (OpenAI)' },
   };
 
+  it('treats $-sequences in a model id as literal text, not replacement patterns', () => {
+    // Aliases are validated, canonical ids are not. `$\`` expands to everything
+    // before the match when handed to String.replace as a *string*, which would
+    // splice the whole array prefix back into the literal and leave the patched
+    // bundle unparseable.
+    const out = runPatchScript({ 'clodex:openai:ev$`il': { context: 1000, display: 'Evil' } });
+
+    expect(out).toContain('"clodex:openai:ev$`il"');
+    expect(out).toContain('.enum(["sonnet","opus","haiku","fable","clodex:openai:ev$`il"])');
+    const knownList = /var KNOWN=(\[.*?\]);/.exec(out)?.[1];
+    expect(() => JSON.parse(knownList!)).not.toThrow();
+    expect(JSON.parse(knownList!)).toContain('clodex:openai:ev$`il');
+  });
+
   it('injects the ALIAS — not the canonical id — as the model identity', () => {
     const out = runPatchScript(config);
 

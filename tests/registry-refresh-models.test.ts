@@ -57,7 +57,10 @@ describe('registry/refresh-models', () => {
       const result = await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
 
       expect(global.fetch).toHaveBeenCalledTimes(1);
-      expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('https://chatgpt.com/backend-api/codex/models?client_version='), expect.anything());
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('https://chatgpt.com/backend-api/codex/models?client_version='),
+        expect.objectContaining({ redirect: 'manual' }),
+      );
       
       expect(result.ok).toBe(true);
       expect(result.modelCount).toBe(1);

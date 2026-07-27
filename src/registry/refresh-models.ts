@@ -153,6 +153,9 @@ async function fetchJsonWithAuth(
         Authorization: `Bearer ${accessToken}`,
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       },
+      // Match fetch-template-models/custom-endpoint: a bearer token is attached,
+      // so a redirect must fail rather than be chased to an unvetted host.
+      redirect: 'manual',
       signal: controller.signal,
     }).finally(() => clearTimeout(timer));
     if (!response.ok) {
