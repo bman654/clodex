@@ -1245,7 +1245,6 @@ describe('server router', () => {
       return startTestServer({
         catalog: createGatewayModelCatalog([lunaModel], gateway, aliases),
         gateway,
-        aliasNames: new Set(aliases.map(alias => alias.name)),
       });
     }
 
@@ -1261,6 +1260,38 @@ describe('server router', () => {
       expect(response.status).toBe(200);
       // Echo invariant: the alias the client sent, not the canonical/display id.
       expect(await response.json()).toMatchObject({ id: 'msg-test', model: 'luna' });
+    });
+
+    it('keeps exact catalog-id precedence when its case fold collides with an alias', async () => {
+      const exactModel: ServerModelInfo = {
+        ...lunaModel,
+        id: 'Model-X',
+        name: 'Exact Model',
+        providerId: 'exact-provider',
+        providerLabel: 'Exact Provider',
+        sourceBackend: 'exact-provider',
+      };
+      const collision = [{
+        name: 'model-x',
+        providerId: lunaModel.providerId!,
+        modelId: lunaModel.id,
+      }];
+      const server = await startTestServer({
+        catalog: createGatewayModelCatalog([exactModel, lunaModel], gateway, collision),
+        gateway,
+      });
+
+      const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'Model-X', messages: [{ role: 'user', content: 'hi' }] }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        id: 'msg-test',
+        model: 'Exact Model (Exact Provider)',
+      });
     });
 
     it('resolves masked and canonical clodex ids when masking is on', async () => {

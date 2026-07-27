@@ -64,6 +64,7 @@ export interface ServerModelInfo {
 
 export interface ModelCatalog {
   get: (id: string) => ServerModelInfo | undefined;
+  isAlias: (id: string) => boolean;
   list: () => ServerModelInfo[];
 }
 
@@ -91,6 +92,7 @@ export function createModelCatalog(models: ServerModelInfo[]): ModelCatalog {
 
   return {
     get: (id: string) => byId.get(id),
+    isAlias: () => false,
     list: () => [...models],
   };
 }
@@ -197,6 +199,10 @@ export function createGatewayModelCatalog(
     get: (id: string) => (
       byId.get(id)
       ?? byModelAlias.get(canonicalModelAliasName(id))
+    ),
+    isAlias: (id: string) => (
+      !byId.has(id)
+      && byModelAlias.has(canonicalModelAliasName(id))
     ),
     list: () => [...models],
   };

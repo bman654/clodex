@@ -60,7 +60,6 @@ import {
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
 import { listenTcpServer, tcpListenerUrlHost } from '../listener-ready.js';
-import { canonicalModelAliasName } from '../model-aliases.js';
 
 export interface ServerOptions {
   host: string;
@@ -69,13 +68,6 @@ export interface ServerOptions {
   serverPassword: string | null;
   catalog: ModelCatalog;
   gateway?: GatewayModelOptions;
-  /**
-   * Saved short alias names (clodex models --alias) accepted as request model
-   * ids. Used only to preserve the response `model` echo: an aliased request
-   * must be echoed back with the exact id the client sent (see CLAUDE.md's
-   * auto-compaction/context-window echo invariant).
-   */
-  aliasNames?: ReadonlySet<string>;
   /** When set, append structured debug lines to this file path. */
   debugLogPath?: string;
   /** When set, append privacy-minimal inference routing records as JSONL. */
@@ -743,7 +735,7 @@ function getResponseModelId(bodyModel: unknown, model: ServerModelInfo, options:
   // would break auto-compaction (see CLAUDE.md).
   if (
     typeof bodyModel === 'string'
-    && options.aliasNames?.has(canonicalModelAliasName(bodyModel))
+    && options.catalog.isAlias(bodyModel)
   ) {
     return bodyModel;
   }
