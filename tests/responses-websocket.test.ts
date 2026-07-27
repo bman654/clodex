@@ -2709,6 +2709,83 @@ describe('createResponsesWebSocketFetch', () => {
     await readAll(second);
   });
 
+  it('recycles a terminal subagent head for a later agent root', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-agent-recycle',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const root = [{ role: 'user', content: [{ type: 'input_text', text: 'agent A' }] }];
+    const first = await withResponsesWebSocketDiagnosticContext(
+      { claudeAgentId: 'agent-a' },
+      () => wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(root)),
+      }),
+    );
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_agent_tool' } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.added', output_index: 0,
+      item: { type: 'function_call', id: 'fc_agent', call_id: 'call_agent', name: 'Bash', arguments: '{}' },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: {
+        type: 'function_call', id: 'fc_agent', call_id: 'call_agent', name: 'Bash',
+        arguments: '{"command":"pwd"}', status: 'completed',
+      },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_agent_tool' } })));
+    await readAll(first);
+
+    const call = {
+      type: 'function_call', call_id: 'call_agent', name: 'Bash', arguments: '{"command":"pwd"}',
+    };
+    const result = { type: 'function_call_output', call_id: 'call_agent', output: '/tmp' };
+    const terminal = await withResponsesWebSocketDiagnosticContext(
+      { claudeAgentId: 'agent-a' },
+      () => wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([...root, call, result])),
+      }),
+    );
+    emitTextResponse(socket, 'resp_agent_done', 'agent A done');
+    await readAll(terminal);
+
+    const secondRoot = [{ role: 'user', content: [{ type: 'input_text', text: 'agent B' }] }];
+    const secondAgent = await withResponsesWebSocketDiagnosticContext(
+      { claudeAgentId: 'agent-b' },
+      () => wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(secondRoot)),
+      }),
+    );
+    expect(fakeSockets).toHaveLength(1);
+    const sent = JSON.parse(socket.send.mock.calls[2]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    expect(sent.input).toEqual(secondRoot);
+    expect(diagnostics.at(-1)).toMatchObject({
+      event: 'ws_head_decision',
+      decision: 'history_mismatch_reused_head',
+      selectedConnectionId: 1,
+      selectedGeneration: 'established',
+    });
+    emitTextResponse(socket, 'resp_agent_b', 'agent B done');
+    await readAll(secondAgent);
+
+    const divergentSameAgent = [{ role: 'user', content: [{ type: 'input_text', text: 'agent B branch' }] }];
+    const branch = await withResponsesWebSocketDiagnosticContext(
+      { claudeAgentId: 'agent-b' },
+      () => wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(divergentSameAgent)),
+      }),
+    );
+    expect(fakeSockets).toHaveLength(2);
+    const branchSocket = lastSocket();
+    branchSocket.emit('open');
+    emitTextResponse(branchSocket, 'resp_agent_b_branch', 'agent B branch done');
+    await readAll(branch);
+  });
+
   it('validates encrypted reasoning and exact assistant text before continuing', async () => {
     const input = [{ role: 'user', content: [{ type: 'input_text', text: 'reason' }] }];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-reasoning' });

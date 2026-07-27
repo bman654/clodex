@@ -529,6 +529,9 @@ export async function startProxyCatalog(
         const claudeSessionIdHeader = Array.isArray(req.headers['x-claude-code-session-id'])
           ? req.headers['x-claude-code-session-id'][0]
           : req.headers['x-claude-code-session-id'];
+        const claudeAgentIdHeader = Array.isArray(req.headers['x-claude-code-agent-id'])
+          ? req.headers['x-claude-code-agent-id'][0]
+          : req.headers['x-claude-code-agent-id'];
         const claudeSessionId = extractClaudeSessionId(anthropicBody, claudeSessionIdHeader);
         const translationLifecycle = createTranslationLifecycle(
           inferenceLogPath,
@@ -617,7 +620,13 @@ export async function startProxyCatalog(
             keepAlive.unref();
             try {
               await withResponsesWebSocketDiagnosticContext(
-                { requestId: relayRequestId, claudeSessionId, estimatedInputTokens, forceCompaction },
+                {
+                  requestId: relayRequestId,
+                  claudeSessionId,
+                  claudeAgentId: claudeAgentIdHeader,
+                  estimatedInputTokens,
+                  forceCompaction,
+                },
                 () => streamAnthropicResponse(
                   model,
                   params,
@@ -645,7 +654,13 @@ export async function startProxyCatalog(
             // outright ("Stream must be set to true"), so always stream internally
             // for it and collect the result, regardless of what the client asked for.
             const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
-              { requestId: relayRequestId, claudeSessionId, estimatedInputTokens, forceCompaction },
+              {
+                requestId: relayRequestId,
+                claudeSessionId,
+                claudeAgentId: claudeAgentIdHeader,
+                estimatedInputTokens,
+                forceCompaction,
+              },
               () => generateAnthropicResponse(
                 model,
                 params,

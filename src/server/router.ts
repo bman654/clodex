@@ -278,6 +278,9 @@ async function handleAnthropicMessages(
   const claudeSessionIdHeader = Array.isArray(req.headers['x-claude-code-session-id'])
     ? req.headers['x-claude-code-session-id'][0]
     : req.headers['x-claude-code-session-id'];
+  const claudeAgentIdHeader = Array.isArray(req.headers['x-claude-code-agent-id'])
+    ? req.headers['x-claude-code-agent-id'][0]
+    : req.headers['x-claude-code-agent-id'];
   const claudeSessionId = extractClaudeSessionId(body as AnthropicRequest, claudeSessionIdHeader);
   if (options.webSocketDiagnosticsLogPath) {
     writeWebSocketDiagnosticRequestLog(options.webSocketDiagnosticsLogPath, {
@@ -446,7 +449,13 @@ async function handleAnthropicMessages(
             res.write(chunk);
           };
           await withResponsesWebSocketDiagnosticContext(
-            { requestId, claudeSessionId, estimatedInputTokens, forceCompaction },
+            {
+              requestId,
+              claudeSessionId,
+              claudeAgentId: claudeAgentIdHeader,
+              estimatedInputTokens,
+              forceCompaction,
+            },
             () => streamAnthropicResponse(languageModel, params, responseModelId, writeStreamChunk, undefined, {
               initialInputTokens: estimatedInputTokens,
             }),
@@ -458,7 +467,13 @@ async function handleAnthropicMessages(
           // returns text/event-stream unconditionally), so stream internally and
           // collect the result instead of issuing a non-streaming SDK request.
           const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
-            { requestId, claudeSessionId, estimatedInputTokens, forceCompaction },
+            {
+              requestId,
+              claudeSessionId,
+              claudeAgentId: claudeAgentIdHeader,
+              estimatedInputTokens,
+              forceCompaction,
+            },
             () => generateAnthropicResponse(languageModel, params, responseModelId, { forceStream: openAiOAuth }),
           );
           sendJson(res, 200, anthropicResponse);
