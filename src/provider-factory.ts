@@ -14,6 +14,7 @@ import {
   injectClaudeIdentity,
 } from './oauth/claude-identity.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
+import { getResponsesCheckpointsPath } from './paths.js';
 
 /** Models that must use /v1/responses instead of /v1/chat/completions. */
 const RESPONSES_ONLY_PREFIXES = [
@@ -193,6 +194,7 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
                   providerId: spec.providerId ?? 'openai',
                   accountId,
                   compactThreshold: spec.openAiCompactThreshold,
+                  checkpointStoreDir: getResponsesCheckpointsPath(),
                   onDiagnostic: spec.onWebSocketDiagnostic,
                 }),
               }

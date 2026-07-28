@@ -6,7 +6,7 @@
 // Claude session/model/effort/account partition and uses previous_response_id
 // only after proving the next translated conversation appends to a chain head.
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { FetchFunction } from '@ai-sdk/provider-utils';
 import type { RawData, WebSocket as WsWebSocket } from 'ws';
@@ -20,6 +20,11 @@ import {
   ResponsesCompactionError,
   type ResponsesCompactionUsage,
 } from './responses-compaction.js';
+import {
+  deleteStoredResponsesCheckpoint,
+  loadStoredResponsesCheckpoints,
+  saveStoredResponsesCheckpoint,
+} from './responses-checkpoint-store.js';
 
 const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite';
 const TERMINAL_EVENT_TYPES = new Set(['response.completed', 'response.failed', 'response.incomplete']);
@@ -37,6 +42,7 @@ export const RESPONSES_WS_MAX_NURSERY_CONNECTIONS = 16;
 export const RESPONSES_WS_WARM_NURSERY_CONNECTIONS_PER_PARTITION = 2;
 export const RESPONSES_COMPACTION_RETAINED_USER_TOKENS = 64_000;
 export const RESPONSES_COMPACTION_CHECKPOINT_TTL_MS = 30 * 60_000;
+export const RESPONSES_COMPACTION_DURABLE_CHECKPOINT_TTL_MS = 7 * 24 * 60 * 60_000;
 
 export interface ResponsesWebSocketFetchOptions {
   providerId?: string;
@@ -52,6 +58,8 @@ export interface ResponsesWebSocketFetchOptions {
   /** Test seam for the unary compact request. */
   compactFetch?: typeof fetch;
   compactTimeoutMs?: number;
+  /** Private durable store for opaque native-compaction recovery checkpoints. */
+  checkpointStoreDir?: string;
   now?: () => number;
   /** Opt-in structured transport diagnostics; never receives conversation content. */
   onDiagnostic?: (event: ResponsesWebSocketDiagnosticEvent) => void;
@@ -112,6 +120,10 @@ interface RequestContext {
   frameCount: number;
   responseId?: string;
   responseUsage?: ResponseUsage;
+  /** Usage from the visible model response only; drives the next context threshold. */
+  modelResponseUsage?: ResponseUsage;
+  /** Hidden native-compaction usage added to the downstream visible response. */
+  usageOffset?: ResponseUsage;
   pendingEvents: unknown[];
   emittedModelData: boolean;
   transportRetryPending: boolean;
@@ -130,7 +142,12 @@ type ReasoningPartState = 'active' | 'can_conclude' | 'concluded';
 
 interface ConnectionEntry {
   debugId: number;
+  /** Logical conversation lineage; changes when a physical socket is recycled. */
+  lineageId: number;
+  lineageKey: string;
   key?: string;
+  checkpointKey?: string;
+  checkpointStoreDir?: string;
   socket: WsWebSocket;
   persistent: boolean;
   generation: 'nursery' | 'established' | 'isolated';
@@ -157,15 +174,22 @@ interface ConnectionEntry {
 
 interface CompactionCheckpoint {
   connectionId: number;
+  lineageId: number;
+  lineageKey: string;
   key: string;
-  requestInput: unknown[];
-  expectedAssistant: unknown[];
+  requestInput?: unknown[];
+  expectedAssistant?: unknown[];
+  requestInputHashes: string[];
+  expectedAssistantHashes: string[];
+  expectedAssistantKinds: string[];
   compactedInput: unknown[];
   lastInputTokens?: number;
   claudeCompactionSummaryHash?: string;
   promptFieldHashes?: Record<string, string>;
   instructionsSnapshot?: string;
   lastUsedAt: number;
+  ttlMs: number;
+  checkpointStoreDir?: string;
 }
 
 // A Claude session partition can have multiple valid conversation heads at
@@ -179,9 +203,11 @@ interface CompactionCheckpoint {
 // One-shot nursery traffic never consumes the established LRU's 32 reserved slots.
 const connections = new Map<string, Set<ConnectionEntry>>();
 const compactionCheckpoints = new Map<string, CompactionCheckpoint[]>();
+const loadedCheckpointStores = new Set<string>();
 const MAX_COMPACTION_CHECKPOINTS_PER_PARTITION = 8;
 const MAX_COMPACTION_CHECKPOINTS = 32;
 let nextConnectionDebugId = 1;
+let nextLineageDebugId = 1;
 
 function connectionEntries(key?: string): ConnectionEntry[] {
   return key ? [...(connections.get(key) ?? [])] : [...connections.values()].flatMap(entries => [...entries]);
@@ -203,26 +229,13 @@ function checkpointEntries(key?: string): CompactionCheckpoint[] {
     : [...compactionCheckpoints.values()].flat();
 }
 
-function saveCompactionCheckpoint(entry: ConnectionEntry): void {
-  if (!entry.key || !entry.requestInput || !entry.expectedAssistant || !entry.compactedInput) return;
-  const checkpoint: CompactionCheckpoint = {
-    connectionId: entry.debugId,
-    key: entry.key,
-    requestInput: entry.requestInput,
-    expectedAssistant: entry.expectedAssistant,
-    compactedInput: entry.compactedInput,
-    lastInputTokens: entry.lastInputTokens,
-    claudeCompactionSummaryHash: entry.claudeCompactionSummaryHash,
-    promptFieldHashes: entry.promptFieldHashes,
-    instructionsSnapshot: entry.instructionsSnapshot,
-    lastUsedAt: entry.lastUsedAt,
-  };
-  const partition = (compactionCheckpoints.get(entry.key) ?? [])
-    .filter(candidate => candidate.connectionId !== entry.debugId);
+function upsertCompactionCheckpoint(checkpoint: CompactionCheckpoint): void {
+  const partition = (compactionCheckpoints.get(checkpoint.key) ?? [])
+    .filter(candidate => candidate.lineageKey !== checkpoint.lineageKey);
   partition.push(checkpoint);
   partition.sort((left, right) => right.lastUsedAt - left.lastUsedAt);
   compactionCheckpoints.set(
-    entry.key,
+    checkpoint.key,
     partition.slice(0, MAX_COMPACTION_CHECKPOINTS_PER_PARTITION),
   );
 
@@ -234,6 +247,88 @@ function saveCompactionCheckpoint(entry: ConnectionEntry): void {
       .filter(candidate => candidate !== oldest);
     if (entries.length) compactionCheckpoints.set(oldest.key, entries);
     else compactionCheckpoints.delete(oldest.key);
+  }
+}
+
+function saveCompactionCheckpoint(entry: ConnectionEntry): void {
+  if (
+    !entry.checkpointKey
+    || !entry.requestInput
+    || !entry.expectedAssistant
+    || !entry.compactedInput
+  ) return;
+  const checkpoint: CompactionCheckpoint = {
+    connectionId: entry.debugId,
+    lineageId: entry.lineageId,
+    lineageKey: entry.lineageKey,
+    key: entry.checkpointKey,
+    requestInput: entry.requestInput,
+    expectedAssistant: entry.expectedAssistant,
+    requestInputHashes: entry.requestInput.map(conversationItemHash),
+    expectedAssistantHashes: entry.expectedAssistant.map(conversationItemHash),
+    expectedAssistantKinds: entry.expectedAssistant.map(conversationItemKind),
+    compactedInput: entry.compactedInput,
+    lastInputTokens: entry.lastInputTokens,
+    claudeCompactionSummaryHash: entry.claudeCompactionSummaryHash,
+    promptFieldHashes: entry.promptFieldHashes,
+    instructionsSnapshot: entry.instructionsSnapshot,
+    lastUsedAt: entry.lastUsedAt,
+    ttlMs: entry.checkpointStoreDir
+      ? RESPONSES_COMPACTION_DURABLE_CHECKPOINT_TTL_MS
+      : RESPONSES_COMPACTION_CHECKPOINT_TTL_MS,
+    checkpointStoreDir: entry.checkpointStoreDir,
+  };
+  upsertCompactionCheckpoint(checkpoint);
+  if (entry.checkpointStoreDir) {
+    try {
+      const persisted = saveStoredResponsesCheckpoint(entry.checkpointStoreDir, {
+        version: 1,
+        checkpointKey: checkpoint.key,
+        lineageKey: checkpoint.lineageKey,
+        requestInputHashes: checkpoint.requestInputHashes,
+        expectedAssistantHashes: checkpoint.expectedAssistantHashes,
+        expectedAssistantKinds: checkpoint.expectedAssistantKinds,
+        compactedInput: checkpoint.compactedInput,
+        lastInputTokens: checkpoint.lastInputTokens,
+        claudeCompactionSummaryHash: checkpoint.claudeCompactionSummaryHash,
+        promptFieldHashes: checkpoint.promptFieldHashes,
+        lastUsedAt: checkpoint.lastUsedAt,
+      }, MAX_COMPACTION_CHECKPOINTS_PER_PARTITION, MAX_COMPACTION_CHECKPOINTS);
+      if (!persisted) entry.debug('compact checkpoint exceeded durable store size cap');
+    } catch {
+      entry.debug('compact checkpoint persistence unavailable');
+    }
+  }
+}
+
+function loadCompactionCheckpointStore(directory: string | undefined, now: number): void {
+  if (!directory || loadedCheckpointStores.has(directory)) return;
+  loadedCheckpointStores.add(directory);
+  try {
+    for (const stored of loadStoredResponsesCheckpoints(
+      directory,
+      now,
+      RESPONSES_COMPACTION_DURABLE_CHECKPOINT_TTL_MS,
+    )) {
+      upsertCompactionCheckpoint({
+        connectionId: 0,
+        lineageId: nextLineageDebugId++,
+        lineageKey: stored.lineageKey,
+        key: stored.checkpointKey,
+        requestInputHashes: stored.requestInputHashes,
+        expectedAssistantHashes: stored.expectedAssistantHashes,
+        expectedAssistantKinds: stored.expectedAssistantKinds,
+        compactedInput: stored.compactedInput,
+        lastInputTokens: stored.lastInputTokens,
+        claudeCompactionSummaryHash: stored.claudeCompactionSummaryHash,
+        promptFieldHashes: stored.promptFieldHashes,
+        lastUsedAt: stored.lastUsedAt,
+        ttlMs: RESPONSES_COMPACTION_DURABLE_CHECKPOINT_TTL_MS,
+        checkpointStoreDir: directory,
+      });
+    }
+  } catch {
+    // Recovery storage is best-effort; normal inference must remain available.
   }
 }
 
@@ -283,7 +378,9 @@ export function resetResponsesWebSocketConnectionsForTests(): void {
   }
   connections.clear();
   compactionCheckpoints.clear();
+  loadedCheckpointStores.clear();
   nextConnectionDebugId = 1;
+  nextLineageDebugId = 1;
 }
 
 /** Normalize the SDK's HeadersInit into a plain record for `ws`. */
@@ -423,6 +520,23 @@ export function responsesWebSocketPartitionKey(
   return createHash('sha256').update(material).digest('hex');
 }
 
+function responsesCheckpointPartitionKey(
+  wsUrl: string,
+  payload: JsonObject,
+  options: Pick<ResponsesWebSocketFetchOptions, 'providerId' | 'accountId'>,
+  authorizationFingerprint: string,
+): string | undefined {
+  // OAuth access tokens rotate; compacted state belongs to the stable account,
+  // model, effort, and Claude session cache key rather than one token. API-key
+  // routes lack a stable account id and remain isolated by credential hash.
+  return responsesWebSocketPartitionKey(
+    wsUrl,
+    payload,
+    options,
+    options.accountId ? '' : authorizationFingerprint,
+  );
+}
+
 function inputArray(payload: JsonObject): unknown[] {
   return Array.isArray(payload.input) ? payload.input : [];
 }
@@ -478,6 +592,9 @@ interface ContinuationMatch {
 interface ContinuationSource {
   requestInput?: unknown[];
   expectedAssistant?: unknown[];
+  requestInputHashes?: string[];
+  expectedAssistantHashes?: string[];
+  expectedAssistantKinds?: string[];
   claudeCompactionSummaryHash?: string;
 }
 
@@ -802,11 +919,22 @@ function historyContinuationMatch(
   entry: ContinuationSource,
   payload: JsonObject,
 ): ContinuationMatch | undefined {
-  if (!entry.requestInput || !entry.expectedAssistant) return undefined;
+  const requestHashes = entry.requestInputHashes
+    ?? entry.requestInput?.map(conversationItemHash);
+  const assistantHashes = entry.expectedAssistantHashes
+    ?? entry.expectedAssistant?.map(conversationItemHash);
+  const assistantKinds = entry.expectedAssistantKinds
+    ?? entry.expectedAssistant?.map(conversationItemKind);
+  if (!requestHashes || !assistantHashes || !assistantKinds) return undefined;
   const full = inputArray(payload);
-  const exactPrefix = [...entry.requestInput, ...entry.expectedAssistant];
-  if (full.length > exactPrefix.length && arraysEqual(full.slice(0, exactPrefix.length), exactPrefix)) {
-    return { delta: full.slice(exactPrefix.length), mode: 'exact' };
+  const fullHashes = full.map(conversationItemHash);
+  const exactPrefixHashes = [...requestHashes, ...assistantHashes];
+  if (
+    full.length > exactPrefixHashes.length
+    && fullHashes.slice(0, exactPrefixHashes.length)
+      .every((hash, index) => hash === exactPrefixHashes[index])
+  ) {
+    return { delta: full.slice(exactPrefixHashes.length), mode: 'exact' };
   }
 
   // Claude can round-trip OpenAI's encrypted reasoning through an Anthropic
@@ -816,18 +944,17 @@ function historyContinuationMatch(
   // previous_response_id. Ignore only those envelopes while still requiring
   // the request history and every visible assistant item/tool call to match
   // exactly, then send only the items after Claude's echoed assistant output.
-  const expectedAssistant = entry.expectedAssistant;
   if (
-    expectedAssistant.some(item => conversationItemKind(item) === 'reasoning')
-    && arraysEqual(full.slice(0, entry.requestInput.length), entry.requestInput)
+    assistantKinds.includes('reasoning')
+    && fullHashes.slice(0, requestHashes.length)
+      .every((hash, index) => hash === requestHashes[index])
   ) {
-    let fullIndex = entry.requestInput.length;
+    let fullIndex = requestHashes.length;
     let expectedIndex = 0;
     let ignoredReasoning = false;
     let replayedReasoning = false;
-    while (expectedIndex < expectedAssistant.length) {
-      const expected = expectedAssistant[expectedIndex];
-      if (conversationItemKind(expected) === 'reasoning') {
+    while (expectedIndex < assistantHashes.length) {
+      if (assistantKinds[expectedIndex] === 'reasoning') {
         ignoredReasoning = true;
         expectedIndex += 1;
         while (
@@ -839,14 +966,14 @@ function historyContinuationMatch(
         }
         continue;
       }
-      if (fullIndex >= full.length || !arraysEqual([full[fullIndex]], [expected])) break;
+      if (fullIndex >= full.length || fullHashes[fullIndex] !== assistantHashes[expectedIndex]) break;
       expectedIndex += 1;
       fullIndex += 1;
     }
     if (
       ignoredReasoning
       && replayedReasoning
-      && expectedIndex === expectedAssistant.length
+      && expectedIndex === assistantHashes.length
       && fullIndex < full.length
     ) {
       return { delta: full.slice(fullIndex), mode: 'replayed_reasoning' };
@@ -858,15 +985,16 @@ function historyContinuationMatch(
   // call or assistant text that followed them. Those opaque items already
   // belong to previous_response_id, so continuation remains safe only when all
   // remaining response items still match exactly.
-  const echoedAssistant = entry.expectedAssistant.filter(item => {
-    const kind = conversationItemKind(item);
+  const echoedAssistantHashes = assistantHashes.filter((_, index) => {
+    const kind = assistantKinds[index]!;
     return kind !== 'reasoning' && !isOpaqueCompactionKind(kind);
   });
-  if (echoedAssistant.length !== entry.expectedAssistant.length) {
-    const echoablePrefix = [...entry.requestInput, ...echoedAssistant];
+  if (echoedAssistantHashes.length !== assistantHashes.length) {
+    const echoablePrefix = [...requestHashes, ...echoedAssistantHashes];
     if (
       full.length > echoablePrefix.length
-      && arraysEqual(full.slice(0, echoablePrefix.length), echoablePrefix)
+      && fullHashes.slice(0, echoablePrefix.length)
+        .every((hash, index) => hash === echoablePrefix[index])
     ) {
       return { delta: full.slice(echoablePrefix.length), mode: 'omitted_reasoning' };
     }
@@ -1136,6 +1264,54 @@ function responseUsage(event: unknown): ResponseUsage | undefined {
   };
 }
 
+function addResponseUsage(left: ResponseUsage, right: ResponseUsage): ResponseUsage {
+  return {
+    inputTokens: left.inputTokens + right.inputTokens,
+    cachedTokens: left.cachedTokens + right.cachedTokens,
+    cacheWriteTokens: left.cacheWriteTokens + right.cacheWriteTokens,
+    outputTokens: left.outputTokens + right.outputTokens,
+  };
+}
+
+function withUsageOffset(event: unknown, offset: ResponseUsage): unknown {
+  if (!event || typeof event !== 'object') return event;
+  const root = event as JsonObject;
+  const response = root.response && typeof root.response === 'object'
+    ? root.response as JsonObject
+    : undefined;
+  if (!response) return event;
+  const visible = responseUsage(event) ?? {
+    inputTokens: 0,
+    cachedTokens: 0,
+    cacheWriteTokens: 0,
+    outputTokens: 0,
+  };
+  const combined = addResponseUsage(visible, offset);
+  const usage = response.usage && typeof response.usage === 'object'
+    ? response.usage as JsonObject
+    : {};
+  const details = usage.input_tokens_details && typeof usage.input_tokens_details === 'object'
+    ? usage.input_tokens_details as JsonObject
+    : {};
+  return {
+    ...root,
+    response: {
+      ...response,
+      usage: {
+        ...usage,
+        input_tokens: combined.inputTokens,
+        output_tokens: combined.outputTokens,
+        total_tokens: combined.inputTokens + combined.outputTokens,
+        input_tokens_details: {
+          ...details,
+          cached_tokens: combined.cachedTokens,
+          cache_write_tokens: combined.cacheWriteTokens,
+        },
+      },
+    },
+  };
+}
+
 function responseUsageDebug(usage: ResponseUsage): string {
   return `usage input_tokens=${usage.inputTokens} `
     + `cached_tokens=${usage.cachedTokens} `
@@ -1268,11 +1444,34 @@ function closeContext(ctx: RequestContext): void {
 }
 
 function discardCompactionCheckpoints(entry: ConnectionEntry): void {
-  if (!entry.key) return;
-  const retained = (compactionCheckpoints.get(entry.key) ?? [])
-    .filter(checkpoint => checkpoint.connectionId !== entry.debugId);
-  if (retained.length) compactionCheckpoints.set(entry.key, retained);
-  else compactionCheckpoints.delete(entry.key);
+  if (!entry.checkpointKey) return;
+  const retained = (compactionCheckpoints.get(entry.checkpointKey) ?? [])
+    .filter(checkpoint => checkpoint.lineageKey !== entry.lineageKey);
+  if (retained.length) compactionCheckpoints.set(entry.checkpointKey, retained);
+  else compactionCheckpoints.delete(entry.checkpointKey);
+  if (entry.checkpointStoreDir) {
+    deleteStoredResponsesCheckpoint(
+      entry.checkpointStoreDir,
+      entry.checkpointKey,
+      entry.lineageKey,
+    );
+  }
+}
+
+function beginRecycledLineage(entry: ConnectionEntry): void {
+  // Socket reuse preserves physical prompt-cache affinity, not conversation
+  // identity. Save the old logical head before clearing continuation state.
+  saveCompactionCheckpoint(entry);
+  entry.lineageId = nextLineageDebugId++;
+  entry.lineageKey = randomUUID();
+  entry.responseId = undefined;
+  entry.requestInput = undefined;
+  entry.expectedAssistant = undefined;
+  entry.compactedInput = undefined;
+  entry.lastInputTokens = undefined;
+  entry.claudeCompactionSummaryHash = undefined;
+  entry.claudeAgentId = undefined;
+  entry.recyclableAgentHead = false;
 }
 
 function deleteEntry(
@@ -1419,8 +1618,15 @@ function cleanupExpiredConnections(now: number): Array<Record<string, unknown>> 
   }
   for (const [key, checkpoints] of compactionCheckpoints) {
     const retained = checkpoints.filter(checkpoint => {
-      const expired = now - checkpoint.lastUsedAt >= RESPONSES_COMPACTION_CHECKPOINT_TTL_MS;
+      const expired = now - checkpoint.lastUsedAt >= checkpoint.ttlMs;
       if (expired) {
+        if (checkpoint.checkpointStoreDir) {
+          deleteStoredResponsesCheckpoint(
+            checkpoint.checkpointStoreDir,
+            checkpoint.key,
+            checkpoint.lineageKey,
+          );
+        }
         evictions.push({
           connectionId: checkpoint.connectionId,
           partitionKey: checkpoint.key,
@@ -1558,6 +1764,7 @@ function resetContextForRetry(ctx: RequestContext): void {
   ctx.emittedModelData = false;
   ctx.responseId = undefined;
   ctx.responseUsage = undefined;
+  ctx.modelResponseUsage = undefined;
   ctx.outputByIndex.clear();
   ctx.outputIndexByItemId.clear();
   ctx.reasoningPartsByItemId.clear();
@@ -1591,6 +1798,8 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   trackReasoningProtocol(entry, ctx, event, type);
   captureOutput(ctx, event);
   if (type === 'response.completed') {
+    ctx.modelResponseUsage = responseUsage(event);
+    if (ctx.usageOffset) event = withUsageOffset(event, ctx.usageOffset);
     const usage = responseUsage(event);
     if (usage) {
       ctx.responseUsage = usage;
@@ -1673,7 +1882,7 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
           return kind === 'function_call' || kind === 'custom_tool_call';
         }),
       );
-      entry.lastInputTokens = ctx.responseUsage?.inputTokens;
+      entry.lastInputTokens = ctx.modelResponseUsage?.inputTokens;
       entry.promptFieldHashes = ctx.promptFieldHashes;
       entry.instructionsSnapshot = ctx.instructionsSnapshot;
       entry.lastUsedAt = now;
@@ -1706,6 +1915,8 @@ function createConnection(
   headers: Record<string, string>,
   persistent: boolean,
   key: string | undefined,
+  checkpointKey: string | undefined,
+  checkpointStoreDir: string | undefined,
   options: ConnectionEntry['options'],
   debug: ConnectionEntry['debug'],
   /** Optional HTTP(S)_PROXY CONNECT-tunnel agent (see src/outbound-proxy.ts). */
@@ -1715,7 +1926,11 @@ function createConnection(
   const socket = new WebSocket(wsUrl, agent ? { headers, agent } : { headers });
   const entry: ConnectionEntry = {
     debugId: nextConnectionDebugId++,
+    lineageId: nextLineageDebugId++,
+    lineageKey: randomUUID(),
     key: persistent ? key : undefined,
+    checkpointKey: persistent ? checkpointKey : undefined,
+    checkpointStoreDir: persistent ? checkpointStoreDir : undefined,
     socket,
     persistent,
     generation: persistent ? 'nursery' : 'isolated',
@@ -1854,11 +2069,18 @@ export function createResponsesWebSocketFetch(
       options,
       authorizationFingerprint,
     );
+    const checkpointKey = responsesCheckpointPartitionKey(
+      wsUrl,
+      payload,
+      options,
+      authorizationFingerprint,
+    );
     const promptFingerprint = responsesWebSocketPromptFingerprint(payload);
     const promptFieldHashes = responsesWebSocketPromptFieldHashes(payload);
     const instructionsSnapshot = instructionsFromPayload(payload);
     const diagnosticCorrelation = diagnosticContext.getStore();
     const now = resolvedOptions.now();
+    loadCompactionCheckpointStore(options.checkpointStoreDir, now);
     const evictions = cleanupExpiredConnections(now);
 
     const runCompactionTrigger = async (
@@ -1912,6 +2134,8 @@ export function createResponsesWebSocketFetch(
               headers,
               Boolean(partitionKey),
               partitionKey,
+              checkpointKey,
+              options.checkpointStoreDir,
               resolvedOptions,
               debug,
               proxyAgent,
@@ -1966,8 +2190,10 @@ export function createResponsesWebSocketFetch(
         .filter(item => isOpaqueCompactionKind(conversationItemKind(item)));
       if (completedEntry && connectionEntries(partitionKey).includes(completedEntry)) {
         // The trigger advances the connection-local previous-response slot, so
-        // the pre-trigger response id is no longer a usable recovery head.
-        deleteEntry(completedEntry, true, false);
+        // the pre-trigger response id is no longer usable. Its canonical
+        // compact checkpoint remains a valid fallback until the rebased
+        // response establishes a newer durable checkpoint.
+        deleteEntry(completedEntry);
       }
       if (output.length !== 1) {
         throw new ResponsesCompactionError(
@@ -1988,8 +2214,8 @@ export function createResponsesWebSocketFetch(
     let selected: ConnectionEntry | undefined = matches[0]?.entry;
     const selectedMatch = matches[0]?.match;
     const selectedDelta = selectedMatch?.delta;
-    const checkpointMatches = partitionKey
-      ? checkpointEntries(partitionKey)
+    const checkpointMatches = checkpointKey
+      ? checkpointEntries(checkpointKey)
         .map(checkpoint => ({ checkpoint, match: historyContinuationMatch(checkpoint, payload) }))
         .filter((candidate): candidate is {
           checkpoint: CompactionCheckpoint;
@@ -2008,8 +2234,8 @@ export function createResponsesWebSocketFetch(
       && !anchored
       && (
         candidates.some(entry => entry.claudeCompactionSummaryHash)
-        || (partitionKey
-          ? checkpointEntries(partitionKey).some(checkpoint => checkpoint.claudeCompactionSummaryHash)
+        || (checkpointKey
+          ? checkpointEntries(checkpointKey).some(checkpoint => checkpoint.claudeCompactionSummaryHash)
           : false)
       )
     ) {
@@ -2071,13 +2297,13 @@ export function createResponsesWebSocketFetch(
           ? 'estimated_threshold'
           : undefined;
     let compacted = false;
+    let compactionUsage: ResponsesCompactionUsage | undefined;
     let failedTriggerCompactedInput: unknown[] | undefined;
 
     if (
       compactThreshold !== undefined
       && compactionReason
       && inputArray(payload).length > 0
-      && (selected !== undefined || selectedCheckpoint !== undefined || !candidates.some(entry => entry.inFlight))
     ) {
       if (selected && selectedDelta) {
         const triggerEntry = selected;
@@ -2098,6 +2324,7 @@ export function createResponsesWebSocketFetch(
           selected = undefined;
           continued = false;
           compacted = true;
+          compactionUsage = result.usage;
           decision = 'compaction_trigger_new_head';
           debug(
             `native compaction trigger produced ${result.output.length} item(s); `
@@ -2172,6 +2399,7 @@ export function createResponsesWebSocketFetch(
           selected = undefined;
           continued = false;
           compacted = true;
+          compactionUsage = result.usage;
           decision = 'compaction_new_head';
           debug(
             `standalone compact reduced ${inputArray(compactPayload).length} input item(s) `
@@ -2354,7 +2582,7 @@ export function createResponsesWebSocketFetch(
       candidateCount: candidates.length,
       idleCandidateCount: idleCandidates.length,
       matchingCandidateCount: matches.length,
-      checkpointCount: partitionKey ? checkpointEntries(partitionKey).length : 0,
+      checkpointCount: checkpointKey ? checkpointEntries(checkpointKey).length : 0,
       matchingCheckpointCount: checkpointMatches.length,
       selectedCheckpointConnectionId: decision === 'compaction_checkpoint'
         ? selectedCheckpoint?.connectionId
@@ -2400,6 +2628,7 @@ export function createResponsesWebSocketFetch(
           sendPayload,
           retryPayload,
           compactedInputBase,
+          usageOffset: compactionUsage,
           supersededEntry,
           claudeCompactionRequest: forceCompaction,
           claudeAgentId: diagnosticCorrelation?.claudeAgentId,
@@ -2426,6 +2655,8 @@ export function createResponsesWebSocketFetch(
             headers,
             persistent,
             partitionKey,
+            checkpointKey,
+            options.checkpointStoreDir,
             resolvedOptions,
             debug,
             proxyAgent,
@@ -2439,10 +2670,17 @@ export function createResponsesWebSocketFetch(
           headers,
           persistent,
           partitionKey,
+          checkpointKey,
+          options.checkpointStoreDir,
           resolvedOptions,
           debug,
           proxyAgent,
         );
+        if (decision === 'history_mismatch_reused_head') beginRecycledLineage(entry);
+        if (decision === 'compaction_checkpoint' && selectedCheckpoint) {
+          entry.lineageId = selectedCheckpoint.lineageId;
+          entry.lineageKey = selectedCheckpoint.lineageKey;
+        }
         dispatchContext(entry, ctx);
 
         const signal = init?.signal;

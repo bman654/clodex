@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { createOpenAI } from '@ai-sdk/openai';
 import { streamText } from 'ai';
 
@@ -195,6 +197,36 @@ function emitCompactionResponse(
       type: 'compaction',
       id: `cmp_${responseId}`,
       encrypted_content: encryptedContent,
+    },
+  })));
+  socket.emit('message', Buffer.from(JSON.stringify({
+    type: 'response.completed', response: { id: responseId, usage },
+  })));
+}
+
+function emitToolCallResponse(
+  socket: FakeWebSocket,
+  responseId: string,
+  callId: string,
+  usage?: {
+    input_tokens: number;
+    input_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
+    output_tokens: number;
+  },
+): void {
+  socket.emit('message', Buffer.from(JSON.stringify({
+    type: 'response.created', response: { id: responseId },
+  })));
+  socket.emit('message', Buffer.from(JSON.stringify({
+    type: 'response.output_item.done',
+    output_index: 0,
+    item: {
+      type: 'function_call',
+      id: `fc_${responseId}`,
+      call_id: callId,
+      name: 'Bash',
+      arguments: '{"command":"pwd"}',
+      status: 'completed',
     },
   })));
   socket.emit('message', Buffer.from(JSON.stringify({
@@ -2337,6 +2369,687 @@ describe('createResponsesWebSocketFetch', () => {
       thirdUser,
     ]);
     expect(compactFetch).not.toHaveBeenCalled();
+  });
+
+  it('restores an oversized compacted session after the transport process restarts', async () => {
+    mkdirSync(process.env.CLODEX_HOME!, { recursive: true });
+    const checkpointStoreDir = mkdtempSync(join(process.env.CLODEX_HOME!, 'restart-checkpoints-'));
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const oldTurns = Array.from({ length: 1_625 }, (_, index) => ({
+      role: 'user',
+      content: [{
+        type: 'input_text',
+        text: `historical turn ${index} ${'x'.repeat(1_800)}`,
+      }],
+    }));
+    const retainedUser = oldTurns.at(-1)!;
+    const compactedCanonical = [
+      retainedUser,
+      { type: 'compaction', encrypted_content: 'restart-safe-opaque-state' },
+    ];
+    const compactFetch = vi.fn(async () => new Response(JSON.stringify({
+      output: compactedCanonical,
+      usage: {
+        input_tokens: 260_000,
+        input_tokens_details: { cached_tokens: 250_000 },
+        output_tokens: 900,
+      },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    const initialFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-restart-recovery',
+      compactThreshold: 258_000,
+      compactFetch: compactFetch as typeof fetch,
+      checkpointStoreDir,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const initial = await withResponsesWebSocketDiagnosticContext(
+      { estimatedInputTokens: 300_000 },
+      () => initialFetch('https://example.test/responses', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer access-token-before-restart' },
+        body: JSON.stringify(sessionPayload(oldTurns)),
+      }),
+    );
+    const compactedSocket = lastSocket();
+    compactedSocket.emit('open');
+    emitTextResponse(compactedSocket, 'resp_before_restart', 'checkpointed answer', {
+      input_tokens: 40_000,
+      input_tokens_details: { cached_tokens: 35_000 },
+      output_tokens: 250,
+    });
+    await readAll(initial);
+
+    expect(compactFetch).toHaveBeenCalledOnce();
+    const persistedFiles = readdirSync(checkpointStoreDir);
+    expect(persistedFiles).toHaveLength(1);
+    const persistedPath = join(checkpointStoreDir, persistedFiles[0]!);
+    expect(statSync(checkpointStoreDir).mode & 0o777).toBe(0o700);
+    expect(statSync(persistedPath).mode & 0o777).toBe(0o600);
+    const persisted = readFileSync(persistedPath, 'utf8');
+    expect(persisted).toContain('restart-safe-opaque-state');
+    expect(persisted).not.toContain('historical turn 0 ');
+
+    // Simulate a fresh Clodex process: all sockets and process-local heads are
+    // gone, while the private durable checkpoint remains.
+    resetResponsesWebSocketConnectionsForTests();
+    fakeSockets.length = 0;
+    const compactAfterRestart = vi.fn(async () => {
+      throw new Error('the oversized transcript must not reach standalone compact');
+    });
+    const resumedFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-restart-recovery',
+      compactThreshold: 258_000,
+      compactFetch: compactAfterRestart as typeof fetch,
+      checkpointStoreDir,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const echoedAssistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'checkpointed answer' }],
+    };
+    const nextUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'continue after restart' }],
+    };
+    const oversizedResume = [...oldTurns, echoedAssistant, nextUser];
+    const resumed = await withResponsesWebSocketDiagnosticContext(
+      { estimatedInputTokens: 400_000 },
+      () => resumedFetch('https://example.test/responses', {
+        method: 'POST',
+        // OAuth token rotation must not orphan a checkpoint for the same account.
+        headers: { Authorization: 'Bearer access-token-after-restart' },
+        body: JSON.stringify(sessionPayload(oversizedResume)),
+      }),
+    );
+    const restoredSocket = lastSocket();
+    restoredSocket.emit('open');
+    const restoredPayload = JSON.parse(restoredSocket.send.mock.calls[0]![0] as string);
+    expect(restoredPayload.previous_response_id).toBeUndefined();
+    expect(restoredPayload.input).toEqual([
+      ...compactedCanonical,
+      echoedAssistant,
+      nextUser,
+    ]);
+    expect(Buffer.byteLength(JSON.stringify(restoredPayload.input), 'utf8'))
+      .toBeLessThan(Buffer.byteLength(JSON.stringify(oversizedResume), 'utf8') / 100);
+    expect(compactAfterRestart).not.toHaveBeenCalled();
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_head_decision',
+      decision: 'compaction_checkpoint',
+      matchingCheckpointCount: 1,
+    }));
+    emitTextResponse(restoredSocket, 'resp_after_restart', 'recovered');
+    await readAll(resumed);
+  });
+
+  it('adds hidden native-compaction usage to the visible response totals', async () => {
+    const user = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'compact and report every token' }],
+    };
+    const compactFetch = vi.fn(async () => new Response(JSON.stringify({
+      output: [user, { type: 'compaction', encrypted_content: 'usage-summary' }],
+      usage: {
+        input_tokens: 210,
+        input_tokens_details: { cached_tokens: 180, cache_write_tokens: 12 },
+        output_tokens: 18,
+      },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-compaction-usage',
+      compactThreshold: 100,
+      compactFetch: compactFetch as typeof fetch,
+    });
+    const response = await withResponsesWebSocketDiagnosticContext(
+      { estimatedInputTokens: 150 },
+      () => wsFetch('https://example.test/responses', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload([user])),
+      }),
+    );
+    const socket = lastSocket();
+    socket.emit('open');
+    emitTextResponse(socket, 'resp_compaction_usage', 'done', {
+      input_tokens: 50,
+      input_tokens_details: { cached_tokens: 40, cache_write_tokens: 3 },
+      output_tokens: 11,
+    });
+    const events = (await readAll(response))
+      .split('\n\n')
+      .filter(Boolean)
+      .map(frame => JSON.parse(frame.replace(/^data: /, '')));
+    const completed = events.find(event => event.type === 'response.completed');
+    expect(completed.response.usage).toMatchObject({
+      input_tokens: 260,
+      output_tokens: 29,
+      total_tokens: 289,
+      input_tokens_details: {
+        cached_tokens: 220,
+        cache_write_tokens: 15,
+      },
+    });
+  });
+
+  it.each([
+    {
+      label: 'parent orchestrator',
+      diagnostic: {},
+      prefix: [] as unknown[],
+    },
+    {
+      label: 'ordinary subagent',
+      diagnostic: { claudeAgentId: 'subagent-1' },
+      prefix: [] as unknown[],
+    },
+    {
+      label: 'dynamic workflow agent',
+      diagnostic: { claudeAgentId: 'workflow-agent-1' },
+      prefix: [{
+        role: 'developer',
+        content: [{ type: 'input_text', text: 'workflow phase one' }],
+      }] as unknown[],
+    },
+  ])(
+    'keeps $label token reporting correct across native compaction and continuation',
+    async ({ label, diagnostic, prefix }) => {
+      const rootUser = {
+        role: 'user',
+        content: [{ type: 'input_text', text: `${label} root` }],
+      };
+      const root = [...prefix, rootUser];
+      const compactFetch = vi.fn(async () => new Response(JSON.stringify({
+        output: [
+          rootUser,
+          { type: 'compaction', encrypted_content: `${label}-opaque-state` },
+        ],
+        usage: {
+          input_tokens: 210,
+          input_tokens_details: { cached_tokens: 180, cache_write_tokens: 12 },
+          output_tokens: 18,
+        },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }));
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: `acct-${label.replaceAll(' ', '-')}`,
+        compactThreshold: 100,
+        compactFetch: compactFetch as typeof fetch,
+      });
+      const first = await withResponsesWebSocketDiagnosticContext(
+        { ...diagnostic, estimatedInputTokens: 150 },
+        () => wsFetch('https://example.test/responses', {
+          method: 'POST',
+          headers: {},
+          body: JSON.stringify(sessionPayload(root)),
+        }),
+      );
+      const socket = lastSocket();
+      socket.emit('open');
+      emitTextResponse(socket, `resp_${label}`, `${label} answer`, {
+        input_tokens: 50,
+        input_tokens_details: { cached_tokens: 40, cache_write_tokens: 3 },
+        output_tokens: 11,
+      });
+      const firstEvents = (await readAll(first))
+        .split('\n\n')
+        .filter(Boolean)
+        .map(frame => JSON.parse(frame.replace(/^data: /, '')));
+      expect(firstEvents.find(event => event.type === 'response.completed').response.usage)
+        .toMatchObject({
+          input_tokens: 260,
+          output_tokens: 29,
+          input_tokens_details: {
+            cached_tokens: 220,
+            cache_write_tokens: 15,
+          },
+        });
+
+      const echoedAssistant = {
+        role: 'assistant',
+        content: [{ type: 'output_text', text: `${label} answer` }],
+      };
+      const nextUser = {
+        role: 'user',
+        content: [{ type: 'input_text', text: `${label} continue` }],
+      };
+      const second = await withResponsesWebSocketDiagnosticContext(
+        diagnostic,
+        () => wsFetch('https://example.test/responses', {
+          method: 'POST',
+          headers: {},
+          body: JSON.stringify(sessionPayload([
+            ...root,
+            echoedAssistant,
+            nextUser,
+          ])),
+        }),
+      );
+      const secondPayload = JSON.parse(socket.send.mock.calls[1]![0] as string);
+      expect(secondPayload.previous_response_id).toBe(`resp_${label}`);
+      expect(secondPayload.input).toEqual([nextUser]);
+      emitTextResponse(socket, `resp_${label}_continued`, `${label} done`, {
+        input_tokens: 60,
+        input_tokens_details: { cached_tokens: 55, cache_write_tokens: 1 },
+        output_tokens: 9,
+      });
+      const secondEvents = (await readAll(second))
+        .split('\n\n')
+        .filter(Boolean)
+        .map(frame => JSON.parse(frame.replace(/^data: /, '')));
+      expect(secondEvents.find(event => event.type === 'response.completed').response.usage)
+        .toMatchObject({
+          input_tokens: 60,
+          output_tokens: 9,
+          input_tokens_details: {
+            cached_tokens: 55,
+            cache_write_tokens: 1,
+          },
+        });
+      expect(compactFetch).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps an earlier agent checkpoint when its physical socket is recycled and compacted', async () => {
+    const agentAUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'agent A root' }],
+    };
+    const agentACanonical = [
+      agentAUser,
+      { type: 'compaction', encrypted_content: 'agent-a-opaque-state' },
+    ];
+    const compactFetch = vi.fn(async () => new Response(JSON.stringify({
+      output: agentACanonical,
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-recycled-checkpoints',
+      compactThreshold: 100,
+      compactFetch: compactFetch as typeof fetch,
+    });
+
+    const agentA = await withResponsesWebSocketDiagnosticContext(
+      { claudeAgentId: 'agent-a', estimatedInputTokens: 150 },
+      () => wsFetch('https://example.test/responses', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload([agentAUser])),
+      }),
+    );
+    const recycledSocket = lastSocket();
+    recycledSocket.emit('open');
+    emitTextResponse(recycledSocket, 'resp_agent_a', 'agent A answer', {
+      input_tokens: 50,
+      output_tokens: 10,
+    });
+    await readAll(agentA);
+
+    const agentBUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'agent B root' }],
+    };
+    const agentB = await withResponsesWebSocketDiagnosticContext(
+      { claudeAgentId: 'agent-b', estimatedInputTokens: 10 },
+      () => wsFetch('https://example.test/responses', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload([agentBUser])),
+      }),
+    );
+    expect(fakeSockets).toHaveLength(1);
+    const agentBRootPayload = JSON.parse(recycledSocket.send.mock.calls[1]![0] as string);
+    expect(agentBRootPayload.previous_response_id).toBeUndefined();
+    emitTextResponse(recycledSocket, 'resp_agent_b', 'agent B answer', {
+      input_tokens: 150,
+      output_tokens: 10,
+    });
+    await readAll(agentB);
+
+    const agentBAssistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'agent B answer' }],
+    };
+    const agentBNext = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'agent B continue' }],
+    };
+    const agentBCompactionPromise = withResponsesWebSocketDiagnosticContext(
+      { claudeAgentId: 'agent-b' },
+      () => wsFetch('https://example.test/responses', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload([
+          agentBUser,
+          agentBAssistant,
+          agentBNext,
+        ])),
+      }),
+    );
+    await vi.waitFor(() => expect(recycledSocket.send).toHaveBeenCalledTimes(3));
+    emitCompactionResponse(recycledSocket, 'resp_agent_b_trigger', 'agent-b-opaque-state');
+    const agentBCompaction = await agentBCompactionPromise;
+    const agentBCompactedSocket = lastSocket();
+    agentBCompactedSocket.emit('open');
+    emitTextResponse(agentBCompactedSocket, 'resp_agent_b_compacted', 'agent B done', {
+      input_tokens: 40,
+      output_tokens: 10,
+    });
+    await readAll(agentBCompaction);
+    agentBCompactedSocket.emit('close', 1000, Buffer.from(''));
+
+    const agentAAssistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'agent A answer' }],
+    };
+    const agentANext = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'agent A resume' }],
+    };
+    await withResponsesWebSocketDiagnosticContext(
+      { claudeAgentId: 'agent-a' },
+      () => wsFetch('https://example.test/responses', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload([
+          agentAUser,
+          agentAAssistant,
+          agentANext,
+        ])),
+      }),
+    );
+    const restoredAgentASocket = lastSocket();
+    restoredAgentASocket.emit('open');
+    const restoredAgentA = JSON.parse(restoredAgentASocket.send.mock.calls[0]![0] as string);
+    expect(restoredAgentA.previous_response_id).toBeUndefined();
+    expect(restoredAgentA.input).toEqual([
+      ...agentACanonical,
+      agentAAssistant,
+      agentANext,
+    ]);
+    expect(compactFetch).toHaveBeenCalledOnce();
+  });
+
+  it('continues a subagent tool loop and usage reporting after native compaction', async () => {
+    const user = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'subagent run pwd' }],
+    };
+    const compactFetch = vi.fn(async () => new Response(JSON.stringify({
+      output: [user, { type: 'compaction', encrypted_content: 'subagent-tool-state' }],
+      usage: {
+        input_tokens: 200,
+        input_tokens_details: { cached_tokens: 180 },
+        output_tokens: 10,
+      },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-subagent-tool-compaction',
+      compactThreshold: 100,
+      compactFetch: compactFetch as typeof fetch,
+    });
+    const first = await withResponsesWebSocketDiagnosticContext(
+      { claudeAgentId: 'subagent-tool', estimatedInputTokens: 150 },
+      () => wsFetch('https://example.test/responses', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload([user])),
+      }),
+    );
+    const socket = lastSocket();
+    socket.emit('open');
+    emitToolCallResponse(socket, 'resp_subagent_tool', 'call_pwd', {
+      input_tokens: 50,
+      input_tokens_details: { cached_tokens: 40 },
+      output_tokens: 5,
+    });
+    const firstCompleted = (await readAll(first))
+      .split('\n\n')
+      .filter(Boolean)
+      .map(frame => JSON.parse(frame.replace(/^data: /, '')))
+      .find(event => event.type === 'response.completed');
+    expect(firstCompleted.response.usage).toMatchObject({
+      input_tokens: 250,
+      output_tokens: 15,
+      input_tokens_details: { cached_tokens: 220 },
+    });
+
+    const echoedCall = {
+      type: 'function_call',
+      call_id: 'call_pwd',
+      name: 'Bash',
+      arguments: '{"command":"pwd"}',
+    };
+    const toolOutput = {
+      type: 'function_call_output',
+      call_id: 'call_pwd',
+      output: '/tmp/project',
+    };
+    const second = await withResponsesWebSocketDiagnosticContext(
+      { claudeAgentId: 'subagent-tool' },
+      () => wsFetch('https://example.test/responses', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload([user, echoedCall, toolOutput])),
+      }),
+    );
+    const continued = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(continued.previous_response_id).toBe('resp_subagent_tool');
+    expect(continued.input).toEqual([toolOutput]);
+    emitTextResponse(socket, 'resp_subagent_tool_done', 'done', {
+      input_tokens: 60,
+      input_tokens_details: { cached_tokens: 55 },
+      output_tokens: 6,
+    });
+    const secondCompleted = (await readAll(second))
+      .split('\n\n')
+      .filter(Boolean)
+      .map(frame => JSON.parse(frame.replace(/^data: /, '')))
+      .find(event => event.type === 'response.completed');
+    expect(secondCompleted.response.usage).toMatchObject({
+      input_tokens: 60,
+      output_tokens: 6,
+      input_tokens_details: { cached_tokens: 55 },
+    });
+    expect(compactFetch).toHaveBeenCalledOnce();
+  });
+
+  it('restores multiple workflow checkpoints after restart', async () => {
+    mkdirSync(process.env.CLODEX_HOME!, { recursive: true });
+    const checkpointStoreDir = mkdtempSync(join(process.env.CLODEX_HOME!, 'workflow-checkpoints-'));
+    const compactFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      const lastUser = [...body.input].reverse().find(
+        (item: { role?: string }) => item.role === 'user',
+      );
+      return new Response(JSON.stringify({
+        output: [
+          lastUser,
+          {
+            type: 'compaction',
+            encrypted_content: `opaque-${lastUser.content[0].text}`,
+          },
+        ],
+        usage: {
+          input_tokens: 210,
+          input_tokens_details: { cached_tokens: 180 },
+          output_tokens: 18,
+        },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const workflowFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-workflow-restart',
+      compactThreshold: 258_000,
+      compactFetch: compactFetch as typeof fetch,
+      checkpointStoreDir,
+    });
+    const roots = ['workflow A', 'workflow B'].map(label => [{
+      role: 'user',
+      content: [{ type: 'input_text', text: label }],
+    }]);
+    const firstWaveBodies: string[] = [];
+    for (let index = 0; index < roots.length; index += 1) {
+      const response = await withResponsesWebSocketDiagnosticContext(
+        { claudeAgentId: `workflow-${index}`, estimatedInputTokens: 300_000 },
+        () => workflowFetch('https://example.test/responses', {
+          method: 'POST',
+          headers: {},
+          body: JSON.stringify(sessionPayload(roots[index]!)),
+        }),
+      );
+      const socket = lastSocket();
+      socket.emit('open');
+      emitTextResponse(socket, `resp_workflow_wave1_${index}`, `wave one ${index}`, {
+        input_tokens: 40_000,
+        input_tokens_details: { cached_tokens: 35_000 },
+        output_tokens: 250,
+      });
+      firstWaveBodies.push(await readAll(response));
+    }
+    expect(fakeSockets).toHaveLength(2);
+    for (const body of firstWaveBodies) {
+      const completed = body.split('\n\n')
+        .filter(Boolean)
+        .map(frame => JSON.parse(frame.replace(/^data: /, '')))
+        .find(event => event.type === 'response.completed');
+      expect(completed.response.usage).toMatchObject({
+        input_tokens: 40_210,
+        output_tokens: 268,
+        input_tokens_details: { cached_tokens: 35_180 },
+      });
+    }
+    expect(compactFetch).toHaveBeenCalledTimes(2);
+    expect(readdirSync(checkpointStoreDir)).toHaveLength(2);
+
+    resetResponsesWebSocketConnectionsForTests();
+    fakeSockets.length = 0;
+    const compactAfterRestart = vi.fn();
+    const resumedFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-workflow-restart',
+      compactThreshold: 258_000,
+      compactFetch: compactAfterRestart as typeof fetch,
+      checkpointStoreDir,
+    });
+    const resumedBodies: string[] = [];
+    for (let index = 0; index < roots.length; index += 1) {
+      const assistant = {
+        role: 'assistant',
+        content: [{ type: 'output_text', text: `wave one ${index}` }],
+      };
+      const nextUser = {
+        role: 'user',
+        content: [{ type: 'input_text', text: `wave two ${index}` }],
+      };
+      const response = await withResponsesWebSocketDiagnosticContext(
+        { claudeAgentId: `workflow-${index}`, estimatedInputTokens: 400_000 },
+        () => resumedFetch('https://example.test/responses', {
+          method: 'POST',
+          headers: {},
+          body: JSON.stringify(sessionPayload([
+            ...roots[index]!,
+            assistant,
+            nextUser,
+          ])),
+        }),
+      );
+      const socket = lastSocket();
+      socket.emit('open');
+      const sent = JSON.parse(socket.send.mock.calls[0]![0] as string);
+      expect(sent.previous_response_id).toBeUndefined();
+      expect(sent.input).toEqual([
+        roots[index]![0],
+        {
+          type: 'compaction',
+          encrypted_content: `opaque-workflow ${index === 0 ? 'A' : 'B'}`,
+        },
+        assistant,
+        nextUser,
+      ]);
+      emitTextResponse(socket, `resp_workflow_wave2_${index}`, `wave two done ${index}`, {
+        input_tokens: 60_000,
+        input_tokens_details: { cached_tokens: 55_000 },
+        output_tokens: 200,
+      });
+      resumedBodies.push(await readAll(response));
+    }
+    expect(fakeSockets).toHaveLength(2);
+    for (const body of resumedBodies) {
+      const completed = body.split('\n\n')
+        .filter(Boolean)
+        .map(frame => JSON.parse(frame.replace(/^data: /, '')))
+        .find(event => event.type === 'response.completed');
+      expect(completed.response.usage).toMatchObject({
+        input_tokens: 60_000,
+        output_tokens: 200,
+        input_tokens_details: { cached_tokens: 55_000 },
+      });
+    }
+    expect(compactAfterRestart).not.toHaveBeenCalled();
+  });
+
+  it('compacts oversized sibling workflow branches concurrently', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    let releaseCompactions!: () => void;
+    const gate = new Promise<void>(resolve => { releaseCompactions = resolve; });
+    const compactFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      await gate;
+      const body = JSON.parse(String(init?.body));
+      const user = body.input.at(-1);
+      return new Response(JSON.stringify({
+        output: [user, { type: 'compaction', encrypted_content: `opaque-${user.content[0].text}` }],
+        usage: { input_tokens: 200, output_tokens: 10 },
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    });
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-concurrent-workflow-compaction',
+      compactThreshold: 258_000,
+      compactFetch: compactFetch as typeof fetch,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const roots = ['sibling one', 'sibling two'].map(text => [{
+      role: 'user',
+      content: [{ type: 'input_text', text }],
+    }]);
+    const pending = roots.map((root, index) => withResponsesWebSocketDiagnosticContext(
+      { claudeAgentId: `sibling-${index}`, estimatedInputTokens: 300_000 },
+      () => wsFetch('https://example.test/responses', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload(root)),
+      }),
+    ));
+    await vi.waitFor(() => expect(compactFetch).toHaveBeenCalledTimes(2));
+    releaseCompactions();
+    const responses = await Promise.all(pending);
+
+    expect(diagnostics.filter(
+      event => event.event === 'ws_compaction'
+        && event.outcome === 'completed'
+        && event.transport === 'responses_compact_endpoint',
+    )).toHaveLength(2);
+    expect(diagnostics
+      .filter(event => event.event === 'ws_head_decision')
+      .map(event => event.decision))
+      .toEqual(['compaction_new_head', 'compaction_new_head']);
+    await Promise.all(responses.map(response => response.body?.cancel()));
   });
 
   it('expires process-local compact checkpoints after 30 minutes', async () => {

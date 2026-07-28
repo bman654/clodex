@@ -1379,6 +1379,16 @@ describe('patch script identity naming', () => {
       { type: 'user' },
       { type: 'assistant', isApiErrorMessage: false, message: { usage: { total: 0 }, model: 'luna' } },
     ])).toEqual({ tokens: 120, progress: [0, 120, 120] });
+
+    // A native-compaction response includes hidden compaction plus visible
+    // inference usage. Later workflow turns must replace that context sample,
+    // while zero-valued streaming placeholders retain the latest real value.
+    expect(runWorkflow([
+      { type: 'assistant', isApiErrorMessage: false, message: { usage: { total: 289 }, model: 'luna' } },
+      { type: 'assistant', isApiErrorMessage: false, message: { usage: { total: 0 }, model: 'luna' } },
+      { type: 'assistant', isApiErrorMessage: false, message: { usage: { total: 69 }, model: 'luna' } },
+      { type: 'assistant', isApiErrorMessage: false, message: { usage: { total: 0 }, model: 'luna' } },
+    ])).toEqual({ tokens: 69, progress: [289, 289, 69, 69] });
   });
 
   it('refreshes the baked context table in place when only the window changes', () => {

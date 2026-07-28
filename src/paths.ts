@@ -43,3 +43,7 @@ export function getProxyTokenPath(env: HomeEnv = process.env): string {
 export function getLogsPath(env: HomeEnv = process.env): string {
   return join(getAppHome(env), 'logs');
 }
+
+export function getResponsesCheckpointsPath(env: HomeEnv = process.env): string {
+  return join(getAppHome(env), 'responses-checkpoints');
+}
