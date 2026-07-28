@@ -1,17 +1,51 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import * as p from '@clack/prompts';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  applyPatch,
   buildPatchModelConfig,
+  buildDesiredPatchConfig,
   computePatchConfigHash,
   evaluatePatchState,
+  getPatchManifestPath,
+  reportRejectedModelAliases,
   summarizePatchResults,
   tryAcquirePatchLock,
   type PatchManifest,
 } from '../src/patcher.js';
-import { applyClodexPatches, PatchApplyError } from '../src/patch-transforms.js';
+import {
+  applyClodexPatches,
+  PATCH_TRANSFORMS_VERSION,
+  PatchApplyError,
+  type PatchScriptModelConfig,
+} from '../src/patch-transforms.js';
+
+/**
+ * The digest a pre-versioning clodex wrote into `patch-state.json`: the bare
+ * key-sorted 4-field tuple, with no version wrapper. This is DELIBERATELY FROZEN
+ * — it models bytes that already exist on real users' disks, so it must NOT be
+ * updated to track future changes to the production canonical tuple. (The
+ * "version participates in the digest" property is pinned by the
+ * transform-set-version test below, which is immune to tuple drift.)
+ */
+function computeLegacyPatchConfigHash(config: PatchScriptModelConfig): string {
+  const canonical = Object.keys(config).sort().map(key => {
+    const entry = config[key]!;
+    return [key, entry.alias ?? null, entry.context ?? null, entry.display ?? null];
+  });
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+const tweakccMocks = vi.hoisted(() => ({
+  tryDetectInstallation: vi.fn(),
+  readContent: vi.fn(),
+  writeContent: vi.fn(),
+}));
+
+vi.mock('tweakcc', () => tweakccMocks);
 
 describe('buildPatchModelConfig', () => {
   const favorites = [
@@ -23,9 +57,37 @@ describe('buildPatchModelConfig', () => {
     { name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
   ];
   const meta = new Map([
-    ['openai-oauth:gpt-5.6-sol', { contextWindow: 272_000, displayName: 'GPT-5.6 Sol (OpenAI (ChatGPT))' }],
-    ['openai-oauth:gpt-5.6-luna', { contextWindow: 272_000, displayName: 'GPT-5.6 Luna (OpenAI (ChatGPT))' }],
+    ['openai-oauth:gpt-5.6-sol', {
+      contextWindow: 272_000,
+      displayName: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
+      effort: {
+        levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'medium',
+      },
+    }],
+    ['openai-oauth:gpt-5.6-luna', {
+      contextWindow: 272_000,
+      displayName: 'GPT-5.6 Luna (OpenAI (ChatGPT))',
+      effort: {
+        levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'medium',
+      },
+    }],
   ]);
+  const rejectedAliases = [
+    { name: 'Orbit', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+    { name: 'ORBIT', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' },
+    { name: 'default', providerId: 'openai', modelId: 'davinci-002' },
+    { name: 'bad:name', providerId: 'openai', modelId: 'mystery-model' },
+    { name: 'ArChIvEd', providerId: 'openai', modelId: 'not-a-favorite' },
+  ];
+  const rejectedAliasRejections = [
+    { alias: rejectedAliases[0]!, reason: 'conflicting-targets' as const },
+    { alias: rejectedAliases[1]!, reason: 'conflicting-targets' as const },
+    { alias: rejectedAliases[2]!, reason: 'reserved-name' as const },
+    { alias: rejectedAliases[3]!, reason: 'invalid-name' as const },
+    { alias: rejectedAliases[4]!, reason: 'target-not-favorite' as const },
+  ];
 
   it('builds clodex-prefixed entries with aliases, context windows, and display labels', () => {
     const { config, unknownWindows } = buildPatchModelConfig(
@@ -38,10 +100,18 @@ describe('buildPatchModelConfig', () => {
       alias: 'sol',
       context: 272_000,
       display: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
+      effort: {
+        levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'high',
+      },
     });
     expect(config['clodex:openai-oauth:gpt-5.6-luna']).toEqual({
       context: 272_000,
       display: 'GPT-5.6 Luna (OpenAI (ChatGPT))',
+      effort: {
+        levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'high',
+      },
     });
     // Unknown window → no context (Claude Code's 200k default) + warning entry
     expect(config['clodex:openai:mystery-model']).toEqual({});
@@ -65,6 +135,196 @@ describe('buildPatchModelConfig', () => {
       () => ({ contextWindow: 272_000, displayName: '   ' }),
     );
     expect(config['clodex:openai:davinci-002']).toEqual({ context: 272_000 });
+  });
+
+  it.each([
+    {
+      name: 'an incomplete base',
+      levels: ['high', 'xhigh'],
+      defaultLevel: 'high',
+    },
+    {
+      name: 'a transport-only default',
+      levels: ['none', 'low', 'medium', 'high'],
+      defaultLevel: 'none',
+    },
+  ])('omits client effort metadata for $name', ({ levels, defaultLevel }) => {
+    const { config } = buildPatchModelConfig(
+      [{ providerId: 'openai', modelId: 'reasoning-model' }],
+      [],
+      () => ({
+        contextWindow: 200_000,
+        effort: { levels, defaultLevel },
+      }),
+    );
+    expect(config['clodex:openai:reasoning-model']).toEqual({});
+  });
+
+  it('canonicalizes aliases and omits ambiguous case-fold collisions', () => {
+    const { config } = buildPatchModelConfig(
+      favorites,
+      [
+        { name: 'Sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+        { name: 'LUNA', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' },
+        { name: 'luna', providerId: 'openai', modelId: 'mystery-model' },
+      ],
+      (providerId, modelId) => meta.get(`${providerId}:${modelId}`),
+    );
+
+    expect(config['clodex:openai-oauth:gpt-5.6-sol']?.alias).toBe('sol');
+    expect(config['clodex:openai-oauth:gpt-5.6-luna']?.alias).toBeUndefined();
+    expect(config['clodex:openai:mystery-model']?.alias).toBeUndefined();
+  });
+
+  it('returns every rejected saved alias so the patch command can report it', () => {
+    const desired = buildPatchModelConfig(
+      favorites,
+      rejectedAliases,
+      (providerId, modelId) => meta.get(`${providerId}:${modelId}`),
+    );
+
+    expect(desired.rejectedAliases).toEqual(rejectedAliases);
+    expect(desired.rejectedAliasRejections).toEqual(rejectedAliasRejections);
+  });
+
+  it('reports each rejected alias with its exact stored name and reason', () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+
+    try {
+      reportRejectedModelAliases(rejectedAliasRejections);
+
+      expect(warn.mock.calls.map(([message]) => String(message))).toEqual([
+        'Saved model alias "Orbit" was not patched — conflicting targets. The saved entry was preserved.',
+        'Saved model alias "ORBIT" was not patched — conflicting targets. The saved entry was preserved.',
+        'Saved model alias "default" was not patched — reserved client name. The saved entry was preserved.',
+        'Saved model alias "bad:name" was not patched — invalid name. The saved entry was preserved.',
+        'Saved model alias "ArChIvEd" was not patched — target is not a saved favorite. The saved entry was preserved.',
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe('buildDesiredPatchConfig', () => {
+  const previousHome = process.env.CLODEX_HOME;
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'clodex-desired-patch-'));
+    process.env.CLODEX_HOME = home;
+  });
+
+  afterEach(() => {
+    if (previousHome === undefined) delete process.env.CLODEX_HOME;
+    else process.env.CLODEX_HOME = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  function writeInputs(
+    model: Record<string, unknown>,
+    provider: {
+      id?: string;
+      templateId?: string;
+      name?: string;
+      npm?: string;
+    } = {},
+  ): void {
+    const providerId = provider.id ?? 'openai';
+    writeFileSync(
+      join(home, 'config.json'),
+      JSON.stringify({
+        favoriteModels: [{ providerId, modelId: model.id }],
+      }),
+    );
+    writeFileSync(
+      join(home, 'providers.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        providers: [{
+          id: providerId,
+          templateId: provider.templateId ?? 'openai',
+          name: provider.name ?? 'OpenAI',
+          enabled: true,
+          authRef: 'env:OPENAI_API_KEY',
+          api: { npm: provider.npm ?? '@ai-sdk/openai' },
+          modelsCache: {
+            fetchedAt: '2026-07-27T00:00:00.000Z',
+            models: [model],
+          },
+          addedAt: '2026-07-27T00:00:00.000Z',
+        }],
+      }),
+    );
+  }
+
+  it('preserves the native high default when provider metadata defaults to medium', () => {
+    writeInputs({
+      id: 'gpt-5.6-sol',
+      upstreamModelId: 'gpt-5.6-sol',
+      name: 'GPT-5.6 Sol',
+      contextWindow: 272_000,
+      modelFormat: 'openai',
+    });
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(desired.config['clodex:openai:gpt-5.6-sol']?.effort).toEqual({
+      levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultLevel: 'high',
+    });
+  });
+
+  it('does not leak provider-only extended levels through the production config path', () => {
+    writeInputs({
+      id: 'gpt-5.5',
+      upstreamModelId: 'gpt-5.5',
+      name: 'GPT-5.5',
+      contextWindow: 272_000,
+      modelFormat: 'openai',
+    });
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(desired.config['clodex:openai:gpt-5.5']?.effort).toEqual({
+      levels: ['low', 'medium', 'high'],
+      defaultLevel: 'high',
+    });
+  });
+
+  it('uses the catalog id when an older cache entry lacks upstreamModelId', () => {
+    writeInputs({
+      id: 'gpt-5.5',
+      name: 'GPT-5.5',
+      contextWindow: 272_000,
+      modelFormat: 'openai',
+    });
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(desired.config['clodex:openai:gpt-5.5']?.effort).toEqual({
+      levels: ['low', 'medium', 'high'],
+      defaultLevel: 'high',
+    });
+  });
+
+  it('omits effort when enriched catalog metadata explicitly disables reasoning', () => {
+    writeInputs({
+      id: 'kimi-k2',
+      upstreamModelId: 'kimi-k2',
+      name: 'Kimi K2',
+      contextWindow: 128_000,
+      modelFormat: 'openai',
+    }, {
+      id: 'qiniu-ai',
+      templateId: 'qiniu-ai',
+      name: 'Qiniu',
+      npm: '@ai-sdk/openai-compatible',
+    });
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(desired.config['clodex:qiniu-ai:kimi-k2']?.effort).toBeUndefined();
   });
 });
 
@@ -91,11 +351,93 @@ describe('computePatchConfigHash', () => {
     );
   });
 
-  it('includes the binary patch schema in the persisted digest', () => {
+  it('changes when only the supported effort levels change', () => {
+    const base = {
+      'clodex:p:m1': {
+        effort: {
+          levels: ['low', 'medium', 'high'],
+          defaultLevel: 'medium',
+        },
+      },
+    };
+    expect(computePatchConfigHash(base)).not.toBe(
+      computePatchConfigHash({
+        'clodex:p:m1': {
+          effort: {
+            levels: ['low', 'medium', 'high', 'xhigh'],
+            defaultLevel: 'medium',
+          },
+        },
+      }),
+    );
+  });
+
+  it('changes when only the default effort level changes', () => {
+    const base = {
+      'clodex:p:m1': {
+        effort: {
+          levels: ['low', 'medium', 'high'],
+          defaultLevel: 'medium',
+        },
+      },
+    };
+    expect(computePatchConfigHash(base)).not.toBe(
+      computePatchConfigHash({
+        'clodex:p:m1': {
+          effort: {
+            levels: ['low', 'medium', 'high'],
+            defaultLevel: 'high',
+          },
+        },
+      }),
+    );
+  });
+  it('differs from the legacy model-config-only hash', () => {
+    const config = { 'clodex:p:m1': { alias: 'x', context: 1000, display: 'M One (P)' } };
+    expect(computePatchConfigHash(config)).not.toBe(computeLegacyPatchConfigHash(config));
+  });
+
+  it('changes when the transform-set version changes', () => {
     const config = { 'clodex:p:m1': { alias: 'x', context: 1000 } };
-    const legacyCanonical = [['clodex:p:m1', 'x', 1000, null]];
-    const legacyHash = createHash('sha256').update(JSON.stringify(legacyCanonical)).digest('hex');
-    expect(computePatchConfigHash(config)).not.toBe(legacyHash);
+    expect(computePatchConfigHash(config)).toBe(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION));
+    expect(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION + 1)).not.toBe(
+      computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION),
+    );
+  });
+});
+
+describe('PATCH_TRANSFORMS_VERSION', () => {
+  // Folding the version into the config hash only helps if somebody actually
+  // bumps it. Nothing else couples an edit of patch-transforms.ts to the
+  // constant, and a forgotten bump reproduces exactly the silent staleness this
+  // mechanism exists to prevent — with a fully green suite. So pin the file.
+  //
+  // WHEN THIS FAILS: patch-transforms.ts changed. Decide, deliberately:
+  //   * transform set changed materially (site added/removed, or a site's regex,
+  //     replacement, or ordering changed) -> bump PATCH_TRANSFORMS_VERSION AND
+  //     update the digest below, in the same commit;
+  //   * comment/formatting/type-only edit -> update the digest below and leave
+  //     the version alone (no need to make every install repatch).
+  //
+  // Scope caveat: this hashes THIS FILE only. patch-transforms.ts imports
+  // `isReservedModelAlias`, so a change reaching the transforms from
+  // model-aliases.ts will not trip this guard. That import feeds a `fail()` gate
+  // only, so it can turn a patch into a hard PatchApplyError but cannot silently
+  // alter the bytes of a patch that succeeds — the failure mode this guard exists
+  // to prevent. It catches the common case (a direct edit), not every possible one.
+  it('is re-pinned deliberately whenever patch-transforms.ts changes', () => {
+    // Normalize line endings: a Windows checkout with core.autocrlf=true would
+    // otherwise fail this guard with zero source change, which is exactly the
+    // "re-pin without thinking" reflex the guard is meant to avoid.
+    const source = readFileSync(
+      new URL('../src/patch-transforms.ts', import.meta.url),
+      'utf8',
+    ).replace(/\r\n/g, '\n');
+    const digest = createHash('sha256').update(source).digest('hex');
+    expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
+      version: 3,
+      digest: 'b81e0113073a0a7cb021d0ab89d837ef02719db3dabe0aa425c14abb1204331e',
+    });
   });
 });
 
@@ -129,6 +471,17 @@ describe('evaluatePatchState', () => {
       binaryPath: '/opt/claude/claude',
       claudeVersion: '2.1.183',
       configHash: 'hash-2',
+      binarySize: 1234,
+    })).toBe('stale-config');
+  });
+
+  it('reports stale-config for a manifest hashed before transform-set versioning', () => {
+    const config = { 'clodex:p:m1': { alias: 'x', context: 1000 } };
+    const legacyManifest = { ...manifest, configHash: computeLegacyPatchConfigHash(config) };
+    expect(evaluatePatchState(legacyManifest, {
+      binaryPath: '/opt/claude/claude',
+      claudeVersion: '2.1.183',
+      configHash: computePatchConfigHash(config),
       binarySize: 1234,
     })).toBe('stale-config');
   });
@@ -211,10 +564,31 @@ describe('applyClodexPatches input validation', () => {
     })).toThrow(/not a safe lowercase alias/);
   });
 
+  it('rejects reserved aliases', () => {
+    expect(() => applyClodexPatches('var x = 1;', {
+      'clodex:openai:model': { alias: 'sonnet' },
+    })).toThrow(/reserved alias/);
+  });
+
   it('rejects an explicit context on a [1m]-suffixed id (the suffix already forces 1M)', () => {
     expect(() => applyClodexPatches('var x = 1;', {
       'clodex:openai:model[1m]': { context: 1_000_000 },
     })).toThrow(/keeps the \[1m\] suffix/);
+  });
+
+  it.each([
+    {
+      levels: ['low', 'high'],
+      defaultLevel: 'high',
+    },
+    {
+      levels: ['low', 'medium', 'high'],
+      defaultLevel: 'max',
+    },
+  ])('rejects effort metadata outside the native client contract', effort => {
+    expect(() => applyClodexPatches('var x = 1;', {
+      'clodex:openai:model': { effort },
+    })).toThrow(/must include low, medium, and high with a native default/);
   });
 
   it('throws PatchApplyError carrying per-site results when a required anchor is missing', () => {
@@ -250,7 +624,7 @@ describe('summarizePatchResults', () => {
 
 // A minified stand-in for the Claude Code bundle carrying every anchor the
 // patch transforms key on, so they can be executed end to end.
-const CLAUDE_FIXTURE = [
+const CLAUDE_CORE_FIXTURE = [
   '.enum(["sonnet","opus","haiku","fable"]).optional().describe(`Optional model override for this agent. Defaults to inherit.`)',
   'var KNOWN=["sonnet","opus","haiku","fable","opusplan"];',
   'function rz(x){switch(x){case"best":{return "opus"}default:return null}}',
@@ -266,9 +640,382 @@ const CLAUDE_FIXTURE = [
   'function runWorkflow(events){let last,messages=[],tokens=0,baseTokens=0,baseTools=0,toolCalls=0,progress=[];const countUsage=(usage)=>usage.total;const emit=(state,data)=>progress.push(data.tokens);for(const msg of events){if(msg.type==="user"){continue}if(msg.type==="assistant"){if(last=msg,messages?.push(msg),!msg.isApiErrorMessage){tokens=countUsage(msg.message.usage);let model=msg.message.model;emit("progress",{tokens:baseTokens+tokens,toolCalls:baseTools+toolCalls})}}}return{tokens,progress}}/*workflow-end*/',
 ].join('\n');
 
+const digestOf = (text: string) => createHash('sha256').update(text).digest('hex');
+
+/**
+ * The re-patch tests below all start from the same state: a live binary holding
+ * a previous clodex patch, plus an ESTABLISHED pristine backup — content-addressed
+ * (so no version probe is needed to trust it) and recorded in the manifest. That
+ * is what makes `applyPatch` plan a `restore`, i.e. seed the candidate from the
+ * backup rather than from the patched binary. Spelling it out matters: with a
+ * manifest that does not identify the live bytes as clodex's own patch, the
+ * planner would fall through to inspecting them and could snapshot a PATCHED
+ * binary as "pristine" — the exact thing the backup rules exist to prevent.
+ */
+const PATCHED_BINARY = 'previously-patched-native';
+const PRISTINE_BINARY = 'pristine-native';
+const PRISTINE_BACKUP_NAME = `claude-test-version-${digestOf(PRISTINE_BINARY).slice(0, 16)}.orig`;
+
+function priorPatchManifest(binaryPath: string, backupPath: string): PatchManifest {
+  return {
+    binaryPath,
+    claudeVersion: 'test-version',
+    configHash: 'previous-config-hash',
+    patchedSize: Buffer.byteLength(PATCHED_BINARY),
+    patchedSha256: digestOf(PATCHED_BINARY),
+    backupPath,
+    pristineSha256: digestOf(PRISTINE_BINARY),
+    patchedAt: '2026-01-01T00:00:00.000Z',
+  };
+}
+
+describe('applyPatch', () => {
+  it('does not write the binary or a current manifest when effort anchors fail', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-effort-anchor-failure-'));
+    const binaryPath = join(dir, 'claude');
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    writeFileSync(binaryPath, 'pristine-native');
+    process.env.CLODEX_HOME = join(dir, 'app-home');
+    process.env.TWEAKCC_CONFIG_DIR = join(dir, 'tweakcc-home');
+
+    tweakccMocks.tryDetectInstallation.mockReset();
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+    tweakccMocks.tryDetectInstallation.mockImplementation(
+      async ({ path }: { path: string }) => {
+        expect(path).not.toBe(binaryPath);
+        expect(readFileSync(path, 'utf8')).toBe('pristine-native');
+        return {
+          path,
+          version: 'test-version',
+          kind: 'native',
+        };
+      },
+    );
+    tweakccMocks.readContent.mockResolvedValue(CLAUDE_CORE_FIXTURE);
+
+    try {
+      const outcome = await applyPatch(
+        binaryPath,
+        'test-version',
+        {
+          config: {
+            'clodex:test:extended': {
+              alias: 'extended',
+              effort: {
+                levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+                defaultLevel: 'high',
+              },
+            },
+          },
+          unknownWindows: [],
+        },
+        'desired-config-hash',
+        { trace: false, manifest: null },
+      );
+
+      expect(outcome.ok).toBe(false);
+      expect(outcome.message).toContain('required effort patches failed');
+      expect(outcome.detailLines).toContain(
+        'clodex patch: FAILED patches: PATCH 8a: effort capability; '
+          + 'PATCH 8b: xhigh effort capability; '
+          + 'PATCH 8c: max effort capability; PATCH 9: default effort',
+      );
+      expect(tweakccMocks.writeContent).not.toHaveBeenCalled();
+      expect(readFileSync(binaryPath, 'utf8')).toBe('pristine-native');
+      expect(existsSync(getPatchManifestPath())).toBe(false);
+    } finally {
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves the working binary and manifest when a re-patch fails validation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-repatch-validation-failure-'));
+    const binaryPath = join(dir, 'claude');
+    const tweakccHome = join(dir, 'tweakcc-home');
+    const pristinePath = join(tweakccHome, PRISTINE_BACKUP_NAME);
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    const previousManifest = '{"existing":"manifest"}\n';
+    mkdirSync(tweakccHome, { recursive: true });
+    writeFileSync(binaryPath, 'previously-patched-native');
+    writeFileSync(pristinePath, 'pristine-native');
+    process.env.CLODEX_HOME = dir;
+    process.env.TWEAKCC_CONFIG_DIR = tweakccHome;
+    writeFileSync(getPatchManifestPath(), previousManifest);
+
+    tweakccMocks.tryDetectInstallation.mockReset();
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+    tweakccMocks.tryDetectInstallation.mockImplementation(
+      async ({ path }: { path: string }) => {
+        expect(path).not.toBe(binaryPath);
+        expect(readFileSync(path, 'utf8')).toBe('pristine-native');
+        return {
+          path,
+          version: 'test-version',
+          kind: 'native',
+        };
+      },
+    );
+    tweakccMocks.readContent.mockResolvedValue(CLAUDE_CORE_FIXTURE);
+
+    try {
+      const outcome = await applyPatch(
+        binaryPath,
+        'test-version',
+        {
+          config: {
+            'clodex:test:extended': {
+              alias: 'extended',
+              effort: {
+                levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+                defaultLevel: 'high',
+              },
+            },
+          },
+          unknownWindows: [],
+        },
+        'desired-config-hash',
+        { trace: false, manifest: priorPatchManifest(binaryPath, pristinePath) },
+      );
+
+      expect(outcome.ok).toBe(false);
+      expect(outcome.message).toContain('required effort patches failed');
+      expect(tweakccMocks.writeContent).not.toHaveBeenCalled();
+      expect(readFileSync(binaryPath, 'utf8')).toBe('previously-patched-native');
+      expect(readFileSync(pristinePath, 'utf8')).toBe('pristine-native');
+      expect(readFileSync(getPatchManifestPath(), 'utf8')).toBe(previousManifest);
+      expect(readFileSync(join(tweakccHome, 'native-binary.backup'), 'utf8')).toBe('pristine-native');
+    } finally {
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves the working binary and manifest when candidate repacking fails', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-repatch-write-failure-'));
+    const binaryPath = join(dir, 'claude');
+    const tweakccHome = join(dir, 'tweakcc-home');
+    const pristinePath = join(tweakccHome, PRISTINE_BACKUP_NAME);
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    const previousManifest = '{"existing":"manifest"}\n';
+    mkdirSync(tweakccHome, { recursive: true });
+    writeFileSync(binaryPath, 'previously-patched-native');
+    writeFileSync(pristinePath, 'pristine-native');
+    process.env.CLODEX_HOME = dir;
+    process.env.TWEAKCC_CONFIG_DIR = tweakccHome;
+    writeFileSync(getPatchManifestPath(), previousManifest);
+
+    tweakccMocks.tryDetectInstallation.mockReset();
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+    tweakccMocks.tryDetectInstallation.mockImplementation(
+      async ({ path }: { path: string }) => ({
+        path,
+        version: 'test-version',
+        kind: 'native',
+      }),
+    );
+    tweakccMocks.readContent.mockResolvedValue(CLAUDE_FIXTURE);
+    tweakccMocks.writeContent.mockRejectedValue(new Error('candidate repack failed'));
+
+    try {
+      const outcome = await applyPatch(
+        binaryPath,
+        'test-version',
+        {
+          config: {
+            'clodex:test:extended': {
+              alias: 'extended',
+              effort: {
+                levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+                defaultLevel: 'high',
+              },
+            },
+          },
+          unknownWindows: [],
+        },
+        'desired-config-hash',
+        { trace: false, manifest: priorPatchManifest(binaryPath, pristinePath) },
+      );
+
+      expect(outcome.ok).toBe(false);
+      expect(outcome.message).toContain('candidate repack failed');
+      expect(tweakccMocks.writeContent).toHaveBeenCalledOnce();
+      expect(readFileSync(binaryPath, 'utf8')).toBe('previously-patched-native');
+      expect(readFileSync(pristinePath, 'utf8')).toBe('pristine-native');
+      expect(readFileSync(getPatchManifestPath(), 'utf8')).toBe(previousManifest);
+    } finally {
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('publishes the replacement and updates the manifest after a successful re-patch', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-repatch-success-'));
+    const binaryPath = join(dir, 'claude');
+    const tweakccHome = join(dir, 'tweakcc-home');
+    const pristinePath = join(tweakccHome, PRISTINE_BACKUP_NAME);
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    const previousManifest = '{"existing":"manifest"}\n';
+    const replacement = 'newly-patched-native';
+    mkdirSync(tweakccHome, { recursive: true });
+    writeFileSync(binaryPath, 'previously-patched-native');
+    writeFileSync(pristinePath, 'pristine-native');
+    process.env.CLODEX_HOME = dir;
+    process.env.TWEAKCC_CONFIG_DIR = tweakccHome;
+    writeFileSync(getPatchManifestPath(), previousManifest);
+
+    tweakccMocks.tryDetectInstallation.mockReset();
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+    tweakccMocks.tryDetectInstallation.mockImplementation(
+      async ({ path }: { path: string }) => ({
+        path,
+        version: 'test-version',
+        kind: 'native',
+      }),
+    );
+    tweakccMocks.readContent.mockResolvedValue(CLAUDE_FIXTURE);
+    tweakccMocks.writeContent.mockImplementation(
+      async ({ path }: { path: string }) => {
+        writeFileSync(path, replacement);
+      },
+    );
+
+    try {
+      const outcome = await applyPatch(
+        binaryPath,
+        'test-version',
+        {
+          config: {
+            'clodex:test:extended': {
+              alias: 'extended',
+              effort: {
+                levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+                defaultLevel: 'high',
+              },
+            },
+          },
+          unknownWindows: [],
+        },
+        'desired-config-hash',
+        { trace: false, manifest: priorPatchManifest(binaryPath, pristinePath) },
+      );
+
+      const manifestBytes = readFileSync(getPatchManifestPath(), 'utf8');
+      const manifest = JSON.parse(manifestBytes) as PatchManifest;
+      expect(outcome.ok).toBe(true);
+      expect(readFileSync(binaryPath, 'utf8')).toBe(replacement);
+      expect(readFileSync(pristinePath, 'utf8')).toBe('pristine-native');
+      expect(readFileSync(join(tweakccHome, 'native-binary.backup'), 'utf8')).toBe('pristine-native');
+      expect(manifestBytes).not.toBe(previousManifest);
+      expect(manifest).toMatchObject({
+        binaryPath,
+        claudeVersion: 'test-version',
+        configHash: 'desired-config-hash',
+        patchedSize: Buffer.byteLength(replacement),
+        patchedSha256: createHash('sha256').update(replacement).digest('hex'),
+        backupPath: pristinePath,
+      });
+    } finally {
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+const CLAUDE_FIXTURE = [
+  CLAUDE_CORE_FIXTURE,
+  'function OI(e){if(SNr(e))return!1;let t=Ede(e,"effort");if(t!==void 0)return t;return!1}',
+  'function I_e(e){if(SNr(e))return!1;let t=Ede(e,"xhigh_effort");if(t!==void 0)return t;return!1}',
+  'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return!1}',
+  'function ait(e){return ww(lo(e))?.default_effort??"high"}',
+].join('\n');
+
+const CLAUDE_PROXY_EFFORT_FIXTURE = [
+  CLAUDE_CORE_FIXTURE,
+  'function OI(e){if(SNr(e))return!1;let t=Ede(e,"effort");if(t!==void 0)return t;return proxyMode(e)}',
+  'function I_e(e){if(SNr(e))return!1;let t=Ede(e,"xhigh_effort");if(t!==void 0)return t;return proxyMode(e)}',
+  'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return proxyMode(e)}',
+  'function ait(e){return ww(lo(e))?.default_effort??"high"}',
+].join('\n');
+
 function runPatchScript(config: Parameters<typeof applyClodexPatches>[1], source = CLAUDE_FIXTURE): string {
   return applyClodexPatches(source, config).content;
 }
+
+type CapabilityFunctionName = 'OI' | 'I_e' | 'eqe';
+
+function executeCapability(
+  source: string,
+  functionName: CapabilityFunctionName,
+  modelId: string,
+  nativeFallback: boolean,
+  denied = false,
+): boolean {
+  const declaration = source
+    .split('\n')
+    .find(line => line.startsWith(`function ${functionName}(`));
+  expect(declaration).toBeDefined();
+  const capability = Function(
+    'SNr',
+    'Ede',
+    'proxyMode',
+    `${declaration};return ${functionName};`,
+  )(
+    () => denied,
+    () => undefined,
+    () => nativeFallback,
+  ) as (id: string) => boolean;
+  return capability(modelId);
+}
+
+function executeDefaultEffort(
+  source: string,
+  modelId: string,
+  nativeDefault: string,
+): string {
+  const declaration = source
+    .split('\n')
+    .find(line => line.startsWith('function ait('));
+  expect(declaration).toBeDefined();
+  const defaultEffort = Function(
+    'lo',
+    'ww',
+    `${declaration};return ait;`,
+  )(
+    (id: string) => id,
+    () => ({ default_effort: nativeDefault }),
+  ) as (id: string) => string;
+  return defaultEffort(modelId);
+}
+
+const CAPABILITY_GATES: Array<{
+  name: string;
+  functionName: CapabilityFunctionName;
+}> = [
+  { name: 'base effort', functionName: 'OI' },
+  { name: 'xhigh effort', functionName: 'I_e' },
+  { name: 'max effort', functionName: 'eqe' },
+];
 
 describe('patch script identity naming', () => {
   const config = {
@@ -276,9 +1023,37 @@ describe('patch script identity naming', () => {
       alias: 'sol',
       context: 272_000,
       display: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
+      effort: {
+        levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'medium',
+      },
     },
     'clodex:openai:mystery': { context: 128_000, display: 'Mystery (OpenAI)' },
   };
+
+  const capabilityConfig = {
+    'clodex:openai:gpt-5.5': {
+      alias: 'standard',
+      effort: {
+        levels: ['low', 'medium', 'high'],
+        defaultLevel: 'high',
+      },
+    },
+    'clodex:openai:gpt-5.6-sol': {
+      alias: 'extended',
+      effort: {
+        levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'high',
+      },
+    },
+    'clodex:openai:no-effort': {
+      alias: 'disabled',
+    },
+  };
+
+  function runCapabilityPatch(): string {
+    return runPatchScript(capabilityConfig, CLAUDE_PROXY_EFFORT_FIXTURE);
+  }
 
   it('injects the ALIAS — not the canonical id — as the model identity', () => {
     const out = runPatchScript(config);
@@ -312,6 +1087,133 @@ describe('patch script identity naming', () => {
     expect(parsed['clodex:openai:mystery']).toBe(128_000);
   });
 
+  it('enables GPT-5.6 effort, xhigh, max, and the native high default for its alias', () => {
+    const out = runPatchScript(config);
+    expect(out).toContain('/*ccpatch:effort*/');
+    expect(out).toContain('/*ccpatch:xhigh-effort*/');
+    expect(out).toContain('/*ccpatch:max-effort*/');
+    expect(out).toContain('/*ccpatch:default-effort*/');
+    expect(out).toContain('"sol":"high"');
+  });
+
+  it.each([
+    {
+      name: 'base only',
+      levels: ['low', 'medium', 'high'],
+      xhigh: false,
+      max: false,
+    },
+    {
+      name: 'xhigh',
+      levels: ['low', 'medium', 'high', 'xhigh'],
+      xhigh: true,
+      max: false,
+    },
+    {
+      name: 'max',
+      levels: ['low', 'medium', 'high', 'max'],
+      xhigh: false,
+      max: true,
+    },
+  ])('exposes $name effort capabilities independently', ({ levels, xhigh, max }) => {
+    const out = runPatchScript({
+      'clodex:openai:reasoning-model': {
+        effort: { levels, defaultLevel: 'high' },
+      },
+    });
+    expect(out).toContain('/*ccpatch:effort*/');
+    expect(out).toContain('/*ccpatch:default-effort*/');
+    const xhighVerdicts = out.match(
+      /\/\*ccpatch:xhigh-effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/,
+    )?.[1];
+    const maxVerdicts = out.match(
+      /\/\*ccpatch:max-effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/,
+    )?.[1];
+    expect(JSON.parse(xhighVerdicts!)).toEqual({
+      'clodex:openai:reasoning-model': xhigh,
+      'clodex:openai:reasoning-model[1m]': xhigh,
+    });
+    expect(JSON.parse(maxVerdicts!)).toEqual({
+      'clodex:openai:reasoning-model': max,
+      'clodex:openai:reasoning-model[1m]': max,
+    });
+  });
+
+  it.each([
+    { name: 'xhigh effort', functionName: 'I_e' as const },
+    { name: 'max effort', functionName: 'eqe' as const },
+  ])('overrides native true with an explicit false $name verdict', ({ functionName }) => {
+    expect(executeCapability(runCapabilityPatch(), functionName, 'standard', true)).toBe(false);
+  });
+
+  it.each(CAPABILITY_GATES)(
+    'overrides native false with an explicit true $name verdict',
+    ({ functionName }) => {
+      expect(executeCapability(runCapabilityPatch(), functionName, 'extended', false)).toBe(true);
+      expect(executeCapability(runCapabilityPatch(), functionName, 'extended[1m]', false)).toBe(true);
+    },
+  );
+
+  it.each(CAPABILITY_GATES)(
+    'keeps configured no-effort identities false at the $name gate',
+    ({ functionName }) => {
+      const out = runCapabilityPatch();
+      expect(executeCapability(out, functionName, 'disabled', true)).toBe(false);
+      expect(executeCapability(out, functionName, 'clodex:openai:no-effort', true)).toBe(false);
+      expect(executeCapability(out, functionName, 'clodex:openai:no-effort[1m]', true)).toBe(false);
+    },
+  );
+
+  it.each(CAPABILITY_GATES)(
+    'falls through only for an unconfigured identity at the $name gate',
+    ({ functionName }) => {
+      const out = runCapabilityPatch();
+      expect(executeCapability(out, functionName, 'unconfigured', false)).toBe(false);
+      expect(executeCapability(out, functionName, 'unconfigured', true)).toBe(true);
+    },
+  );
+
+  it.each(['constructor', 'toString', '__proto__'])(
+    'falls through for unconfigured object prototype identity %s',
+    modelId => {
+      const out = runCapabilityPatch();
+      for (const { functionName } of CAPABILITY_GATES) {
+        expect(executeCapability(out, functionName, modelId, false)).toBe(false);
+        expect(executeCapability(out, functionName, modelId, true)).toBe(true);
+      }
+      expect(executeDefaultEffort(out, modelId, 'medium')).toBe('medium');
+    },
+  );
+
+  it.each(CAPABILITY_GATES)(
+    'keeps the native denylist ahead of the configured $name verdict',
+    ({ functionName }) => {
+      const out = runCapabilityPatch();
+      for (const modelId of ['extended', 'extended[1m]']) {
+        expect(executeCapability(
+          out,
+          functionName,
+          modelId,
+          false,
+          true,
+        )).toBe(false);
+      }
+    },
+  );
+
+  it.each([
+    'sol',
+    'sol[1m]',
+    'clodex:openai-oauth:gpt-5.6-sol',
+    'clodex:openai-oauth:gpt-5.6-sol[1m]',
+  ])('returns high for configured default key %s against native medium', modelId => {
+    expect(executeDefaultEffort(runPatchScript(config), modelId, 'medium')).toBe('high');
+  });
+
+  it('falls through to the native default for an unconfigured identity', () => {
+    expect(executeDefaultEffort(runPatchScript(config), 'unconfigured', 'medium')).toBe('medium');
+  });
+
   it('falls back to the canonical id as the identity when a model has no alias', () => {
     const out = runPatchScript({ 'clodex:openai:mystery': { context: 128_000 } });
     expect(out).toContain('.enum(["sonnet","opus","haiku","fable","clodex:openai:mystery"])');
@@ -319,6 +1221,16 @@ describe('patch script identity naming', () => {
     // No alias → nothing to resolve and no picker entry.
     expect(out).not.toContain('case"clodex:openai:mystery":return');
     expect(out).not.toContain('value:"clodex:openai:mystery"');
+  });
+
+  it('supports a configured alias that matches an object prototype name', () => {
+    const out = runPatchScript({
+      'clodex:openai:model': { alias: 'constructor' },
+    });
+    expect(out).toContain('case"constructor":return "constructor";');
+    for (const { functionName } of CAPABILITY_GATES) {
+      expect(executeCapability(out, functionName, 'constructor', true)).toBe(false);
+    }
   });
 
   it('uses the real display label in the /model picker and the Agent tool description', () => {
@@ -335,6 +1247,19 @@ describe('patch script identity naming', () => {
     expect(out).toContain('Additional custom models: sol.');
   });
 
+  it('supports aliases that match object prototype property names', () => {
+    const out = runPatchScript({
+      'clodex:openai:model': {
+        alias: 'constructor',
+        context: 128_000,
+        display: 'Model',
+      },
+    });
+
+    expect(out).toContain('case"constructor":return "constructor";');
+    expect(out).toContain('{value:"constructor",label:"Constructor",description:"Model"}');
+  });
+
   it('is idempotent — re-running the same patch changes nothing', () => {
     const once = runPatchScript(config);
     expect(runPatchScript(config, once)).toBe(once);
@@ -349,14 +1274,18 @@ describe('patch script identity naming', () => {
       ['PATCH 5: model picker options', 'OK'],
       ['PATCH 4: Agent tool model description', 'OK'],
       ['PATCH 7: per-model context window', 'OK'],
-      ['PATCH 12: native context owner', 'OK'],
-      ['PATCH 13: native context guard', 'OK'],
-      ['PATCH 14: native precompute owner', 'OK'],
-      ['PATCH 15: native context window', 'OK'],
-      ['PATCH 8: native Computer Use opt-in', 'OK'],
-      ['PATCH 9: native Computer Use default enable', 'OK'],
-      ['PATCH 10: Workflow agent stall timeout', 'OK'],
-      ['PATCH 11: Workflow token progress', 'OK'],
+      ['PATCH X1: native context owner', 'OK'],
+      ['PATCH X2: native context guard', 'OK'],
+      ['PATCH X3: native precompute owner', 'OK'],
+      ['PATCH X4: native context window', 'OK'],
+      ['PATCH X5: native Computer Use opt-in', 'OK'],
+      ['PATCH X6: native Computer Use default enable', 'OK'],
+      ['PATCH X7: Workflow agent stall timeout', 'OK'],
+      ['PATCH X8: Workflow token progress', 'OK'],
+      ['PATCH 8a: effort capability', 'OK'],
+      ['PATCH 8b: xhigh effort capability', 'OK'],
+      ['PATCH 8c: max effort capability', 'OK'],
+      ['PATCH 9: default effort', 'OK'],
     ]);
     const rerun = applyClodexPatches(fresh.content, config);
     expect(rerun.results.map(r => [r.name, r.status])).toEqual([
@@ -368,14 +1297,18 @@ describe('patch script identity naming', () => {
       // PATCH 7 re-runs through the in-place refresh path; an unchanged config
       // rewrites the identical table, which reports as already patched.
       ['PATCH 7: per-model context window (refresh)', 'SKIP'],
-      ['PATCH 12: native context owner', 'SKIP'],
-      ['PATCH 13: native context guard', 'SKIP'],
-      ['PATCH 14: native precompute owner', 'SKIP'],
-      ['PATCH 15: native context window', 'SKIP'],
-      ['PATCH 8: native Computer Use opt-in', 'SKIP'],
-      ['PATCH 9: native Computer Use default enable', 'SKIP'],
-      ['PATCH 10: Workflow agent stall timeout', 'SKIP'],
-      ['PATCH 11: Workflow token progress', 'SKIP'],
+      ['PATCH X1: native context owner', 'SKIP'],
+      ['PATCH X2: native context guard', 'SKIP'],
+      ['PATCH X3: native precompute owner', 'SKIP'],
+      ['PATCH X4: native context window', 'SKIP'],
+      ['PATCH X5: native Computer Use opt-in', 'SKIP'],
+      ['PATCH X6: native Computer Use default enable', 'SKIP'],
+      ['PATCH X7: Workflow agent stall timeout', 'SKIP'],
+      ['PATCH X8: Workflow token progress', 'SKIP'],
+      ['PATCH 8a: effort capability (refresh)', 'SKIP'],
+      ['PATCH 8b: xhigh effort capability (refresh)', 'SKIP'],
+      ['PATCH 8c: max effort capability (refresh)', 'SKIP'],
+      ['PATCH 9: default effort (refresh)', 'SKIP'],
     ]);
   });
 
@@ -458,5 +1391,141 @@ describe('patch script identity naming', () => {
     const parsed = JSON.parse(table!) as Record<string, number>;
     expect(parsed['clodex:openai:mystery']).toBe(131_072);
     expect(parsed['sol']).toBe(272_000);
+  });
+
+  it('keeps identity and context patches when every effort anchor drifts', () => {
+    const patched = applyClodexPatches(CLAUDE_CORE_FIXTURE, config);
+
+    expect(patched.content).toContain('.enum(["sonnet","opus","haiku","fable","sol","clodex:openai:mystery"])');
+    expect(patched.content).toContain('/*ccpatch:ctx*/');
+    expect(patched.results.slice(0, 6).map(result => [result.name, result.status])).toEqual([
+      ['PATCH 1: Agent tool model enum', 'OK'],
+      ['PATCH 3: known-alias validator list', 'OK'],
+      ['PATCH 6: alias resolver switch', 'OK'],
+      ['PATCH 5: model picker options', 'OK'],
+      ['PATCH 4: Agent tool model description', 'OK'],
+      ['PATCH 7: per-model context window', 'OK'],
+    ]);
+    expect(patched.results.filter(result => result.name.startsWith('PATCH X')).every(
+      result => result.status === 'OK',
+    )).toBe(true);
+    expect(patched.results.filter(result =>
+      result.name.startsWith('PATCH 8a:')
+      || result.name.startsWith('PATCH 8b:')
+      || result.name.startsWith('PATCH 8c:')
+      || result.name.startsWith('PATCH 9:')
+    )).toEqual([
+      { status: 'FAIL', name: 'PATCH 8a: effort capability', extra: 'anchor not found' },
+      { status: 'FAIL', name: 'PATCH 8b: xhigh effort capability', extra: 'anchor not found' },
+      { status: 'FAIL', name: 'PATCH 8c: max effort capability', extra: 'anchor not found' },
+      { status: 'FAIL', name: 'PATCH 9: default effort', extra: 'anchor not found' },
+    ]);
+  });
+
+  it('refreshes every baked effort table when extended capabilities are removed', () => {
+    const once = runPatchScript(config);
+    const updatedConfig: Parameters<typeof applyClodexPatches>[1] = {
+      ...config,
+      'clodex:openai-oauth:gpt-5.6-sol': {
+        ...config['clodex:openai-oauth:gpt-5.6-sol'],
+        effort: {
+          levels: ['low', 'medium', 'high'],
+          defaultLevel: 'high',
+        },
+      },
+    };
+    const updated = runPatchScript(updatedConfig, once);
+
+    const base = updated.match(/\/\*ccpatch:effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+    const xhigh = updated.match(/\/\*ccpatch:xhigh-effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+    const max = updated.match(/\/\*ccpatch:max-effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+    const defaults = updated.match(/\/\*ccpatch:default-effort\*\/var _cce=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+
+    expect(JSON.parse(base!)).toEqual({
+      sol: true,
+      'sol[1m]': true,
+      'clodex:openai-oauth:gpt-5.6-sol': true,
+      'clodex:openai-oauth:gpt-5.6-sol[1m]': true,
+      'clodex:openai:mystery': false,
+      'clodex:openai:mystery[1m]': false,
+    });
+    expect(JSON.parse(xhigh!)).toEqual({
+      sol: false,
+      'sol[1m]': false,
+      'clodex:openai-oauth:gpt-5.6-sol': false,
+      'clodex:openai-oauth:gpt-5.6-sol[1m]': false,
+      'clodex:openai:mystery': false,
+      'clodex:openai:mystery[1m]': false,
+    });
+    expect(JSON.parse(max!)).toEqual({
+      sol: false,
+      'sol[1m]': false,
+      'clodex:openai-oauth:gpt-5.6-sol': false,
+      'clodex:openai-oauth:gpt-5.6-sol[1m]': false,
+      'clodex:openai:mystery': false,
+      'clodex:openai:mystery[1m]': false,
+    });
+    expect(JSON.parse(defaults!)).toEqual({
+      sol: 'high',
+      'sol[1m]': 'high',
+      'clodex:openai-oauth:gpt-5.6-sol': 'high',
+      'clodex:openai-oauth:gpt-5.6-sol[1m]': 'high',
+    });
+  });
+
+  it('keeps capability denials and clears defaults when effort is removed', () => {
+    const once = runPatchScript(config);
+    const { effort: _effort, ...withoutEffort } = config['clodex:openai-oauth:gpt-5.6-sol'];
+    const updated = runPatchScript({
+      ...config,
+      'clodex:openai-oauth:gpt-5.6-sol': withoutEffort,
+    }, once);
+
+    const base = updated.match(/\/\*ccpatch:effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+    const xhigh = updated.match(/\/\*ccpatch:xhigh-effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+    const max = updated.match(/\/\*ccpatch:max-effort\*\/var _ccv=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+    const defaults = updated.match(/\/\*ccpatch:default-effort\*\/var _cce=Object\.assign\(Object\.create\(null\),(\{[^{}]*\})\)/)?.[1];
+
+    const disabledVerdicts = {
+      sol: false,
+      'sol[1m]': false,
+      'clodex:openai-oauth:gpt-5.6-sol': false,
+      'clodex:openai-oauth:gpt-5.6-sol[1m]': false,
+      'clodex:openai:mystery': false,
+      'clodex:openai:mystery[1m]': false,
+    };
+    expect(JSON.parse(base!)).toEqual(disabledVerdicts);
+    expect(JSON.parse(xhigh!)).toEqual(disabledVerdicts);
+    expect(JSON.parse(max!)).toEqual(disabledVerdicts);
+    expect(JSON.parse(defaults!)).toEqual({});
+
+    for (const { functionName } of CAPABILITY_GATES) {
+      expect(executeCapability(updated, functionName, 'sol', true)).toBe(false);
+      expect(executeCapability(updated, functionName, 'sol[1m]', true)).toBe(false);
+      expect(executeCapability(
+        updated,
+        functionName,
+        'clodex:openai-oauth:gpt-5.6-sol',
+        true,
+      )).toBe(false);
+      expect(executeCapability(
+        updated,
+        functionName,
+        'clodex:openai-oauth:gpt-5.6-sol[1m]',
+        true,
+      )).toBe(false);
+    }
+    expect(executeDefaultEffort(updated, 'sol', 'medium')).toBe('medium');
+    expect(executeDefaultEffort(updated, 'sol[1m]', 'medium')).toBe('medium');
+    expect(executeDefaultEffort(
+      updated,
+      'clodex:openai-oauth:gpt-5.6-sol',
+      'medium',
+    )).toBe('medium');
+    expect(executeDefaultEffort(
+      updated,
+      'clodex:openai-oauth:gpt-5.6-sol[1m]',
+      'medium',
+    )).toBe('medium');
   });
 });

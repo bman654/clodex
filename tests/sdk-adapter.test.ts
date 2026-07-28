@@ -251,7 +251,7 @@ describe('translateRequest', () => {
     });
   });
 
-  it('maps output_config.effort to OpenAI reasoningEffort without dropping store/include', () => {
+  it('maps GPT-5.5 output_config.effort without dropping OpenAI store/include', () => {
     const params = translateRequest({
       model: 'gpt-5.5',
       output_config: { effort: 'high' },
@@ -277,6 +277,19 @@ describe('translateRequest', () => {
 
     expect(configured.providerOptions?.openai?.reasoningEffort).toBe('medium');
     expect(fallback.providerOptions?.openai?.reasoningEffort).toBe('medium');
+  });
+
+  it('preserves GPT-5.6 xhigh effort without dropping OpenAI store/include', () => {
+    const params = translateRequest({
+      model: 'gpt-5.6-sol',
+      output_config: { effort: 'xhigh' },
+      messages: [{ role: 'user', content: 'hi' }],
+    }, '@ai-sdk/openai');
+    expect(params.providerOptions?.openai).toMatchObject({
+      store: false,
+      include: ['reasoning.encrypted_content'],
+      reasoningEffort: 'xhigh',
+    });
   });
 
   it('maps output_config.effort to OpenRouter reasoning when provider metadata allows it', () => {

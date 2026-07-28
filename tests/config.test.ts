@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -69,13 +69,36 @@ describe('dotfolder config', () => {
   it('saves favorites and aliases', () => {
     savePreferences({
       favoriteModels: [{ providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
-      modelAliases: [{ name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
+      modelAliases: [{ name: 'Sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
     });
 
     expect(loadPreferences()).toMatchObject({
       favoriteModels: [{ providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
-      modelAliases: [{ name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
+      modelAliases: [{ name: 'Sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
     });
+    expect(JSON.parse(readFileSync(getConfigPath(), 'utf8')).modelAliases).toEqual([
+      { name: 'Sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+    ]);
+  });
+
+  it('loads legacy aliases without mutating or filtering their stored form', () => {
+    savePreferences({ lastProvider: 'openai-oauth' });
+    const legacyPayload = JSON.stringify({
+      lastProvider: 'openai-oauth',
+      modelAliases: [
+        { name: 'LuNa', providerId: 'one', modelId: 'model-a' },
+        { name: 'luna', providerId: 'one', modelId: 'model-a' },
+        { name: 'Orbit', providerId: 'one', modelId: 'model-a' },
+        { name: 'ORBIT', providerId: 'two', modelId: 'model-b' },
+        { name: 'best', providerId: 'one', modelId: 'model-a' },
+      ],
+    });
+    writeFileSync(getConfigPath(), legacyPayload);
+
+    const prefs = loadPreferences();
+    expect(prefs.lastProvider).toBe('openai-oauth');
+    expect(prefs.modelAliases).toEqual(JSON.parse(legacyPayload).modelAliases);
+    expect(readFileSync(getConfigPath(), 'utf8')).toBe(legacyPayload);
   });
 
   it('saves and clears app path overrides', () => {

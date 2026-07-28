@@ -712,6 +712,10 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   for (const alias of options.modelAliases ?? []) {
     const aliasId = normalizeRouteLookupId(alias.name);
     reservedModelIds.add(aliasId);
+    for (const sourceName of alias.sourceNames ?? []) {
+      reservedModelIds.add(normalizeRouteLookupId(sourceName));
+      reservedModelIds.add(normalizeRouteLookupId(sourceName.trim()));
+    }
     const route = routesById.get(normalizeRouteLookupId(alias.routeId));
     if (!route) continue;
     routesById.set(aliasId, route);

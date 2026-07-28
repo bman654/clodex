@@ -315,6 +315,7 @@ export interface ReasoningCapabilities {
 
 const ANTHROPIC_EFFORT_LEVELS = ['low', 'medium', 'high'] as const;
 const OPENAI_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
+const GPT_56_EFFORT_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 const GEMINI_EFFORT_LEVELS = ['low', 'medium', 'high'] as const;
 const MISTRAL_EFFORT_LEVELS = ['high', 'off'] as const;
 const XAI_EFFORT_LEVELS = ['none', 'low', 'medium', 'high'] as const;
@@ -544,7 +545,18 @@ function mapCodexEffortToAnthropic(effort: string): string | undefined {
   }
 }
 
-function mapCodexEffortToOpenAI(effort: string): string | undefined {
+function isGpt56Model(modelId: string): boolean {
+  return /^gpt-5\.6(?:-|$)/i.test(modelId);
+}
+
+function mapCodexEffortToOpenAI(effort: string, modelId?: string): string | undefined {
+  if (
+    modelId
+    && isGpt56Model(modelId)
+    && GPT_56_EFFORT_LEVELS.includes(effort as typeof GPT_56_EFFORT_LEVELS[number])
+  ) {
+    return effort;
+  }
   if (effort === 'xhigh') return 'high';
   const allowed = ['low', 'medium', 'high'];
   return allowed.includes(effort) ? effort : undefined;
@@ -638,7 +650,7 @@ export function getReasoningCapabilities(
     const prefersResponses = modelPrefersResponsesApi(modelId);
     if (prefersResponses || metadata?.reasoning) {
       return {
-        levels: [...OPENAI_EFFORT_LEVELS],
+        levels: isGpt56Model(modelId) ? [...GPT_56_EFFORT_LEVELS] : [...OPENAI_EFFORT_LEVELS],
         defaultLevel: 'medium',
         supportsSummaries: true,
         mode: 'controllable',
@@ -773,6 +785,43 @@ export function getReasoningCapabilities(
   return EMPTY_REASONING;
 }
 
+/**
+ * Capabilities safe to advertise through the patched client's native effort UI.
+ *
+ * Provider capabilities describe accepted Clodex inputs, including values that
+ * a provider adapter may approximate on the wire. Native client metadata must
+ * be stricter: every advertised level must emit a distinct provider option so
+ * the selected effort cannot silently collapse onto another choice.
+ */
+export function getPatchReasoningCapabilities(
+  npm: string,
+  modelId: string,
+  metadata?: ReasoningMetadata,
+): ReasoningCapabilities {
+  if (
+    metadata?.reasoning === false
+    && !hasSupportedParameter(metadata, 'reasoning_effort')
+    && !hasSupportedParameter(metadata, 'reasoning')
+  ) {
+    return EMPTY_REASONING;
+  }
+
+  const capabilities = getReasoningCapabilities(npm, modelId, metadata);
+  const seenProviderOptions = new Set<string>();
+
+  return {
+    ...capabilities,
+    levels: capabilities.levels.filter(level => {
+      const providerOptions = effortProviderOptions(npm, level, modelId, metadata);
+      if (!providerOptions) return false;
+      const fingerprint = JSON.stringify(providerOptions);
+      if (seenProviderOptions.has(fingerprint)) return false;
+      seenProviderOptions.add(fingerprint);
+      return true;
+    }),
+  };
+}
+
 export function buildCodexReasoningLevels(
   capabilities: Pick<ReasoningCapabilities, 'levels'>,
 ): Array<{ effort: string; description: string }> {
@@ -807,7 +856,7 @@ export function effortProviderOptions(
 
   if (npm === '@ai-sdk/openai' || npm === '@ai-sdk/azure') {
     if (!modelId || !modelPrefersResponsesApi(modelId)) return undefined;
-    const reasoningEffort = mapCodexEffortToOpenAI(effort);
+    const reasoningEffort = mapCodexEffortToOpenAI(effort, modelId);
     return reasoningEffort ? { openai: { reasoningEffort } } : undefined;
   }
 

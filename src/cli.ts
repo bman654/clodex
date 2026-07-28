@@ -23,7 +23,13 @@ import { fetchProviderCatalog, providersForPicker, resolveLocalProviderApiKey } 
 import { VERSION } from './constants.js';
 import type { ParsedArgs, FavoriteModel, LocalProvider, LocalProviderModel } from './types.js';
 import { addFavorite, removeFavorite, isFavorite } from './favorites.js';
-import { isValidModelAlias, modelAliasTarget, parseModelAliasAssignment } from './model-aliases.js';
+import {
+  canonicalModelAliasName,
+  modelAliasMatchesName,
+  modelAliasMatchesStoredName,
+  modelAliasTarget,
+  parseModelAliasAssignment,
+} from './model-aliases.js';
 import {
   browseByProviderChoice,
   buildGlobalFavoriteIndex,
@@ -521,6 +527,7 @@ ${pc.bold('Behavior:')}
   proxy mode, without opening the interactive manager.
   --alias <name=target> saves a short name for a proxy-mode favorite. The
   target is clodex:<provider-id>:<model-id> (the clodex: prefix is optional).
+  Alias names are stored lowercase and cannot use client-reserved model names.
   --unalias <name> removes a saved short name.
 
 ${pc.bold('How it works:')}
@@ -563,6 +570,26 @@ function printHelp(text: string): void {
   console.log(`\n${text}\n`);
 }
 
+export function reportInactiveCatalogAliases(modelAliases: ProxyModelAlias[]): void {
+  const unavailableAliases = modelAliases.filter(alias => alias.unavailableReason !== undefined);
+  if (unavailableAliases.length === 0) return;
+  const warningLines = unavailableAliases.flatMap(alias => (
+    alias.sourceNames?.length
+      ? alias.sourceNames.map(name => (
+          `  ${JSON.stringify(name)} — ${alias.unavailableReason}`
+        ))
+      : [
+          `  ${JSON.stringify(alias.savedName ?? alias.name)} — ${alias.unavailableReason}`,
+        ]
+  ));
+
+  p.log.warn(
+    `${warningLines.length} saved model alias${warningLines.length === 1 ? '' : 'es'} inactive. `
+    + 'Saved entries were preserved.\n'
+    + warningLines.join('\n'),
+  );
+}
+
 async function launchClaudeViaCatalog(
   catalogRoutes: ProxyRoute[],
   startingRoute: ProxyRoute,
@@ -571,6 +598,7 @@ async function launchClaudeViaCatalog(
   trace: boolean,
   claudeArgs: string[],
 ): Promise<number> {
+  reportInactiveCatalogAliases(modelAliases);
   let proxyHandle: ProxyHandle;
   try {
     proxyHandle = await startProxyCatalog(
@@ -642,27 +670,38 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
       p.log.info('Add it with `clodex models`, then save the alias.');
       return 1;
     }
-    const modelAliases = (prefs.modelAliases ?? []).filter(alias => alias.name !== parsed.name);
+    if (prefs.modelAliases !== undefined && !Array.isArray(prefs.modelAliases)) {
+      p.log.error('Saved model aliases are malformed: "modelAliases" must be an array.');
+      return 1;
+    }
+    const aliases = prefs.modelAliases ?? [];
+    const modelAliases = aliases.filter(alias => !modelAliasMatchesName(alias, parsed.name));
     modelAliases.push(parsed);
     savePreferences({ modelAliases });
     p.log.success(`Saved model alias ${parsed.name} → ${modelAliasTarget(parsed)}.`);
     return 0;
   }
   if (opts.unalias !== undefined) {
-    const name = opts.unalias.trim();
-    if (!isValidModelAlias(name)) {
-      p.log.error('Alias names must be 1-64 letters, numbers, dots, underscores, or hyphens.');
+    const requestedName = opts.unalias.trim();
+    const name = canonicalModelAliasName(requestedName);
+    const prefs = loadPreferences();
+    if (prefs.modelAliases !== undefined && !Array.isArray(prefs.modelAliases)) {
+      p.log.error('Saved model aliases are malformed: "modelAliases" must be an array.');
       return 1;
     }
-    const prefs = loadPreferences();
     const aliases = prefs.modelAliases ?? [];
-    const modelAliases = aliases.filter(alias => alias.name !== name);
-    if (modelAliases.length === aliases.length) {
-      p.log.error(`No model alias named ${name} is saved.`);
+    const modelAliases = aliases.filter(alias => !modelAliasMatchesStoredName(alias, requestedName));
+    const removedCount = aliases.length - modelAliases.length;
+    if (removedCount === 0) {
+      p.log.error(`No model alias named ${JSON.stringify(requestedName)} is saved.`);
       return 1;
     }
     savePreferences({ modelAliases });
-    p.log.success(`Removed model alias ${name}.`);
+    p.log.success(
+      removedCount === 1
+        ? `Removed model alias ${name || JSON.stringify(requestedName)}.`
+        : `Removed ${removedCount} model aliases named ${name || JSON.stringify(requestedName)}.`,
+    );
     return 0;
   }
   if (opts.list) {
@@ -1230,7 +1269,11 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     return launchClaudeViaCatalog(
       catalogRoutes,
       startingRoute,
-      resolveCatalogModelAliases(prefs.modelAliases ?? [], resolveRoute),
+      resolveCatalogModelAliases(
+        prefs.modelAliases,
+        resolveRoute,
+        catalogRoutes,
+      ),
       selectedModel.contextWindow,
       trace,
       claudeArgs,

@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.1.5](https://github.com/bman654/clodex/compare/v2.1.4...v2.1.5) (2026-07-27)
+
+
+### Bug Fixes
+
+* canonicalize aliases without unsafe fallback ([#59](https://github.com/bman654/clodex/issues/59)) ([5fec19a](https://github.com/bman654/clodex/commit/5fec19a1c399491259e25b5b34cf447f95fbd08d))
+* **patcher:** include transform-set version in patch config hash ([#60](https://github.com/bman654/clodex/issues/60)) ([09f79ad](https://github.com/bman654/clodex/commit/09f79ad968dbd5b3d53c8b4d9a43b3d2cbe1011d))
+* **patcher:** resolve claude version from the binary being patched ([#62](https://github.com/bman654/clodex/issues/62)) ([164be9d](https://github.com/bman654/clodex/commit/164be9d2ef99f4cd81473ebdf3a42818f2994cc2))
+* preserve extended effort levels in patched clients ([#57](https://github.com/bman654/clodex/issues/57)) ([e61f972](https://github.com/bman654/clodex/commit/e61f9725d14784fffebf26add13c3cc6fa1945ec))
+
 ## [2.1.4](https://github.com/bman654/clodex/compare/v2.1.3...v2.1.4) (2026-07-27)
 
 

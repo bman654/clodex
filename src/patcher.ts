@@ -9,17 +9,24 @@
 //  - auto-apply: no confirmation, concise summary,
 //  - idempotence: a manifest (~/.clodex/patch-state.json) records the claude
 //    version + config hash; unchanged config → fast no-op,
-//  - re-patch: stale config/version → restore the pristine backup, patch fresh,
-//  - a pristine per-version backup (~/.tweakcc/claude-<ver>.orig) compatible
-//    with `tweakcc --restore`,
+//  - re-patch: stale config/version → seed the candidate from the pristine
+//    backup instead of the live binary, so a patch is never stacked on a patch,
+//  - a content-addressed pristine backup per version+content
+//    (~/.tweakcc/claude-<ver>-<sha>.orig, see patch-backup.ts) that is only ever
+//    used once its provenance is established,
+//  - atomic publication: the patch is built in a sibling temp dir and renamed
+//    over the live binary only after it fully succeeds,
 //  - a pid lock (~/.clodex/patch.lock) so concurrent launches cannot race.
 
 import { createHash } from 'node:crypto';
 import {
   copyFileSync,
   existsSync,
+  mkdtempSync,
   mkdirSync,
   readFileSync,
+  renameSync,
+  rmSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -28,19 +35,45 @@ import {
   realpathSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import { getAppHome } from './paths.js';
 import { loadPreferences } from './config.js';
 import { loadRegistry } from './registry/io.js';
-import { findClaudeBinary, getInstalledClaudeVersion } from './launch.js';
+import { findModelsDevModel } from './registry/models-dev.js';
+import { findClaudeBinary, getClaudeVersionForBinary } from './launch.js';
+import {
+  backupDir,
+  collectPristineFacts,
+  contentAddressedBackupPath,
+  isPatchedClaudeSource,
+  looksLikeLegacyClodexPatch,
+  planInspectedPristineSource,
+  planPristineSource,
+  planRestoreOnly,
+  sha256File,
+  tweakccMirrorBackupPath,
+  type PristineFacts,
+  type PristinePlan,
+  type ResolvedPristinePlan,
+} from './patch-backup.js';
+import type { Installation } from 'tweakcc';
 import { httpProxyDisplayName, httpProxyModelId } from './http-proxy/routes.js';
 import { stripOneMContextSuffix } from './context-model-id.js';
+import { getPatchReasoningCapabilities } from './provider-factory.js';
+import {
+  describeModelAliasRejection,
+  normalizeModelAliases,
+  type ModelAliasRejection,
+  type StoredModelAlias,
+} from './model-aliases.js';
 import {
   applyClodexPatches,
   formatPatchSiteLine,
   PatchApplyError,
+  projectNativeEffort,
+  PATCH_TRANSFORMS_VERSION,
   type PatchSiteResult,
   type PatchScriptModelConfig,
 } from './patch-transforms.js';
@@ -52,7 +85,7 @@ export interface PatchManifest {
   binaryPath: string;
   /** `claude --version` at patch time. */
   claudeVersion: string;
-  /** sha256 of the desired patch model config (canonical JSON). */
+  /** sha256 of the transform-set version and desired patch model config. */
   configHash: string;
   /** Size in bytes of the binary after patching (cheap staleness probe). */
   patchedSize: number;
@@ -60,6 +93,12 @@ export interface PatchManifest {
   patchedSha256: string;
   /** Pristine backup used for restore. */
   backupPath: string;
+  /**
+   * sha256 of the pristine bytes in `backupPath`. Written since content-addressed
+   * backups landed; absent in manifests from older installs, so readers must
+   * treat it as optional.
+   */
+  pristineSha256?: string;
   patchedAt: string;
 }
 
@@ -94,6 +133,9 @@ export interface DesiredPatchConfig {
   config: PatchScriptModelConfig;
   /** Model ids whose context window is unknown (defaulting to Claude Code's 200k). */
   unknownWindows: string[];
+  /** Saved aliases excluded from the patch while remaining in configuration. */
+  rejectedAliases: StoredModelAlias[];
+  rejectedAliasRejections: ModelAliasRejection[];
 }
 
 /** Model metadata the patch bakes in, resolved from the registry models cache. */
@@ -101,12 +143,11 @@ export interface PatchModelMeta {
   contextWindow?: number;
   /** Canonical label, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. */
   displayName?: string;
+  effort?: {
+    levels: string[];
+    defaultLevel: string;
+  };
 }
-
-// Bump whenever the binary transform set changes so existing installations are
-// restored from their pristine backup and repatched instead of being mistaken
-// for current solely because their model map is unchanged.
-const PATCH_SCHEMA_VERSION = 6;
 
 /**
  * Build the patch model config from favorites + aliases.
@@ -116,12 +157,31 @@ const PATCH_SCHEMA_VERSION = 6;
  */
 export function buildPatchModelConfig(
   favorites: Array<{ providerId: string; modelId: string }>,
-  aliases: Array<{ name: string; providerId: string; modelId: string }>,
+  aliases: unknown,
   modelMetaFor: (providerId: string, modelId: string) => PatchModelMeta | undefined,
 ): DesiredPatchConfig {
   const config: PatchScriptModelConfig = {};
   const unknownWindows: string[] = [];
-  const aliasByFavorite = new Map(aliases.map(a => [`${a.providerId}:${a.modelId}`, a.name]));
+  const normalizedAliases = normalizeModelAliases(aliases);
+  const favoriteTargets = new Set(
+    favorites.map(favorite => `${favorite.providerId}:${favorite.modelId}`),
+  );
+  const targetRejections: ModelAliasRejection[] = normalizedAliases.accepted
+    .filter(({ alias }) => (
+      !favoriteTargets.has(`${alias.providerId}:${alias.modelId}`)
+    ))
+    .flatMap(({ sources }) => sources.map(source => ({
+      alias: source,
+      reason: 'target-not-favorite',
+    })));
+  const aliasByFavorite = new Map(
+    normalizedAliases.aliases
+      .filter(alias => favoriteTargets.has(`${alias.providerId}:${alias.modelId}`))
+      .map(alias => [
+        `${alias.providerId}:${alias.modelId}`,
+        alias.name,
+      ]),
+  );
 
   for (const favorite of favorites) {
     const id = stripOneMContextSuffix(httpProxyModelId(favorite.providerId, favorite.modelId));
@@ -135,36 +195,83 @@ export function buildPatchModelConfig(
     else if (context !== 200_000) entry.context = context;
     const display = meta?.displayName?.trim();
     if (display) entry.display = display;
+    const effort = projectNativeEffort(meta?.effort);
+    if (effort) entry.effort = effort;
     config[id] = entry;
   }
-  return { config, unknownWindows };
+  return {
+    config,
+    unknownWindows,
+    rejectedAliases: [
+      ...normalizedAliases.rejected,
+      ...targetRejections.map(rejection => rejection.alias),
+    ],
+    rejectedAliasRejections: [
+      ...normalizedAliases.rejections,
+      ...targetRejections,
+    ],
+  };
 }
 
-/** Canonical (key-sorted) hash of a patch model config. */
-export function computePatchConfigHash(config: PatchScriptModelConfig): string {
+export function reportRejectedModelAliases(
+  rejections: ModelAliasRejection[],
+): void {
+  for (const rejection of rejections) {
+    p.log.warn(
+      `Saved model alias ${JSON.stringify(rejection.alias.name)} was not patched — `
+      + `${describeModelAliasRejection(rejection.reason)}. The saved entry was preserved.`,
+    );
+  }
+}
+
+/** Canonical (key-sorted) hash of the transform-set version and patch model config. */
+export function computePatchConfigHash(
+  config: PatchScriptModelConfig,
+  transformsVersion = PATCH_TRANSFORMS_VERSION,
+): string {
   const canonical = Object.keys(config).sort().map(key => {
     const entry = config[key]!;
-    return [key, entry.alias ?? null, entry.context ?? null, entry.display ?? null];
+    return [
+      key,
+      entry.alias ?? null,
+      entry.context ?? null,
+      entry.display ?? null,
+      entry.effort?.levels ?? null,
+      entry.effort?.defaultLevel ?? null,
+    ];
   });
-  return createHash('sha256')
-    .update(JSON.stringify([PATCH_SCHEMA_VERSION, canonical]))
-    .digest('hex');
+  return createHash('sha256').update(JSON.stringify([transformsVersion, canonical])).digest('hex');
 }
 
 /** Read favorites + aliases + registry model metadata from disk (no network, no credentials). */
 export function buildDesiredPatchConfig(): DesiredPatchConfig {
   const prefs = loadPreferences();
   const favorites = prefs.favoriteModels ?? [];
-  const aliases = prefs.modelAliases ?? [];
+  const aliases = prefs.modelAliases;
   const registry = loadRegistry();
 
   const meta = new Map<string, PatchModelMeta>();
   for (const provider of registry.providers) {
     for (const model of provider.modelsCache?.models ?? []) {
+      const npm = model.npm ?? provider.api.npm ?? '';
+      const upstreamModelId = model.upstreamModelId ?? model.id;
+      const modelsDev = findModelsDevModel(provider.id, model.id);
+      const effort = getPatchReasoningCapabilities(npm, upstreamModelId, {
+        providerId: provider.id,
+        apiBaseUrl: model.apiUrl ?? provider.api.url,
+        supportedParameters: model.supportedParameters,
+        reasoning: model.reasoning ?? modelsDev?.reasoning,
+        interleavedReasoningField:
+          model.interleavedReasoningField ?? modelsDev?.interleaved?.field,
+        upstreamModelId,
+      });
       meta.set(`${provider.id}:${model.id}`, {
         contextWindow: model.contextWindow && model.contextWindow > 0 ? model.contextWindow : undefined,
         // Same label `clodex server` prints at startup and `models --list` shows.
         displayName: httpProxyDisplayName(model, provider.name),
+        effort: effort.mode === 'controllable'
+          ? { levels: effort.levels, defaultLevel: effort.defaultLevel }
+          : undefined,
       });
     }
   }
@@ -260,44 +367,56 @@ export function tryAcquirePatchLock(
 
 // ── Binary + backup helpers ─────────────────────────────────────────────────
 
-function sha256File(path: string): string {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
-}
+/** Outcome of locating the binary `clodex patch` should operate on. */
+export type ClaudePatchTarget =
+  | { ok: true; binaryPath: string; version: string }
+  | { ok: false; reason: 'binary-not-found' }
+  | { ok: false; reason: 'version-unknown'; binaryPath: string };
 
 /**
  * Locate the REAL native binary, bypassing wrapper shims (e.g. cmux) that a
  * plain PATH lookup can return. Order (ported from the relay-ai wrapper):
  * TWEAKCC_CC_INSTALLATION_PATH → ~/.local/bin/claude (stable native-install
  * symlink) → findClaudeBinary() PATH lookup.
+ *
+ * The version is probed from THAT binary, never from whatever `claude` PATH
+ * resolves to. The two chains diverge exactly when the overrides matter (a shim
+ * on PATH, a different install under the override), and the version selects the
+ * pristine backup that seeds the patch candidate — so a version borrowed from
+ * another install publishes those other bytes over the user's Claude Code. There
+ * is no fallback version for the same reason: an unprobeable binary is an error.
  */
-export function resolveClaudeBinaryForPatch(): { binaryPath: string; version: string } | null {
+export function resolveClaudeBinaryForPatch(): ClaudePatchTarget {
   const envOverride = process.env['TWEAKCC_CC_INSTALLATION_PATH'];
   const nativeSymlink = join(homedir(), '.local', 'bin', 'claude');
   const source = envOverride?.trim()
     || (existsSync(nativeSymlink) ? nativeSymlink : null)
     || findClaudeBinary();
-  if (!source) return null;
+  if (!source) return { ok: false, reason: 'binary-not-found' };
   let resolved: string;
   try {
     resolved = realpathSync(source);
   } catch {
-    return null;
+    return { ok: false, reason: 'binary-not-found' };
   }
   try {
-    if (!statSync(resolved).isFile()) return null;
+    if (!statSync(resolved).isFile()) return { ok: false, reason: 'binary-not-found' };
   } catch {
-    return null;
+    return { ok: false, reason: 'binary-not-found' };
   }
-  return { binaryPath: resolved, version: getInstalledClaudeVersion() };
+  const version = getClaudeVersionForBinary(resolved);
+  if (!version) return { ok: false, reason: 'version-unknown', binaryPath: resolved };
+  return { ok: true, binaryPath: resolved, version };
 }
 
-function backupDir(): string {
-  return process.env['TWEAKCC_CONFIG_DIR']?.trim() || join(homedir(), '.tweakcc');
-}
-
-function pristineBackupPath(version: string, binaryPath: string): string {
-  const tag = version.replace(/[^\w.-]+/g, '_') || basename(binaryPath);
-  return join(backupDir(), `claude-${tag}.orig`);
+/** Accurate, actionable message per failure reason — the two are NOT the same problem. */
+export function describePatchTargetFailure(target: Extract<ClaudePatchTarget, { ok: false }>): string {
+  return target.reason === 'binary-not-found'
+    ? 'claude binary not found. Install Claude Code or set TWEAKCC_CC_INSTALLATION_PATH.'
+    : `Could not determine the version of ${target.binaryPath} (\`claude --version\` failed). `
+      + 'clodex will not patch a binary whose version it cannot read, because the version selects the '
+      + 'pristine backup it patches from. If a previous patch left the install broken, '
+      + '`clodex patch --restore` still works — it reads the version from the patch manifest.';
 }
 
 // ── Patch reporting ─────────────────────────────────────────────────────────
@@ -317,45 +436,229 @@ export function summarizePatchResults(results: PatchSiteResult[]): string[] {
 
 // ── Apply / restore ─────────────────────────────────────────────────────────
 
-interface ApplyOutcome {
+export interface ApplyOutcome {
   ok: boolean;
   message: string;
   detailLines?: string[];
 }
 
-async function applyPatch(
+/**
+ * Establish that a backup really holds the pristine bytes of `version` before
+ * anything is built from it. Content-addressed backups are already self-validated
+ * by name; a legacy `claude-<ver>.orig` carries no hash, so the only evidence
+ * that its bytes are that version is running it.
+ *
+ * Both callers put these bytes on the user's install — `applyPatch` seeds the
+ * patch candidate from them and renames it into place, `--restore` copies them
+ * over the binary directly — so an unverified backup is a silent downgrade
+ * either way.
+ */
+function verifyPristineSource(
+  plan: Extract<PristinePlan, { action: 'restore' }>,
+  version: string,
+): { ok: true } | { ok: false; message: string } {
+  if (!plan.probeVersion) return { ok: true };
+  const backupVersion = getClaudeVersionForBinary(plan.backupPath);
+  if (backupVersion === version) return { ok: true };
+  return {
+    ok: false,
+    message: `Refusing to use ${plan.backupPath} as the pristine source for claude ${version}: it reports `
+      + `${backupVersion ? `version ${backupVersion}` : 'no version at all'}. `
+      + 'That backup predates content-addressed backup names and does not hold this version\'s bytes. '
+      + 'Remove it (or reinstall Claude Code), then run `clodex patch`.',
+  };
+}
+
+/**
+ * Publish a file into the backup directory atomically: write a temp file beside
+ * the destination, then rename it into place.
+ *
+ * A plain `copyFileSync` of a ~250 MB binary that is interrupted (Ctrl-C, crash,
+ * ENOSPC) leaves a TRUNCATED file under a name asserting its content hash. That
+ * is the one corruption content-addressing cannot notice without re-hashing, and
+ * it made `clodex patch` fail permanently with a misleading extraction error.
+ * `rename` within one directory is atomic, so a backup file is either absent or
+ * complete — never half-written.
+ */
+function publishBackupFile(from: string, to: string): void {
+  const temp = `${to}.tmp-${process.pid}-${Date.now().toString(36)}`;
+  try {
+    copyFileSync(from, temp);
+    renameSync(temp, to);
+  } catch (err) {
+    try {
+      rmSync(temp, { force: true });
+    } catch {
+      // best effort — the temp name is unique and does not match the scanner's
+      // `claude-*.orig` pattern, so a leftover is never mistaken for a backup.
+    }
+    throw err;
+  }
+}
+
+/**
+ * Refuse bytes that already carry a clodex patch. `planInspectedPristineSource`
+ * applies this rule to the LIVE binary; this is the same rule for bytes that came
+ * out of a BACKUP, which `verifyPristineSource` cannot cover because it only
+ * proves the version — and a patched claude reports its own version perfectly.
+ */
+function describePoisonedPristineSource(backupPath: string, version: string): string {
+  return `Refusing to patch from ${backupPath}: those bytes already carry a clodex patch, `
+    + 'so they are not pristine and patching them would stack a patch on a patch. '
+    + `That backup was recorded as pristine for claude ${version} by an older clodex, which `
+    + 'snapshotted whatever binary was live when no backup existed. '
+    + `Delete ${backupPath}, reinstall Claude Code, then run \`clodex patch\`.`;
+}
+
+function requiredEffortPatchFailures(results: PatchSiteResult[]): PatchSiteResult[] {
+  return results.filter(result =>
+    result.status === 'FAIL'
+    && (
+      result.name.startsWith('PATCH 8a:')
+      || result.name.startsWith('PATCH 8b:')
+      || result.name.startsWith('PATCH 8c:')
+      || result.name.startsWith('PATCH 9:')
+    ),
+  );
+}
+
+export async function applyPatch(
   binaryPath: string,
   version: string,
   desired: DesiredPatchConfig,
   configHash: string,
-  opts: { trace: boolean; restoreFirst: boolean },
+  opts: { trace: boolean; manifest: PatchManifest | null },
 ): Promise<ApplyOutcome> {
-  const backup = pristineBackupPath(version, binaryPath);
-  mkdirSync(backupDir(), { recursive: true });
-
-  if (opts.restoreFirst) {
-    if (!existsSync(backup)) {
-      return { ok: false, message: `Cannot re-patch: pristine backup missing at ${backup}. Reinstall claude, then run clodex patch.` };
-    }
-    copyFileSync(backup, binaryPath);
-  } else if (!existsSync(backup)) {
-    copyFileSync(binaryPath, backup);
-  }
-  // Mirror the pristine copy to tweakcc's restore location (always from the
-  // backup, never the live binary — so it stays pristine even after patching).
-  copyFileSync(backup, join(backupDir(), 'native-binary.backup'));
-
-  // tweakcc's lib entry pulls in its interactive-picker deps (ink/react), so
-  // load it lazily — only when a patch is actually applied.
-  const { tryDetectInstallation, readContent, writeContent } = await import('tweakcc');
-
+  let candidateDir: string | undefined;
   let results: PatchSiteResult[];
+  let patchedSize: number;
+  let patchedSha256: string;
+  let backup: string;
+  let pristineSha256: string;
   try {
-    const installation = await tryDetectInstallation({ path: binaryPath });
-    const source = await readContent(installation);
-    const patched = applyClodexPatches(source, desired.config);
+    mkdirSync(backupDir(), { recursive: true });
+
+    // tweakcc's lib entry pulls in its interactive-picker deps (ink/react), so
+    // load it lazily — only when a patch is actually applied.
+    const { tryDetectInstallation, readContent, writeContent } = await import('tweakcc');
+
+    // Everything below reads and writes the CANDIDATE; the live binary is only
+    // touched by the final rename. Seeding it is also how the source gets
+    // extracted, so no path pays for the (expensive, ~250 MB) extraction twice
+    // unless the seed itself has to change.
+    candidateDir = mkdtempSync(join(dirname(binaryPath), '.clodex-patch-'));
+    const candidatePath = join(candidateDir, basename(binaryPath));
+    const seedCandidate = async (from: string): Promise<{ installation: Installation; source: string }> => {
+      copyFileSync(from, candidatePath);
+      const installation = await tryDetectInstallation({ path: candidatePath });
+      return { installation, source: await readContent(installation) };
+    };
+
+    const facts: PristineFacts = collectPristineFacts({
+      version,
+      binaryPath,
+      manifest: opts.manifest,
+    });
+
+    const initial = planPristineSource(facts);
+    let loaded: { installation: Installation; source: string } | null = null;
+    let plan: ResolvedPristinePlan;
+    if (initial.action === 'inspect') {
+      // Unrecognized bytes. The only reliable "is this already patched?" signal
+      // lives in the extracted JS (the native binary compresses it, so a raw
+      // byte scan finds nothing), so seed the candidate from the LIVE binary and
+      // inspect that copy — byte-identical, so it answers the question about the
+      // live binary, which is what the R1 guard below turns on.
+      loaded = await seedCandidate(binaryPath);
+      if (looksLikeLegacyClodexPatch(loaded.source)) {
+        p.log.warn(
+          `${binaryPath} carries no clodex patch marker but does look like a patch from a clodex `
+          + 'older than the effort patch sites. Treating it as pristine; if `/model` shows stale '
+          + 'entries afterwards, reinstall Claude Code and run `clodex patch` again.',
+        );
+      }
+      plan = planInspectedPristineSource(facts, { patched: isPatchedClaudeSource(loaded.source) });
+      // Only an unpatched live binary may be both snapshotted AND patched from.
+      // Any other verdict means these bytes are not pristine: drop them and
+      // re-seed from an established backup below.
+      if (plan.action !== 'snapshot') loaded = null;
+    } else {
+      plan = initial;
+    }
+
+    if (plan.action === 'error') return { ok: false, message: plan.message };
+    for (const note of plan.notes) p.log.warn(note);
+
+    if (plan.action === 'restore') {
+      const verified = verifyPristineSource(plan, version);
+      if (!verified.ok) return { ok: false, message: verified.message };
+      p.log.info(`Binary differs from its pristine backup — building a fresh patch candidate from ${plan.backupPath}.`);
+    }
+    pristineSha256 = plan.pristineSha256;
+    backup = plan.backupPath;
+
+    // Seed from the established backup on the `reuse` and `restore` paths
+    // (`snapshot` already inspected the live binary's own bytes), then hold EVERY
+    // path to the same rule: the bytes about to be patched must carry no clodex
+    // patch marker. `verifyPristineSource` above only proves the version, and a
+    // patched claude reports its version perfectly well.
+    //
+    // Nothing has been written to the backup directory yet, deliberately. A
+    // poisoned backup must not be laundered into a content-addressed name (which
+    // later runs then trust without a probe), and must not clobber the tweakcc
+    // mirror on its way to failing.
+    if (!loaded) {
+      loaded = await seedCandidate(backup);
+      if (isPatchedClaudeSource(loaded.source)) {
+        return { ok: false, message: describePoisonedPristineSource(backup, version) };
+      }
+    } else if (plan.action === 'snapshot') {
+      // Bootstrap, from the candidate rather than re-reading the live binary:
+      // these are the exact bytes just inspected and found unpatched, and
+      // `writeContent` has not run yet. Sourcing the backup from them makes
+      // name/content/inspected-bytes agreement structural instead of incidental.
+      // Written unconditionally: this branch is only reached when no VALID backup
+      // holds these bytes, so an existing file at this content address is a
+      // corrupt one being replaced by the bytes its name asserts.
+      publishBackupFile(candidatePath, plan.backupPath);
+    }
+
+    // Adopt a legacy `claude-<ver>.orig` under its content address so later runs
+    // can self-validate it instead of re-running the version probe. The original
+    // file is left alone — `tweakcc --restore` and older clodex still find it.
+    //
+    // Whether the canonical name already holds the right bytes is decided from
+    // CONTENT, not existence: `facts.backups` carries the hash the scan already
+    // computed, and anything at that name the scan rejected (truncated, foreign)
+    // is absent from it and gets replaced rather than adopted and published.
+    const canonical = contentAddressedBackupPath(version, pristineSha256);
+    if (canonical !== backup) {
+      const alreadyStored = facts.backups.some(
+        candidate => candidate.path === canonical && candidate.sha256 === pristineSha256,
+      );
+      if (!alreadyStored) publishBackupFile(backup, canonical);
+      backup = canonical;
+    }
+
+    // Mirror the pristine copy to tweakcc's restore location (always from the
+    // backup, never the live binary — so it stays pristine after patching).
+    publishBackupFile(backup, tweakccMirrorBackupPath());
+
+    const patched = applyClodexPatches(loaded.source, desired.config);
     results = patched.results;
-    await writeContent(installation, patched.content);
+    const failedEffortPatches = requiredEffortPatchFailures(results);
+    if (failedEffortPatches.length > 0) {
+      throw new PatchApplyError(
+        `clodex patch: required effort patches failed: ${
+          failedEffortPatches.map(result => result.name).join('; ')
+        }`,
+        results,
+      );
+    }
+    await writeContent(loaded.installation, patched.content);
+    patchedSize = statSync(candidatePath).size;
+    patchedSha256 = sha256File(candidatePath);
+    renameSync(candidatePath, binaryPath);
   } catch (err) {
     const detailLines = err instanceof PatchApplyError ? summarizePatchResults(err.results) : [];
     if (opts.trace && detailLines.length) {
@@ -366,6 +669,20 @@ async function applyPatch(
       message: `Patch failed: ${err instanceof Error ? err.message : String(err)}`,
       detailLines,
     };
+  } finally {
+    if (candidateDir !== undefined) {
+      try {
+        rmSync(candidateDir, { recursive: true, force: true });
+      } catch (err) {
+        if (opts.trace) {
+          process.stderr.write(
+            `clodex patch: could not remove temporary candidate directory: ${
+              err instanceof Error ? err.message : String(err)
+            }\n`,
+          );
+        }
+      }
+    }
   }
   if (opts.trace) {
     process.stderr.write(`${summarizePatchResults(results).join('\n')}\n`);
@@ -375,9 +692,10 @@ async function applyPatch(
     binaryPath,
     claudeVersion: version,
     configHash,
-    patchedSize: statSync(binaryPath).size,
-    patchedSha256: sha256File(binaryPath),
+    patchedSize,
+    patchedSha256,
     backupPath: backup,
+    pristineSha256,
     patchedAt: new Date().toISOString(),
   };
   writePatchManifest(manifest);
@@ -393,32 +711,79 @@ async function applyPatch(
   };
 }
 
-export async function runPatchCommand(opts: { restore?: boolean; trace?: boolean } = {}): Promise<number> {
-  const resolved = resolveClaudeBinaryForPatch();
-  if (!resolved) {
-    p.log.error('claude binary not found. Install Claude Code or set TWEAKCC_CC_INSTALLATION_PATH.');
+/**
+ * `clodex patch --restore` — put the pristine bytes back over the live binary.
+ *
+ * A pristine backup exists PRECISELY for the case where the install is broken, so
+ * recovery must not require the broken binary to run. When `--version` cannot be
+ * probed, the version comes from the manifest instead — it recorded
+ * `claudeVersion`, `backupPath` and `pristineSha256` when the binary was patched,
+ * which establishes provenance without executing anything. The patch path keeps
+ * the hard failure: patching an unidentifiable binary is elective, restoring one
+ * is the user's way out.
+ */
+function runRestoreCommand(target: ClaudePatchTarget): number {
+  if (!target.ok && target.reason === 'binary-not-found') {
+    p.log.error(describePatchTargetFailure(target));
     return 1;
   }
-  const { binaryPath, version } = resolved;
+  const binaryPath = target.binaryPath;
+  const manifest = readPatchManifest();
 
-  if (opts.restore) {
-    const manifest = readPatchManifest();
-    const backup = manifest?.backupPath && existsSync(manifest.backupPath)
-      ? manifest.backupPath
-      : pristineBackupPath(version, binaryPath);
-    if (!existsSync(backup)) {
-      p.log.error(`No pristine backup found for claude ${version} (${backup}).`);
-      return 1;
-    }
-    copyFileSync(backup, binaryPath);
-    try {
-      unlinkSync(getPatchManifestPath());
-    } catch {
-      // no manifest to remove
-    }
-    p.log.success(`Restored pristine claude ${version} from ${backup}.`);
-    return 0;
+  let version: string;
+  if (target.ok) {
+    version = target.version;
+  } else if (manifest?.binaryPath === binaryPath && manifest.claudeVersion) {
+    version = manifest.claudeVersion;
+    p.log.warn(
+      `Could not read the version of ${binaryPath} (\`claude --version\` failed) — using claude `
+      + `${version} from the patch manifest, which recorded it when this binary was patched. `
+      + 'This is expected when a bad patch left the install unable to run.',
+    );
+  } else {
+    p.log.error(
+      `Could not determine the version of ${binaryPath} (\`claude --version\` failed), and `
+      + 'no patch manifest records a pristine backup for it, so clodex cannot tell which backup '
+      + `belongs to this install. Restore it by hand from ${backupDir()} (or reinstall Claude Code).`,
+    );
+    return 1;
   }
+
+  // Unlike the patch path, this copies straight over the live binary — there is
+  // nothing to publish atomically — so it carries the full provenance check.
+  const plan = planRestoreOnly(collectPristineFacts({ version, binaryPath, manifest }));
+  if (plan.action === 'error') {
+    p.log.error(plan.message);
+    return 1;
+  }
+  for (const note of plan.notes) p.log.warn(note);
+  const verified = verifyPristineSource(plan, version);
+  if (!verified.ok) {
+    p.log.error(verified.message);
+    return 1;
+  }
+  copyFileSync(plan.backupPath, binaryPath);
+  try {
+    unlinkSync(getPatchManifestPath());
+  } catch {
+    // no manifest to remove
+  }
+  p.log.success(`Restored pristine claude ${version} from ${plan.backupPath}.`);
+  return 0;
+}
+
+export async function runPatchCommand(opts: { restore?: boolean; trace?: boolean } = {}): Promise<number> {
+  const target = resolveClaudeBinaryForPatch();
+
+  // Handled BEFORE the patch path's version check, because `--restore` has its
+  // own rules: it must still work on a binary that no longer runs.
+  if (opts.restore) return runRestoreCommand(target);
+
+  if (!target.ok) {
+    p.log.error(describePatchTargetFailure(target));
+    return 1;
+  }
+  const { binaryPath, version } = target;
 
   const desired = buildDesiredPatchConfig();
   if (Object.keys(desired.config).length === 0) {
@@ -428,6 +793,7 @@ export async function runPatchCommand(opts: { restore?: boolean; trace?: boolean
   for (const id of desired.unknownWindows) {
     p.log.warn(`No context window metadata for ${id} — Claude Code will assume the 200k default.`);
   }
+  reportRejectedModelAliases(desired.rejectedAliasRejections);
 
   const configHash = computePatchConfigHash(desired.config);
   const manifest = readPatchManifest();
@@ -450,17 +816,13 @@ export async function runPatchCommand(opts: { restore?: boolean; trace?: boolean
   }
 
   try {
-    // Never patch on top of a patch: whenever a pristine backup exists for this
-    // version and the live binary differs from it (stale clodex patch, an old
-    // relay-ai patch, or a lost manifest), restore the backup before patching.
-    const backup = pristineBackupPath(version, binaryPath);
-    const restoreFirst = existsSync(backup) && sha256File(backup) !== sha256File(binaryPath);
-    if (restoreFirst) {
-      p.log.info('Binary differs from its pristine backup — restoring it before patching fresh.');
-    }
+    // Never patch on top of a patch: applyPatch decides from the pristine
+    // backups for THIS version (and the manifest) whether the live binary is
+    // already patched, and seeds the candidate from established pristine bytes
+    // rather than from the live binary whenever it is not.
     const outcome = await applyPatch(binaryPath, version, desired, configHash, {
       trace: opts.trace ?? false,
-      restoreFirst,
+      manifest,
     });
     if (!outcome.ok) {
       p.log.error(outcome.message);
@@ -490,8 +852,17 @@ export async function runLaunchPatchCheck(opts: { agentStdout?: boolean; dryRun?
     const desired = buildDesiredPatchConfig();
     if (Object.keys(desired.config).length === 0) return; // nothing to patch
 
-    const resolved = resolveClaudeBinaryForPatch();
-    if (!resolved) return;
+    const target = resolveClaudeBinaryForPatch();
+    if (!target.ok) {
+      // A patch check must never break a launch. "Not found" is silent (the user
+      // may not use the patcher at all); an unreadable version is a real problem
+      // worth one dim line, since it also blocks `clodex patch`.
+      if (target.reason === 'version-unknown' && !opts.agentStdout) {
+        console.error(pc.dim(`clodex: ${describePatchTargetFailure(target)}`));
+      }
+      return;
+    }
+    const resolved = target;
 
     const configHash = computePatchConfigHash(desired.config);
     const manifest = readPatchManifest();

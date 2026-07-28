@@ -5,6 +5,7 @@ import { generateAnthropicResponse } from '../src/sdk-adapter.js';
 import { startProxyCatalog, type ProxyRoute } from '../src/proxy.js';
 
 const ORIGINAL_COMPACTION_FLAG = process.env.CLODEX_OPENAI_COMPACTION;
+const ORIGINAL_COMPACTION_THRESHOLD = process.env.CLODEX_OPENAI_COMPACT_THRESHOLD;
 
 vi.mock('../src/provider-factory.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/provider-factory.js')>();
@@ -64,6 +65,8 @@ describe('SDK proxy provider identity', () => {
     vi.mocked(generateAnthropicResponse).mockClear();
     if (ORIGINAL_COMPACTION_FLAG === undefined) delete process.env.CLODEX_OPENAI_COMPACTION;
     else process.env.CLODEX_OPENAI_COMPACTION = ORIGINAL_COMPACTION_FLAG;
+    if (ORIGINAL_COMPACTION_THRESHOLD === undefined) delete process.env.CLODEX_OPENAI_COMPACT_THRESHOLD;
+    else process.env.CLODEX_OPENAI_COMPACT_THRESHOLD = ORIGINAL_COMPACTION_THRESHOLD;
   });
 
   it('passes stable provider id into the SDK provider factory', async () => {
@@ -97,6 +100,7 @@ describe('SDK proxy provider identity', () => {
 
   it('injects the opt-in native-compaction threshold in proxy mode', async () => {
     process.env.CLODEX_OPENAI_COMPACTION = '1';
+    delete process.env.CLODEX_OPENAI_COMPACT_THRESHOLD;
     const route: ProxyRoute = {
       aliasId: 'anthropic-openai-oauth__gpt-5.6-sol',
       realModelId: 'gpt-5.6-sol',
