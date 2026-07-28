@@ -61,6 +61,7 @@ import {
 } from './http-proxy/index.js';
 import { runPatchCommand, runLaunchPatchCheck } from './patcher.js';
 import { installOutboundProxyDispatcher } from './outbound-proxy.js';
+import { resolveOpenAiCompactionThreshold } from './oauth/responses-compaction.js';
 const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--trace', '--endpoint', '--proxy', '--save-mode', '--help', '-h', '--version', '-v']);
 const CLODEX_LAUNCH_FLAGS = new Set(['--provider', '--model']);
 
@@ -590,6 +591,16 @@ export function reportInactiveCatalogAliases(modelAliases: ProxyModelAlias[]): v
   );
 }
 
+export function catalogUsesNativeContextOwner(
+  catalogRoutes: Array<Pick<ProxyRoute, 'providerId' | 'modelFormat' | 'contextWindow'>>,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return catalogRoutes.length > 0 && catalogRoutes.every(route =>
+    route.providerId === 'openai-oauth'
+    && route.modelFormat === 'openai'
+    && resolveOpenAiCompactionThreshold(route.contextWindow, env) !== undefined);
+}
+
 async function launchClaudeViaCatalog(
   catalogRoutes: ProxyRoute[],
   startingRoute: ProxyRoute,
@@ -626,7 +637,10 @@ async function launchClaudeViaCatalog(
     proxyHandle.port,
     contextWindow,
     true,
-    startingRoute.providerId === 'openai-oauth' && startingRoute.modelFormat === 'openai',
+    // The ownership flag is process-wide while /model can switch routes.
+    // Suppress Claude's compactor only when every selectable route is covered
+    // by Clodex native compaction; mixed catalogs must keep Claude's lifecycle.
+    catalogUsesNativeContextOwner(catalogRoutes),
   );
 
   const debugLogPath = prepareClaudeTraceLog();
