@@ -1,10 +1,38 @@
 // tests/cli.test.ts
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { parseArgs, rootHelpText, claudeHelpText, serverHelpText, modelsHelpText, patchHelpText, main } from '../src/cli.js';
+import {
+  catalogUsesNativeContextOwner,
+  parseArgs,
+  rootHelpText,
+  claudeHelpText,
+  serverHelpText,
+  modelsHelpText,
+  patchHelpText,
+  main,
+} from '../src/cli.js';
 import { VERSION } from '../src/constants.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe('catalogUsesNativeContextOwner', () => {
+  const nativeRoute = {
+    providerId: 'openai-oauth',
+    modelFormat: 'openai' as const,
+    contextWindow: 272_000,
+  };
+
+  it('requires every selectable model to use enabled native OpenAI compaction', () => {
+    const enabled = { CLODEX_OPENAI_COMPACTION: '1' };
+    expect(catalogUsesNativeContextOwner([nativeRoute, nativeRoute], enabled)).toBe(true);
+    expect(catalogUsesNativeContextOwner([
+      nativeRoute,
+      { providerId: 'anthropic', modelFormat: 'anthropic', contextWindow: 200_000 },
+    ], enabled)).toBe(false);
+    expect(catalogUsesNativeContextOwner([nativeRoute], {})).toBe(false);
+    expect(catalogUsesNativeContextOwner([], enabled)).toBe(false);
+  });
 });
 
 describe('parseArgs', () => {

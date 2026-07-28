@@ -40,9 +40,16 @@ model window retained as the hard provider ceiling and recovery boundary.
 
 Native compaction intentionally does not rewrite Claude's local transcript. The
 two ledgers therefore remain different: Claude retains UI/resume history while
-Clodex retains the opaque OpenAI continuation checkpoint. On restart, model
+Clodex retains compacted OpenAI continuation state. On restart, model
 switch, checkpoint expiry, or recovery failure, Claude's manual/portable
 summary path remains the safe handoff.
+
+Enabling native compaction also opts into durable recovery checkpoints under
+`~/.clodex/responses-checkpoints`. These files can contain retained user
+messages, assistant/tool state, and OpenAI's opaque compaction item. Clodex
+creates the directory with mode `0700` and files with mode `0600`, rejects
+symlinked stores, limits each file to 8 MiB, and removes checkpoints after seven
+days on the next checkpoint scan. Keep the Clodex home directory private.
 
 Claude-initiated compaction turns, including `/compact`, never trigger an
 additional hidden native compaction. They run against the existing response
@@ -60,9 +67,11 @@ response chain or select a different partition:
 - checkpoint eviction;
 - a failed standalone recovery request.
 
-Process-local compact checkpoints expire after 30 minutes and are capped at
-eight per model/account/session partition and 32 globally. They are not written
-to disk.
+Process-local compact checkpoints expire after 30 minutes. Durable checkpoints
+expire after seven days. Both are capped at 16 per model/account/session
+partition and 64 globally. Durable storage is bounded, rescanned periodically
+for checkpoints written by another Clodex process, and used to recover matching
+agent lineages after restart.
 
 Before a planned restart, model switch, or resume, use Claude's normal
 `/compact` while the transcript still fits. If native state is already gone and

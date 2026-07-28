@@ -4,12 +4,15 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  deleteStoredResponsesCheckpoint,
   loadStoredResponsesCheckpoints,
   saveStoredResponsesCheckpoint,
   type StoredResponsesCheckpoint,
@@ -56,14 +59,36 @@ describe('Responses checkpoint store', () => {
     const directory = storeDirectory('checkpoint-validation');
     const expired = checkpoint('b'.repeat(64), randomUUID(), 0);
     saveStoredResponsesCheckpoint(directory, expired, 8, 32);
-    writeFileSync(join(directory, 'corrupt.json'), '{', { mode: 0o600 });
-    writeFileSync(join(directory, 'invalid.json'), JSON.stringify({
+    const corruptName = `${'c'.repeat(64)}-${randomUUID()}.json`;
+    const invalidName = `${'d'.repeat(64)}-${randomUUID()}.json`;
+    writeFileSync(join(directory, corruptName), '{', { mode: 0o600 });
+    writeFileSync(join(directory, invalidName), JSON.stringify({
       ...checkpoint('c'.repeat(64)),
       lineageKey: '../../outside',
     }), { mode: 0o600 });
+    writeFileSync(join(directory, 'unrelated.json'), '{"keep":true}', { mode: 0o600 });
 
     expect(loadStoredResponsesCheckpoints(directory, 1_001, 1_000)).toEqual([]);
-    expect(readdirSync(directory)).toEqual([]);
+    expect(readdirSync(directory)).toEqual(['unrelated.json']);
+  });
+
+  it('rejects symlinked stores without modifying their targets', () => {
+    const target = storeDirectory('checkpoint-symlink-target');
+    const value = checkpoint('c'.repeat(64));
+    saveStoredResponsesCheckpoint(target, value, 8, 32);
+    writeFileSync(join(target, 'unrelated.json'), '{"keep":true}', { mode: 0o600 });
+    const link = join(process.env.CLODEX_HOME!, 'checkpoint-store-link');
+    rmSync(link, { recursive: true, force: true });
+    symlinkSync(target, link, 'dir');
+
+    expect(() => loadStoredResponsesCheckpoints(link, value.lastUsedAt + 1, 10_000))
+      .toThrow('must be a real directory');
+    expect(() => saveStoredResponsesCheckpoint(link, value, 8, 32))
+      .toThrow('must be a real directory');
+    deleteStoredResponsesCheckpoint(link, value.checkpointKey, value.lineageKey);
+    expect(readdirSync(target)).toContain('unrelated.json');
+    expect(loadStoredResponsesCheckpoints(target, value.lastUsedAt + 1, 10_000))
+      .toEqual([value]);
   });
 
   it('bounds durable entries per partition and globally', () => {

@@ -58,7 +58,7 @@ export interface ResponsesWebSocketFetchOptions {
   /** Test seam for the unary compact request. */
   compactFetch?: typeof fetch;
   compactTimeoutMs?: number;
-  /** Private durable store for opaque native-compaction recovery checkpoints. */
+  /** Private durable store for compacted native-compaction recovery state. */
   checkpointStoreDir?: string;
   now?: () => number;
   /** Opt-in structured transport diagnostics; never receives conversation content. */
@@ -203,9 +203,10 @@ interface CompactionCheckpoint {
 // One-shot nursery traffic never consumes the established LRU's 32 reserved slots.
 const connections = new Map<string, Set<ConnectionEntry>>();
 const compactionCheckpoints = new Map<string, CompactionCheckpoint[]>();
-const loadedCheckpointStores = new Set<string>();
-const MAX_COMPACTION_CHECKPOINTS_PER_PARTITION = 8;
-const MAX_COMPACTION_CHECKPOINTS = 32;
+const checkpointStoreNextScanAt = new Map<string, number>();
+const CHECKPOINT_STORE_RESCAN_INTERVAL_MS = 5_000;
+const MAX_COMPACTION_CHECKPOINTS_PER_PARTITION = 16;
+const MAX_COMPACTION_CHECKPOINTS = 64;
 let nextConnectionDebugId = 1;
 let nextLineageDebugId = 1;
 
@@ -229,9 +230,22 @@ function checkpointEntries(key?: string): CompactionCheckpoint[] {
     : [...compactionCheckpoints.values()].flat();
 }
 
-function upsertCompactionCheckpoint(checkpoint: CompactionCheckpoint): void {
-  const partition = (compactionCheckpoints.get(checkpoint.key) ?? [])
-    .filter(candidate => candidate.lineageKey !== checkpoint.lineageKey);
+function upsertCompactionCheckpoint(
+  checkpoint: CompactionCheckpoint,
+  preferExistingOnTie = false,
+): void {
+  const existingPartition = compactionCheckpoints.get(checkpoint.key) ?? [];
+  const existing = existingPartition.find(candidate => candidate.lineageKey === checkpoint.lineageKey);
+  if (
+    existing
+    && (
+      existing.lastUsedAt > checkpoint.lastUsedAt
+      || (preferExistingOnTie && existing.lastUsedAt === checkpoint.lastUsedAt)
+    )
+  ) return;
+  const partition = existingPartition.filter(
+    candidate => candidate.lineageKey !== checkpoint.lineageKey,
+  );
   partition.push(checkpoint);
   partition.sort((left, right) => right.lastUsedAt - left.lastUsedAt);
   compactionCheckpoints.set(
@@ -302,8 +316,7 @@ function saveCompactionCheckpoint(entry: ConnectionEntry): void {
 }
 
 function loadCompactionCheckpointStore(directory: string | undefined, now: number): void {
-  if (!directory || loadedCheckpointStores.has(directory)) return;
-  loadedCheckpointStores.add(directory);
+  if (!directory || now < (checkpointStoreNextScanAt.get(directory) ?? 0)) return;
   try {
     for (const stored of loadStoredResponsesCheckpoints(
       directory,
@@ -325,10 +338,15 @@ function loadCompactionCheckpointStore(directory: string | undefined, now: numbe
         lastUsedAt: stored.lastUsedAt,
         ttlMs: RESPONSES_COMPACTION_DURABLE_CHECKPOINT_TTL_MS,
         checkpointStoreDir: directory,
-      });
+      }, true);
     }
+    // Periodic bounded rescans make checkpoints written by another Clodex
+    // process visible without adding filesystem work to every inference turn.
+    checkpointStoreNextScanAt.set(directory, now + CHECKPOINT_STORE_RESCAN_INTERVAL_MS);
   } catch {
-    // Recovery storage is best-effort; normal inference must remain available.
+    // Do not cache a failed scan. The next request retries recovery while
+    // normal inference remains available.
+    checkpointStoreNextScanAt.delete(directory);
   }
 }
 
@@ -378,7 +396,7 @@ export function resetResponsesWebSocketConnectionsForTests(): void {
   }
   connections.clear();
   compactionCheckpoints.clear();
-  loadedCheckpointStores.clear();
+  checkpointStoreNextScanAt.clear();
   nextConnectionDebugId = 1;
   nextLineageDebugId = 1;
 }
@@ -1797,9 +1815,11 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   const type = eventType(event);
   trackReasoningProtocol(entry, ctx, event, type);
   captureOutput(ctx, event);
-  if (type === 'response.completed') {
+  if (TERMINAL_EVENT_TYPES.has(type ?? '')) {
     ctx.modelResponseUsage = responseUsage(event);
-    if (ctx.usageOffset) event = withUsageOffset(event, ctx.usageOffset);
+    if (type === 'response.completed' && ctx.usageOffset) {
+      event = withUsageOffset(event, ctx.usageOffset);
+    }
     const usage = responseUsage(event);
     if (usage) {
       ctx.responseUsage = usage;
@@ -2045,6 +2065,11 @@ export function createResponsesWebSocketFetch(
     maxNurseryConnections: options.maxNurseryConnections ?? RESPONSES_WS_MAX_NURSERY_CONNECTIONS,
     now: options.now ?? Date.now,
   };
+  // Durable native state must never remain active after the user disables the
+  // native compaction opt-in, even if a caller accidentally supplies a path.
+  const checkpointStoreDir = options.compactThreshold !== undefined
+    ? options.checkpointStoreDir
+    : undefined;
 
   return async (requestUrl, init): Promise<Response> => {
     const { WebSocket } = await import('ws');
@@ -2080,7 +2105,7 @@ export function createResponsesWebSocketFetch(
     const instructionsSnapshot = instructionsFromPayload(payload);
     const diagnosticCorrelation = diagnosticContext.getStore();
     const now = resolvedOptions.now();
-    loadCompactionCheckpointStore(options.checkpointStoreDir, now);
+    loadCompactionCheckpointStore(checkpointStoreDir, now);
     const evictions = cleanupExpiredConnections(now);
 
     const runCompactionTrigger = async (
@@ -2135,7 +2160,7 @@ export function createResponsesWebSocketFetch(
               Boolean(partitionKey),
               partitionKey,
               checkpointKey,
-              options.checkpointStoreDir,
+              checkpointStoreDir,
               resolvedOptions,
               debug,
               proxyAgent,
@@ -2180,11 +2205,17 @@ export function createResponsesWebSocketFetch(
       if (timedOut) {
         throw new ResponsesCompactionError(
           `Native compaction trigger exceeded ${Math.round(compactTimeoutMs / 1000)}s`,
+          undefined,
+          ctx?.responseUsage,
         );
       }
       const completedEntry = ctx?.entry;
       if (!ctx?.responseId) {
-        throw new ResponsesCompactionError('Native compaction trigger did not complete');
+        throw new ResponsesCompactionError(
+          'Native compaction trigger did not complete',
+          undefined,
+          ctx?.responseUsage,
+        );
       }
       const output = expectedAssistantItems(ctx)
         .filter(item => isOpaqueCompactionKind(conversationItemKind(item)));
@@ -2198,6 +2229,8 @@ export function createResponsesWebSocketFetch(
       if (output.length !== 1) {
         throw new ResponsesCompactionError(
           `Native compaction trigger returned ${output.length} compaction items`,
+          undefined,
+          ctx.responseUsage,
         );
       }
       return { output, usage: ctx.responseUsage, triggerWireBytes };
@@ -2299,6 +2332,7 @@ export function createResponsesWebSocketFetch(
     let compacted = false;
     let compactionUsage: ResponsesCompactionUsage | undefined;
     let failedTriggerCompactedInput: unknown[] | undefined;
+    let failedTriggerUsage: ResponsesCompactionUsage | undefined;
 
     if (
       compactThreshold !== undefined
@@ -2346,6 +2380,10 @@ export function createResponsesWebSocketFetch(
             ...(result.usage ?? {}),
           }, diagnosticCorrelation);
         } catch (error) {
+          if (error instanceof ResponsesCompactionError) {
+            failedTriggerUsage = error.usage;
+            compactionUsage = error.usage;
+          }
           debug('native compaction trigger unavailable; trying standalone compact endpoint');
           emitDiagnostic(options, {
             event: 'ws_compaction',
@@ -2399,7 +2437,9 @@ export function createResponsesWebSocketFetch(
           selected = undefined;
           continued = false;
           compacted = true;
-          compactionUsage = result.usage;
+          compactionUsage = failedTriggerUsage && result.usage
+            ? addResponseUsage(failedTriggerUsage, result.usage)
+            : result.usage ?? failedTriggerUsage;
           decision = 'compaction_new_head';
           debug(
             `standalone compact reduced ${inputArray(compactPayload).length} input item(s) `
@@ -2656,7 +2696,7 @@ export function createResponsesWebSocketFetch(
             persistent,
             partitionKey,
             checkpointKey,
-            options.checkpointStoreDir,
+            checkpointStoreDir,
             resolvedOptions,
             debug,
             proxyAgent,
@@ -2671,7 +2711,7 @@ export function createResponsesWebSocketFetch(
           persistent,
           partitionKey,
           checkpointKey,
-          options.checkpointStoreDir,
+          checkpointStoreDir,
           resolvedOptions,
           debug,
           proxyAgent,

@@ -44,11 +44,13 @@ export interface CompactResponsesWindowOptions {
 
 export class ResponsesCompactionError extends Error {
   readonly statusCode?: number;
+  readonly usage?: ResponsesCompactionUsage;
 
-  constructor(message: string, statusCode?: number) {
+  constructor(message: string, statusCode?: number, usage?: ResponsesCompactionUsage) {
     super(message);
     this.name = 'ResponsesCompactionError';
     this.statusCode = statusCode;
+    this.usage = usage;
   }
 }
 

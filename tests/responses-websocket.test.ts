@@ -1,6 +1,16 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { createOpenAI } from '@ai-sdk/openai';
 import { streamText } from 'ai';
@@ -31,6 +41,7 @@ import {
   withResponsesWebSocketDiagnosticContext,
   type ResponsesWebSocketDiagnosticEvent,
 } from '../src/oauth/responses-websocket.js';
+import { saveStoredResponsesCheckpoint } from '../src/oauth/responses-checkpoint-store.js';
 import { sdkUpstreamErrorDetails } from '../src/upstream-error.js';
 
 const WS_URL = 'wss://chatgpt.com/backend-api/codex/responses';
@@ -61,6 +72,18 @@ const sessionPayload = (input: unknown[], extra: Record<string, unknown> = {}) =
   input,
   ...extra,
 });
+
+function checkpointItemHash(value: unknown): string {
+  const canonicalize = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(canonicalize);
+    if (!input || typeof input !== 'object') return input;
+    return Object.fromEntries(Object.keys(input as Record<string, unknown>)
+      .sort()
+      .filter(key => (input as Record<string, unknown>)[key] !== undefined)
+      .map(key => [key, canonicalize((input as Record<string, unknown>)[key])]));
+  };
+  return createHash('sha256').update(JSON.stringify(canonicalize(value))).digest('hex').slice(0, 16);
+}
 
 /** Drive a failed WebSocket upgrade by emitting `unexpected-response`. */
 function rejectUpgrade(
@@ -2010,7 +2033,9 @@ describe('createResponsesWebSocketFetch', () => {
     await readAll(second);
   });
 
-  it('uses standalone compact output when a live compaction trigger fails', async () => {
+  it.each(['response.failed', 'response.incomplete'] as const)(
+    'uses standalone compact output and retains usage when a live trigger ends with %s',
+    async terminalType => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const canonical = [
       { role: 'user', content: [{ type: 'input_text', text: 'retained' }] },
@@ -2028,7 +2053,7 @@ describe('createResponsesWebSocketFetch', () => {
       headers: { 'content-type': 'application/json' },
     }));
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
-      accountId: 'acct-compact-endpoint-fallback',
+      accountId: `acct-compact-endpoint-fallback-${terminalType}`,
       compactThreshold: 100,
       compactFetch: compactFetch as typeof fetch,
       onDiagnostic: event => diagnostics.push(event),
@@ -2055,8 +2080,23 @@ describe('createResponsesWebSocketFetch', () => {
     });
     await vi.waitFor(() => expect(originalSocket.send).toHaveBeenCalledTimes(2));
     originalSocket.emit('message', Buffer.from(JSON.stringify({
-      type: 'error',
-      error: { code: 'compaction_trigger_unavailable', message: 'private trigger failure' },
+      type: 'response.created',
+      response: { id: `resp_endpoint_fallback_${terminalType}` },
+    })));
+    originalSocket.emit('message', Buffer.from(JSON.stringify({
+      type: terminalType,
+      response: {
+        id: `resp_endpoint_fallback_${terminalType}`,
+        status: terminalType === 'response.failed' ? 'failed' : 'incomplete',
+        usage: {
+          input_tokens: 80,
+          input_tokens_details: { cached_tokens: 70, cache_write_tokens: 2 },
+          output_tokens: 5,
+        },
+        ...(terminalType === 'response.failed'
+          ? { error: { code: 'server_error', message: 'trigger failed after usage' } }
+          : { incomplete_details: { reason: 'max_output_tokens' } }),
+      },
     })));
 
     const second = await secondPromise;
@@ -2066,8 +2106,25 @@ describe('createResponsesWebSocketFetch', () => {
     const sent = JSON.parse(replacement.send.mock.calls[0]![0] as string);
     expect(sent.previous_response_id).toBeUndefined();
     expect(sent.input).toEqual(canonical);
-    emitTextResponse(replacement, 'resp_endpoint_fallback_next', 'done');
-    await readAll(second);
+    emitTextResponse(replacement, 'resp_endpoint_fallback_next', 'done', {
+      input_tokens: 50,
+      input_tokens_details: { cached_tokens: 40, cache_write_tokens: 3 },
+      output_tokens: 10,
+    });
+    const events = (await readAll(second))
+      .split('\n\n')
+      .filter(Boolean)
+      .map(frame => JSON.parse(frame.replace(/^data: /, '')));
+    const completed = events.find(event => event.type === 'response.completed');
+    expect(completed.response.usage).toMatchObject({
+      input_tokens: 330,
+      output_tokens: 45,
+      total_tokens: 375,
+      input_tokens_details: {
+        cached_tokens: 110,
+        cache_write_tokens: 5,
+      },
+    });
     expect(originalSocket.close).toHaveBeenCalledOnce();
     expect(diagnostics).toContainEqual(expect.objectContaining({
       event: 'ws_compaction',
@@ -2076,7 +2133,8 @@ describe('createResponsesWebSocketFetch', () => {
       inputTokens: 200,
       outputTokens: 30,
     }));
-  });
+    },
+  );
 
   it('recompacts canonical opaque state when an in-band trigger falls back to HTTP', async () => {
     const firstCanonical = [{ type: 'compaction', encrypted_content: 'first-opaque-state' }];
@@ -2537,6 +2595,58 @@ describe('createResponsesWebSocketFetch', () => {
     });
   });
 
+  it('surfaces aggregated compaction usage through the real OpenAI AI SDK', async () => {
+    const compactFetch = vi.fn(async () => new Response(JSON.stringify({
+      output: [{ type: 'compaction', encrypted_content: 'sdk-usage-summary' }],
+      usage: {
+        input_tokens: 210,
+        input_tokens_details: { cached_tokens: 180, cache_write_tokens: 12 },
+        output_tokens: 18,
+      },
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-sdk-compaction-usage',
+      compactThreshold: 100,
+      compactFetch: compactFetch as typeof fetch,
+    });
+    const provider = createOpenAI({ apiKey: 'test-only', fetch: wsFetch });
+    const usagePromise = withResponsesWebSocketDiagnosticContext(
+      { claudeAgentId: 'workflow-sdk-usage', estimatedInputTokens: 150 },
+      async () => {
+        const streamed = streamText({
+          model: provider.responses('gpt-5.6-sol'),
+          prompt: 'report usage through the SDK',
+          maxRetries: 0,
+        });
+        for await (const part of streamed.stream) {
+          if (part.type === 'finish') return part.totalUsage;
+        }
+        throw new Error('AI SDK stream ended without a finish part');
+      },
+    );
+    await vi.waitFor(() => expect(fakeSockets).toHaveLength(1));
+    const socket = lastSocket();
+    socket.emit('open');
+    emitTextResponse(socket, 'resp_sdk_compaction_usage', 'done', {
+      input_tokens: 50,
+      input_tokens_details: { cached_tokens: 40, cache_write_tokens: 3 },
+      output_tokens: 11,
+    });
+
+    expect(await usagePromise).toMatchObject({
+      inputTokens: 260,
+      outputTokens: 29,
+      totalTokens: 289,
+      inputTokenDetails: {
+        cacheReadTokens: 220,
+        cacheWriteTokens: 15,
+      },
+    });
+  });
+
   it.each([
     {
       label: 'parent orchestrator',
@@ -2898,9 +3008,9 @@ describe('createResponsesWebSocketFetch', () => {
       compactFetch: compactFetch as typeof fetch,
       checkpointStoreDir,
     });
-    const roots = ['workflow A', 'workflow B'].map(label => [{
+    const roots = Array.from({ length: 16 }, (_, index) => [{
       role: 'user',
-      content: [{ type: 'input_text', text: label }],
+      content: [{ type: 'input_text', text: `workflow ${index}` }],
     }]);
     const firstWaveBodies: string[] = [];
     for (let index = 0; index < roots.length; index += 1) {
@@ -2921,7 +3031,7 @@ describe('createResponsesWebSocketFetch', () => {
       });
       firstWaveBodies.push(await readAll(response));
     }
-    expect(fakeSockets).toHaveLength(2);
+    expect(fakeSockets).toHaveLength(roots.length);
     for (const body of firstWaveBodies) {
       const completed = body.split('\n\n')
         .filter(Boolean)
@@ -2933,8 +3043,8 @@ describe('createResponsesWebSocketFetch', () => {
         input_tokens_details: { cached_tokens: 35_180 },
       });
     }
-    expect(compactFetch).toHaveBeenCalledTimes(2);
-    expect(readdirSync(checkpointStoreDir)).toHaveLength(2);
+    expect(compactFetch).toHaveBeenCalledTimes(roots.length);
+    expect(readdirSync(checkpointStoreDir)).toHaveLength(roots.length);
 
     resetResponsesWebSocketConnectionsForTests();
     fakeSockets.length = 0;
@@ -2975,7 +3085,7 @@ describe('createResponsesWebSocketFetch', () => {
         roots[index]![0],
         {
           type: 'compaction',
-          encrypted_content: `opaque-workflow ${index === 0 ? 'A' : 'B'}`,
+          encrypted_content: `opaque-workflow ${index}`,
         },
         assistant,
         nextUser,
@@ -2987,7 +3097,7 @@ describe('createResponsesWebSocketFetch', () => {
       });
       resumedBodies.push(await readAll(response));
     }
-    expect(fakeSockets).toHaveLength(2);
+    expect(fakeSockets).toHaveLength(roots.length);
     for (const body of resumedBodies) {
       const completed = body.split('\n\n')
         .filter(Boolean)
@@ -3000,6 +3110,218 @@ describe('createResponsesWebSocketFetch', () => {
       });
     }
     expect(compactAfterRestart).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'retries a failed checkpoint-store scan', initialStore: 'symlink', nextNow: 0 },
+    { label: 'rescans for checkpoints written by another process', initialStore: 'empty', nextNow: 6_000 },
+  ])('$label', async ({ initialStore, nextNow }) => {
+    mkdirSync(process.env.CLODEX_HOME!, { recursive: true });
+    const target = mkdtempSync(join(process.env.CLODEX_HOME!, 'checkpoint-rescan-target-'));
+    const checkpointStoreDir = initialStore === 'symlink'
+      ? join(process.env.CLODEX_HOME!, `checkpoint-rescan-link-${randomUUID()}`)
+      : target;
+    if (initialStore === 'symlink') symlinkSync(target, checkpointStoreDir, 'dir');
+
+    let now = 0;
+    const accountId = `acct-checkpoint-rescan-${initialStore}`;
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId,
+      compactThreshold: 100,
+      checkpointStoreDir,
+      now: () => now,
+    });
+    const user = {
+      role: 'user',
+      content: [{ type: 'input_text', text: `initial ${initialStore}` }],
+    };
+    const assistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'initial answer' }],
+    };
+    const first = await wsFetch('https://example.test/responses', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([user])),
+    });
+    const firstSocket = lastSocket();
+    firstSocket.emit('open');
+    emitTextResponse(firstSocket, `resp_rescan_${initialStore}`, 'initial answer', {
+      input_tokens: 50,
+      output_tokens: 10,
+    });
+    await readAll(first);
+    firstSocket.emit('close', 1000, Buffer.from(''));
+
+    if (initialStore === 'symlink') {
+      rmSync(checkpointStoreDir);
+      mkdirSync(checkpointStoreDir, { mode: 0o700 });
+    }
+    const checkpointKey = responsesWebSocketPartitionKey(
+      WS_URL,
+      sessionPayload([user]),
+      { accountId },
+    )!;
+    const compactedInput = [
+      user,
+      { type: 'compaction', encrypted_content: `external-${initialStore}` },
+    ];
+    expect(saveStoredResponsesCheckpoint(checkpointStoreDir, {
+      version: 1,
+      checkpointKey,
+      lineageKey: randomUUID(),
+      requestInputHashes: [checkpointItemHash(user)],
+      expectedAssistantHashes: [checkpointItemHash(assistant)],
+      expectedAssistantKinds: ['assistant'],
+      compactedInput,
+      lastInputTokens: 50,
+      lastUsedAt: now,
+    }, 16, 64)).toBe(true);
+
+    now = nextNow;
+    const nextUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'after external checkpoint' }],
+    };
+    const resumed = await wsFetch('https://example.test/responses', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([user, assistant, nextUser])),
+    });
+    const resumedSocket = lastSocket();
+    resumedSocket.emit('open');
+    const sent = JSON.parse(resumedSocket.send.mock.calls[0]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    expect(sent.input).toEqual([...compactedInput, nextUser]);
+    emitTextResponse(resumedSocket, `resp_rescan_done_${initialStore}`, 'done');
+    await readAll(resumed);
+  });
+
+  it('does not restore durable checkpoints when native compaction is disabled', async () => {
+    mkdirSync(process.env.CLODEX_HOME!, { recursive: true });
+    const checkpointStoreDir = mkdtempSync(join(process.env.CLODEX_HOME!, 'checkpoint-disabled-'));
+    const accountId = 'acct-checkpoint-disabled';
+    const user = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'native compaction disabled' }],
+    };
+    const assistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'prior answer' }],
+    };
+    const checkpointKey = responsesWebSocketPartitionKey(
+      WS_URL,
+      sessionPayload([user]),
+      { accountId },
+    )!;
+    saveStoredResponsesCheckpoint(checkpointStoreDir, {
+      version: 1,
+      checkpointKey,
+      lineageKey: randomUUID(),
+      requestInputHashes: [checkpointItemHash(user)],
+      expectedAssistantHashes: [checkpointItemHash(assistant)],
+      expectedAssistantKinds: ['assistant'],
+      compactedInput: [{ type: 'compaction', encrypted_content: 'must-not-load' }],
+      lastInputTokens: 300_000,
+      lastUsedAt: Date.now(),
+    }, 16, 64);
+
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId,
+      checkpointStoreDir,
+    });
+    const nextUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'continue without native state' }],
+    };
+    const fullInput = [user, assistant, nextUser];
+    const response = await wsFetch('https://example.test/responses', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload(fullInput)),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    const sent = JSON.parse(socket.send.mock.calls[0]![0] as string);
+    expect(sent.input).toEqual(fullInput);
+    expect(sent.input).not.toContainEqual(expect.objectContaining({
+      encrypted_content: 'must-not-load',
+    }));
+    emitTextResponse(socket, 'resp_checkpoint_disabled', 'done');
+    await readAll(response);
+  });
+
+  it('keeps newer in-memory checkpoint state when a periodic rescan finds stale disk state', async () => {
+    mkdirSync(process.env.CLODEX_HOME!, { recursive: true });
+    const checkpointStoreDir = mkdtempSync(join(process.env.CLODEX_HOME!, 'checkpoint-stale-rescan-'));
+    let now = 10;
+    const compactFetch = vi.fn(async () => new Response(JSON.stringify({
+      output: [{ type: 'compaction', encrypted_content: 'newer-memory-state' }],
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    }));
+    const accountId = 'acct-checkpoint-stale-rescan';
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId,
+      compactThreshold: 100,
+      compactFetch: compactFetch as typeof fetch,
+      checkpointStoreDir,
+      now: () => now,
+    });
+    const user = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'create newer checkpoint' }],
+    };
+    const first = await withResponsesWebSocketDiagnosticContext(
+      { estimatedInputTokens: 150 },
+      () => wsFetch('https://example.test/responses', {
+        method: 'POST',
+        headers: {},
+        body: JSON.stringify(sessionPayload([user])),
+      }),
+    );
+    const firstSocket = lastSocket();
+    firstSocket.emit('open');
+    emitTextResponse(firstSocket, 'resp_newer_checkpoint', 'newer answer', {
+      input_tokens: 50,
+      output_tokens: 10,
+    });
+    await readAll(first);
+    firstSocket.emit('close', 1000, Buffer.from(''));
+
+    const [checkpointName] = readdirSync(checkpointStoreDir);
+    const checkpointPath = join(checkpointStoreDir, checkpointName!);
+    const stale = JSON.parse(readFileSync(checkpointPath, 'utf8'));
+    stale.lastUsedAt = 5;
+    stale.compactedInput = [{ type: 'compaction', encrypted_content: 'stale-disk-state' }];
+    writeFileSync(checkpointPath, JSON.stringify(stale), { mode: 0o600 });
+
+    now = 6_010;
+    const assistant = {
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'newer answer' }],
+    };
+    const nextUser = {
+      role: 'user',
+      content: [{ type: 'input_text', text: 'continue from newer state' }],
+    };
+    const resumed = await wsFetch('https://example.test/responses', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([user, assistant, nextUser])),
+    });
+    const resumedSocket = lastSocket();
+    resumedSocket.emit('open');
+    const sent = JSON.parse(resumedSocket.send.mock.calls[0]![0] as string);
+    expect(sent.input).toContainEqual(expect.objectContaining({
+      encrypted_content: 'newer-memory-state',
+    }));
+    expect(sent.input).not.toContainEqual(expect.objectContaining({
+      encrypted_content: 'stale-disk-state',
+    }));
+    emitTextResponse(resumedSocket, 'resp_newer_checkpoint_done', 'done');
+    await readAll(resumed);
   });
 
   it('compacts oversized sibling workflow branches concurrently', async () => {
@@ -3228,7 +3550,7 @@ describe('createResponsesWebSocketFetch', () => {
       };
     }
 
-    const perPartition = await exerciseCap(Array.from({ length: 9 }, () => 'shared-key'));
+    const perPartition = await exerciseCap(Array.from({ length: 17 }, () => 'shared-key'));
     expect(perPartition.oldestInput).not.toContainEqual(expect.objectContaining({
       encrypted_content: perPartition.oldestSummary,
     }));
@@ -3239,7 +3561,7 @@ describe('createResponsesWebSocketFetch', () => {
     resetResponsesWebSocketConnectionsForTests();
     fakeSockets.length = 0;
     const global = await exerciseCap(Array.from(
-      { length: 33 },
+      { length: 65 },
       (_, index) => `partition-${index}`,
     ));
     expect(global.oldestInput).not.toContainEqual(expect.objectContaining({

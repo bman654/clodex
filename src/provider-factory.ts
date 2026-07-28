@@ -194,7 +194,9 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
                   providerId: spec.providerId ?? 'openai',
                   accountId,
                   compactThreshold: spec.openAiCompactThreshold,
-                  checkpointStoreDir: getResponsesCheckpointsPath(),
+                  checkpointStoreDir: spec.openAiCompactThreshold !== undefined
+                    ? getResponsesCheckpointsPath()
+                    : undefined,
                   onDiagnostic: spec.onWebSocketDiagnostic,
                 }),
               }

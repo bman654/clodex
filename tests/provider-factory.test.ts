@@ -353,11 +353,28 @@ describe('createLanguageModel', () => {
       expect.objectContaining({
         accountId: 'acct-transport-threshold',
         compactThreshold: 244_800,
+        checkpointStoreDir: expect.any(String),
       }),
     );
     expect(createOpenAI).toHaveBeenCalledWith(expect.objectContaining({
       fetch: responsesFetch,
     }));
+
+    await create({
+      npm: '@ai-sdk/openai',
+      modelId: 'gpt-5.6-sol',
+      apiKey: 'oauth-token',
+      authType: 'oauth',
+      oauthAccountId: 'acct-compaction-disabled',
+    });
+    expect(createResponsesWebSocketFetch).toHaveBeenLastCalledWith(
+      expect.any(String),
+      undefined,
+      expect.objectContaining({
+        compactThreshold: undefined,
+        checkpointStoreDir: undefined,
+      }),
+    );
     vi.doUnmock('../src/oauth/responses-websocket.js');
     vi.doUnmock('@ai-sdk/openai');
   });
