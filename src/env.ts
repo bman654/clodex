@@ -67,6 +67,7 @@ export function buildChildEnv(
   proxyPort?: number,
   contextWindow?: number,
   enableGatewayDiscovery?: boolean,
+  nativeContextOwner = false,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env };
   for (const name of CONFLICTING_ENV_VARS) {
@@ -85,6 +86,10 @@ export function buildChildEnv(
   // lever and it reflects the model you started with.
   // Third-party routes also require a `[1m]` model-id suffix for 1M+ windows in the UI.
   env['CLAUDE_CODE_MAX_CONTEXT_TOKENS'] = String(resolveContextWindow(bareModel, contextWindow));
+  // Native Responses compaction owns the model-facing context for translated
+  // routes; Claude's local transcript counter must not auto-compact or block it.
+  delete env['CLODEX_NATIVE_CONTEXT_OWNER'];
+  if (nativeContextOwner) env['CLODEX_NATIVE_CONTEXT_OWNER'] = '1';
   if (enableGatewayDiscovery) {
     env['CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY'] = '1';
   }

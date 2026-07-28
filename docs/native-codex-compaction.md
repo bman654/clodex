@@ -29,31 +29,20 @@ clodex claude
 `CLODEX_OPENAI_COMPACT_THRESHOLD` does not enable the feature by itself.
 Invalid, fractional, zero, and negative thresholds are ignored.
 
-## Keep Claude Code's transcript bounded
+## Clodex-owned context lifecycle
 
-Configure Claude Code's own auto-compact window even when native compaction is
-enabled. For example, in `.claude/settings.json`:
+Clodex-launched OpenAI OAuth children set `CLODEX_NATIVE_CONTEXT_OWNER=1`.
+The patched Claude binary then leaves automatic/precomputed compaction, the
+local blocking guard, and Claude's local context-window override disabled for
+that child. Manual `/compact` remains available. Native OpenAI compaction at
+the configured threshold owns the model-facing chain, with the advertised
+model window retained as the hard provider ceiling and recovery boundary.
 
-```json
-{
-  "env": {
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "230000"
-  }
-}
-```
-
-Claude Code does not proactively auto-compact OpenAI model IDs unless the user
-configures an auto-compact window; its built-in model-default window table
-contains Anthropic model IDs only.
-
-If Claude's effective auto-compact point is below Clodex's native threshold,
-Claude compacts first and the native path normally stays dormant. This is the
-conservative configuration.
-
-Lowering `CLODEX_OPENAI_COMPACT_THRESHOLD` below Claude's effective trigger lets
-you evaluate native compaction, but accepts the transcript-growth risk: usage
-reported after the OpenAI rebase is smaller even though Claude's saved
-transcript is still large.
+Native compaction intentionally does not rewrite Claude's local transcript. The
+two ledgers therefore remain different: Claude retains UI/resume history while
+Clodex retains the opaque OpenAI continuation checkpoint. On restart, model
+switch, checkpoint expiry, or recovery failure, Claude's manual/portable
+summary path remains the safe handoff.
 
 Claude-initiated compaction turns, including `/compact`, never trigger an
 additional hidden native compaction. They run against the existing response

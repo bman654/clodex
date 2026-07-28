@@ -598,6 +598,7 @@ async function launchClaudeViaCatalog(
     proxyHandle.port,
     contextWindow,
     true,
+    startingRoute.providerId === 'openai-oauth' && startingRoute.modelFormat === 'openai',
   );
 
   const debugLogPath = prepareClaudeTraceLog();
@@ -1308,6 +1309,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
       proxyHandle.token,
       proxyHandle.port,
       selectedModel.contextWindow,
+      false,
     );
   } else if (selectedModel.modelFormat === 'anthropic') {
     childEnv = buildChildEnv(
@@ -1316,6 +1318,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
       launchApiKey ?? '',
       undefined,
       selectedModel.contextWindow,
+      false,
     );
   } else {
     try {
@@ -1356,6 +1359,8 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
       proxyHandle.token,
       proxyHandle.port,
       selectedModel.contextWindow,
+      true,
+      activeProvider.id === 'openai-oauth',
     );
   }
 
