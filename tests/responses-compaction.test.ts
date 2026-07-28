@@ -3,12 +3,21 @@ import {
   compactRequestPayload,
   compactResponsesWindow,
   OPENAI_COMPACTION_DEFAULT_RATIO,
+  OPENAI_COMPACTION_PREFLIGHT_MARGIN_TOKENS,
+  resolveOpenAiCompactionPreflightThreshold,
   resolveOpenAiCompactionThreshold,
   ResponsesCompactionError,
   responsesCompactUrl,
 } from '../src/oauth/responses-compaction.js';
 
 describe('Responses standalone compaction', () => {
+  it('leaves a preflight margin below the authoritative OpenAI threshold', () => {
+    expect(resolveOpenAiCompactionPreflightThreshold(900_000))
+      .toBe(900_000 - OPENAI_COMPACTION_PREFLIGHT_MARGIN_TOKENS);
+    expect(resolveOpenAiCompactionPreflightThreshold(10_000)).toBe(10_000);
+    expect(resolveOpenAiCompactionPreflightThreshold(0)).toBe(1);
+  });
+
   it('is opt-in and defaults enabled sessions to Codex-compatible 90% utilization', () => {
     expect(resolveOpenAiCompactionThreshold(272_000, {})).toBeUndefined();
     expect(resolveOpenAiCompactionThreshold(272_000, {

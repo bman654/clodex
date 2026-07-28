@@ -16,6 +16,7 @@ import { outboundWsProxyAgent } from '../outbound-proxy.js';
 import { anthropicErrorType, clampRetryAfterSeconds } from '../upstream-error.js';
 import {
   compactResponsesWindow,
+  resolveOpenAiCompactionPreflightThreshold,
   RESPONSES_COMPACT_TIMEOUT_MS,
   ResponsesCompactionError,
   type ResponsesCompactionUsage,
@@ -1100,6 +1101,14 @@ function responseFailureDetails(event: unknown): Record<string, unknown> {
     incompleteReason: boundedDiagnosticIdentifier(incomplete?.reason),
     ...diagnosticTextFingerprint('errorMessage', message),
   };
+}
+
+function payloadWireBytes(payload: JsonObject): number | undefined {
+  try {
+    return Buffer.byteLength(JSON.stringify(payload), 'utf8');
+  } catch {
+    return undefined;
+  }
 }
 
 function emitContextDiagnostic(
@@ -2315,6 +2324,14 @@ export function createResponsesWebSocketFetch(
     const compactThreshold = options.compactThreshold;
     const measuredInputTokens = selected?.lastInputTokens ?? selectedCheckpoint?.lastInputTokens;
     const estimatedInputTokens = diagnosticCorrelation?.estimatedInputTokens;
+    // OpenAI's measured usage is authoritative after a response. Claude's
+    // serialized-input estimate is only a preflight safety signal: it covers
+    // the interval before the first measurement and tokenizer/serialization
+    // drift that could otherwise let the next request cross the limit.
+    const preflightInputTokens = Math.max(
+      measuredInputTokens ?? 0,
+      estimatedInputTokens ?? 0,
+    );
     const forceCompaction = diagnosticCorrelation?.forceCompaction === true;
     const compactionReason = forceCompaction
       ? undefined
@@ -2325,8 +2342,7 @@ export function createResponsesWebSocketFetch(
         : compactThreshold !== undefined
           && !selected?.compactedInput
           && !selectedCheckpoint
-          && estimatedInputTokens !== undefined
-          && estimatedInputTokens >= compactThreshold
+          && preflightInputTokens >= resolveOpenAiCompactionPreflightThreshold(compactThreshold)
           ? 'estimated_threshold'
           : undefined;
     let compacted = false;
@@ -2373,6 +2389,7 @@ export function createResponsesWebSocketFetch(
             threshold: compactThreshold,
             measuredInputTokens,
             estimatedInputTokens,
+            preflightInputTokens,
             sourceItems: inputArray(payload).length,
             retainedItems: compactedInput.length - result.output.length,
             compactedItems: result.output.length,
@@ -2393,6 +2410,10 @@ export function createResponsesWebSocketFetch(
             threshold: compactThreshold,
             measuredInputTokens,
             estimatedInputTokens,
+            preflightInputTokens,
+            preflightThreshold: resolveOpenAiCompactionPreflightThreshold(compactThreshold),
+            inputItems: inputArray(payload).length,
+            inputBytes: payloadWireBytes(payload),
             errorType: boundedDiagnosticIdentifier(
               error instanceof Error ? error.name : typeof error,
             ),
@@ -2454,12 +2475,29 @@ export function createResponsesWebSocketFetch(
             threshold: compactThreshold,
             measuredInputTokens,
             estimatedInputTokens,
+            preflightInputTokens,
             sourceItems: inputArray(compactPayload).length,
             compactedItems: result.output.length,
             ...(usage ?? {}),
           }, diagnosticCorrelation);
         } catch (error) {
-          debug('standalone compaction unavailable; preserving normal response path');
+          const errorType = boundedDiagnosticIdentifier(
+            error instanceof Error ? error.name : typeof error,
+          );
+          const statusCode = error && typeof error === 'object' && 'statusCode' in error
+            && typeof error.statusCode === 'number'
+            ? error.statusCode
+            : undefined;
+          debug(
+            'standalone compaction unavailable; preserving normal response path'
+            + ` type=${errorType ?? 'unknown'}`
+            + (statusCode === undefined ? '' : ` status=${statusCode}`)
+            + ` estimated=${estimatedInputTokens ?? 'unknown'}`
+            + ` threshold=${compactThreshold}`
+            + ` preflight=${resolveOpenAiCompactionPreflightThreshold(compactThreshold)}`
+            + ` items=${inputArray(payload).length}`
+            + ` bytes=${payloadWireBytes(payload) ?? 'unknown'}`,
+          );
           emitDiagnostic(options, {
             event: 'ws_compaction',
             outcome: 'fallback',
@@ -2468,13 +2506,11 @@ export function createResponsesWebSocketFetch(
             threshold: compactThreshold,
             measuredInputTokens,
             estimatedInputTokens,
-            errorType: boundedDiagnosticIdentifier(
-              error instanceof Error ? error.name : typeof error,
-            ),
-            statusCode: error && typeof error === 'object' && 'statusCode' in error
-              && typeof error.statusCode === 'number'
-              ? error.statusCode
-              : undefined,
+            preflightThreshold: resolveOpenAiCompactionPreflightThreshold(compactThreshold),
+            inputItems: inputArray(payload).length,
+            inputBytes: payloadWireBytes(payload),
+            errorType,
+            statusCode,
           }, diagnosticCorrelation);
         }
       }

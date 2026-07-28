@@ -16,10 +16,22 @@ const COMPACT_BODY_FIELDS = [
 ] as const;
 
 export const OPENAI_COMPACTION_DEFAULT_RATIO = 0.9;
+// Anthropic's serialized request estimate is deliberately conservative but is
+// not a tokenizer. Leave room for estimator error and the downstream output
+// budget before asking OpenAI to compact.
+export const OPENAI_COMPACTION_PREFLIGHT_MARGIN_TOKENS = 32_000;
 // Compaction runs before the downstream SSE response exists. An in-band trigger
 // can consume this budget before a standalone retry consumes it again, reaching
 // Claude Code's 120s no-data watchdog before the normal fallback can start.
 export const RESPONSES_COMPACT_TIMEOUT_MS = 60_000;
+
+export function resolveOpenAiCompactionPreflightThreshold(compactThreshold: number): number {
+  if (!Number.isSafeInteger(compactThreshold) || compactThreshold <= 0) return 1;
+  // Keep small test/custom thresholds exact; the safety margin is for real
+  // model windows where a few thousand tokens are meaningful.
+  if (compactThreshold <= OPENAI_COMPACTION_PREFLIGHT_MARGIN_TOKENS) return compactThreshold;
+  return Math.max(1, compactThreshold - OPENAI_COMPACTION_PREFLIGHT_MARGIN_TOKENS);
+}
 
 export interface ResponsesCompactionUsage {
   inputTokens: number;
