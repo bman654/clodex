@@ -350,6 +350,80 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   }
 
   // ---------------------------------------------------------------------------
+  // PATCH 12 — delegate context lifecycle to Clodex for translated routes.
+  // Native Responses compaction reduces the model-facing chain without
+  // rewriting Claude's local transcript. Claude's own auto-compactor and local
+  // hard guard can therefore act on a different counter than Clodex.
+  {
+    const MARKER = '/*clodex:native-context-owner*/';
+    applyOnce(
+      'PATCH 12: native context owner',
+      /function ([\w$]+)\(\)\{if\(([\w$]+)\.DISABLE_COMPACT\)return!1;if\(Yt\(process\.env\.DISABLE_AUTO_COMPACT\)\)return!1;return Hc\("autoCompactEnabled",!0\)\.value\}/,
+      (_m, predicate, config) =>
+        'function ' + predicate + '(){' + MARKER
+        + 'if(process.env.CLODEX_NATIVE_CONTEXT_OWNER==="1")return!1;'
+        + 'if(' + config + '.DISABLE_COMPACT)return!1;if(Yt(process.env.DISABLE_AUTO_COMPACT))return!1;'
+        + 'return Hc("autoCompactEnabled",!0).value}',
+      { marker: MARKER, required: true }
+    );
+  }
+
+  // PATCH 13 — prevent Claude's local context guard from blocking a Clodex child.
+  {
+    const MARKER = '/*clodex:native-context-guard*/';
+    applyOnce(
+      'PATCH 13: native context guard',
+      new RegExp(String.raw`function ([\w$]+)\(e,t,r,n=t\)\{let ([\w$]+)=Sfo\(t,r\),([\w$]+)=r\.enabled\?[\w$]+:t,([\w$]+)=[\w$]+-20000,([\w$]+)=r\.testBlockingOverride,`),
+      (_m, fn, threshold, active, warn, blocking) =>
+        'function ' + fn + '(e,t,r,n=t){' + MARKER
+        + 'if(process.env.CLODEX_NATIVE_CONTEXT_OWNER==="1")return{level:"ok",pctLeft:100};'
+        + 'let ' + threshold + '=Sfo(t,r),' + active + '=r.enabled?' + threshold + ':t,'
+        + warn + '=' + active + '-20000,' + blocking + '=r.testBlockingOverride,',
+      { marker: MARKER, required: true }
+    );
+  }
+
+  // PATCH 14 — suppress Claude's background precomputed auto-compaction arm.
+  {
+    const MARKER = '/*clodex:native-precompute-owner*/';
+    applyOnce(
+      'PATCH 14: native precompute owner',
+      /function ([\w$]+)\(e,t,r,n\)\{let ([\w$]+)=Uds\(t,r,n\),([\w$]+)=\2\.enabled\?r:void 0,([\w$]+)=CSe\(t,\3\);if\(!JGe\(t,r\)\)return e>=Hds\(\4,\2\);/,
+      (_m, fn, options, enabledWindow, context, settings) =>
+        'function ' + fn + '(e,t,r,n){' + MARKER
+        + 'if(process.env.CLODEX_NATIVE_CONTEXT_OWNER==="1")return!1;'
+        + 'let ' + options + '=Uds(t,r,n),' + enabledWindow + '=' + options + '.enabled?r:void 0,'
+        + context + '=CSe(t,' + enabledWindow + ');if(!JGe(t,r))return e>=Hds(' + context + ',' + options + ');',
+      { marker: MARKER, required: true }
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 15 — keep Claude's derived context window at the model cap.
+  //
+  // The owner flag suppresses Claude's compaction decision, but the resolver is
+  // also consulted by request preflight and status calculations. If a caller
+  // supplies CLAUDE_CODE_AUTO_COMPACT_WINDOW, leaving that value in the
+  // resolver can still produce a local hard-limit rejection before Clodex's
+  // native lifecycle gets a chance to compact. Owner mode therefore ignores
+  // that local window and uses Claude's resolved model cap (currently 1M for
+  // Sol/Luna). Non-owner launches retain the upstream env behavior.
+  // ---------------------------------------------------------------------------
+  {
+    const MARKER = '/*clodex:native-context-window*/';
+    applyOnce(
+      'PATCH 15: native context window',
+      /function ([\w$]+)\(e,t\)\{let ([\w$]+)=lo\(e\),([\w$]+)=Mv\(\),([\w$]+)=JE\(e,\3\);if\(process\.env\.CLAUDE_CODE_AUTO_COMPACT_WINDOW\)/,
+      (_m, resolver, modelKey, clientData, modelCap) =>
+        'function ' + resolver + '(e,t){let ' + modelKey + '=lo(e),' + clientData + '=Mv(),'
+        + modelCap + '=JE(e,' + clientData + ');' + MARKER
+        + 'if(process.env.CLODEX_NATIVE_CONTEXT_OWNER==="1")return{window:' + modelCap
+        + ',configured:' + modelCap + ',source:"owner"};'
+        + 'if(process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW)',
+      { marker: MARKER, required: true }
+    );
+  }
+
   // PATCH 8 — opt in to Claude Code's bundled native Computer Use MCP.
   //
   // Claude Code ships a macOS-native computer-use MCP server and guards both

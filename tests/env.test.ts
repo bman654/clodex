@@ -194,6 +194,11 @@ describe('buildChildEnv', () => {
     expect(buildChildEnv(UPSTREAM_URL, 'zzzz-unknown-model', 'k')['CLAUDE_CODE_MAX_CONTEXT_TOKENS']).toBe('200000');
   });
 
+  it('delegates context ownership only when requested for a native OpenAI route', () => {
+    expect(buildChildEnv(UPSTREAM_URL, 'custom-model', 'k')['CLODEX_NATIVE_CONTEXT_OWNER']).toBeUndefined();
+    expect(buildChildEnv(UPSTREAM_URL, 'custom-model', 'k', undefined, undefined, false, true)['CLODEX_NATIVE_CONTEXT_OWNER']).toBe('1');
+  });
+
   it('uses explicit contextWindow override when provided', () => {
     expect(buildChildEnv(UPSTREAM_URL, 'custom-model', 'k', undefined, 512_000)['CLAUDE_CODE_MAX_CONTEXT_TOKENS']).toBe('512000');
     expect(buildChildEnv(UPSTREAM_URL, 'custom-model', 'k', undefined, 1_048_576)['CLAUDE_CODE_MAX_CONTEXT_TOKENS']).toBe('1048576');

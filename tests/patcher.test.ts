@@ -258,6 +258,10 @@ const CLAUDE_FIXTURE = [
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
   'function Lbo(){if(lK("hipaa"))return!1;return QE_()&&iEs().enabled}',
   'function Fw(e){let t=Rd();if(oSs(e))return!Syo(t.enabledMcpServers).includes(e);return Syo(t.disabledMcpServers).includes(e)}',
+  'function aY(e,t){let r=lo(e),n=Mv(),o=JE(e,n);if(process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW){let l=UNe("CLAUDE_CODE_AUTO_COMPACT_WINDOW",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,Tfo,Nds);if(l.status!=="invalid"){let c=Math.max(Tfo,l.effective);return{window:Math.min(o,c),configured:c,source:"env"}}}return{window:o,configured:o,source:"auto"}}',
+  'function JI(){if(Z.DISABLE_COMPACT)return!1;if(Yt(process.env.DISABLE_AUTO_COMPACT))return!1;return Hc("autoCompactEnabled",!0).value}',
+  'function uMu(e,t,r,n=t){let o=Sfo(t,r),i=r.enabled?o:t,s=i-20000,a=r.testBlockingOverride,l=a!==void 0&&!isNaN(a)&&a>0?a:n-3000,c=Math.max(0,Math.round((i-e)/i*100));if(e>=l)return{level:"blocked",pctLeft:c};if(r.enabled&&e>=o)return{level:"compact",pctLeft:c};if(e>=s)return{level:"warn",pctLeft:c};return{level:"ok"}}',
+  'function gMu(e,t,r,n){let o=Uds(t,r,n),i=o.enabled?r:void 0,s=CSe(t,i);if(!JGe(t,r))return e>=Hds(s,o);let{window:a}=aY(t,i);if(a<bRe)return!1;return e>=Hds(s,o)}',
   'const workflowNote=`NOTE: You are running inside a workflow script. Be concise \\u2014 the script will parse your output.`,aa,bb,cc,dd,sj_=180000,attempts=5,retries=5;var runtime={};',
   'function runWorkflow(events){let last,messages=[],tokens=0,baseTokens=0,baseTools=0,toolCalls=0,progress=[];const countUsage=(usage)=>usage.total;const emit=(state,data)=>progress.push(data.tokens);for(const msg of events){if(msg.type==="user"){continue}if(msg.type==="assistant"){if(last=msg,messages?.push(msg),!msg.isApiErrorMessage){tokens=countUsage(msg.message.usage);let model=msg.message.model;emit("progress",{tokens:baseTokens+tokens,toolCalls:baseTools+toolCalls})}}}return{tokens,progress}}/*workflow-end*/',
 ].join('\n');
@@ -345,6 +349,10 @@ describe('patch script identity naming', () => {
       ['PATCH 5: model picker options', 'OK'],
       ['PATCH 4: Agent tool model description', 'OK'],
       ['PATCH 7: per-model context window', 'OK'],
+      ['PATCH 12: native context owner', 'OK'],
+      ['PATCH 13: native context guard', 'OK'],
+      ['PATCH 14: native precompute owner', 'OK'],
+      ['PATCH 15: native context window', 'OK'],
       ['PATCH 8: native Computer Use opt-in', 'OK'],
       ['PATCH 9: native Computer Use default enable', 'OK'],
       ['PATCH 10: Workflow agent stall timeout', 'OK'],
@@ -360,6 +368,10 @@ describe('patch script identity naming', () => {
       // PATCH 7 re-runs through the in-place refresh path; an unchanged config
       // rewrites the identical table, which reports as already patched.
       ['PATCH 7: per-model context window (refresh)', 'SKIP'],
+      ['PATCH 12: native context owner', 'SKIP'],
+      ['PATCH 13: native context guard', 'SKIP'],
+      ['PATCH 14: native precompute owner', 'SKIP'],
+      ['PATCH 15: native context window', 'SKIP'],
       ['PATCH 8: native Computer Use opt-in', 'SKIP'],
       ['PATCH 9: native Computer Use default enable', 'SKIP'],
       ['PATCH 10: Workflow agent stall timeout', 'SKIP'],
@@ -392,6 +404,14 @@ describe('patch script identity naming', () => {
       'sj_=/*clodex:workflow-stall-timeout*/'
       + 'Math.min(Math.max(Number(process.env.CLODEX_WORKFLOW_STALL_TIMEOUT_MS)||180000,180000),1800000)'
     );
+  });
+
+  it('delegates automatic context lifecycle to Clodex only when the child flag is set', () => {
+    const out = runPatchScript(config);
+    expect(out).toContain('/*clodex:native-context-owner*/if(process.env.CLODEX_NATIVE_CONTEXT_OWNER==="1")return!1;');
+    expect(out).toContain('/*clodex:native-context-guard*/if(process.env.CLODEX_NATIVE_CONTEXT_OWNER==="1")return{level:"ok",pctLeft:100};');
+    expect(out).toContain('/*clodex:native-precompute-owner*/if(process.env.CLODEX_NATIVE_CONTEXT_OWNER==="1")return!1;');
+    expect(out).toContain('/*clodex:native-context-window*/if(process.env.CLODEX_NATIVE_CONTEXT_OWNER==="1")return{window:o,configured:o,source:"owner"};');
   });
 
   it('retains the last nonzero Workflow token sample across streaming placeholders', () => {
