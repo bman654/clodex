@@ -58,18 +58,33 @@ describe('resolveCatalogModelAliases', () => {
         contextWindow: 1_000_000,
       }],
     }];
-    const aliases: ModelAlias[] = [{
-      name: 'fast',
-      providerId: 'test-provider',
-      modelId: 'model-v1',
-    }];
+    const aliases: ModelAlias[] = [
+      {
+        name: 'Fast',
+        providerId: 'test-provider',
+        modelId: 'model-v1',
+      },
+      {
+        name: 'best',
+        providerId: 'test-provider',
+        modelId: 'model-v1',
+      },
+    ];
 
     const resolved = resolveCatalogModelAliases(aliases, makeRouteResolver(providers));
 
-    expect(resolved).toEqual([{
-      name: 'fast',
-      routeId: 'anthropic-test-provider__model-v1[1m]',
-    }]);
+    expect(resolved).toEqual([
+      {
+        name: 'fast',
+        routeId: 'anthropic-test-provider__model-v1[1m]',
+        savedName: 'Fast',
+        sourceNames: ['Fast'],
+      },
+      {
+        name: 'best',
+        unavailableReason: 'reserved client name',
+      },
+    ]);
     expect(resolved[0]?.routeId).not.toBe('clodex:test-provider:model-v1');
   });
 
@@ -83,7 +98,85 @@ describe('resolveCatalogModelAliases', () => {
     expect(resolveCatalogModelAliases([alias], makeRouteResolver([]))).toEqual([{
       name: 'archived',
       routeId: modelAliasTarget(alias),
+      unavailableReason: 'target unavailable',
     }]);
+  });
+
+  it('retains raw saved spellings in inactive alias warning metadata', () => {
+    const aliases: ModelAlias[] = [
+      { name: 'Orbit', providerId: 'one', modelId: 'model-a' },
+      { name: 'ORBIT', providerId: 'two', modelId: 'model-b' },
+      { name: 'ArChIvEd', providerId: 'missing-provider', modelId: 'missing-model' },
+      { name: 'ARCHIVED', providerId: 'missing-provider', modelId: 'missing-model' },
+    ];
+
+    expect(resolveCatalogModelAliases(aliases, makeRouteResolver([]))).toEqual([
+      {
+        name: 'archived',
+        savedName: 'ArChIvEd',
+        sourceNames: ['ArChIvEd', 'ARCHIVED'],
+        routeId: 'clodex:missing-provider:missing-model',
+        unavailableReason: 'target unavailable',
+      },
+      {
+        name: 'orbit',
+        savedName: 'Orbit',
+        unavailableReason: 'conflicting targets',
+      },
+      {
+        name: 'orbit',
+        savedName: 'ORBIT',
+        unavailableReason: 'conflicting targets',
+      },
+    ]);
+  });
+
+  it('rejects an alias that would shadow an exact catalog route', () => {
+    const exactCatalogRoute = {
+      aliasId: 'claude-sonnet-4',
+      realModelId: 'claude-sonnet-4',
+      displayName: 'Claude Sonnet 4',
+      upstreamUrl: 'https://api.anthropic.com',
+      apiKey: 'anthropic-key',
+      modelFormat: 'anthropic' as const,
+    };
+    const aliasTargetRoute = {
+      ...exactCatalogRoute,
+      aliasId: 'anthropic-other__model-a',
+      realModelId: 'model-a',
+      displayName: 'Model A',
+    };
+    const alias: ModelAlias = {
+      name: 'CLAUDE-SONNET-4',
+      providerId: 'other',
+      modelId: 'model-a',
+    };
+
+    expect(resolveCatalogModelAliases(
+      [alias],
+      () => aliasTargetRoute,
+      [exactCatalogRoute, aliasTargetRoute],
+    )).toEqual([
+      {
+        name: 'claude-sonnet-4',
+        savedName: 'CLAUDE-SONNET-4',
+        sourceNames: ['CLAUDE-SONNET-4'],
+        routeId: 'anthropic-other__model-a',
+        unavailableReason: 'conflicts with a catalog model id',
+      },
+    ]);
+  });
+
+  it('rejects malformed array elements before resolving catalog routes', () => {
+    const resolveRoute = vi.fn();
+
+    expect(() => resolveCatalogModelAliases([
+      { name: 'valid', providerId: 'one', modelId: 'model-a' },
+      null,
+    ], resolveRoute)).toThrow(
+      'Saved model aliases are malformed: "modelAliases[1]" must be an object with a string "name".',
+    );
+    expect(resolveRoute).not.toHaveBeenCalled();
   });
 });
 

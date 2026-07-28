@@ -702,8 +702,9 @@ describe('selective HTTP proxy', () => {
         name: 'llama',
         routeId: 'clodex:groq:llama-3.3-70b',
         displayName: 'Llama 3.3 70B (Groq)',
+        sourceNames: ['LLaMa', 'LLAMA'],
       }],
-      reservedModelIds: ['missing-route'],
+      reservedModelIds: ['missing-route', 'orbit', 'Orbit', 'ORBIT'],
       adapterHandle: {
         port: adapterPort,
         token: 'adapter-local-token',
@@ -840,6 +841,9 @@ describe('selective HTTP proxy', () => {
 
       const rejectedCases = [
         { model: 'clodex:groq:typo', path: '/v1/messages' },
+        { model: 'LLaMa', path: '/v1/messages' },
+        { model: 'LLAMA', path: '/v1/messages' },
+        { model: 'orbit', path: '/v1/messages' },
         { model: 'missing-route', path: '/v1/messages' },
         { model: 'missing-route[1m]', path: '/v1/messages' },
         { model: 'missing-route[1M]', path: '/v1/messages' },
@@ -858,7 +862,7 @@ describe('selective HTTP proxy', () => {
         expect(response, `${testCase.path} ${testCase.model}`).toContain('400 Bad Request');
         expect(response).toContain('invalid_request_error');
         expect(response).toContain('clodex models --list');
-        expect(response).toContain('clodex patch');
+        expect(response).not.toContain('clodex patch');
       }
 
       const compressedUnavailableBody = JSON.stringify({ model: 'missing-route', messages: [] });
@@ -871,6 +875,8 @@ describe('selective HTTP proxy', () => {
       );
       expect(compressedUnavailableResponse).toContain('400 Bad Request');
       expect(compressedUnavailableResponse).toContain('invalid_request_error');
+      expect(compressedUnavailableResponse).toContain('clodex models --list');
+      expect(compressedUnavailableResponse).not.toContain('clodex patch');
 
       const unreadableCompressedResponse = await requestMitm(
         proxy.port,

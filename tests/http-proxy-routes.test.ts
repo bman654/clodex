@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildHttpProxyRoutes, httpProxyModelId } from '../src/http-proxy/routes.js';
+import { buildPatchModelConfig } from '../src/patcher.js';
 import type { LocalProvider } from '../src/types.js';
 
 const providers: LocalProvider[] = [
@@ -89,6 +90,7 @@ describe('HTTP proxy routes', () => {
         { name: 'llama', providerId: 'groq', modelId: 'llama-3.3-70b' },
         { name: 'missing', providerId: 'groq', modelId: 'gone' },
         { name: 'bad:name', providerId: 'groq', modelId: 'llama-3.3-70b' },
+        { name: 'DeFaUlT', providerId: 'groq', modelId: 'llama-3.3-70b' },
       ],
     );
 
@@ -98,8 +100,61 @@ describe('HTTP proxy routes', () => {
       displayName: 'Llama 3.3 70B (Groq Cloud)',
     }]);
     expect(result.unavailableAliases).toEqual([
-      { name: 'missing', providerId: 'groq', modelId: 'gone' },
       { name: 'bad:name', providerId: 'groq', modelId: 'llama-3.3-70b' },
+      { name: 'DeFaUlT', providerId: 'groq', modelId: 'llama-3.3-70b' },
+      { name: 'missing', providerId: 'groq', modelId: 'gone' },
     ]);
+  });
+
+  it('fails closed when case variants point at different targets', () => {
+    const result = buildHttpProxyRoutes(
+      providers,
+      [{ providerId: 'groq', modelId: 'llama-3.3-70b' }],
+      [
+        { name: 'LLaMa', providerId: 'groq', modelId: 'llama-3.3-70b' },
+        { name: 'llama', providerId: 'groq', modelId: 'other' },
+      ],
+    );
+
+    expect(result.aliases).toEqual([]);
+    expect(result.unavailableAliases).toEqual([
+      { name: 'LLaMa', providerId: 'groq', modelId: 'llama-3.3-70b' },
+      { name: 'llama', providerId: 'groq', modelId: 'other' },
+    ]);
+  });
+
+  it('collapses equivalent case variants without reporting an unavailable alias', () => {
+    const result = buildHttpProxyRoutes(
+      providers,
+      [{ providerId: 'groq', modelId: 'llama-3.3-70b' }],
+      [
+        { name: 'LLaMa', providerId: 'groq', modelId: 'llama-3.3-70b' },
+        { name: 'LLAMA', providerId: 'groq', modelId: 'llama-3.3-70b' },
+      ],
+    );
+
+    expect(result.aliases).toEqual([{
+      name: 'llama',
+      routeId: 'clodex:groq:llama-3.3-70b[1m]',
+      displayName: 'Llama 3.3 70B (Groq Cloud)',
+      sourceNames: ['LLaMa', 'LLAMA'],
+    }]);
+    expect(result.unavailableAliases).toEqual([]);
+  });
+
+  it('uses the same canonical alias for patch identity and proxy routing', () => {
+    const favorite = { providerId: 'groq', modelId: 'llama-3.3-70b' };
+    const aliases = [{ name: 'LLaMa', ...favorite }];
+    const routes = buildHttpProxyRoutes(providers, [favorite], aliases);
+    const patch = buildPatchModelConfig(
+      [favorite],
+      aliases,
+      () => ({ contextWindow: 1_000_000, displayName: 'Llama 3.3 70B' }),
+    );
+
+    expect(routes.aliases[0]?.name).toBe(
+      patch.config['clodex:groq:llama-3.3-70b']?.alias,
+    );
+    expect(routes.aliases[0]?.sourceNames).toEqual(['LLaMa']);
   });
 });

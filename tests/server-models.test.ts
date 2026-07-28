@@ -116,17 +116,43 @@ describe('server model catalog', () => {
 
   it('resolves canonical clodex ids and saved short aliases without advertising them', () => {
     const catalog = createGatewayModelCatalog(models, undefined, [
-      { name: 'deep', providerId: 'go', modelId: 'deepseek-test' },
+      { name: 'Deep', providerId: 'go', modelId: 'deepseek-test' },
       { name: 'ghost', providerId: 'go', modelId: 'not-in-catalog' },
+      { name: 'best', providerId: 'go', modelId: 'deepseek-test' },
     ]);
 
     expect(catalog.get('clodex:go:deepseek-test')).toMatchObject({ id: 'deepseek-test' });
     expect(catalog.get('clodex:openai:gpt-5')).toMatchObject({ id: 'gpt-5' });
     expect(catalog.get('deep')).toMatchObject({ id: 'deepseek-test' });
+    expect(catalog.get('best')).toBeUndefined();
     // An alias whose target is not in the (possibly filtered) catalog stays unknown.
     expect(catalog.get('ghost')).toBeUndefined();
     // Accepted input forms never leak into the advertised catalog.
     expect(catalog.list().map(model => model.id)).toEqual(['claude-sonnet-test', 'deepseek-test', 'gpt-5']);
+  });
+
+  it('preserves canonical provider and model id casing', () => {
+    const caseSensitiveModel: ServerModelInfo = {
+      id: 'Model-X',
+      name: 'Case-sensitive model',
+      isFree: false,
+      brand: 'Other',
+      providerId: 'Provider-X',
+      sourceBackend: 'Provider-X',
+      modelFormat: 'openai',
+    };
+    const catalog = createGatewayModelCatalog([caseSensitiveModel], undefined, [{
+      name: 'short',
+      providerId: 'Provider-X',
+      modelId: 'Model-X',
+    }]);
+
+    expect(catalog.get('short')).toMatchObject({ id: 'Model-X', providerId: 'Provider-X' });
+    expect(catalog.get('clodex:Provider-X:Model-X')).toMatchObject({
+      id: 'Model-X',
+      providerId: 'Provider-X',
+    });
+    expect(catalog.get('clodex:provider-x:model-x')).toBeUndefined();
   });
 
   it('an exact catalog id always wins over a colliding saved alias', () => {

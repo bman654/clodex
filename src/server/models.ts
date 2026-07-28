@@ -2,6 +2,7 @@
 import { resolveContextWindow } from '../context-window.js';
 import { aliasModelId } from '../proxy.js';
 import { httpProxyModelId } from '../http-proxy/routes.js';
+import { normalizeModelAliases } from '../model-aliases.js';
 import { maskGatewayModelId } from './vendor-mask.js';
 import type { FreeStatus } from '../free-models.js';
 import type { ModelAlias } from '../types.js';
@@ -180,7 +181,7 @@ export function createGatewayModelCatalog(
     const canonicalId = httpProxyModelId(gatewayProviderId(model), model.id);
     if (!byId.has(canonicalId)) byId.set(canonicalId, model);
   }
-  for (const alias of modelAliases ?? []) {
+  for (const alias of normalizeModelAliases(modelAliases).aliases) {
     if (byId.has(alias.name)) continue;
     const target = models.find(
       model => gatewayProviderId(model) === alias.providerId && model.id === alias.modelId,

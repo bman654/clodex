@@ -1,11 +1,14 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
+import * as p from '@clack/prompts';
 import {
   buildConfiguredHttpProxyOptions,
   formatHttpProxyEnvironmentLines,
   formatHttpProxyModelLines,
+  loadHttpProxyRoutes,
+  reportSkippedHttpProxyFavorites,
   runHttpProxyServerCommand,
   type LoadedHttpProxyRoutes,
 } from '../src/http-proxy/index.js';
@@ -86,33 +89,189 @@ describe('HTTP proxy startup model list', () => {
       rmSync(home, { recursive: true, force: true });
     }
   }, 20_000);
-  it('reserves unavailable configured aliases in the production server options', () => {
+  it('reserves canonical and exact stored names for inactive configured aliases', () => {
     const loaded: LoadedHttpProxyRoutes = {
       routes: [],
       aliases: [],
       unavailable: [],
       unsupported: [],
-      unavailableAliases: [{
-        name: 'missing-route',
-        providerId: 'openai',
-        modelId: 'missing-model',
-      }],
+      unavailableAliases: [
+        {
+          name: ' Orbit ',
+          providerId: 'openai',
+          modelId: 'model-a',
+        },
+        {
+          name: 'ORBIT',
+          providerId: 'other',
+          modelId: 'model-b',
+        },
+      ],
       favoriteCount: 0,
     };
 
-    expect(buildConfiguredHttpProxyOptions(
+    const options = buildConfiguredHttpProxyOptions(
       loaded,
       17645,
       false,
       '/tmp/inference.jsonl',
-    )).toMatchObject({
+    );
+
+    expect(options).toMatchObject({
       host: '127.0.0.1',
       port: 17645,
       routes: [],
       modelAliases: [],
-      reservedModelIds: ['missing-route'],
       inferenceLogPath: '/tmp/inference.jsonl',
     });
+    expect(options.reservedModelIds).toHaveLength(4);
+    expect(new Set(options.reservedModelIds)).toEqual(
+      new Set([' Orbit ', 'orbit', 'Orbit', 'ORBIT']),
+    );
+  });
+
+  it('reserves every exact source spelling for an active canonical alias', () => {
+    const loaded: LoadedHttpProxyRoutes = {
+      routes: [],
+      aliases: [{
+        name: 'luna',
+        routeId: 'clodex:test:model-a',
+        displayName: 'Model A',
+        sourceNames: ['LuNa', 'LUNA'],
+      }],
+      unavailable: [],
+      unsupported: [],
+      unavailableAliases: [],
+      favoriteCount: 1,
+    };
+
+    const options = buildConfiguredHttpProxyOptions(
+      loaded,
+      17645,
+      false,
+      '/tmp/inference.jsonl',
+    );
+
+    expect(new Set(options.reservedModelIds)).toEqual(
+      new Set(['luna', 'LuNa', 'LUNA']),
+    );
+  });
+
+  it('preserves every exact source spelling when no favorites remain', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'clodex-proxy-no-favorites-'));
+    const previousHome = process.env['CLODEX_HOME'];
+    process.env['CLODEX_HOME'] = home;
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [],
+      modelAliases: [
+        { name: 'LuNa', providerId: 'one', modelId: 'model-a' },
+        { name: 'LUNA', providerId: 'one', modelId: 'model-a' },
+      ],
+    }));
+
+    try {
+      const loaded = await loadHttpProxyRoutes();
+      expect(loaded.unavailableAliases).toEqual([
+        { name: 'LuNa', providerId: 'one', modelId: 'model-a' },
+        { name: 'LUNA', providerId: 'one', modelId: 'model-a' },
+      ]);
+
+      const options = buildConfiguredHttpProxyOptions(
+        loaded,
+        17645,
+        false,
+        '/tmp/inference.jsonl',
+      );
+      expect(new Set(options.reservedModelIds)).toEqual(
+        new Set(['luna', 'LuNa', 'LUNA']),
+      );
+    } finally {
+      if (previousHome === undefined) delete process.env['CLODEX_HOME'];
+      else process.env['CLODEX_HOME'] = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when saved aliases are not stored as an array', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'clodex-proxy-malformed-aliases-'));
+    const previousHome = process.env['CLODEX_HOME'];
+    process.env['CLODEX_HOME'] = home;
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId: 'one', modelId: 'model-a' }],
+      modelAliases: { name: 'LuNa', providerId: 'one', modelId: 'model-a' },
+    }));
+
+    try {
+      await expect(loadHttpProxyRoutes()).rejects.toThrow(
+        'Saved model aliases are malformed: "modelAliases" must be an array.',
+      );
+    } finally {
+      if (previousHome === undefined) delete process.env['CLODEX_HOME'];
+      else process.env['CLODEX_HOME'] = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed on malformed alias elements before the zero-favorite shortcut', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'clodex-proxy-malformed-alias-element-'));
+    const previousHome = process.env['CLODEX_HOME'];
+    process.env['CLODEX_HOME'] = home;
+
+    try {
+      for (const malformed of [
+        null,
+        7,
+        { name: 7, providerId: 'one', modelId: 'model-a' },
+      ]) {
+        writeFileSync(join(home, 'config.json'), JSON.stringify({
+          favoriteModels: [],
+          modelAliases: [
+            { name: 'valid', providerId: 'one', modelId: 'model-a' },
+            malformed,
+          ],
+        }));
+
+        await expect(loadHttpProxyRoutes()).rejects.toThrow(
+          'Saved model aliases are malformed: "modelAliases[1]" must be an object with a string "name".',
+        );
+      }
+    } finally {
+      if (previousHome === undefined) delete process.env['CLODEX_HOME'];
+      else process.env['CLODEX_HOME'] = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('reports each inactive alias with the reason it was rejected', () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const loaded: LoadedHttpProxyRoutes = {
+      routes: [],
+      aliases: [],
+      unavailable: [],
+      unsupported: [],
+      unavailableAliases: [
+        { name: 'default', providerId: 'openai', modelId: 'model-a' },
+        { name: 'Orbit', providerId: 'openai', modelId: 'model-a' },
+        { name: 'ORBIT', providerId: 'other', modelId: 'model-b' },
+        { name: 'bad:name', providerId: 'openai', modelId: 'model-a' },
+        { name: 'missing', providerId: 'openai', modelId: 'missing-model' },
+      ],
+      favoriteCount: 1,
+    };
+
+    try {
+      reportSkippedHttpProxyFavorites(loaded);
+      expect(warn).toHaveBeenCalledWith(
+        '5 model aliases skipped. Saved entries were preserved.\n'
+        + '  "default" — reserved client name\n'
+        + '  "Orbit" — conflicting targets\n'
+        + '  "ORBIT" — conflicting targets\n'
+        + '  "bad:name" — invalid name\n'
+        + '  "missing" — target unavailable',
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('prints proxy env values with the merged non-Anthropic bypass list', () => {

@@ -14,6 +14,7 @@ import { withResponsesWebSocketDiagnosticContext } from '../src/oauth/responses-
 
 const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:oauth-provider`;
 const ORIGINAL_COMPACTION_FLAG = process.env.CLODEX_OPENAI_COMPACTION;
+const ORIGINAL_COMPACTION_THRESHOLD = process.env.CLODEX_OPENAI_COMPACT_THRESHOLD;
 
 vi.mock('../src/env.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/env.js')>();
@@ -205,11 +206,18 @@ async function closeHandle(handle: ServerHandle | { close: () => Promise<void> }
 afterEach(async () => {
   vi.mocked(createLanguageModel).mockClear();
   vi.mocked(resolveProviderCredential).mockReset();
+  vi.mocked(generateAnthropicResponse).mockClear();
   vi.mocked(streamAnthropicResponse).mockClear();
+  vi.mocked(generateOpenAiResponse).mockClear();
   vi.mocked(streamOpenAiResponse).mockClear();
   vi.mocked(withResponsesWebSocketDiagnosticContext).mockClear();
   if (ORIGINAL_COMPACTION_FLAG === undefined) delete process.env.CLODEX_OPENAI_COMPACTION;
   else process.env.CLODEX_OPENAI_COMPACTION = ORIGINAL_COMPACTION_FLAG;
+  if (ORIGINAL_COMPACTION_THRESHOLD === undefined) {
+    delete process.env.CLODEX_OPENAI_COMPACT_THRESHOLD;
+  } else {
+    process.env.CLODEX_OPENAI_COMPACT_THRESHOLD = ORIGINAL_COMPACTION_THRESHOLD;
+  }
   while (handles.length > 0) {
     const handle = handles.pop();
     if (handle) await closeHandle(handle);
@@ -571,6 +579,7 @@ describe('server router', () => {
 
   it('injects the opt-in native-compaction threshold in endpoint mode', async () => {
     process.env.CLODEX_OPENAI_COMPACTION = '1';
+    delete process.env.CLODEX_OPENAI_COMPACT_THRESHOLD;
     vi.mocked(resolveProviderCredential).mockResolvedValue('oauth-token');
     const catalog = createGatewayModelCatalog([{
       id: 'gpt-5.6-sol',
@@ -1382,6 +1391,57 @@ describe('server router', () => {
 
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({ id: 'chatcmpl-test', model: 'luna' });
+    });
+
+    it('rejects conflicting saved aliases on both request formats without selecting a provider', async () => {
+      const solModel: ServerModelInfo = {
+        ...lunaModel,
+        id: 'gpt-5.6-sol',
+        name: 'GPT-5.6 Sol',
+      };
+      const conflictingAliases = [
+        { name: 'Orbit', providerId: 'openai-oauth', modelId: 'gpt-5.6-luna' },
+        { name: 'ORBIT', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+      ];
+      const server = await startTestServer({
+        catalog: createGatewayModelCatalog(
+          [lunaModel, solModel],
+          gateway,
+          conflictingAliases,
+        ),
+        gateway,
+        aliasNames: new Set(),
+      });
+      await vi.waitFor(async () => {
+        const health = await fetch(`${server.url}/health`);
+        expect(health.status).toBe(200);
+      });
+
+      for (const path of [
+        '/anthropic/v1/messages',
+        '/openai/v1/chat/completions',
+      ]) {
+        expect(server.server.listening, path).toBe(true);
+        const response = await fetch(`${server.url}${path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'orbit',
+            messages: [{ role: 'user', content: 'hi' }],
+          }),
+        });
+
+        expect(response.status, path).toBe(400);
+        expect(await response.json()).toMatchObject({
+          error: { message: 'Unknown model: orbit' },
+        });
+      }
+
+      expect(createLanguageModel).not.toHaveBeenCalled();
+      expect(generateAnthropicResponse).not.toHaveBeenCalled();
+      expect(streamAnthropicResponse).not.toHaveBeenCalled();
+      expect(generateOpenAiResponse).not.toHaveBeenCalled();
+      expect(streamOpenAiResponse).not.toHaveBeenCalled();
     });
 
     it('still rejects unknown model ids with 400', async () => {
