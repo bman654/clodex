@@ -462,6 +462,38 @@ function responseRetryAfterSeconds(event: unknown): number | undefined {
   return undefined;
 }
 
+/**
+ * HTTP status carried by an in-band error frame. The Codex backend reports it
+ * as a top-level `status` (e.g. 400 alongside an `unsupported_parameter`
+ * error); `response.status` is the response lifecycle state, not a status code,
+ * so it is deliberately not consulted here.
+ */
+function responseErrorStatus(event: unknown): number | undefined {
+  if (!event || typeof event !== 'object') return undefined;
+  const record = event as JsonObject;
+  for (const candidate of [record.status, (record.error as JsonObject | undefined)?.status]) {
+    if (typeof candidate === 'number' && Number.isInteger(candidate)
+      && candidate >= 400 && candidate <= 599) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function responseErrorMessage(event: unknown): string | undefined {
+  if (!event || typeof event !== 'object') return undefined;
+  const record = event as JsonObject;
+  const response = record.response && typeof record.response === 'object'
+    ? record.response as JsonObject
+    : undefined;
+  for (const candidate of [record.error, response?.error, record]) {
+    if (!candidate || typeof candidate !== 'object') continue;
+    const message = (candidate as JsonObject).message;
+    if (typeof message === 'string' && message.trim()) return message.trim();
+  }
+  return undefined;
+}
+
 function boundedDiagnosticIdentifier(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const normalized = value.trim();
@@ -1121,6 +1153,30 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
     resetContextForRetry(ctx);
     const replacement = ctx.createReplacement();
     dispatchContext(replacement, ctx);
+    return;
+  }
+
+  // A bare `error` frame carrying an HTTP status is a rejected request, not a
+  // response: forwarding it verbatim ends the stream with no content, so the
+  // client sees an empty 200 and reports a generic failure instead of the
+  // upstream reason. Map it to a real error frame while nothing has been
+  // emitted yet — once model data is downstream the stream is already
+  // committed, and the existing partial-output path must keep handling it.
+  const errorStatus = type === 'error' && !ctx.emittedModelData
+    ? responseErrorStatus(event)
+    : undefined;
+  if (errorStatus !== undefined) {
+    failContext(
+      entry,
+      ctx,
+      responseErrorMessage(event) ?? `OpenAI rejected the request (HTTP ${errorStatus})`,
+      {
+        source: 'error_frame',
+        errorCode,
+        mappedStatusCode: errorStatus,
+      },
+      errorStatus,
+    );
     return;
   }
 

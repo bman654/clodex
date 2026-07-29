@@ -911,6 +911,79 @@ describe('createResponsesWebSocketFetch', () => {
     }));
   });
 
+  it('maps an in-band rejected request to its upstream status instead of an empty stream', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await withResponsesWebSocketDiagnosticContext(
+      { requestId: 'req-unsupported-parameter' },
+      () => wsFetch('https://x', {
+        method: 'POST',
+        headers: { Authorization: 'Bearer tok' },
+        body: JSON.stringify(sessionPayload([])),
+      }),
+    );
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'invalid_request_error',
+        code: 'unsupported_parameter',
+        message: "Unsupported parameter: 'reasoning.summary' is not supported with the 'gpt-5.3-codex-spark' model.",
+        param: 'reasoning.summary',
+      },
+      status: 400,
+    })));
+
+    const body = await readAll(res);
+    expect(await readErrorFrame(new Response(body))).toEqual({
+      type: 'error',
+      sequence_number: 1,
+      error: {
+        type: 'invalid_request_error',
+        code: '400',
+        message: "Unsupported parameter: 'reasoning.summary' is not supported with the 'gpt-5.3-codex-spark' model.",
+        param: null,
+      },
+    });
+    // The failure must reach the caller as a 400, not as a content-free 200.
+    expect(await classifyThroughSdk(body)).toMatchObject({
+      statusCode: 400,
+      isRetryable: false,
+    });
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_error',
+      requestId: 'req-unsupported-parameter',
+      source: 'error_frame',
+      errorCode: 'unsupported_parameter',
+      mappedStatusCode: 400,
+      emittedModelData: false,
+    }));
+  });
+
+  it('leaves a status-carrying error frame alone once model data is downstream', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', { method: 'POST', headers: {}, body: '{}' });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_text.delta', delta: 'partial',
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: { type: 'server_error', code: 'internal_error', message: 'late failure' },
+      status: 500,
+    })));
+
+    // Already-committed stream: the frame is forwarded verbatim, not rewritten
+    // into a synthetic error that would contradict the emitted output.
+    const body = await readAll(res);
+    expect(body).toContain('partial');
+    expect(body).not.toContain('"code":"500"');
+  });
+
   it('logs sanitized upstream response failure details after partial output', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
