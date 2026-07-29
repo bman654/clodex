@@ -447,6 +447,21 @@ function responseErrorCode(event: unknown): string | undefined {
   return typeof responseError?.code === 'string' ? responseError.code : undefined;
 }
 
+/**
+ * Error CLASS of a frame, e.g. `usage_limit_reached`. Deliberately does not
+ * fall back to the frame's own `type`: on an error chunk that is the chunk
+ * discriminator (`'error'`), which names nothing.
+ */
+function responseErrorType(event: unknown): string | undefined {
+  if (!event || typeof event !== 'object') return undefined;
+  const record = event as JsonObject;
+  const error = record.error && typeof record.error === 'object' ? record.error as JsonObject : undefined;
+  if (typeof error?.type === 'string') return error.type;
+  const response = record.response && typeof record.response === 'object' ? record.response as JsonObject : undefined;
+  const responseError = response?.error && typeof response.error === 'object' ? response.error as JsonObject : undefined;
+  return typeof responseError?.type === 'string' ? responseError.type : undefined;
+}
+
 function responseRetryAfterSeconds(event: unknown): number | undefined {
   if (!event || typeof event !== 'object') return undefined;
   const record = event as JsonObject;
@@ -1138,7 +1153,24 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
     );
     return;
   }
-  if (FAILURE_EVENT_TYPES.has(type ?? '')) {
+  // A bare `error` frame carrying an HTTP status is a rejected request, not a
+  // response: forwarding it verbatim ends the stream with no content, so the
+  // client sees an empty 200 and reports a generic failure instead of the
+  // upstream reason. Map it to a real error frame while nothing has been
+  // emitted yet — once model data is downstream the stream is already
+  // committed, and the existing partial-output path must keep handling it.
+  //
+  // Resolved here, above the generic failure record, only so that record can be
+  // suppressed when the rejection branch below emits its own. The branch itself
+  // must stay after the `willRetry` return — ahead of it, it would swallow a
+  // `previous_response_not_found` frame (which carries a 400) and kill the retry.
+  const errorStatus = type === 'error' && !ctx.emittedModelData
+    ? responseErrorStatus(event)
+    : undefined;
+  // One rejection, one diagnostic record. Without this gate a rejected request
+  // emits both this record and `failContext`'s, under different `source` values
+  // with disjoint fields, reading as two failures of one request.
+  if (FAILURE_EVENT_TYPES.has(type ?? '') && (errorStatus === undefined || willRetry)) {
     emitResponseErrorDiagnostic(entry, ctx, {
       source: 'response_event',
       upstreamEventType: type,
@@ -1156,26 +1188,41 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
     return;
   }
 
-  // A bare `error` frame carrying an HTTP status is a rejected request, not a
-  // response: forwarding it verbatim ends the stream with no content, so the
-  // client sees an empty 200 and reports a generic failure instead of the
-  // upstream reason. Map it to a real error frame while nothing has been
-  // emitted yet — once model data is downstream the stream is already
-  // committed, and the existing partial-output path must keep handling it.
-  const errorStatus = type === 'error' && !ctx.emittedModelData
-    ? responseErrorStatus(event)
-    : undefined;
   if (errorStatus !== undefined) {
+    // The AI SDK strips unknown frame fields, so a backoff hint survives only
+    // baked into the message text — same reason the connection-limit branch
+    // above spells it out. Clamped, so a hostile hint cannot park a client past
+    // the 120s no-event stream abort.
+    // Only when upstream actually gave one. `clampRetryAfterSeconds` supplies a
+    // 5s DEFAULT for a missing hint, so clamping unconditionally would have
+    // every 429 assert a backoff upstream never stated — and that value becomes
+    // a real `retry-after` header downstream. Worse on a plan-level limit,
+    // where the reason says hours: a prose-only "retry after 1800s" would get
+    // "; retry after 5s" appended, and the client reads the first match.
+    const statedRetryAfter = errorStatus === 429 ? responseRetryAfterSeconds(event) : undefined;
+    const retryAfterSeconds = statedRetryAfter === undefined
+      ? undefined
+      : clampRetryAfterSeconds(statedRetryAfter);
+    const reason = responseErrorMessage(event) ?? `OpenAI rejected the request (HTTP ${errorStatus})`;
     failContext(
       entry,
       ctx,
-      responseErrorMessage(event) ?? `OpenAI rejected the request (HTTP ${errorStatus})`,
+      retryAfterSeconds === undefined ? reason : `${reason}; retry after ${retryAfterSeconds}s`,
       {
         source: 'error_frame',
-        errorCode,
+        // Names the failure. Without it this record — now the ONLY one for a
+        // rejection — can carry no indication of what failed, since a bare
+        // error frame often has no `code` at all.
+        errorType: boundedDiagnosticIdentifier(responseErrorType(event)),
+        // Upstream-controlled, so bounded like every other identifier in this
+        // file's diagnostics. The connection-limit branch can pass its code raw
+        // only because it has just been compared `===` to a known constant.
+        errorCode: boundedDiagnosticIdentifier(errorCode),
         mappedStatusCode: errorStatus,
+        ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
       },
       errorStatus,
+      retryAfterSeconds,
     );
     return;
   }

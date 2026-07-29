@@ -961,6 +961,184 @@ describe('createResponsesWebSocketFetch', () => {
       mappedStatusCode: 400,
       emittedModelData: false,
     }));
+    // One rejection, one record. The generic `response_event` record is
+    // suppressed so a diagnostics consumer does not read one failed request as
+    // two distinct failures under disjoint field sets.
+    expect(diagnostics.filter(event => event.event === 'ws_response_error')).toHaveLength(1);
+  });
+
+  it('bounds an upstream-controlled error code in the rejection diagnostic', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      // Hostile: overlong and newline-bearing, so it would corrupt a log line
+      // if forwarded verbatim the way the raw value was.
+      error: { type: 'invalid_request_error', code: `${'c'.repeat(400)}\nsecond line`, message: 'nope' },
+      status: 400,
+    })));
+    await readAll(res);
+
+    const record = diagnostics.find(event => event.event === 'ws_response_error');
+    expect(record).toMatchObject({ source: 'error_frame', mappedStatusCode: 400 });
+    // Rejected outright rather than truncated — same discipline every other
+    // identifier in this file's diagnostics already follows.
+    expect(record?.errorCode).toBeUndefined();
+  });
+
+  it('carries an in-band 429 backoff hint through as message text', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: { type: 'rate_limit_error', message: 'usage limit reached', retry_after_seconds: 45 },
+      status: 429,
+    })));
+
+    const body = await readAll(res);
+    // The AI SDK strips unknown frame fields, so the hint only survives baked
+    // into the message — which is how the consumer recovers it.
+    expect(body).toContain('retry after 45s');
+    expect(await classifyThroughSdk(body)).toMatchObject({
+      statusCode: 429,
+      isRetryable: true,
+      retryAfterSeconds: 45,
+    });
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_error',
+      source: 'error_frame',
+      // The record that survives dedup must still name the failure.
+      errorType: 'rate_limit_error',
+      retryAfterSeconds: 45,
+    }));
+  });
+
+  it('clamps an absurd in-band backoff hint', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: { type: 'rate_limit_error', message: 'slow down', retry_after_seconds: 86400 },
+      status: 429,
+    })));
+
+    // Bounded so a hostile hint cannot park a client past the 120s stream abort.
+    expect(await readAll(res)).toContain('retry after 60s');
+  });
+
+  it('states no backoff hint on a 429 when upstream gave none', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      // A plan-level limit: the reason is stated in prose, on an hours scale.
+      error: { type: 'usage_limit_reached', message: 'Usage limit reached. Resets in 4 hours.' },
+      status: 429,
+    })));
+
+    const body = await readAll(res);
+    expect(body).toContain('Resets in 4 hours.');
+    // Inventing a hint here would become a real `retry-after: 5` header and
+    // send the client back long before the limit resets.
+    expect(body).not.toContain('retry after');
+    expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429 });
+  });
+
+  it('reads a status nested under error, not only the top-level one', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: { type: 'invalid_request_error', message: 'nested status', status: 400 },
+    })));
+
+    expect(await classifyThroughSdk(await readAll(res))).toMatchObject({ statusCode: 400 });
+  });
+
+  // The fall-through cases. `status` must be an HTTP error code specifically —
+  // a success status is not a rejection, and `response.status` is a lifecycle
+  // string this must never mistake for one.
+  it.each([
+    ['a non-error status', { type: 'error', error: { type: 'server_error', message: 'keep me' }, status: 200 }],
+    ['a lifecycle response status', { type: 'error', error: { type: 'server_error', message: 'keep me' }, response: { status: 'failed' } }],
+    ['a fractional status', { type: 'error', error: { type: 'server_error', message: 'keep me' }, status: 400.5 }],
+    // `response.status` is a lifecycle state, never an HTTP code. Pinned with a
+    // NUMERIC value on purpose: a string one is rejected by the type guard
+    // anyway, so only this shape can catch a future edit that starts consulting
+    // that field and reports a lifecycle position as a status.
+    ['a numeric response status', { type: 'error', error: { type: 'server_error', message: 'keep me' }, response: { status: 400 } }],
+  ])('leaves a frame carrying %s to the existing path', async (_label, frame) => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify(frame)));
+
+    const body = await readAll(res);
+    expect(body).toContain('keep me');
+    // Not rewritten into a synthetic frame: no status was recovered, so the
+    // original is forwarded exactly as before this branch existed.
+    expect(body).not.toContain('"code":"200"');
+    expect(await classifyThroughSdk(body)).toBeUndefined();
+  });
+
+  // Each message source the helper consults, pinned separately — otherwise a
+  // "simplification" that drops one of the fallbacks ships green.
+  it.each([
+    ['nested under response.error', { type: 'error', status: 400, response: { error: { message: 'from response error' } } }, 'from response error'],
+    ['on the frame itself', { type: 'error', status: 400, message: 'from the frame' }, 'from the frame'],
+  ])('recovers a rejection message %s', async (_label, frame, expected) => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify(frame)));
+
+    expect(await readAll(res)).toContain(expected);
+  });
+
+  it('falls back to a generic reason when a rejection carries no message', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'error', status: 503 })));
+
+    const body = await readAll(res);
+    expect(body).toContain('OpenAI rejected the request (HTTP 503)');
+    expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 503 });
   });
 
   it('leaves a status-carrying error frame alone once model data is downstream', async () => {
@@ -981,6 +1159,12 @@ describe('createResponsesWebSocketFetch', () => {
     // into a synthetic error that would contradict the emitted output.
     const body = await readAll(res);
     expect(body).toContain('partial');
+    // Assert the ORIGINAL frame is still there, not merely that the synthetic
+    // one is absent: `not.toContain` alone passes just as happily when the
+    // frame is dropped entirely, which is the regression this test exists to
+    // catch. Both halves are required.
+    expect(body).toContain('late failure');
+    expect(body).toContain('"status":500');
     expect(body).not.toContain('"code":"500"');
   });
 
@@ -1672,6 +1856,51 @@ describe('createResponsesWebSocketFetch', () => {
     emitTextResponse(replacement, 'resp_recovered', 'recovered');
     const body = await readAll(second);
     expect(body).not.toContain('previous_response_not_found');
+  });
+
+  it('still logs a retried rejection, which no error_frame record covers', async () => {
+    // The retry frame carries a 400, so the rejection branch would claim it if
+    // the willRetry arm of the diagnostic gate were dropped — and because the
+    // retry returns before that branch, the failure would then be logged
+    // NOWHERE. This pins the arm that prevents it.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'one' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-retry-diag',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const firstSocket = lastSocket();
+    firstSocket.emit('open');
+    emitTextResponse(firstSocket, 'resp_old', 'answer');
+    await readAll(first);
+
+    const second = await wsFetch('https://x', {
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify(sessionPayload([
+        ...input,
+        { role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+        { role: 'user', content: [{ type: 'input_text', text: 'two' }] },
+      ])),
+    });
+    firstSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error', status: 400,
+      error: { code: 'previous_response_not_found', message: 'gone' },
+    })));
+    const replacement = lastSocket();
+    replacement.emit('open');
+    emitTextResponse(replacement, 'resp_recovered', 'recovered');
+    await readAll(second);
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_error',
+      source: 'response_event',
+      errorCode: 'previous_response_not_found',
+      willRetry: true,
+    }));
   });
 
   it('resets a rewind/branch to full context and establishes the branch as the new head', async () => {
