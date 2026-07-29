@@ -546,6 +546,17 @@ function isGpt56Model(modelId: string): boolean {
   return /^gpt-5\.6(?:-|$)/i.test(modelId);
 }
 
+// gpt-5.3-codex-spark rejects `reasoning.summary` outright:
+//   400 unsupported_parameter — "Unsupported parameter: 'reasoning.summary' is
+//   not supported with the 'gpt-5.3-codex-spark' model." (param: reasoning.summary)
+// The AI SDK derives `summary: 'detailed'` from any effort other than 'none'
+// unless reasoningSummary is set explicitly, so every effort level that maps to
+// a value would otherwise fail. Passing null suppresses the field while leaving
+// effort control intact.
+function isReasoningSummaryUnsupportedModel(modelId: string): boolean {
+  return /codex-spark(?:-|$)/i.test(modelId);
+}
+
 function mapCodexEffortToOpenAI(effort: string, modelId?: string): string | undefined {
   if (
     modelId
@@ -854,7 +865,10 @@ export function effortProviderOptions(
   if (npm === '@ai-sdk/openai' || npm === '@ai-sdk/azure') {
     if (!modelId || !modelPrefersResponsesApi(modelId)) return undefined;
     const reasoningEffort = mapCodexEffortToOpenAI(effort, modelId);
-    return reasoningEffort ? { openai: { reasoningEffort } } : undefined;
+    if (!reasoningEffort) return undefined;
+    return isReasoningSummaryUnsupportedModel(modelId)
+      ? { openai: { reasoningEffort, reasoningSummary: null } }
+      : { openai: { reasoningEffort } };
   }
 
   if (npm === '@ai-sdk/xai') {
