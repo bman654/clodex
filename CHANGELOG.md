@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.1.6](https://github.com/bman654/clodex/compare/v2.1.5...v2.1.6) (2026-07-29)
+
+
+### Bug Fixes
+
+* **oauth:** surface in-band request rejections instead of an empty 200 ([#67](https://github.com/bman654/clodex/issues/67)) ([d512065](https://github.com/bman654/clodex/commit/d5120656f9c80518f150bbf3193eb781f27d6df9))
+* **reasoning:** suppress reasoning.summary for gpt-5.3-codex-spark ([#65](https://github.com/bman654/clodex/issues/65)) ([b455916](https://github.com/bman654/clodex/commit/b455916d117398ba0635f551180f899ec5a660be))
+* recover provider message and status from mid-stream error frames ([#68](https://github.com/bman654/clodex/issues/68)) ([5b138e4](https://github.com/bman654/clodex/commit/5b138e4bf9390c610b578a294e697216f2bb8d49))
+
 ## [2.1.5](https://github.com/bman654/clodex/compare/v2.1.4...v2.1.5) (2026-07-27)
 
 
