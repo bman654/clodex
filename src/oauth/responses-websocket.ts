@@ -446,6 +446,10 @@ function continuationMismatchDetails(
   entry: ConnectionEntry,
   payload: JsonObject,
   log?: (message: string) => void,
+  // Only the head clodex actually gave up on should reach stderr. Every candidate
+  // head is described in the diagnostic, and a gap on a head that lost to a better
+  // match costs nothing, so warning on those would overstate the damage.
+  warnOnGap = false,
 ): Record<string, unknown> {
   const full = inputArray(payload);
   const prefix = [...(entry.requestInput ?? []), ...(entry.expectedAssistant ?? [])];
@@ -460,7 +464,7 @@ function continuationMismatchDetails(
   const expected = mismatch < prefix.length ? prefix[mismatch] : undefined;
   const actual = mismatch < full.length ? full[mismatch] : undefined;
   const reasoningGap = reasoningNormalizationGap(expected, actual);
-  if (reasoningGap) warnReasoningNormalizationGap(reasoningGap, log);
+  if (reasoningGap && warnOnGap) warnReasoningNormalizationGap(reasoningGap, log);
   return {
     fullItems: full.length,
     expectedPrefixItems: prefix.length,
@@ -478,7 +482,7 @@ function continuationMismatchSummary(
   payload: JsonObject,
   log?: (message: string) => void,
 ): string {
-  const details = continuationMismatchDetails(entry, payload, log);
+  const details = continuationMismatchDetails(entry, payload, log, true);
   return `full_items=${details.fullItems} expected_prefix_items=${details.expectedPrefixItems} `
     + `first_mismatch=${details.firstMismatch} expected=${details.expectedKind} actual=${details.actualKind}`;
 }

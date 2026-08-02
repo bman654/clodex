@@ -1842,6 +1842,89 @@ describe('createResponsesWebSocketFetch', () => {
       .not.toHaveProperty('reasoningNormalizationGap');
   });
 
+  it('does not warn about a gap on a head that lost to a better match', async () => {
+    const stderr: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => { stderr.push(String(chunk)); return true; });
+    try {
+      const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+      const input = [{ role: 'user', content: [{ type: 'input_text', text: 'inspect it' }] }];
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-gap-not-selected',
+        onDiagnostic: event => diagnostics.push(event),
+      });
+
+      // Head 1 snapshots a reasoning item carrying content the echo will not repeat.
+      const first = await wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+      });
+      const socket1 = lastSocket();
+      socket1.emit('open');
+      socket1.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_h1' } })));
+      socket1.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.done', output_index: 0,
+        item: {
+          type: 'reasoning', id: 'rs_1', encrypted_content: 'enc_1',
+          content: [{ type: 'reasoning_text', text: 'private' }], summary: GAP_SUMMARY,
+        },
+      })));
+      socket1.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.done', output_index: 1,
+        item: {
+          type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'Read',
+          arguments: '{"path":"a.ts"}', status: 'completed',
+        },
+      })));
+      socket1.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_h1' } })));
+      await readAll(first);
+
+      const echo1 = { type: 'reasoning', encrypted_content: 'enc_1', summary: GAP_SUMMARY };
+      const call1 = { type: 'function_call', call_id: 'call_1', name: 'Read', arguments: '{"path":"a.ts"}' };
+      const out1 = { type: 'function_call_output', call_id: 'call_1', output: 'a' };
+      const turn2 = [...input, echo1, call1, out1];
+
+      // Head 1 cannot match, so this opens head 2 — and legitimately warns.
+      const second = await wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(turn2)),
+      });
+      const socket2 = lastSocket();
+      socket2.emit('open');
+      socket2.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_h2' } })));
+      socket2.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.done', output_index: 0,
+        item: {
+          type: 'function_call', id: 'fc_2', call_id: 'call_2', name: 'Read',
+          arguments: '{"path":"b.ts"}', status: 'completed',
+        },
+      })));
+      socket2.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_h2' } })));
+      await readAll(second);
+      expect(stderr.join('')).toContain('identical encrypted_content');
+
+      // Clear the dedupe so a stray warning on this next turn would be visible.
+      resetReasoningGapWarningsForTests();
+      stderr.length = 0;
+
+      const call2 = { type: 'function_call', call_id: 'call_2', name: 'Read', arguments: '{"path":"b.ts"}' };
+      const out2 = { type: 'function_call_output', call_id: 'call_2', output: 'b' };
+      const third = await wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([...turn2, call2, out2])),
+      });
+
+      const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
+      expect(decision.decision).toBe('continuation');
+      // Head 1 still carries the gap in the diagnostic record ...
+      expect((decision.heads as { mismatch: Record<string, unknown> }[])
+        .some(head => head.mismatch.reasoningNormalizationGap !== undefined)).toBe(true);
+      // ... but nothing was lost, so the terminal stays quiet.
+      expect(stderr.join('')).toBe('');
+      emitTextResponse(lastSocket(), 'resp_h2_next', 'done');
+      await readAll(third);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('reports a repeated reasoning gap once rather than on every turn', async () => {
     const storedReasoning = {
       type: 'reasoning', id: 'rs_1', encrypted_content: 'enc_same',
