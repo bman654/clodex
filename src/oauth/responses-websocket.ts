@@ -359,8 +359,16 @@ function normalizeToolCallJson(value: unknown): unknown {
   // summary alone, so it never re-emits that key and the chain head could
   // never match its own echo. An empty array carries no information; drop it
   // from both sides. A populated `content` is real data and still compared.
-  if (record.type === 'reasoning' && Array.isArray(record.content) && record.content.length === 0) {
-    delete out.content;
+  if (record.type === 'reasoning') {
+    if (Array.isArray(record.content) && record.content.length === 0) delete out.content;
+    // `encrypted_content` IS the reasoning item's identity, and the real state
+    // lives upstream under previous_response_id — the summary is display text.
+    // It also cannot survive the round trip intact: the SDK emits one reasoning
+    // part per summary part, but only the LAST part's `reasoning-end` carries the
+    // encrypted content, so the unsigned earlier blocks are dropped on the way
+    // back and a multi-part summary returns holding only its final part. Compare
+    // on the blob and a head can match its own echo.
+    if (typeof record.encrypted_content === 'string' && record.encrypted_content) delete out.summary;
   }
   return out;
 }
@@ -405,8 +413,12 @@ function reasoningNormalizationGap(expected: unknown, actual: unknown): string[]
   const right = actual as JsonObject;
   const blob = left.encrypted_content;
   if (typeof blob !== 'string' || !blob || blob !== right.encrypted_content) return undefined;
-  const fields = [...new Set([...Object.keys(left), ...Object.keys(right)])].sort()
-    .filter(key => canonicalJson(normalizeToolCallJson(left[key])) !== canonicalJson(normalizeToolCallJson(right[key])));
+  // Diff the NORMALIZED items. Diffing the raw ones names fields that
+  // normalization already reconciles, which points a reader at a red herring.
+  const normalizedLeft = normalizeToolCallJson(left) as JsonObject;
+  const normalizedRight = normalizeToolCallJson(right) as JsonObject;
+  const fields = [...new Set([...Object.keys(normalizedLeft), ...Object.keys(normalizedRight)])].sort()
+    .filter(key => canonicalJson(normalizedLeft[key]) !== canonicalJson(normalizedRight[key]));
   return fields.length ? fields : undefined;
 }
 

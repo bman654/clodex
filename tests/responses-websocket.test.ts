@@ -1800,6 +1800,66 @@ describe('createResponsesWebSocketFetch', () => {
 
   const GAP_SUMMARY = [{ type: 'summary_text', text: 'weighing it' }];
 
+  it('continues when a multi-part reasoning summary comes back holding only its final part', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'reason hard' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-multi-summary',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_multi' } })));
+    // Upstream ships ONE reasoning item carrying every summary part ...
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: {
+        type: 'reasoning', id: 'rs_1', encrypted_content: 'enc_multi', content: [], status: 'completed',
+        summary: [
+          { type: 'summary_text', text: 'part one' },
+          { type: 'summary_text', text: 'part two' },
+          { type: 'summary_text', text: 'part three' },
+        ],
+      },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 1,
+      item: {
+        type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'Read',
+        arguments: '{"path":"file.ts"}', status: 'completed',
+      },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_multi' } })));
+    await readAll(first);
+
+    // ... but Claude gets one thinking block per part and only the LAST carries
+    // the signature, so the SDK drops the unsigned ones and a single reasoning
+    // item comes back holding just the final summary part.
+    const echoedReasoning = [{
+      type: 'reasoning', encrypted_content: 'enc_multi',
+      summary: [{ type: 'summary_text', text: 'part three' }],
+    }];
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_1', name: 'Read', arguments: '{"path":"file.ts"}',
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_1', output: 'contents' };
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([...input, ...echoedReasoning, echoedCall, toolOutput])),
+    });
+
+    expect(fakeSockets).toHaveLength(1);
+    const sent = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_multi');
+    expect(sent.input).toEqual([toolOutput]);
+    expect(diagnostics.at(-1)).toMatchObject({ event: 'ws_head_decision', decision: 'continuation' });
+    emitTextResponse(socket, 'resp_multi_next', 'done');
+    await readAll(second);
+  });
+
   it('warns on stderr when an identical reasoning item still fails the continuation match', async () => {
     const { stderr, diagnostics } = await runReasoningMismatch({
       accountId: 'acct-reasoning-gap',
