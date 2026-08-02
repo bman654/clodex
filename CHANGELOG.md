@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.7](https://github.com/bman654/clodex/compare/v2.1.6...v2.1.7) (2026-08-02)
+
+
+### Bug Fixes
+
+* **oauth:** continue chains when a reasoning item carries empty content ([#69](https://github.com/bman654/clodex/issues/69)) ([5cdd063](https://github.com/bman654/clodex/commit/5cdd063159a4073ace55abfc7b88f7fa6a9e2ebd))
+
 ## [2.1.6](https://github.com/bman654/clodex/compare/v2.1.5...v2.1.6) (2026-07-29)
 
 
