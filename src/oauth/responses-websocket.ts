@@ -114,6 +114,9 @@ interface ConnectionEntry {
   responseId?: string;
   requestInput?: unknown[];
   expectedAssistant?: unknown[];
+  /** Memoized canonical form of the stored prefix; cleared whenever it changes. */
+  canonicalPrefix?: string[];
+  canonicalEchoablePrefix?: string[];
   options: Required<Pick<ResponsesWebSocketFetchOptions, 'hardTtlMs' | 'idleTtlMs' | 'nurseryIdleTtlMs' | 'maxConnections' | 'now'>>;
   debug: (message: string) => void;
 }
@@ -550,12 +553,40 @@ function continuationMismatchSummary(
     + `first_mismatch=${details.firstMismatch} expected=${details.expectedKind} actual=${details.actualKind}`;
 }
 
-function continuationMatch(entry: ConnectionEntry, payload: JsonObject): ContinuationMatch | undefined {
+/**
+ * Canonical string per conversation item.
+ *
+ * `canonicalize` maps element-wise and a JSON array serializes as its elements
+ * joined, so two equal-length arrays are equal exactly when every element's
+ * canonical string is equal. Comparing item-wise is therefore identical in
+ * meaning to comparing whole arrays, but it lets both sides be computed once
+ * instead of re-serializing an entire conversation for every candidate head.
+ */
+function canonicalItemStrings(items: unknown[]): string[] {
+  return items.map(item => canonicalJson(normalizeToolCallJson([item])));
+}
+
+/** True when `head` is a strict prefix of `client`. Exits at the first difference. */
+function isStrictPrefix(head: string[], client: string[]): boolean {
+  if (client.length <= head.length) return false;
+  for (let index = 0; index < head.length; index += 1) {
+    if (head[index] !== client[index]) return false;
+  }
+  return true;
+}
+
+function continuationMatch(
+  entry: ConnectionEntry,
+  payload: JsonObject,
+  clientItems: string[],
+): ContinuationMatch | undefined {
   if (!entry.responseId || !entry.requestInput || !entry.expectedAssistant) return undefined;
   const full = inputArray(payload);
-  const exactPrefix = [...entry.requestInput, ...entry.expectedAssistant];
-  if (full.length > exactPrefix.length && arraysEqual(full.slice(0, exactPrefix.length), exactPrefix)) {
-    return { delta: full.slice(exactPrefix.length), mode: 'exact' };
+  // The stored prefix only changes when a response completes, so canonicalize it
+  // once per head rather than once per lookup.
+  entry.canonicalPrefix ??= canonicalItemStrings([...entry.requestInput, ...entry.expectedAssistant]);
+  if (isStrictPrefix(entry.canonicalPrefix, clientItems)) {
+    return { delta: full.slice(entry.canonicalPrefix.length), mode: 'exact' };
   }
 
   // Claude does not always echo an OpenAI reasoning item back into its
@@ -565,11 +596,9 @@ function continuationMatch(entry: ConnectionEntry, payload: JsonObject): Continu
   // remaining response items still match exactly.
   const echoedAssistant = entry.expectedAssistant.filter(item => conversationItemKind(item) !== 'reasoning');
   if (echoedAssistant.length === entry.expectedAssistant.length) return undefined;
-  const echoablePrefix = [...entry.requestInput, ...echoedAssistant];
-  if (full.length <= echoablePrefix.length || !arraysEqual(full.slice(0, echoablePrefix.length), echoablePrefix)) {
-    return undefined;
-  }
-  return { delta: full.slice(echoablePrefix.length), mode: 'omitted_reasoning' };
+  entry.canonicalEchoablePrefix ??= canonicalItemStrings([...entry.requestInput, ...echoedAssistant]);
+  if (!isStrictPrefix(entry.canonicalEchoablePrefix, clientItems)) return undefined;
+  return { delta: full.slice(entry.canonicalEchoablePrefix.length), mode: 'omitted_reasoning' };
 }
 
 function eventType(event: unknown): string | undefined {
@@ -1381,6 +1410,9 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
       entry.responseId = ctx.responseId;
       entry.requestInput = inputArray(ctx.originalPayload);
       entry.expectedAssistant = expectedAssistantItems(ctx);
+      // The stored prefix just changed, so the memoized canonical form is stale.
+      entry.canonicalPrefix = undefined;
+      entry.canonicalEchoablePrefix = undefined;
       entry.promptFieldHashes = ctx.promptFieldHashes;
       entry.instructionsSnapshot = ctx.instructionsSnapshot;
       entry.lastUsedAt = now;
@@ -1590,8 +1622,10 @@ export function createResponsesWebSocketFetch(
 
     const candidates = partitionKey ? connectionEntries(partitionKey) : [];
     const idleCandidates = candidates.filter(entry => !entry.inFlight);
+    // Canonicalize the incoming conversation ONCE, not once per candidate head.
+    const clientItems = idleCandidates.length ? canonicalItemStrings(inputArray(payload)) : [];
     const matches = idleCandidates
-      .map(entry => ({ entry, match: continuationMatch(entry, payload) }))
+      .map(entry => ({ entry, match: continuationMatch(entry, payload, clientItems) }))
       .filter((candidate): candidate is { entry: ConnectionEntry; match: ContinuationMatch } => candidate.match !== undefined)
       // Prefer the longest matching history, which produces the smallest delta.
       .sort((left, right) => left.match.delta.length - right.match.delta.length
