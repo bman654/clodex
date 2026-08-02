@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.8](https://github.com/bman654/clodex/compare/v2.1.7...v2.1.8) (2026-08-02)
+
+
+### Bug Fixes
+
+* **oauth:** match reasoning heads on the encrypted blob, and make the connection pools configurable ([#71](https://github.com/bman654/clodex/issues/71)) ([32a82c2](https://github.com/bman654/clodex/commit/32a82c29a99d32c3520e2c4e814af70f2fb5a942))
+
 ## [2.1.7](https://github.com/bman654/clodex/compare/v2.1.6...v2.1.7) (2026-08-02)
 
 

@@ -1,6 +1,6 @@
 {
   "name": "@bman654/clodex",
-  "version": "2.1.7",
+  "version": "2.1.8",
   "publishConfig": {
     "access": "public"
   },
