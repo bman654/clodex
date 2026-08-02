@@ -352,6 +352,16 @@ function normalizeToolCallJson(value: unknown): unknown {
       // A malformed/non-JSON custom-tool input must still match byte-for-byte.
     }
   }
+
+  // A reasoning item comes back from the Responses API carrying an empty
+  // `content: []`, which we retain when snapshotting the expected assistant
+  // items. The SDK rebuilds the echoed item from the encrypted content and
+  // summary alone, so it never re-emits that key and the chain head could
+  // never match its own echo. An empty array carries no information; drop it
+  // from both sides. A populated `content` is real data and still compared.
+  if (record.type === 'reasoning' && Array.isArray(record.content) && record.content.length === 0) {
+    delete out.content;
+  }
   return out;
 }
 
@@ -378,7 +388,65 @@ function conversationItemHash(value: unknown): string {
   return createHash('sha256').update(canonicalJson(normalizeToolCallJson(value))).digest('hex').slice(0, 16);
 }
 
-function continuationMismatchDetails(entry: ConnectionEntry, payload: JsonObject): Record<string, unknown> {
+/**
+ * Names the fields that differ between the stored reasoning item and the one
+ * Claude echoed back, but ONLY when both carry the same `encrypted_content`.
+ *
+ * That blob is the reasoning item's identity: when it matches, the two objects
+ * describe the same reasoning and the continuation should have been accepted,
+ * so any remaining difference is a normalization gap on our side. When it
+ * differs the items are genuinely different reasoning (a divergent branch or a
+ * fresh turn) and the mismatch is correct, not a defect — reporting those would
+ * bury the signal in noise.
+ */
+function reasoningNormalizationGap(expected: unknown, actual: unknown): string[] | undefined {
+  if (conversationItemKind(expected) !== 'reasoning' || conversationItemKind(actual) !== 'reasoning') return undefined;
+  const left = expected as JsonObject;
+  const right = actual as JsonObject;
+  const blob = left.encrypted_content;
+  if (typeof blob !== 'string' || !blob || blob !== right.encrypted_content) return undefined;
+  const fields = [...new Set([...Object.keys(left), ...Object.keys(right)])].sort()
+    .filter(key => canonicalJson(normalizeToolCallJson(left[key])) !== canonicalJson(normalizeToolCallJson(right[key])));
+  return fields.length ? fields : undefined;
+}
+
+const warnedReasoningGaps = new Set<string>();
+const MAX_REASONING_GAP_WARNINGS = 3;
+
+/**
+ * Surfaces a normalization gap on stderr so it is visible in the terminal that
+ * started clodex without needing --trace. Deduplicated by the differing-field
+ * signature and hard-capped, because this shares a terminal with Claude Code's
+ * interactive UI and must never become a stream.
+ */
+function warnReasoningNormalizationGap(fields: string[], log?: (message: string) => void): void {
+  const signature = fields.join(',');
+  const message = 'clodex: warning: a reasoning item with identical encrypted_content failed the '
+    + `continuation match on field(s): ${signature}. Prompt caching is degraded for this turn — `
+    + 'this is a clodex normalization gap, please report it at '
+    + 'https://github.com/bman654/clodex/issues';
+  try { log?.(`reasoning normalization gap: ${signature}`); } catch { /* ignore */ }
+  if (warnedReasoningGaps.has(signature)) return;
+  if (warnedReasoningGaps.size >= MAX_REASONING_GAP_WARNINGS) return;
+  warnedReasoningGaps.add(signature);
+  try {
+    process.stderr.write(`${message}\n`);
+    if (warnedReasoningGaps.size === MAX_REASONING_GAP_WARNINGS) {
+      process.stderr.write('clodex: warning: further reasoning-normalization warnings suppressed.\n');
+    }
+  } catch { /* a warning must never break a request */ }
+}
+
+/** Test seam: the warning cap is process-wide and would leak between cases. */
+export function resetReasoningGapWarningsForTests(): void {
+  warnedReasoningGaps.clear();
+}
+
+function continuationMismatchDetails(
+  entry: ConnectionEntry,
+  payload: JsonObject,
+  log?: (message: string) => void,
+): Record<string, unknown> {
   const full = inputArray(payload);
   const prefix = [...(entry.requestInput ?? []), ...(entry.expectedAssistant ?? [])];
   const comparable = Math.min(full.length, prefix.length);
@@ -391,6 +459,8 @@ function continuationMismatchDetails(entry: ConnectionEntry, payload: JsonObject
   }
   const expected = mismatch < prefix.length ? prefix[mismatch] : undefined;
   const actual = mismatch < full.length ? full[mismatch] : undefined;
+  const reasoningGap = reasoningNormalizationGap(expected, actual);
+  if (reasoningGap) warnReasoningNormalizationGap(reasoningGap, log);
   return {
     fullItems: full.length,
     expectedPrefixItems: prefix.length,
@@ -399,11 +469,16 @@ function continuationMismatchDetails(entry: ConnectionEntry, payload: JsonObject
     actualKind: actual === undefined ? 'none' : conversationItemKind(actual),
     ...(expected !== undefined ? { expectedHash: conversationItemHash(expected) } : {}),
     ...(actual !== undefined ? { actualHash: conversationItemHash(actual) } : {}),
+    ...(reasoningGap ? { reasoningNormalizationGap: reasoningGap } : {}),
   };
 }
 
-function continuationMismatchSummary(entry: ConnectionEntry, payload: JsonObject): string {
-  const details = continuationMismatchDetails(entry, payload);
+function continuationMismatchSummary(
+  entry: ConnectionEntry,
+  payload: JsonObject,
+  log?: (message: string) => void,
+): string {
+  const details = continuationMismatchDetails(entry, payload, log);
   return `full_items=${details.fullItems} expected_prefix_items=${details.expectedPrefixItems} `
     + `first_mismatch=${details.firstMismatch} expected=${details.expectedKind} actual=${details.actualKind}`;
 }
@@ -1481,7 +1556,7 @@ export function createResponsesWebSocketFetch(
       // head. Existing heads remain eligible for later exact-prefix matches.
       debug(
         `history mismatch starting an additional chain; retained ${candidates.length} existing head(s) `
-        + `(${continuationMismatchSummary(diagnosticEntry, payload)})`,
+        + `(${continuationMismatchSummary(diagnosticEntry, payload, debug)})`,
       );
       decision = 'history_mismatch_new_head';
     } else if (partitionKey) {
@@ -1547,7 +1622,7 @@ export function createResponsesWebSocketFetch(
         ttlPausedMs: entry.ttlPausedMs,
         idleMs: Math.max(0, now - entry.lastUsedAt),
         promptChanges: changedPromptFields(entry.promptFieldHashes, promptFieldHashes),
-        mismatch: continuationMismatchDetails(entry, payload),
+        mismatch: continuationMismatchDetails(entry, payload, debug),
       })),
       evictions,
     }, diagnosticCorrelation);

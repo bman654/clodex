@@ -23,6 +23,7 @@ vi.mock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
 
 import {
   createResponsesWebSocketFetch,
+  resetReasoningGapWarningsForTests,
   resetResponsesWebSocketConnectionsForTests,
   responsesWebSocketPartitionKey,
   responsesWebSocketPromptFingerprint,
@@ -131,6 +132,7 @@ function emitTextResponse(socket: FakeWebSocket, responseId: string, text: strin
 describe('createResponsesWebSocketFetch', () => {
   beforeEach(() => {
     resetResponsesWebSocketConnectionsForTests();
+    resetReasoningGapWarningsForTests();
     fakeSockets.length = 0;
   });
 
@@ -1674,6 +1676,189 @@ describe('createResponsesWebSocketFetch', () => {
     });
     emitTextResponse(socket, 'resp_after_tool', 'done');
     await readAll(second);
+  });
+
+  it('continues when the upstream reasoning item carried an empty content array', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'inspect it' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-empty-reasoning-content',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.created', response: { id: 'resp_empty_content' },
+    })));
+    // The Responses API ships `content: []` on reasoning items. The SDK rebuilds
+    // the echoed item from encrypted content and summary alone, so that key never
+    // comes back and must not be treated as a divergence.
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: {
+        type: 'reasoning', id: 'rs_1', encrypted_content: 'enc_1', content: [],
+        summary: [{ type: 'summary_text', text: 'weighing it' }], status: 'completed',
+      },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 1,
+      item: {
+        type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'Read',
+        arguments: '{"path":"file.ts"}', status: 'completed',
+      },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.completed', response: { id: 'resp_empty_content' },
+    })));
+    await readAll(first);
+
+    const echoedReasoning = {
+      type: 'reasoning', encrypted_content: 'enc_1',
+      summary: [{ type: 'summary_text', text: 'weighing it' }],
+    };
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_1', name: 'Read', arguments: '{"path":"file.ts"}',
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_1', output: 'contents' };
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([...input, echoedReasoning, echoedCall, toolOutput])),
+    });
+
+    expect(fakeSockets).toHaveLength(1);
+    const sent = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_empty_content');
+    expect(sent.input).toEqual([toolOutput]);
+    expect(diagnostics.at(-1)).toMatchObject({
+      event: 'ws_head_decision',
+      decision: 'continuation',
+      continuationMatchMode: 'exact',
+    });
+    emitTextResponse(socket, 'resp_after_empty_content', 'done');
+    await readAll(second);
+  });
+
+  // Drives one mismatch between a stored reasoning item and the item Claude echoes
+  // back, returning what reached stderr and the head-decision diagnostic.
+  async function runReasoningMismatch(options: {
+    accountId: string;
+    storedReasoning: Record<string, unknown>;
+    echoedReasoning: Record<string, unknown>;
+    responseId: string;
+  }): Promise<{ stderr: string[]; diagnostics: ResponsesWebSocketDiagnosticEvent[] }> {
+    const stderr: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => { stderr.push(String(chunk)); return true; });
+    try {
+      const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+      const input = [{ role: 'user', content: [{ type: 'input_text', text: 'inspect it' }] }];
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: options.accountId,
+        onDiagnostic: event => diagnostics.push(event),
+      });
+      const first = await wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+      });
+      const socket = lastSocket();
+      socket.emit('open');
+      socket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.created', response: { id: options.responseId },
+      })));
+      socket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.done', output_index: 0, item: options.storedReasoning,
+      })));
+      socket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.done', output_index: 1,
+        item: {
+          type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'Read',
+          arguments: '{"path":"file.ts"}', status: 'completed',
+        },
+      })));
+      socket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.completed', response: { id: options.responseId },
+      })));
+      await readAll(first);
+
+      const echoedCall = {
+        type: 'function_call', call_id: 'call_1', name: 'Read', arguments: '{"path":"file.ts"}',
+      };
+      const toolOutput = { type: 'function_call_output', call_id: 'call_1', output: 'contents' };
+      const second = await wsFetch('https://x', {
+        method: 'POST', headers: {},
+        body: JSON.stringify(sessionPayload([...input, options.echoedReasoning, echoedCall, toolOutput])),
+      });
+      emitTextResponse(lastSocket(), `${options.responseId}_next`, 'done');
+      await readAll(second);
+      return { stderr, diagnostics };
+    } finally {
+      spy.mockRestore();
+    }
+  }
+
+  const GAP_SUMMARY = [{ type: 'summary_text', text: 'weighing it' }];
+
+  it('warns on stderr when an identical reasoning item still fails the continuation match', async () => {
+    const { stderr, diagnostics } = await runReasoningMismatch({
+      accountId: 'acct-reasoning-gap',
+      responseId: 'resp_gap',
+      // A populated `content` is exactly the case the empty-array normalization
+      // deliberately does not cover, so it must be reported rather than absorbed.
+      storedReasoning: {
+        type: 'reasoning', id: 'rs_1', encrypted_content: 'enc_same',
+        content: [{ type: 'reasoning_text', text: 'private' }], summary: GAP_SUMMARY,
+      },
+      echoedReasoning: {
+        type: 'reasoning', encrypted_content: 'enc_same', summary: GAP_SUMMARY,
+      },
+    });
+
+    expect(stderr.join('')).toContain('identical encrypted_content');
+    expect(stderr.join('')).toContain('content');
+    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
+    expect(decision.decision).toBe('history_mismatch_new_head');
+    expect((decision.heads as { mismatch: Record<string, unknown> }[])[0]!.mismatch)
+      .toMatchObject({ reasoningNormalizationGap: ['content'] });
+  });
+
+  it('stays silent when the reasoning items are genuinely different reasoning', async () => {
+    const { stderr, diagnostics } = await runReasoningMismatch({
+      accountId: 'acct-reasoning-divergent',
+      responseId: 'resp_divergent',
+      storedReasoning: {
+        type: 'reasoning', id: 'rs_1', encrypted_content: 'enc_stored', summary: GAP_SUMMARY,
+      },
+      // A different blob means a different turn — mismatching is correct here.
+      echoedReasoning: {
+        type: 'reasoning', encrypted_content: 'enc_other', summary: GAP_SUMMARY,
+      },
+    });
+
+    expect(stderr.join('')).toBe('');
+    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
+    expect((decision.heads as { mismatch: Record<string, unknown> }[])[0]!.mismatch)
+      .not.toHaveProperty('reasoningNormalizationGap');
+  });
+
+  it('reports a repeated reasoning gap once rather than on every turn', async () => {
+    const storedReasoning = {
+      type: 'reasoning', id: 'rs_1', encrypted_content: 'enc_same',
+      content: [{ type: 'reasoning_text', text: 'private' }], summary: GAP_SUMMARY,
+    };
+    const echoedReasoning = {
+      type: 'reasoning', encrypted_content: 'enc_same', summary: GAP_SUMMARY,
+    };
+    const first = await runReasoningMismatch({
+      accountId: 'acct-reasoning-repeat-1', responseId: 'resp_r1', storedReasoning, echoedReasoning,
+    });
+    const second = await runReasoningMismatch({
+      accountId: 'acct-reasoning-repeat-2', responseId: 'resp_r2', storedReasoning, echoedReasoning,
+    });
+
+    expect(first.stderr.join('')).toContain('identical encrypted_content');
+    expect(second.stderr.join('')).toBe('');
   });
 
   it('continues when Claude omits reasoning but exactly echoes the following assistant text', async () => {
