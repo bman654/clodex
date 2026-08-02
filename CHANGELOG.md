@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.9](https://github.com/bman654/clodex/compare/v2.1.8...v2.1.9) (2026-08-02)
+
+
+### Performance Improvements
+
+* **oauth:** canonicalize conversation items once per request, not per head ([#73](https://github.com/bman654/clodex/issues/73)) ([7acc070](https://github.com/bman654/clodex/commit/7acc070003907c7bcafb815cb2e5754418913914))
+
 ## [2.1.8](https://github.com/bman654/clodex/compare/v2.1.7...v2.1.8) (2026-08-02)
 
 
