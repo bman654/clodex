@@ -410,6 +410,50 @@ function reasoningNormalizationGap(expected: unknown, actual: unknown): string[]
   return fields.length ? fields : undefined;
 }
 
+/**
+ * Describes the SHAPE of a reasoning gap without recording any reasoning text.
+ *
+ * Naming the differing fields says a gap exists but not why. Two mechanisms can
+ * produce the same field list: one upstream reasoning item carrying several
+ * summary parts and coming back split into several items, or a single item that
+ * genuinely differs. Counting the summary/content elements on each side, plus how
+ * many consecutive reasoning items share this `encrypted_content`, separates them
+ * from the diagnostic log alone.
+ */
+function reasoningGapShape(
+  expected: unknown,
+  actual: unknown,
+  full: unknown[],
+  storedTail: unknown[],
+  index: number,
+): Record<string, unknown> {
+  const describe = (value: unknown) => {
+    const record = (value ?? {}) as JsonObject;
+    return {
+      keys: Object.keys(record).sort(),
+      summaryParts: Array.isArray(record.summary) ? record.summary.length : 0,
+      contentItems: Array.isArray(record.content) ? record.content.length : 0,
+    };
+  };
+  const blob = (expected as JsonObject).encrypted_content;
+  const runFrom = (items: unknown[], start: number) => {
+    let count = 0;
+    for (let at = start; at < items.length; at += 1) {
+      const item = items[at] as JsonObject | undefined;
+      if (conversationItemKind(item) !== 'reasoning' || item?.encrypted_content !== blob) break;
+      count += 1;
+    }
+    return count;
+  };
+  const storedStart = storedTail.findIndex(item => (item as JsonObject)?.encrypted_content === blob);
+  return {
+    expected: describe(expected),
+    actual: describe(actual),
+    clientReasoningRun: runFrom(full, index),
+    storedReasoningRun: storedStart < 0 ? 0 : runFrom(storedTail, storedStart),
+  };
+}
+
 const warnedReasoningGaps = new Set<string>();
 const MAX_REASONING_GAP_WARNINGS = 3;
 
@@ -473,7 +517,14 @@ function continuationMismatchDetails(
     actualKind: actual === undefined ? 'none' : conversationItemKind(actual),
     ...(expected !== undefined ? { expectedHash: conversationItemHash(expected) } : {}),
     ...(actual !== undefined ? { actualHash: conversationItemHash(actual) } : {}),
-    ...(reasoningGap ? { reasoningNormalizationGap: reasoningGap } : {}),
+    ...(reasoningGap
+      ? {
+          reasoningNormalizationGap: reasoningGap,
+          reasoningGapShape: reasoningGapShape(
+            expected, actual, full, entry.expectedAssistant ?? [], mismatch,
+          ),
+        }
+      : {}),
   };
 }
 
@@ -1456,6 +1507,25 @@ function createConnection(
  * Build a fetch transport backed by persistent, session-aware Responses sockets.
  * Each returned Response still represents exactly one AI SDK request.
  */
+/**
+ * Reads a connection-pool cap from the environment.
+ *
+ * Both pools are process-wide, so a workload that fans out into many concurrent
+ * subagent conversations can evict heads before their next turn arrives. An
+ * explicit option still wins, so tests are never perturbed by a stray variable.
+ * A malformed value is reported and ignored rather than silently reinterpreted.
+ */
+function envConnectionCap(name: string, log?: (message: string) => void): number | undefined {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const value = Number(raw.trim());
+  if (!Number.isInteger(value) || value < 1 || value > 1024) {
+    try { log?.(`ws: ignoring ${name}=${raw} (expected an integer between 1 and 1024)`); } catch { /* ignore */ }
+    return undefined;
+  }
+  return value;
+}
+
 export function createResponsesWebSocketFetch(
   wsUrl: string,
   log?: (message: string) => void,
@@ -1467,8 +1537,12 @@ export function createResponsesWebSocketFetch(
     idleTtlMs: options.idleTtlMs ?? RESPONSES_WS_IDLE_TTL_MS,
     nurseryIdleTtlMs: options.nurseryIdleTtlMs
       ?? Math.min(RESPONSES_WS_NURSERY_IDLE_TTL_MS, options.idleTtlMs ?? RESPONSES_WS_IDLE_TTL_MS),
-    maxConnections: options.maxConnections ?? RESPONSES_WS_MAX_CONNECTIONS,
-    maxNurseryConnections: options.maxNurseryConnections ?? RESPONSES_WS_MAX_NURSERY_CONNECTIONS,
+    maxConnections: options.maxConnections
+      ?? envConnectionCap('CLODEX_WS_MAX_CONNECTIONS', log)
+      ?? RESPONSES_WS_MAX_CONNECTIONS,
+    maxNurseryConnections: options.maxNurseryConnections
+      ?? envConnectionCap('CLODEX_WS_MAX_NURSERY_CONNECTIONS', log)
+      ?? RESPONSES_WS_MAX_NURSERY_CONNECTIONS,
     now: options.now ?? Date.now,
   };
 

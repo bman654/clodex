@@ -1820,7 +1820,17 @@ describe('createResponsesWebSocketFetch', () => {
     const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
     expect(decision.decision).toBe('history_mismatch_new_head');
     expect((decision.heads as { mismatch: Record<string, unknown> }[])[0]!.mismatch)
-      .toMatchObject({ reasoningNormalizationGap: ['content'] });
+      .toMatchObject({
+        reasoningNormalizationGap: ['content'],
+        // The shape record is what tells a later reader WHICH mechanism produced
+        // the gap without ever storing reasoning text.
+        reasoningGapShape: {
+          expected: { summaryParts: 1, contentItems: 1 },
+          actual: { summaryParts: 1, contentItems: 0 },
+          clientReasoningRun: 1,
+          storedReasoningRun: 1,
+        },
+      });
   });
 
   it('stays silent when the reasoning items are genuinely different reasoning', async () => {
@@ -2436,6 +2446,76 @@ describe('createResponsesWebSocketFetch', () => {
         reason: 'nursery_lru_cap',
       }],
     });
+  });
+
+  // Both pools are process-wide, so a subagent-heavy workload can need more than
+  // the defaults. Drives the nursery cap because it is the cheaper one to fill.
+  async function fillTwoNurseryHeads(accountId: string): Promise<ResponsesWebSocketDiagnosticEvent[]> {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    for (const root of ['root one', 'root two']) {
+      const response = await wsFetch('https://x', {
+        method: 'POST', headers: {},
+        body: JSON.stringify(sessionPayload([{ role: 'user', content: [{ type: 'input_text', text: root }] }])),
+      });
+      const socket = lastSocket();
+      socket.emit('open');
+      emitTextResponse(socket, `resp_${root.replace(' ', '_')}`, 'ok');
+      await readAll(response);
+    }
+    return diagnostics;
+  }
+
+  const lastEvictions = (diagnostics: ResponsesWebSocketDiagnosticEvent[]) =>
+    (diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!.evictions ?? []) as
+      Record<string, unknown>[];
+
+  it('honors CLODEX_WS_MAX_NURSERY_CONNECTIONS', async () => {
+    process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS = '1';
+    try {
+      expect(lastEvictions(await fillTwoNurseryHeads('acct-env-nursery-cap')))
+        .toMatchObject([{ reason: 'nursery_lru_cap' }]);
+    } finally {
+      delete process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS;
+    }
+  });
+
+  it('ignores a malformed connection cap rather than reinterpreting it', async () => {
+    process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS = 'lots';
+    try {
+      // Falls back to the default of 8, so two heads coexist without eviction.
+      expect(lastEvictions(await fillTwoNurseryHeads('acct-env-nursery-bad'))).toEqual([]);
+    } finally {
+      delete process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS;
+    }
+  });
+
+  it('lets an explicit option outrank the environment', async () => {
+    process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS = '1';
+    try {
+      const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-env-nursery-override',
+        maxNurseryConnections: 8,
+        onDiagnostic: event => diagnostics.push(event),
+      });
+      for (const root of ['root one', 'root two']) {
+        const response = await wsFetch('https://x', {
+          method: 'POST', headers: {},
+          body: JSON.stringify(sessionPayload([{ role: 'user', content: [{ type: 'input_text', text: root }] }])),
+        });
+        const socket = lastSocket();
+        socket.emit('open');
+        emitTextResponse(socket, `resp_ovr_${root.replace(' ', '_')}`, 'ok');
+        await readAll(response);
+      }
+      expect(lastEvictions(diagnostics)).toEqual([]);
+    } finally {
+      delete process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS;
+    }
   });
 
   it('partitions by provider, account, model, effort, session, and credential fingerprint', () => {
