@@ -573,7 +573,8 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
           + 'for(let _clodexKey of ' + networkVars + '){'
           + 'if(typeof _clodexNetwork[_clodexKey]==="string")'
           + '_clodexChildEnv[_clodexKey]=_clodexNetwork[_clodexKey];'
-          + 'else delete _clodexChildEnv[_clodexKey]}}catch(_clodexError){}}';
+          + 'else delete _clodexChildEnv[_clodexKey]}}catch(_clodexError){'
+          + 'if(!(_clodexError instanceof SyntaxError))throw _clodexError}}';
         return head! + restore + restoredBody + tail!;
       },
       { marker, required: true },

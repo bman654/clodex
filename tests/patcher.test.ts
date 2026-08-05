@@ -453,7 +453,7 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
       version: 3,
-      digest: 'da3c4bffe8ddd7e014fe3f7a2e8be118497817083e346cc76791e8b86a3163a4',
+      digest: '978d5da896287f19242d534151f76edd092dd5f858088d8117c57f336ccb9218',
     });
   });
 });
