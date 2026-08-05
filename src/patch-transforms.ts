@@ -21,6 +21,10 @@
 // skip the resolver and /model picker patches).
 
 import { isReservedModelAlias } from './model-aliases.js';
+import {
+  CHILD_NETWORK_ENV_VARS,
+  ORIGINAL_NETWORK_ENV_VAR,
+} from './network-env.js';
 
 /**
  * Version of the transform set below — NOT of the patch-state manifest, whose
@@ -31,7 +35,8 @@ import { isReservedModelAlias } from './model-aliases.js';
  * removing a PATCH site, or changing a site's regex, replacement, or ordering.
  * Without a bump, users whose favorites are unchanged keep the OLD patch forever
  * and never receive the new transforms, silently. `tests/patcher.test.ts` pins a
- * hash of this file to force that decision to be made rather than forgotten.
+ * hash of the transform inputs to force that decision to be made rather than
+ * forgotten.
  */
 export const PATCH_TRANSFORMS_VERSION = 3;
 
@@ -102,7 +107,7 @@ export function formatPatchSiteLine(result: PatchSiteResult): string {
 }
 
 /**
- * Apply the clodex patch sites (PATCH 1–9) to the Claude Code source.
+ * Apply the clodex patch sites (PATCH 1–10) to the Claude Code source.
  * Pure: source string in → patched string + per-site results out. Throws
  * `PatchApplyError` when the config is invalid or a required site fails —
  * nothing should be written to the binary in that case.
@@ -539,6 +544,40 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         { required: false },
       );
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 10 — child command network environment.
+  //
+  // The wrapper routes the parent client through a local bridge and records the
+  // network variables it replaced. Restore that snapshot only in the client's
+  // shared child-environment builder. The builder's existing filtering still
+  // runs against the restored copy, while nested wrapped client launches retain
+  // the parent's bridge environment and are routed again by the wrapper.
+  // ---------------------------------------------------------------------------
+  {
+    const marker = '/*ccpatch:child-network-env*/';
+    const snapshotVar = q(ORIGINAL_NETWORK_ENV_VAR);
+    const networkVars = JSON.stringify(CHILD_NETWORK_ENV_VARS);
+    applyOnce(
+      'PATCH 10: child network environment',
+      /(function [\w$]+\(\)\{)((?=[\s\S]{0,5000}?CLAUDE_CODE_REMOTE)(?=[\s\S]{0,7000}?CLAUDE_CODE_OAUTH_TOKEN)[\s\S]*?)(\}function [\w$]+\(\)\{let [\w$]+=process\.env\.CLAUDE_CODE_MCP_ALLOWLIST_ENV)/,
+      (_match, head, body, tail) => {
+        const restoredBody = body!.replace(/process\.env/g, '_clodexChildEnv');
+        const restore = marker
+          + 'let _clodexChildEnv=process.env,_clodexOriginalNetwork=_clodexChildEnv[' + snapshotVar + '];'
+          + 'if(_clodexOriginalNetwork!==void 0){_clodexChildEnv={..._clodexChildEnv};'
+          + 'delete _clodexChildEnv[' + snapshotVar + '];try{'
+          + 'let _clodexNetwork=JSON.parse(_clodexOriginalNetwork);'
+          + 'if(_clodexNetwork&&typeof _clodexNetwork==="object"&&!Array.isArray(_clodexNetwork))'
+          + 'for(let _clodexKey of ' + networkVars + '){'
+          + 'if(typeof _clodexNetwork[_clodexKey]==="string")'
+          + '_clodexChildEnv[_clodexKey]=_clodexNetwork[_clodexKey];'
+          + 'else delete _clodexChildEnv[_clodexKey]}}catch(_clodexError){}}';
+        return head! + restore + restoredBody + tail!;
+      },
+      { marker, required: true },
+    );
   }
 
   return { content: js, results: report };
