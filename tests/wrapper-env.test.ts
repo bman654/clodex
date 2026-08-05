@@ -20,6 +20,7 @@ const baseEnv: NodeJS.ProcessEnv = {
   https_proxy: 'http://corp-proxy:8080',
   HOME: '/Users/someone',
 };
+const ORIGINAL_NETWORK_ENV_VAR = 'CLODEX_ORIGINAL_NETWORK_ENV';
 
 describe('computeWrapperEnv', () => {
   it('proxy-mode server: injects proxy vars + CA and removes ANTHROPIC_BASE_URL', () => {
@@ -39,6 +40,10 @@ describe('computeWrapperEnv', () => {
     }
     expect(env['NODE_EXTRA_CA_CERTS']).toBe('/home/u/.clodex/http-proxy/clodex-ca.pem');
     expect(env['PATH']).toBe('/usr/bin');
+    expect(JSON.parse(env[ORIGINAL_NETWORK_ENV_VAR]!)).toEqual({
+      HTTPS_PROXY: 'http://corp-proxy:8080',
+      https_proxy: 'http://corp-proxy:8080',
+    });
   });
 
   it('proxy-mode server removes Anthropic bypasses while preserving unrelated hosts', () => {
@@ -56,6 +61,9 @@ describe('computeWrapperEnv', () => {
 
     expect(env['NO_PROXY']).toBe('localhost,.internal.example');
     expect(env['no_proxy']).toBe('localhost,.internal.example');
+    expect(JSON.parse(env[ORIGINAL_NETWORK_ENV_VAR]!)).toMatchObject({
+      NO_PROXY: 'localhost,api.anthropic.com,.anthropic.com,.internal.example,*',
+    });
   });
 
   it('merges uppercase and lowercase bypass lists before filtering', () => {
@@ -92,6 +100,53 @@ describe('computeWrapperEnv', () => {
     for (const name of ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy']) {
       expect(env[name]).toBeUndefined();
     }
+    expect(JSON.parse(env[ORIGINAL_NETWORK_ENV_VAR]!)).toEqual({
+      HTTPS_PROXY: 'http://corp-proxy:8080',
+      https_proxy: 'http://corp-proxy:8080',
+    });
+  });
+
+  it('preserves the first network snapshot across nested wrapper launches', () => {
+    const state: ServerRuntimeState = {
+      mode: 'proxy',
+      port: 17645,
+      pid: process.pid,
+      caPath: '/home/u/.clodex/http-proxy/clodex-ca.pem',
+      startedAt: '2026-07-20T00:00:00.000Z',
+    };
+    const originalSnapshot = JSON.stringify({
+      HTTPS_PROXY: 'http://corp-proxy.example:8080',
+      NO_PROXY: '.internal.example',
+    });
+
+    const env = computeWrapperEnv({
+      ...baseEnv,
+      HTTPS_PROXY: 'http://127.0.0.1:17645',
+      https_proxy: 'http://127.0.0.1:17645',
+      [ORIGINAL_NETWORK_ENV_VAR]: originalSnapshot,
+    }, state);
+
+    expect(env[ORIGINAL_NETWORK_ENV_VAR]).toBe(originalSnapshot);
+  });
+
+  it('replaces a malformed inherited snapshot before applying bridge settings', () => {
+    const state: ServerRuntimeState = {
+      mode: 'proxy',
+      port: 17645,
+      pid: process.pid,
+      caPath: '/home/u/.clodex/http-proxy/clodex-ca.pem',
+      startedAt: '2026-07-20T00:00:00.000Z',
+    };
+
+    const env = computeWrapperEnv({
+      ...baseEnv,
+      [ORIGINAL_NETWORK_ENV_VAR]: 'not-json',
+    }, state);
+
+    expect(JSON.parse(env[ORIGINAL_NETWORK_ENV_VAR]!)).toEqual({
+      HTTPS_PROXY: 'http://corp-proxy:8080',
+      https_proxy: 'http://corp-proxy:8080',
+    });
   });
 
   it('no live server: returns the env untouched without mutating the input', () => {

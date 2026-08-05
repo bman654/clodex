@@ -6,9 +6,36 @@
 // stays tiny and fast — it runs for every Claude-Code-spawned agent process.
 
 import type { ServerRuntimeState } from './server-runtime.js';
+import {
+  CHILD_NETWORK_ENV_VARS,
+  ORIGINAL_NETWORK_ENV_VAR,
+  PROXY_ENV_VARS,
+} from './network-env.js';
 
-const PROXY_ENV_VARS = ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'] as const;
 export const REQUIRE_SERVER_ENV = 'CLODEX_REQUIRE_SERVER';
+
+function hasValidOriginalNetworkSnapshot(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    const allowedKeys = new Set<string>(CHILD_NETWORK_ENV_VARS);
+    return Object.entries(parsed).every(([key, entry]) =>
+      allowedKeys.has(key) && typeof entry === 'string');
+  } catch (error) {
+    if (error instanceof SyntaxError) return false;
+    throw error;
+  }
+}
+
+function preserveOriginalNetworkEnv(env: NodeJS.ProcessEnv): void {
+  if (hasValidOriginalNetworkSnapshot(env[ORIGINAL_NETWORK_ENV_VAR])) return;
+  const snapshot: NodeJS.ProcessEnv = {};
+  for (const name of CHILD_NETWORK_ENV_VARS) {
+    if (env[name] !== undefined) snapshot[name] = env[name];
+  }
+  env[ORIGINAL_NETWORK_ENV_VAR] = JSON.stringify(snapshot);
+}
 
 export function removeAnthropicProxyBypass(env: NodeJS.ProcessEnv): void {
   const noProxyValues = [env['NO_PROXY'], env['no_proxy']]
@@ -57,6 +84,8 @@ export function computeWrapperEnv(
   // No live server: launch claude completely untouched — a down server must
   // never break launching claude.
   if (!state) return env;
+
+  preserveOriginalNetworkEnv(env);
 
   if (state.mode === 'proxy') {
     // Selective MITM: claude keeps its own Anthropic credentials; the proxy
