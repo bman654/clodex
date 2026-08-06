@@ -127,6 +127,7 @@ describe('isPatchedClaudeSource', () => {
     expect(legacyOnly).not.toContain('/*ccpatch:');
     expect(isPatchedClaudeSource(legacyOnly)).toBe(false);
     expect(looksLikeLegacyClodexPatch(legacyOnly)).toBe(true);
+    expect(isPatchedClaudeSource(`${FIXTURE}\n/*clodex-local:example*/`)).toBe(false);
   });
 
   it('reports no legacy suspicion once the proof marker is present', () => {

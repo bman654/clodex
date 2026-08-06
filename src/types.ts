@@ -81,6 +81,8 @@ export interface UserPreferences {
   serverBridgeMode?: BridgeMode;
   /** Manual binary path overrides (e.g. the claude binary). */
   appPathOverrides?: Record<string, string>;
+  /** Explicit opt-in to execute ~/.clodex/local-patches.mjs during patch runs. */
+  localPatchesEnabled?: boolean;
   recentLaunchFolders?: string[];
   server?: {
     savedPassword?: string;
@@ -136,6 +138,8 @@ export interface ParsedArgs {
   favoritesUnalias?: string;
   /** clodex patch: restore the pristine Claude Code binary. */
   patchRestore?: boolean;
+  /** clodex patch: persistently enable or disable local patch execution. */
+  patchLocalPatches?: boolean;
   error?: string;
 }
 

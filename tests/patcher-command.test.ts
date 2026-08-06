@@ -214,6 +214,247 @@ describe('runPatchCommand version resolution', () => {
   });
 });
 
+describe('runPatchCommand local patches', () => {
+  it('persists explicit opt-in and applies the fixed local module after built-ins', async () => {
+    const real = installClaude('2.1.220');
+    writeFileSync(join(clodexHome, 'local-patches.mjs'), `
+      export default [{
+        id: 'example-site',
+        apply(source, { marker }) {
+          if (!source.includes('/*ccpatch:effort*/')) throw new Error('built-ins missing');
+          return source + '\\n' + marker + 'example-change';
+        },
+      }];
+    `);
+
+    expect(await runPatchCommand({ localPatches: true })).toBe(0);
+    expect(bundleOf(real)).toContain('/*ccpatch:effort*/');
+    expect(bundleOf(real)).toContain('/*clodex-local:example-site*/example-change');
+    expect(JSON.parse(readFileSync(join(clodexHome, 'config.json'), 'utf8'))).toMatchObject({
+      localPatchesEnabled: true,
+    });
+    expect(logs.join('\n')).toMatch(/LOCAL example-site/);
+  });
+
+  it('reapplies from pristine bytes when only the local module changes', async () => {
+    const real = installClaude('2.1.220');
+    const pristine = readFileSync(real);
+    const modulePath = join(clodexHome, 'local-patches.mjs');
+    const writeModule = (label: string) => writeFileSync(modulePath, `
+      export default [{
+        id: 'editable-site',
+        apply(source, { marker }) { return source + '\\n' + marker + ${JSON.stringify(label)}; },
+      }];
+    `);
+
+    writeModule('first-version');
+    expect(await runPatchCommand({ localPatches: true })).toBe(0);
+    expect(bundleOf(real)).toContain('/*clodex-local:editable-site*/first-version');
+
+    writeModule('second-version');
+    expect(await runPatchCommand({})).toBe(0);
+    expect(bundleOf(real)).toContain('/*clodex-local:editable-site*/second-version');
+    expect(bundleOf(real)).not.toContain('first-version');
+    expect(readFileSync(readPatchManifest()!.backupPath)).toEqual(pristine);
+  });
+
+  it('rebuilds a built-in-only patch when local execution is disabled', async () => {
+    const real = installClaude('2.1.220');
+    writeFileSync(join(clodexHome, 'local-patches.mjs'), `
+      export default [{
+        id: 'removable-site',
+        apply(source, { marker }) { return source + '\\n' + marker + 'local-change'; },
+      }];
+    `);
+
+    expect(await runPatchCommand({ localPatches: true })).toBe(0);
+    expect(bundleOf(real)).toContain('/*clodex-local:removable-site*/');
+
+    expect(await runPatchCommand({ localPatches: false })).toBe(0);
+    expect(bundleOf(real)).toContain('/*ccpatch:effort*/');
+    expect(bundleOf(real)).not.toContain('/*clodex-local:');
+    expect(JSON.parse(readFileSync(join(clodexHome, 'config.json'), 'utf8'))).toMatchObject({
+      localPatchesEnabled: false,
+    });
+  });
+
+  it('publishes complete built-ins but no partial locals when a local site fails', async () => {
+    const real = installClaude('2.1.220');
+    writeFileSync(join(clodexHome, 'local-patches.mjs'), `
+      export default [
+        {
+          id: 'first',
+          apply(source, { marker }) { return source + '\\n' + marker + 'partial'; },
+        },
+        {
+          id: 'fails',
+          apply(source) { return source; },
+        },
+      ];
+    `);
+
+    expect(await runPatchCommand({ localPatches: true })).toBe(0);
+    expect(bundleOf(real)).toContain('/*ccpatch:effort*/');
+    expect(bundleOf(real)).not.toContain('/*clodex-local:');
+    expect(logs.join('\n')).toMatch(/SKIP\s+LOCAL first.*rolled back/);
+    expect(logs.join('\n')).toMatch(/FAIL\s+LOCAL fails/);
+    expect(readPatchManifest()).not.toBeNull();
+  });
+
+  it('hashes but never executes local code during a launch freshness check', async () => {
+    installClaude('2.1.220');
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const proofPath = join(home, 'local-module-executed');
+    writeFileSync(join(clodexHome, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
+      localPatchesEnabled: true,
+    }));
+    writeFileSync(join(clodexHome, 'local-patches.mjs'), `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(proofPath)}, 'executed');
+      export default [];
+    `);
+
+    await expect(runLaunchPatchCheck({ dryRun: true })).resolves.toBeUndefined();
+    expect(existsSync(proofPath)).toBe(false);
+    expect(stderr).toHaveBeenCalled();
+  });
+
+  it('detects an edited local module as stale without executing the new bytes', async () => {
+    const real = installClaude('2.1.220');
+    const modulePath = join(clodexHome, 'local-patches.mjs');
+    writeFileSync(modulePath, `
+      export default [{
+        id: 'first',
+        apply(source, { marker }) { return source + '\\n' + marker; },
+      }];
+    `);
+    expect(await runPatchCommand({ localPatches: true })).toBe(0);
+
+    const proofPath = join(home, 'edited-module-executed');
+    writeFileSync(modulePath, `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(proofPath)}, 'executed');
+      export default [{
+        id: 'second',
+        apply(source, { marker }) { return source + '\\n' + marker; },
+      }];
+    `);
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(runLaunchPatchCheck({ dryRun: true })).resolves.toBeUndefined();
+    expect(stderr.mock.calls.join('\n')).toContain('stale-patched');
+    expect(existsSync(proofPath)).toBe(false);
+    expect(bundleOf(real)).toContain('/*clodex-local:first*/');
+    expect(bundleOf(real)).not.toContain('/*clodex-local:second*/');
+  });
+
+  it('reports a missing opted-in module without blocking built-in publication', async () => {
+    const real = installClaude('2.1.220');
+
+    expect(await runPatchCommand({ localPatches: true })).toBe(0);
+    expect(bundleOf(real)).toContain('/*ccpatch:effort*/');
+    expect(logs.join('\n')).toMatch(/FAIL\s+LOCAL PATCH SET/);
+    expect(logs.join('\n')).toContain(join(clodexHome, 'local-patches.mjs'));
+  });
+
+  it('does not execute local code when a required built-in site fails', async () => {
+    const bundle = PRISTINE_BUNDLE
+      .split('\n')
+      .filter(line => !line.startsWith('function OI('))
+      .join('\n');
+    const real = installClaude('2.1.220', bundle);
+    const before = readFileSync(real);
+    const proofPath = join(home, 'local-module-executed');
+    writeFileSync(join(clodexHome, 'local-patches.mjs'), `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(proofPath)}, 'executed');
+      export default [];
+    `);
+
+    expect(await runPatchCommand({ localPatches: true })).toBe(1);
+    expect(existsSync(proofPath)).toBe(false);
+    expect(readFileSync(real)).toEqual(before);
+  });
+
+  it('rolls back locals that remove a native member from a built-in routing site', async () => {
+    const real = installClaude('2.1.220');
+    writeFileSync(join(clodexHome, 'local-patches.mjs'), `
+      export default [{
+        id: 'damages-built-in',
+        apply(source, { marker }) {
+          return source.replace('"fable","sol"', '"sol"') + '\\n' + marker;
+        },
+      }];
+    `);
+
+    expect(await runPatchCommand({ localPatches: true })).toBe(0);
+    expect(bundleOf(real)).toContain('.enum(["sonnet","opus","haiku","fable","sol"])');
+    expect(bundleOf(real)).not.toContain('/*clodex-local:damages-built-in*/');
+    expect(logs.join('\n')).toMatch(/FAIL\s+LOCAL PATCH SET.*changed built-in patch sites/);
+  });
+
+  it('publishes built-ins when a local proof cannot be captured', async () => {
+    const bundle = PRISTINE_BUNDLE.replace(
+      'case"best":{return "opus"}default:return null',
+      'case"best":{return "opus"}case"sol":return "native";default:return null',
+    );
+    const real = installClaude('2.1.220', bundle);
+    writeFileSync(join(clodexHome, 'local-patches.mjs'), `
+      export default [{
+        id: 'must-not-run',
+        apply(source, { marker }) { return source + '\\n' + marker; },
+      }];
+    `);
+
+    expect(await runPatchCommand({ localPatches: true })).toBe(0);
+    expect(bundleOf(real)).toContain('/*ccpatch:effort*/');
+    expect(bundleOf(real)).toContain('case"sol":return "native";');
+    expect(bundleOf(real)).not.toContain('/*clodex-local:must-not-run*/');
+    expect(logs.join('\n')).toMatch(/FAIL\s+LOCAL PATCH SET.*postconditions/);
+  });
+
+  it('allows a local edit adjacent to an intact built-in postcondition', async () => {
+    const real = installClaude('2.1.220');
+    writeFileSync(join(clodexHome, 'local-patches.mjs'), `
+      export default [{
+        id: 'adjacent-site',
+        apply(source, { marker }) {
+          const close = 'Additional custom models: sol.' + String.fromCharCode(96) + ')';
+          return source.replace(close, close + marker + 'adjacent-change');
+        },
+      }];
+    `);
+
+    expect(await runPatchCommand({ localPatches: true })).toBe(0);
+    expect(bundleOf(real)).toContain(
+      String.fromCharCode(96) + ')/*clodex-local:adjacent-site*/adjacent-change',
+    );
+    expect(logs.join('\n')).toMatch(/OK\s+LOCAL adjacent-site/);
+  });
+
+  it('rolls back locals that move a reserved marker away from its built-in code', async () => {
+    const real = installClaude('2.1.220');
+    writeFileSync(join(clodexHome, 'local-patches.mjs'), `
+      export default [{
+        id: 'moves-marker',
+        apply(source, { marker }) {
+          const damaged = source.replace(
+            /\\/\\*ccpatch:effort\\*\\/var _ccv=.*?if\\(_ccv!==void 0\\)return _ccv;/,
+            '',
+          );
+          return damaged + '\\n/*ccpatch:effort*/\\n' + marker;
+        },
+      }];
+    `);
+
+    expect(await runPatchCommand({ localPatches: true })).toBe(0);
+    expect(bundleOf(real)).toMatch(/\/\*ccpatch:effort\*\/var _ccv=/);
+    expect(bundleOf(real)).not.toContain('/*clodex-local:moves-marker*/');
+    expect(logs.join('\n')).toMatch(/FAIL\s+LOCAL PATCH SET.*changed built-in patch sites/);
+  });
+});
+
 describe('runPatchCommand pristine backup safety', () => {
   it('re-patches from the pristine backup instead of patching on top of a patch', async () => {
     const real = installClaude('2.1.220');

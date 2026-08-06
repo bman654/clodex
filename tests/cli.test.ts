@@ -158,6 +158,24 @@ describe('parseArgs', () => {
   it('parses the patch command', () => {
     expect(parseArgs(['patch'])).toMatchObject({ command: 'patch', showHelp: false });
     expect(parseArgs(['patch', '--restore'])).toMatchObject({ command: 'patch', patchRestore: true });
+    expect(parseArgs(['patch', '--enable-local-patches'])).toMatchObject({
+      command: 'patch',
+      patchLocalPatches: true,
+    });
+    expect(parseArgs(['patch', '--disable-local-patches'])).toMatchObject({
+      command: 'patch',
+      patchLocalPatches: false,
+    });
+    expect(parseArgs([
+      'patch',
+      '--enable-local-patches',
+      '--disable-local-patches',
+    ])).toMatchObject({
+      error: '--enable-local-patches and --disable-local-patches cannot be combined',
+    });
+    expect(parseArgs(['patch', '--restore', '--enable-local-patches'])).toMatchObject({
+      error: '--restore cannot be combined with local-patch settings',
+    });
     expect(parseArgs(['patch', '--help'])).toMatchObject({ command: 'patch', showHelp: true });
     expect(parseArgs(['patch', '--bogus'])).toMatchObject({ error: 'Unknown patch option: --bogus' });
   });
@@ -212,6 +230,10 @@ describe('help text', () => {
     expect(claudeHelpText()).toContain('clodex:<provider-id>:<model-id>');
     expect(serverHelpText()).toContain('--no-discovery');
     expect(patchHelpText()).toContain('--restore');
+    expect(patchHelpText()).toContain('--enable-local-patches');
+    expect(patchHelpText()).toContain('--disable-local-patches');
+    expect(patchHelpText()).toContain('local-patches.mjs');
+    expect(patchHelpText()).toContain('executes trusted JavaScript');
   });
 
   it('no longer mentions the removed --http-proxy alias', () => {

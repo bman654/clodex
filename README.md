@@ -167,17 +167,42 @@ clodex server --endpoint --quick --providers favorites
 clodex server --proxy
 ```
 
-### `clodex patch [--restore]`
+### `clodex patch`
 
 Patch the installed Claude Code binary so clodex favorites and aliases are first-class: accepted by the Agent tool's model field, listed in `/model`, resolved to their real ids, and reporting the correct context window.
 
 | Flag | Effect |
 | --- | --- |
 | `--restore` | Restore the pristine (unpatched) Claude Code binary |
-| `--trace` | Show the underlying tweakcc output |
+| `--trace` | Show per-site `OK`/`SKIP`/`FAIL` results |
+| `--enable-local-patches` | Persistently enable the fixed local patch module |
+| `--disable-local-patches` | Disable local patches and rebuild from pristine bytes without them |
 | `--help` | Help |
 
 The patch map is built from your favorites and aliases; context windows come from provider metadata. A pristine per-version backup is kept, and a manifest (`~/.clodex/patch-state.json`) makes re-runs no-ops until your config or Claude Code version changes — then the binary is restored first and re-patched fresh. `clodex claude` checks patch freshness at launch and offers to re-patch (a non-blocking notice when not interactive). Re-run `clodex patch` after every `claude` update.
+
+#### Local patches (trusted code)
+
+Local patches are an explicitly enabled extension layer for private transforms that do not belong in clodex itself. Put one self-contained ES module at `~/.clodex/local-patches.mjs` (or `$CLODEX_HOME/local-patches.mjs`) and opt in with `clodex patch --enable-local-patches`. It must be a regular UTF-8 file no larger than 1 MiB. File presence alone never loads it.
+
+Enabling this feature executes that JavaScript with your full user permissions; it is not sandboxed. Only use code you trust. Clodex never searches the current project, its installation, dependencies, or `node_modules` for patches.
+
+The module must default-export an array. Each site has a unique lowercase `id` and an `apply` function that returns the complete source and emits the generated `marker` exactly once when it applies:
+
+```js
+export default [
+  {
+    id: 'example-site',
+    apply(source, { marker }) {
+      const anchor = 'exampleAnchor()';
+      if (!source.includes(anchor)) return source;
+      return source.replace(anchor, `${marker}${anchor}`);
+    },
+  },
+];
+```
+
+Clodex hashes the captured module bytes into patch freshness, so editing the file triggers a pristine rebuild. The module is then applied after all built-in routing sites as one transaction: if any local site fails, every local change is discarded, the complete built-in patch still publishes, and `--trace` reports the failure. Local sites receive markers in the separate `/*clodex-local:...*/` namespace and cannot add, remove, or replace built-in `/*ccpatch:...*/` markers. Before publishing local output, Clodex compares exact postconditions captured from every successful built-in site and reruns the built-in verifier. Keep the module deterministic and self-contained; imported helper files are not part of its freshness identity.
 
 ### `clodex models` / `clodex favorites`
 

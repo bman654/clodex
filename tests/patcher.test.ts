@@ -22,6 +22,10 @@ import {
   PatchApplyError,
   type PatchScriptModelConfig,
 } from '../src/patch-transforms.js';
+import {
+  builtInPatchProofsChanged,
+  captureBuiltInPatchProofs,
+} from '../src/built-in-patch-proofs.js';
 
 /**
  * The digest a pre-versioning clodex wrote into `patch-state.json`: the bare
@@ -402,6 +406,17 @@ describe('computePatchConfigHash', () => {
     expect(computePatchConfigHash(config)).toBe(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION));
     expect(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION + 1)).not.toBe(
       computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION),
+    );
+  });
+
+  it('changes with enabled local patch bytes while preserving the disabled hash', () => {
+    const config = { 'clodex:p:m1': { alias: 'x', context: 1000 } };
+    const disabled = computePatchConfigHash(config);
+
+    expect(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION, undefined)).toBe(disabled);
+    expect(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION, 'v1:first')).not.toBe(disabled);
+    expect(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION, 'v1:first')).not.toBe(
+      computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION, 'v1:second'),
     );
   });
 });
@@ -1286,6 +1301,18 @@ describe('patch script identity naming', () => {
       ['PATCH 8c: max effort capability (refresh)', 'SKIP'],
       ['PATCH 9: default effort (refresh)', 'SKIP'],
     ]);
+  });
+
+  it('captures every successful built-in postcondition before local patches run', () => {
+    const patched = applyClodexPatches(CLAUDE_FIXTURE, config);
+    const proofs = captureBuiltInPatchProofs(patched.content, config, patched.results);
+
+    expect(proofs).toHaveLength(patched.results.length);
+    expect(builtInPatchProofsChanged(patched.content, proofs)).toBe(false);
+    expect(builtInPatchProofsChanged(
+      patched.content.replace('"fable","sol"', '"sol"'),
+      proofs,
+    )).toBe(true);
   });
 
   it('refreshes the baked context table in place when only the window changes', () => {

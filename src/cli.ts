@@ -283,8 +283,21 @@ export function parseArgs(args: string[]): ParsedArgs {
       if (arg === '--help' || arg === '-h') parsed.showHelp = true;
       else if (arg === '--version' || arg === '-v') parsed.showVersion = true;
       else if (arg === '--restore') parsed.patchRestore = true;
-      else if (arg === '--trace') parsed.trace = true;
+      else if (arg === '--enable-local-patches') {
+        if (parsed.patchLocalPatches === false && !parsed.error) {
+          parsed.error = '--enable-local-patches and --disable-local-patches cannot be combined';
+        }
+        parsed.patchLocalPatches = true;
+      } else if (arg === '--disable-local-patches') {
+        if (parsed.patchLocalPatches === true && !parsed.error) {
+          parsed.error = '--enable-local-patches and --disable-local-patches cannot be combined';
+        }
+        parsed.patchLocalPatches = false;
+      } else if (arg === '--trace') parsed.trace = true;
       else if (!parsed.error) parsed.error = `Unknown patch option: ${arg}`;
+    }
+    if (parsed.patchRestore && parsed.patchLocalPatches !== undefined && !parsed.error) {
+      parsed.error = '--restore cannot be combined with local-patch settings';
     }
     return parsed;
   }
@@ -335,7 +348,7 @@ Bridge Claude Code to OpenAI models — OpenAI API key or ChatGPT/Codex-plan OAu
 ${pc.bold('Usage:')}
   clodex claude [options] [claude-flags]
   clodex server [options]
-  clodex patch [--restore]
+  clodex patch [options]
   clodex models
   clodex favorites
   clodex providers
@@ -551,11 +564,15 @@ real ids, and reporting the correct context window.
 ${pc.bold('Usage:')}
   clodex patch
   clodex patch --restore
+  clodex patch --enable-local-patches
+  clodex patch --disable-local-patches
   clodex patch --help
 
 ${pc.bold('Options:')}
-  --restore    Restore the pristine (unpatched) Claude Code binary
-  --trace      Show per-patch-site results (OK/SKIP/FAIL)
+  --restore                  Restore the pristine Claude Code binary
+  --trace                    Show per-patch-site results (OK/SKIP/FAIL)
+  --enable-local-patches     Persistently enable ~/.clodex/local-patches.mjs
+  --disable-local-patches    Disable local patches and rebuild without them
 
 ${pc.bold('Behavior:')}
   The patch map is built automatically from your clodex favorites and aliases
@@ -563,6 +580,10 @@ ${pc.bold('Behavior:')}
   per-version backup is kept, and a manifest (~/.clodex/patch-state.json)
   makes re-runs no-ops until your config or Claude Code version changes —
   then the binary is restored first and re-patched fresh.
+
+  Local patches execute after the built-ins as an all-or-none set. Enabling
+  them executes trusted JavaScript from local-patches.mjs with your full user
+  permissions. Local failures are reported but never block the built-ins.
   Run clodex patch again after every claude update.`;
 }
 
@@ -1512,7 +1533,11 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       printHelp(patchHelpText());
       return 0;
     }
-    return runPatchCommand({ restore: parsed.patchRestore, trace: parsed.trace });
+    return runPatchCommand({
+      restore: parsed.patchRestore,
+      trace: parsed.trace,
+      localPatches: parsed.patchLocalPatches,
+    });
   }
 
   if (parsed.showVersion) {

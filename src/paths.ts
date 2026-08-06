@@ -28,6 +28,10 @@ export function getConfigPath(env: HomeEnv = process.env): string {
   return join(getAppHome(env), 'config.json');
 }
 
+export function getLocalPatchesPath(env: HomeEnv = process.env): string {
+  return join(getAppHome(env), 'local-patches.mjs');
+}
+
 export function getProvidersPath(env: HomeEnv = process.env): string {
   return join(getAppHome(env), 'providers.json');
 }

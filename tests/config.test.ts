@@ -81,6 +81,14 @@ describe('dotfolder config', () => {
     ]);
   });
 
+  it('persists explicit local-patch opt-in and opt-out', () => {
+    savePreferences({ localPatchesEnabled: true });
+    expect(loadPreferences().localPatchesEnabled).toBe(true);
+
+    savePreferences({ localPatchesEnabled: false });
+    expect(loadPreferences().localPatchesEnabled).toBe(false);
+  });
+
   it('loads legacy aliases without mutating or filtering their stored form', () => {
     savePreferences({ lastProvider: 'openai-oauth' });
     const legacyPayload = JSON.stringify({

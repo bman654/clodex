@@ -39,7 +39,17 @@ import { basename, dirname, join } from 'node:path';
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import { getAppHome } from './paths.js';
-import { loadPreferences } from './config.js';
+import { loadPreferences, savePreferences } from './config.js';
+import {
+  applyLocalPatches,
+  inspectLocalPatchSource,
+  type LocalPatchSource,
+} from './local-patches.js';
+import {
+  builtInPatchProofsChanged,
+  captureBuiltInPatchProofs,
+  type BuiltInPatchProof,
+} from './built-in-patch-proofs.js';
 import { loadRegistry } from './registry/io.js';
 import { findModelsDevModel } from './registry/models-dev.js';
 import { findClaudeBinary, getClaudeVersionForBinary } from './launch.js';
@@ -228,6 +238,7 @@ export function reportRejectedModelAliases(
 export function computePatchConfigHash(
   config: PatchScriptModelConfig,
   transformsVersion = PATCH_TRANSFORMS_VERSION,
+  localPatchIdentity?: string,
 ): string {
   const canonical = Object.keys(config).sort().map(key => {
     const entry = config[key]!;
@@ -240,7 +251,11 @@ export function computePatchConfigHash(
       entry.effort?.defaultLevel ?? null,
     ];
   });
-  return createHash('sha256').update(JSON.stringify([transformsVersion, canonical])).digest('hex');
+  const payload: unknown[] = [transformsVersion, canonical];
+  if (localPatchIdentity !== undefined) {
+    payload.push(['local-patches', localPatchIdentity]);
+  }
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 }
 
 /** Read favorites + aliases + registry model metadata from disk (no network, no credentials). */
@@ -522,12 +537,73 @@ function requiredEffortPatchFailures(results: PatchSiteResult[]): PatchSiteResul
   );
 }
 
+function builtInPatchVerificationFailed(
+  source: string,
+  config: PatchScriptModelConfig,
+  expected: PatchSiteResult[],
+  proofs: BuiltInPatchProof[],
+): boolean {
+  if (builtInPatchProofsChanged(source, proofs)) return true;
+
+  let verification: ReturnType<typeof applyClodexPatches>;
+  try {
+    verification = applyClodexPatches(source, config);
+  } catch {
+    return true;
+  }
+  if (verification.content !== source || verification.results.length !== expected.length) {
+    return true;
+  }
+
+  const expectedByName = new Map(expected.map(result => [
+    result.name.replace(/ \(refresh\)$/, ''),
+    result,
+  ]));
+  for (const result of verification.results) {
+    const original = expectedByName.get(result.name.replace(/ \(refresh\)$/, ''));
+    if (!original) return true;
+    if (original.status === 'FAIL') {
+      if (result.status !== 'FAIL' || result.extra !== original.extra) return true;
+    } else if (result.status !== 'SKIP') {
+      return true;
+    }
+  }
+  return false;
+}
+
+function discardLocalPatchOutcome(
+  builtInContent: string,
+  results: PatchSiteResult[],
+): { content: string; results: PatchSiteResult[] } {
+  return {
+    content: builtInContent,
+    results: [
+      ...results.map(result => result.status === 'OK'
+        ? {
+            status: 'SKIP' as const,
+            name: result.name,
+            extra: 'rolled back after built-in verification failed',
+          }
+        : result),
+      {
+        status: 'FAIL',
+        name: 'LOCAL PATCH SET',
+        extra: 'local output changed built-in patch sites',
+      },
+    ],
+  };
+}
+
 export async function applyPatch(
   binaryPath: string,
   version: string,
   desired: DesiredPatchConfig,
   configHash: string,
-  opts: { trace: boolean; manifest: PatchManifest | null },
+  opts: {
+    trace: boolean;
+    manifest: PatchManifest | null;
+    localPatches?: LocalPatchSource;
+  },
 ): Promise<ApplyOutcome> {
   let candidateDir: string | undefined;
   let results: PatchSiteResult[];
@@ -644,8 +720,8 @@ export async function applyPatch(
     // backup, never the live binary — so it stays pristine after patching).
     publishBackupFile(backup, tweakccMirrorBackupPath());
 
-    const patched = applyClodexPatches(loaded.source, desired.config);
-    results = patched.results;
+    const builtIn = applyClodexPatches(loaded.source, desired.config);
+    results = builtIn.results;
     const failedEffortPatches = requiredEffortPatchFailures(results);
     if (failedEffortPatches.length > 0) {
       throw new PatchApplyError(
@@ -655,7 +731,42 @@ export async function applyPatch(
         results,
       );
     }
-    await writeContent(loaded.installation, patched.content);
+    let builtInProofs: BuiltInPatchProof[] = [];
+    let local: { content: string; results: PatchSiteResult[] } | undefined;
+    if (opts.localPatches?.enabled && typeof opts.localPatches.source === 'string') {
+      try {
+        builtInProofs = captureBuiltInPatchProofs(
+          builtIn.content,
+          desired.config,
+          builtIn.results,
+        );
+      } catch {
+        local = {
+          content: builtIn.content,
+          results: [{
+            status: 'FAIL',
+            name: 'LOCAL PATCH SET',
+            extra: 'could not capture built-in postconditions',
+          }],
+        };
+      }
+    }
+    local ??= opts.localPatches
+      ? await applyLocalPatches(builtIn.content, opts.localPatches)
+      : { content: builtIn.content, results: [] };
+    if (
+      local.results.some(result => result.status === 'OK')
+      && builtInPatchVerificationFailed(
+        local.content,
+        desired.config,
+        builtIn.results,
+        builtInProofs,
+      )
+    ) {
+      local = discardLocalPatchOutcome(builtIn.content, local.results);
+    }
+    results = [...results, ...local.results];
+    await writeContent(loaded.installation, local.content);
     patchedSize = statSync(candidatePath).size;
     patchedSha256 = sha256File(candidatePath);
     renameSync(candidatePath, binaryPath);
@@ -772,7 +883,11 @@ function runRestoreCommand(target: ClaudePatchTarget): number {
   return 0;
 }
 
-export async function runPatchCommand(opts: { restore?: boolean; trace?: boolean } = {}): Promise<number> {
+export async function runPatchCommand(opts: {
+  restore?: boolean;
+  trace?: boolean;
+  localPatches?: boolean;
+} = {}): Promise<number> {
   const target = resolveClaudeBinaryForPatch();
 
   // Handled BEFORE the patch path's version check, because `--restore` has its
@@ -785,6 +900,10 @@ export async function runPatchCommand(opts: { restore?: boolean; trace?: boolean
   }
   const { binaryPath, version } = target;
 
+  if (opts.localPatches !== undefined) {
+    savePreferences({ localPatchesEnabled: opts.localPatches });
+  }
+
   const desired = buildDesiredPatchConfig();
   if (Object.keys(desired.config).length === 0) {
     p.log.error('No favorite models to patch. Save favorites with `clodex models` first.');
@@ -795,7 +914,14 @@ export async function runPatchCommand(opts: { restore?: boolean; trace?: boolean
   }
   reportRejectedModelAliases(desired.rejectedAliasRejections);
 
-  const configHash = computePatchConfigHash(desired.config);
+  const localPatches = inspectLocalPatchSource(
+    loadPreferences().localPatchesEnabled === true,
+  );
+  const configHash = computePatchConfigHash(
+    desired.config,
+    PATCH_TRANSFORMS_VERSION,
+    localPatches.enabled ? localPatches.configIdentity : undefined,
+  );
   const manifest = readPatchManifest();
   const state = evaluatePatchState(manifest, {
     binaryPath,
@@ -823,6 +949,7 @@ export async function runPatchCommand(opts: { restore?: boolean; trace?: boolean
     const outcome = await applyPatch(binaryPath, version, desired, configHash, {
       trace: opts.trace ?? false,
       manifest,
+      localPatches,
     });
     if (!outcome.ok) {
       p.log.error(outcome.message);
@@ -864,7 +991,14 @@ export async function runLaunchPatchCheck(opts: { agentStdout?: boolean; dryRun?
     }
     const resolved = target;
 
-    const configHash = computePatchConfigHash(desired.config);
+    const localPatches = inspectLocalPatchSource(
+      loadPreferences().localPatchesEnabled === true,
+    );
+    const configHash = computePatchConfigHash(
+      desired.config,
+      PATCH_TRANSFORMS_VERSION,
+      localPatches.enabled ? localPatches.configIdentity : undefined,
+    );
     const manifest = readPatchManifest();
     const state = evaluatePatchState(manifest, {
       binaryPath: resolved.binaryPath,
