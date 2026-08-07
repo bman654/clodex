@@ -598,10 +598,14 @@ function warnToolArgumentNormalizationGap(
   // agree once today's shared rule runs; it does not prove which side stopped
   // applying it, and a first false positive is what teaches a user to ignore
   // the one warning whose value depends on being believed.
+  // `--trace` is the diagnostic a `clodex claude` user can actually produce; the
+  // richer per-head JSONL is `clodex server --ws-diagnostics`, which is a server
+  // flag only, so naming it here would send most users after a flag their command
+  // does not accept and silently forwards to the claude binary.
   const message = `clodex: warning: tool call "${tool}" failed the continuation match, but both `
     + "sides are identical once clodex's filler-strip rule is applied, so the head should have "
-    + 'matched. Prompt caching is degraded for this turn — please report it, with --ws-diagnostics '
-    + 'output if you can, at https://github.com/bman654/clodex/issues';
+    + 'matched. Prompt caching is degraded for this turn — please report it, with the adapter debug '
+    + 'log from --trace if you can, at https://github.com/bman654/clodex/issues';
   try { log?.(`tool argument normalization gap: ${signature}`); } catch { /* ignore */ }
   if (warnedToolArgumentGaps.has(signature)) return;
   if (warnedToolArgumentGaps.size >= MAX_TOOL_ARGUMENT_GAP_WARNINGS) return;
