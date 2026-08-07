@@ -13,6 +13,7 @@ import type { RawData, WebSocket as WsWebSocket } from 'ws';
 import { CODEX_RESPONSES_WEBSOCKETS_BETA } from '../constants.js';
 import { outboundWsProxyAgent } from '../outbound-proxy.js';
 import { anthropicErrorType, clampRetryAfterSeconds } from '../upstream-error.js';
+import { sanitizeToolInput } from '../tool-input-sanitize.js';
 
 const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite';
 const TERMINAL_EVENT_TYPES = new Set(['response.completed', 'response.failed', 'response.incomplete']);
@@ -547,24 +548,23 @@ function continuationMismatchSummary(
   entry: ConnectionEntry,
   payload: JsonObject,
   log?: (message: string) => void,
+  mismatchDump = false,
 ): string {
   const details = continuationMismatchDetails(entry, payload, log, true);
   let summary = `full_items=${details.fullItems} expected_prefix_items=${details.expectedPrefixItems} `
     + `first_mismatch=${details.firstMismatch} expected=${details.expectedKind} actual=${details.actualKind}`;
   // The hashes make same-kind mismatches diagnosable from the log alone. With
   // CLODEX_MISMATCH_DUMP=1 the canonical bytes of both divergent items land in
-  // the debug log too — that file is 0600, but `--trace` re-reads it and
-  // prints matching lines to stdout on exit, so raw conversation content can
-  // reach the terminal; the CLAUDE.md entry for the variable carries the
-  // privacy tradeoff.
+  // the adapter debug log too. That file is written through the redacting
+  // trace logger at mode 0600 and is never re-printed to the terminal
+  // (`printTraceLog` reads the separate Claude Code debug log); the CLAUDE.md
+  // entry for the variable carries the privacy tradeoff.
   if (details.expectedHash || details.actualHash) {
     summary += ` expected_hash=${details.expectedHash ?? 'none'} actual_hash=${details.actualHash ?? 'none'}`;
-  }
-  if (process.env.CLODEX_MISMATCH_DUMP === '1' && log) {
-    const full = inputArray(payload);
-    const prefix = [...(entry.requestInput ?? []), ...(entry.expectedAssistant ?? [])];
-    const index = typeof details.firstMismatch === 'number' ? details.firstMismatch : -1;
-    if (index >= 0) {
+    if (mismatchDump && log) {
+      const full = inputArray(payload);
+      const prefix = [...(entry.requestInput ?? []), ...(entry.expectedAssistant ?? [])];
+      const index = details.firstMismatch as number;
       log(`mismatch dump expected[${index}]: ${mismatchDumpLine(prefix, index)}`);
       log(`mismatch dump actual[${index}]: ${mismatchDumpLine(full, index)}`);
     }
@@ -1048,22 +1048,26 @@ function requiredToolProps(payload: JsonObject): Map<string, Set<string>> {
  * input before it reaches the client, and the client echoes that sanitized
  * object back. A head that snapshots the raw upstream string can therefore
  * never match its own echo, and the chain is lost on the next turn (#84).
- * Snapshot the arguments in the same downstream shape instead. Compare-only:
- * the payload actually sent upstream is untouched.
+ * Snapshot the arguments in the same downstream shape instead, using the
+ * same shared strip rule the translation layer applies
+ * (`sanitizeToolInput` in tool-input-sanitize.ts). Compare-only: the payload
+ * actually sent upstream is untouched.
  */
 function sanitizedCallArguments(item: JsonObject, requiredProps: Map<string, Set<string>>): JsonObject {
   if (typeof item.arguments !== 'string') return item;
+  // The client-side SDK parses a blank arguments string as `{}` before the
+  // client ever sees it, so a zero-argument tool call is echoed back as
+  // `"{}"`. Mirror that here, or the raw-`""` snapshot loses the chain with
+  // the same tail-index signature as #84.
+  const raw = item.arguments.trim();
   let parsed: unknown;
-  try { parsed = JSON.parse(item.arguments); } catch { return item; }
+  try { parsed = raw === '' ? {} : JSON.parse(raw); } catch { return item; }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return item;
   const required = requiredProps.get(typeof item.name === 'string' ? item.name : '');
-  const out: JsonObject = {};
-  for (const [key, value] of Object.entries(parsed as JsonObject)) {
-    if (value === null) continue;
-    if (Array.isArray(value) && value.length === 0 && !required?.has(key)) continue;
-    out[key] = value;
-  }
-  return { ...item, arguments: JSON.stringify(out) };
+  return {
+    ...item,
+    arguments: JSON.stringify(sanitizeToolInput(parsed as Record<string, unknown>, required)),
+  };
 }
 
 function expectedAssistantItems(ctx: RequestContext): unknown[] {
@@ -1661,6 +1665,9 @@ export function createResponsesWebSocketFetch(
   options: ResponsesWebSocketFetchOptions = {},
 ): FetchFunction {
   const debug = (message: string) => { try { log?.(`ws: ${message}`); } catch { /* ignore */ } };
+  // Resolved once per transport, like the connection caps: the dump is a
+  // diagnostic opt-in, not something to re-read per request.
+  const mismatchDump = process.env.CLODEX_MISMATCH_DUMP === '1';
   const resolvedOptions = {
     hardTtlMs: options.hardTtlMs ?? RESPONSES_WS_HARD_TTL_MS,
     idleTtlMs: options.idleTtlMs ?? RESPONSES_WS_IDLE_TTL_MS,
@@ -1765,7 +1772,7 @@ export function createResponsesWebSocketFetch(
       // head. Existing heads remain eligible for later exact-prefix matches.
       debug(
         `history mismatch starting an additional chain; retained ${candidates.length} existing head(s) `
-        + `(${continuationMismatchSummary(diagnosticEntry, payload, debug)})`,
+        + `(${continuationMismatchSummary(diagnosticEntry, payload, debug, mismatchDump)})`,
       );
       decision = 'history_mismatch_new_head';
     } else if (partitionKey) {

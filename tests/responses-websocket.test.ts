@@ -1748,6 +1748,147 @@ describe('createResponsesWebSocketFetch', () => {
     await readAll(second);
   });
 
+  it.each([['', 'empty'], ['   ', 'whitespace']])(
+    'continues a zero-argument tool call whose blank (%#) arguments string is echoed as {}',
+    async (blank, tag) => {
+      const input = [{ role: 'user', content: [{ type: 'input_text', text: 'ping' }] }];
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: `acct-blank-${tag}` });
+      const first = await wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+      });
+      const socket = lastSocket();
+      socket.emit('open');
+      socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: `resp_blank_${tag}` } })));
+      socket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.done', output_index: 0,
+        item: { type: 'function_call', call_id: `call_b_${tag}`, name: 'Ping', arguments: blank },
+      })));
+      socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: `resp_blank_${tag}` } })));
+      await readAll(first);
+
+      // The client-side SDK parses a blank arguments string as `{}`, so the
+      // echo for a zero-argument tool (common for MCP tools) comes back as
+      // `"{}"`. A raw-`""` snapshot would lose the chain with the same
+      // tail-index signature as #84.
+      const echoedCall = { type: 'function_call', call_id: `call_b_${tag}`, name: 'Ping', arguments: '{}' };
+      const toolOutput = { type: 'function_call_output', call_id: `call_b_${tag}`, output: 'pong' };
+      const second = await wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([...input, echoedCall, toolOutput])),
+      });
+      const sent = JSON.parse(socket.send.mock.calls[1]![0] as string);
+      expect(sent.previous_response_id).toBe(`resp_blank_${tag}`);
+      expect(sent.input).toEqual([toolOutput]);
+      emitTextResponse(socket, `resp_blank_${tag}_done`, 'done');
+      await readAll(second);
+    },
+  );
+
+  describe('mismatch diagnostics', () => {
+    /** Build a head, then replay a history that diverges at the tool call's
+     * argument value, and capture every debug line the transport emits. */
+    async function runValueMismatch(opts: {
+      accountId: string;
+      headArguments?: string;
+      replayItems?: (input: unknown[]) => unknown[];
+    }): Promise<string[]> {
+      const lines: string[] = [];
+      const input = [{ role: 'user', content: [{ type: 'input_text', text: 'read it back' }] }];
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, message => lines.push(message), {
+        accountId: opts.accountId,
+      });
+      const first = await wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+      });
+      const socket = lastSocket();
+      socket.emit('open');
+      socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_dump' } })));
+      socket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.done', output_index: 0,
+        item: {
+          type: 'function_call', call_id: 'call_dump', name: 'Read',
+          arguments: opts.headArguments ?? '{"path":"expected.ts"}',
+        },
+      })));
+      socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_dump' } })));
+      await readAll(first);
+
+      const replay = opts.replayItems
+        ? opts.replayItems(input)
+        : [
+            ...input,
+            { type: 'function_call', call_id: 'call_dump', name: 'Read', arguments: '{"path":"actual.ts"}' },
+            { type: 'function_call_output', call_id: 'call_dump', output: 'contents' },
+          ];
+      const second = await wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(replay)),
+      });
+      const isolated = lastSocket();
+      expect(isolated).not.toBe(socket);
+      isolated.emit('open');
+      emitTextResponse(isolated, 'resp_dump_new', 'done');
+      await readAll(second);
+      return lines;
+    }
+
+    it('appends both item hashes to the mismatch summary line', async () => {
+      const lines = await runValueMismatch({ accountId: 'acct-diag-hashes' });
+      const summary = lines.find(line => line.includes('history mismatch starting an additional chain'));
+      expect(summary).toMatch(/expected_hash=[0-9a-f]{16} actual_hash=[0-9a-f]{16}/);
+    });
+
+    it('writes no dump lines unless CLODEX_MISMATCH_DUMP=1 is set', async () => {
+      const lines = await runValueMismatch({ accountId: 'acct-diag-gated' });
+      expect(lines.some(line => line.includes('mismatch dump'))).toBe(false);
+    });
+
+    it('dumps both divergent items in canonical bytes when opted in', async () => {
+      process.env.CLODEX_MISMATCH_DUMP = '1';
+      try {
+        const lines = await runValueMismatch({ accountId: 'acct-diag-dump' });
+        const expectedLine = lines.find(line => line.includes('mismatch dump expected['));
+        const actualLine = lines.find(line => line.includes('mismatch dump actual['));
+        expect(expectedLine).toContain('expected.ts');
+        expect(actualLine).toContain('actual.ts');
+      } finally {
+        delete process.env.CLODEX_MISMATCH_DUMP;
+      }
+    });
+
+    it('caps a dump line at 2000 characters with a truncation marker', async () => {
+      process.env.CLODEX_MISMATCH_DUMP = '1';
+      try {
+        const lines = await runValueMismatch({
+          accountId: 'acct-diag-cap',
+          headArguments: JSON.stringify({ path: 'expected.ts', blob: 'x'.repeat(5_000) }),
+        });
+        const expectedLine = lines.find(line => line.includes('mismatch dump expected['))!;
+        const dumped = expectedLine.slice(expectedLine.indexOf(']: ') + 3);
+        expect(dumped).toHaveLength(2_000);
+        expect(dumped.endsWith(' [truncated]')).toBe(true);
+      } finally {
+        delete process.env.CLODEX_MISMATCH_DUMP;
+      }
+    });
+
+    it('renders (absent) for a side whose history ends before the divergence', async () => {
+      process.env.CLODEX_MISMATCH_DUMP = '1';
+      try {
+        // The client replays a truncated history (a rewind): every comparable
+        // item matches, so the divergence is the head simply being longer.
+        const lines = await runValueMismatch({
+          accountId: 'acct-diag-absent',
+          replayItems: input => input,
+        });
+        const expectedLine = lines.find(line => line.includes('mismatch dump expected['));
+        const actualLine = lines.find(line => line.includes('mismatch dump actual['));
+        expect(expectedLine).toContain('expected.ts');
+        expect(actualLine).toContain('(absent)');
+      } finally {
+        delete process.env.CLODEX_MISMATCH_DUMP;
+      }
+    });
+  });
+
   it('validates encrypted reasoning and exact assistant text before continuing', async () => {
     const input = [{ role: 'user', content: [{ type: 'input_text', text: 'reason' }] }];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-reasoning' });

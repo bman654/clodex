@@ -18,6 +18,7 @@ import {
   type ReasoningMetadata,
 } from './provider-factory.js';
 import { resolveUpstreamTools } from './tool-search.js';
+import { sanitizeToolInput } from './tool-input-sanitize.js';
 import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-types.js';
 import { anthropicErrorType, upstreamHttpStatus } from './upstream-error.js';
 import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
@@ -400,28 +401,6 @@ export function translateMessages(
       }
       if (parts.length) out.push({ role: 'assistant', content: parts } as unknown as ModelMessage);
     }
-  }
-  return out;
-}
-
-/**
- * Strip filler values GPT-family models emit for optional params instead of
- * omitting them: top-level `null` always, and empty arrays for properties the
- * tool's schema does not require. Claude Code forwards some tool inputs
- * verbatim into server-side API calls (e.g. WebSearch domain lists become the
- * `web_search` tool config, where an empty list is a 400), so filler must be
- * removed here. Required properties keep their empty arrays — there an empty
- * array is an intentional value (e.g. TodoWrite's `todos: []` clears the list).
- */
-function sanitizeToolInput(
-  input: Record<string, unknown>,
-  requiredProps?: ReadonlySet<string>,
-): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(input)) {
-    if (v === null) continue;
-    if (Array.isArray(v) && v.length === 0 && !requiredProps?.has(k)) continue;
-    out[k] = v;
   }
   return out;
 }
