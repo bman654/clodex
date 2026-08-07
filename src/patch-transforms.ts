@@ -33,7 +33,7 @@ import { isReservedModelAlias } from './model-aliases.js';
  * and never receive the new transforms, silently. `tests/patcher.test.ts` pins a
  * hash of this file to force that decision to be made rather than forgotten.
  */
-export const PATCH_TRANSFORMS_VERSION = 2;
+export const PATCH_TRANSFORMS_VERSION = 3;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -272,18 +272,20 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
 
   // ---------------------------------------------------------------------------
   // PATCH 1 — Agent/subagent tool 'model' zod enum.
-  // Anchor: .enum([ "sonnet",...,"fable" ]).optional().describe( — the array
-  // begins with the built-in aliases and is immediately followed by
-  // .optional().describe(. We append our identities (alias when defined, else
-  // the canonical id) inside the enum so the tool accepts them — this is the same
-  // enum subagent/skill 'model:' frontmatter is validated against, which is why
+  // Anchor: the aliases array ["sonnet",...,"fable"] wrapped in an enum
+  // constructor and immediately followed by .optional().describe(. Builds
+  // through 2.1.223 spell the constructor `.enum(`; 2.1.224+ minifies it to a
+  // bare helper call on the model property (`model:xr([...])`), so both are
+  // accepted. We append our identities (alias when defined, else the canonical
+  // id) inside the enum so the tool accepts them — this is the same enum
+  // subagent/skill 'model:' frontmatter is validated against, which is why
   // the short alias has to be the value that lands here.
   // (This same .describe( is patched by PATCH 4 below.)
   // ---------------------------------------------------------------------------
   applyOnce(
     'PATCH 1: Agent tool model enum',
-    /\.enum\((\["sonnet","opus","haiku"(?:,"[^"]+")*\])\)\.optional\(\)\.describe\(/,
-    (_m, arr) => '.enum(' + extendAliasArray(arr!) + ').optional().describe(',
+    /((?:\.enum|model:[A-Za-z_$][\w$]*)\()(\["sonnet","opus","haiku"(?:,"[^"]+")*\])\)(\.optional\(\)\.describe\()/,
+    (_m, open, arr, tail) => open! + extendAliasArray(arr!) + ')' + tail!,
     { required: true, noopIsSkip: true }
   );
 

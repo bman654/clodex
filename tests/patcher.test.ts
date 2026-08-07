@@ -450,8 +450,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
     ).replace(/\r\n/g, '\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 2,
-      digest: '944e9b8ee070d1921ad72e1053cd06c0a6cddbfe1a9c604f7333a9b35d88cb47',
+      version: 3,
+      digest: '8698e34835e19503f3591284d241f02ea2fb325844d6f5531f514f91ca76554b',
     });
   });
 });
@@ -1228,6 +1228,16 @@ describe('patch script identity naming', () => {
     // No alias → nothing to resolve and no picker entry.
     expect(out).not.toContain('case"clodex:openai:mystery":return');
     expect(out).not.toContain('value:"clodex:openai:mystery"');
+  });
+
+  it('patches the 2.1.224+ minified enum shape (model:xr([...]))', () => {
+    const modern = CLAUDE_FIXTURE.replace(
+      '.enum(["sonnet","opus","haiku","fable"])',
+      'model:xr(["sonnet","opus","haiku","fable"])',
+    );
+    expect(modern).not.toBe(CLAUDE_FIXTURE);
+    const out = runPatchScript({ 'clodex:openai:mystery': { context: 128_000 } }, modern);
+    expect(out).toContain('model:xr(["sonnet","opus","haiku","fable","clodex:openai:mystery"]).optional().describe(');
   });
 
   it('supports a configured alias that matches an object prototype name', () => {

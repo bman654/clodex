@@ -107,7 +107,7 @@ export function captureBuiltInPatchProofs(
 
   addPattern(
     'PATCH 1: Agent tool model enum',
-    /\.enum\(\["sonnet","opus","haiku"(?:,"[^"]+")*\]\)\.optional\(\)\.describe\(/,
+    /(?:\.enum|model:[A-Za-z_$][\w$]*)\(\["sonnet","opus","haiku"(?:,"[^"]+")*\]\)\.optional\(\)\.describe\(/,
   );
   addPattern(
     'PATCH 3: known-alias validator list',
