@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.2.0](https://github.com/bman654/clodex/compare/v2.1.9...v2.2.0) (2026-08-07)
+
+
+### Features
+
+* **patcher:** add opt-in local patch extensions ([#75](https://github.com/bman654/clodex/issues/75)) ([785871d](https://github.com/bman654/clodex/commit/785871d9c5741233f176f6f00b0f7d19f4d235b7))
+
+
+### Bug Fixes
+
+* **deps:** bump undici to 7.29.0 ([#76](https://github.com/bman654/clodex/issues/76)) ([54621d1](https://github.com/bman654/clodex/commit/54621d1406c86c6b3dd14f799b2e933258057e0a))
+
 ## [2.1.9](https://github.com/bman654/clodex/compare/v2.1.8...v2.1.9) (2026-08-02)
 
 
