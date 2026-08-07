@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.3.0](https://github.com/bman654/clodex/compare/v2.2.2...v2.3.0) (2026-08-07)
+
+
+### Features
+
+* **oauth:** warn on stderr when the tool-argument strip rule forks ([#89](https://github.com/bman654/clodex/issues/89)) ([827215a](https://github.com/bman654/clodex/commit/827215a8dcbad8d0cfc1f3f59a8087a5df5dc97b))
+
 ## [2.2.2](https://github.com/bman654/clodex/compare/v2.2.1...v2.2.2) (2026-08-07)
 
 
