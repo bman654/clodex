@@ -986,8 +986,60 @@ function withoutEphemeralFields(item: JsonObject): JsonObject {
   return out;
 }
 
+/**
+ * Per-tool `required` property sets, read from the request's own `tools`
+ * array. The Responses provider passes each function tool's JSON schema
+ * through as `parameters` unmodified, so these are the same `required` sets
+ * the Anthropic translation layer consults when it sanitizes tool input on
+ * the way to the client (`sanitizeToolInput` in sdk-adapter.ts).
+ */
+function requiredToolProps(payload: JsonObject): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>();
+  const add = (tool: unknown): void => {
+    if (!tool || typeof tool !== 'object') return;
+    const record = tool as JsonObject;
+    if (record.type === 'namespace' && Array.isArray(record.tools)) {
+      for (const nested of record.tools) add(nested);
+      return;
+    }
+    if (record.type !== 'function' || typeof record.name !== 'string') return;
+    const parameters = record.parameters;
+    const required = parameters && typeof parameters === 'object'
+      && Array.isArray((parameters as JsonObject).required)
+      ? (parameters as JsonObject).required as unknown[] : [];
+    map.set(record.name, new Set(required.filter((p): p is string => typeof p === 'string')));
+  };
+  if (Array.isArray(payload.tools)) for (const tool of payload.tools) add(tool);
+  return map;
+}
+
+/**
+ * The client never sees the raw upstream `arguments` string: the translation
+ * layer strips `null`-valued keys and non-required empty arrays from tool
+ * input before it reaches the client, and the client echoes that sanitized
+ * object back. A head that snapshots the raw upstream string can therefore
+ * never match its own echo, and the chain is lost on the next turn (#84).
+ * Snapshot the arguments in the same downstream shape instead. Compare-only:
+ * the payload actually sent upstream is untouched.
+ */
+function sanitizedCallArguments(item: JsonObject, requiredProps: Map<string, Set<string>>): JsonObject {
+  if (typeof item.arguments !== 'string') return item;
+  let parsed: unknown;
+  try { parsed = JSON.parse(item.arguments); } catch { return item; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return item;
+  const required = requiredProps.get(typeof item.name === 'string' ? item.name : '');
+  const out: JsonObject = {};
+  for (const [key, value] of Object.entries(parsed as JsonObject)) {
+    if (value === null) continue;
+    if (Array.isArray(value) && value.length === 0 && !required?.has(key)) continue;
+    out[key] = value;
+  }
+  return { ...item, arguments: JSON.stringify(out) };
+}
+
 function expectedAssistantItems(ctx: RequestContext): unknown[] {
   const output: unknown[] = [];
+  const requiredProps = requiredToolProps(ctx.originalPayload);
   for (const [, accumulator] of [...ctx.outputByIndex.entries()].sort(([left], [right]) => left - right)) {
       const done = accumulator.done ?? {};
       const type = accumulator.type ?? (typeof done.type === 'string' ? done.type : undefined);
@@ -1008,7 +1060,11 @@ function expectedAssistantItems(ctx: RequestContext): unknown[] {
         output.push({ ...withoutEphemeralFields(done), type: 'reasoning', summary });
         continue;
       }
-      if (type === 'function_call' || type === 'custom_tool_call') {
+      if (type === 'function_call') {
+        output.push({ ...sanitizedCallArguments(withoutEphemeralFields(done), requiredProps), type });
+        continue;
+      }
+      if (type === 'custom_tool_call') {
         output.push({ ...withoutEphemeralFields(done), type });
       }
   }
