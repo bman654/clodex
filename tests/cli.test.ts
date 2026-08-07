@@ -208,7 +208,6 @@ describe('help text', () => {
     for (const help of helps) {
       expect(help).not.toContain('antigravity');
       expect(help).not.toContain('Gemini');
-      expect(help).not.toContain('OpenCode');
       expect(help).not.toContain('Zen');
       expect(help).not.toContain('--vertex');
       expect(help).not.toContain('subscription tier');
@@ -222,6 +221,7 @@ describe('help text', () => {
     expect(root).toContain('clodex patch');
     expect(root).toContain('clodex models');
     expect(root).toContain('clodex providers');
+    expect(root).toContain('OpenCode Go');
     expect(root).toContain('--endpoint');
     expect(root).toContain('--proxy');
     expect(root).toContain('--save-mode');

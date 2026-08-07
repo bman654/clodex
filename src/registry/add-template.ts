@@ -95,6 +95,14 @@ export async function addProviderFromTemplate(
   });
   if (existingState.error) return existingState.error;
 
+  if (trimmedKey && template.verifyCredential) {
+    const probeBaseUrl = opts?.baseUrl?.trim() || template.defaultBaseUrl || '';
+    const credentialError = await template.verifyCredential(trimmedKey, probeBaseUrl);
+    if (credentialError) {
+      return { added: false, error: credentialError };
+    }
+  }
+
   const fetched = await fetchTemplateModels(template, trimmedKey, opts?.baseUrl);
   if (fetched.error || fetched.models.length === 0) {
     return {

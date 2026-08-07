@@ -207,6 +207,29 @@ describe('registry/add-template', () => {
     expect(res.error).toBe('API key cannot be empty.');
   });
 
+  it('rejects the add when the template credential probe fails, before any models fetch', async () => {
+    const tpl: ProviderTemplate = {
+      ...dummyTemplate,
+      verifyCredential: vi.fn(async () => 'Provider rejected this API key.'),
+    };
+    const res = await addProviderFromTemplate(tpl, 'bad-key');
+    expect(res.added).toBe(false);
+    expect(res.error).toBe('Provider rejected this API key.');
+    expect(tpl.verifyCredential).toHaveBeenCalledWith('bad-key', '');
+    expect(fetchTemplate.fetchTemplateModels).not.toHaveBeenCalled();
+    expect(registryState.providers).toHaveLength(0);
+  });
+
+  it('proceeds when the template credential probe accepts the key', async () => {
+    const tpl: ProviderTemplate = {
+      ...dummyTemplate,
+      verifyCredential: vi.fn(async () => null),
+    };
+    const res = await addProviderFromTemplate(tpl, 'good-key');
+    expect(res.added).toBe(true);
+    expect(fetchTemplate.fetchTemplateModels).toHaveBeenCalled();
+  });
+
   it('fails if provider already exists and replaceExisting is not set', async () => {
     registryState = {
       schemaVersion: 1,

@@ -14,10 +14,10 @@ import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 
 const TEST_TIMEOUT_MS = 10_000;
 
-interface OpenAiModelListResponse {
+type OpenAiModelListResponse = ProviderModelListRow[] | {
   data?: ProviderModelListRow[];
   models?: ProviderModelListRow[];
-}
+};
 
 interface ProviderModelListRow {
   id?: string;
@@ -102,7 +102,7 @@ function parseNativePricing(pricing: ProviderModelListRow['pricing']): CachedMod
 }
 
 function parseModelList(body: OpenAiModelListResponse, npm: string): CachedModel[] {
-  const rows = body.data ?? body.models ?? [];
+  const rows = Array.isArray(body) ? body : body.data ?? body.models ?? [];
   const format = modelFormatForNpm(npm);
   const models: CachedModel[] = [];
 
