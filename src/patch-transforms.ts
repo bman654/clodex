@@ -33,7 +33,7 @@ import { isReservedModelAlias } from './model-aliases.js';
  * and never receive the new transforms, silently. `tests/patcher.test.ts` pins a
  * hash of this file to force that decision to be made rather than forgotten.
  */
-export const PATCH_TRANSFORMS_VERSION = 3;
+export const PATCH_TRANSFORMS_VERSION = 4;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -428,6 +428,54 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         /(function [\w$]+\(e,t\)\{)(let [\w$]+=[\w$]+\(\);if\([\w$]+!==void 0\)return [\w$]+;if\([\w$]+\(e,t\)\)return [\w$]+;return [\w$]+\(e,t\)\})/,
         (_m, head, body) => head! + SNIPPET + body!,
         { required: true }
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 10 — autocompact alias recognition.
+  //
+  // The autocompact threshold resolver classifies models it does not recognize
+  // as source:"unknown-model" (window enforcement, 2.1.224): the session is
+  // held to an assumed window with an unrecognized-model notice, and a
+  // conversation whose prefix already exceeds that threshold is blocked with a
+  // synthetic "Prompt is too long" instead of being sent. Configured
+  // identities are real models whose true windows PATCH 7 bakes into the
+  // window resolver this same function reads, so short-circuit the
+  // unknown-model branch: a configured identity returns source:"model-default"
+  // with its resolved window — the same treatment a recognized model gets.
+  //
+  // Anchor: the unique unknown-model return inside the threshold resolver. The
+  // env kill-switch name is stable across builds; the minified identifiers are
+  // wildcarded. The injected lookup reuses PATCH 7's key set so the two baked
+  // tables cannot drift, and a null-prototype object keeps prototype-name
+  // aliases (e.g. "constructor") from false-matching.
+  // ---------------------------------------------------------------------------
+  if (Object.keys(CONTEXT_BY_KEY).length) {
+    const MARKER = '/*ccpatch:acw*/';
+    const KEYS = JSON.stringify(Object.fromEntries(Object.keys(CONTEXT_BY_KEY).map((k) => [k, 1])));
+    const snippetFor = (model: string, win: string) =>
+      MARKER + 'if(Object.assign(Object.create(null),' + KEYS + ')[String(' + model + '||"").trim().toLowerCase()]!==void 0)'
+      + 'return{window:' + win + ',configured:' + win + ',source:"model-default"};';
+
+    if (js.includes(MARKER)) {
+      // Re-patching an already-patched binary: refresh the baked key set in
+      // place, preserving the build-specific identifier names.
+      applyOnce(
+        'PATCH 10: autocompact alias recognition (refresh)',
+        /\/\*ccpatch:acw\*\/if\(Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\(([\w$]+)\|\|""\)\.trim\(\)\.toLowerCase\(\)\]!==void 0\)return\{window:([\w$]+),configured:\2,source:"model-default"\};/,
+        (_m, model, win) => snippetFor(model!, win!),
+        { required: true, noopIsSkip: true }
+      );
+    } else {
+      applyOnce(
+        'PATCH 10: autocompact alias recognition',
+        /(if\([\w$]+\(\)&&![\w$]+(?:\.env)?\.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT&&![\w$]+\(([\w$]+),[\w$]+\)&&![\w$]+\(\2\)&&![\w$]+\(\2,[\w$]+\)\)return\{window:([\w$]+),configured:\3,source:"unknown-model"\})/,
+        (_m, whole, model, win) => snippetFor(model!, win!) + whole!,
+        // Best-effort by design: if a future build drifts this anchor, losing
+        // alias recognition degrades to the pre-PATCH-10 status quo, which is
+        // far better than aborting every patch (the PATCH 1 lesson).
+        { required: false }
       );
     }
   }

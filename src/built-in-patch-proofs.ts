@@ -159,6 +159,10 @@ export function captureBuiltInPatchProofs(
     effortProofPattern('/*ccpatch:max-effort*/'),
   );
   addPattern(
+    'PATCH 10: autocompact alias recognition',
+    /\/\*ccpatch:acw\*\/if\(Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\([\w$]+\|\|""\)\.trim\(\)\.toLowerCase\(\)\]!==void 0\)return\{window:[\w$]+,configured:[\w$]+,source:"model-default"\};/,
+  );
+  addPattern(
     'PATCH 9: default effort',
     /\/\*ccpatch:default-effort\*\/var _cce=Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\([\w$]+\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_cce!==void 0\)return _cce;/,
   );

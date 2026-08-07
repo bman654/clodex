@@ -450,8 +450,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
     ).replace(/\r\n/g, '\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 3,
-      digest: '8698e34835e19503f3591284d241f02ea2fb325844d6f5531f514f91ca76554b',
+      version: 4,
+      digest: 'ec54416778c261b5ab35f2b602447664b21d331294e08e0c16680a75fd00668d',
     });
   });
 });
@@ -645,6 +645,7 @@ const CLAUDE_CORE_FIXTURE = [
   'function rz(x){switch(x){case"best":{return "opus"}default:return null}}',
   'function opts(e,t,r){let n=cur(),o=(n==="opus")?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}',
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
+  'function QT9(e,t){let n=lw(e),o=RS(e,t);if(gk()&&!EV.CLAUDE_CODE_DISABLE_UNKNOWN_MODEL_WINDOW_ENFORCEMENT&&!isKn(e,t)&&!isBt(e)&&!isOv(e,n))return{window:o,configured:o,source:"unknown-model"};return{window:o,configured:o,source:"auto"}}',
 ].join('\n');
 
 const digestOf = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -1291,6 +1292,7 @@ describe('patch script identity naming', () => {
       ['PATCH 5: model picker options', 'OK'],
       ['PATCH 4: Agent tool model description', 'OK'],
       ['PATCH 7: per-model context window', 'OK'],
+      ['PATCH 10: autocompact alias recognition', 'OK'],
       ['PATCH 8a: effort capability', 'OK'],
       ['PATCH 8b: xhigh effort capability', 'OK'],
       ['PATCH 8c: max effort capability', 'OK'],
@@ -1306,6 +1308,7 @@ describe('patch script identity naming', () => {
       // PATCH 7 re-runs through the in-place refresh path; an unchanged config
       // rewrites the identical table, which reports as already patched.
       ['PATCH 7: per-model context window (refresh)', 'SKIP'],
+      ['PATCH 10: autocompact alias recognition (refresh)', 'SKIP'],
       ['PATCH 8a: effort capability (refresh)', 'SKIP'],
       ['PATCH 8b: xhigh effort capability (refresh)', 'SKIP'],
       ['PATCH 8c: max effort capability (refresh)', 'SKIP'],
@@ -1342,20 +1345,68 @@ describe('patch script identity naming', () => {
 
     expect(patched.content).toContain('.enum(["sonnet","opus","haiku","fable","sol","clodex:openai:mystery"])');
     expect(patched.content).toContain('/*ccpatch:ctx*/');
-    expect(patched.results.slice(0, 6).map(result => [result.name, result.status])).toEqual([
+    expect(patched.results.slice(0, 7).map(result => [result.name, result.status])).toEqual([
       ['PATCH 1: Agent tool model enum', 'OK'],
       ['PATCH 3: known-alias validator list', 'OK'],
       ['PATCH 6: alias resolver switch', 'OK'],
       ['PATCH 5: model picker options', 'OK'],
       ['PATCH 4: Agent tool model description', 'OK'],
       ['PATCH 7: per-model context window', 'OK'],
+      ['PATCH 10: autocompact alias recognition', 'OK'],
     ]);
-    expect(patched.results.slice(6)).toEqual([
+    expect(patched.results.slice(7)).toEqual([
       { status: 'FAIL', name: 'PATCH 8a: effort capability', extra: 'anchor not found' },
       { status: 'FAIL', name: 'PATCH 8b: xhigh effort capability', extra: 'anchor not found' },
       { status: 'FAIL', name: 'PATCH 8c: max effort capability', extra: 'anchor not found' },
       { status: 'FAIL', name: 'PATCH 9: default effort', extra: 'anchor not found' },
     ]);
+  });
+
+  it('recognizes configured identities in the autocompact threshold resolver', () => {
+    const out = runPatchScript(config, CLAUDE_CORE_FIXTURE);
+    expect(out).toContain('/*ccpatch:acw*/');
+    const start = out.indexOf('function QT9');
+    expect(start).toBeGreaterThan(-1);
+    const tail = 'return{window:o,configured:o,source:"auto"}}';
+    const src = out.slice(start, out.indexOf(tail, start) + tail.length);
+    const resolver = new Function(
+      'lw', 'RS', 'gk', 'EV', 'isKn', 'isBt', 'isOv',
+      `${src}; return QT9;`,
+    )(
+      (e: string) => String(e).toLowerCase(),
+      () => 272_000,
+      () => true,
+      {},
+      () => false,
+      () => false,
+      () => false,
+    ) as (e: string, t?: number) => { window: number; configured: number; source: string };
+    // A configured alias and its canonical id are recognized with their window.
+    expect(resolver('sol')).toEqual({ window: 272_000, configured: 272_000, source: 'model-default' });
+    expect(resolver('SOL ')).toEqual({ window: 272_000, configured: 272_000, source: 'model-default' });
+    expect(resolver('clodex:openai:mystery').source).toBe('model-default');
+    // A genuinely unrecognized model still gets the enforcement branch.
+    expect(resolver('some-future-model').source).toBe('unknown-model');
+    // Object prototype names never false-match the baked key set.
+    expect(resolver('constructor').source).toBe('unknown-model');
+  });
+
+  it('refreshes the autocompact recognition key set when the config changes', () => {
+    const once = runPatchScript(config, CLAUDE_CORE_FIXTURE);
+    expect(once).toContain('"clodex:openai:mystery":1');
+    const updatedConfig: Parameters<typeof applyClodexPatches>[1] = {
+      ...config,
+      'clodex:openai:added-later': { alias: 'nova', context: 128_000 },
+    };
+    const refreshed = applyClodexPatches(once, updatedConfig);
+    expect(refreshed.results.map(r => [r.name, r.status])).toContainEqual(
+      ['PATCH 10: autocompact alias recognition (refresh)', 'OK'],
+    );
+    const marker = refreshed.content.indexOf('/*ccpatch:acw*/');
+    const snippet = refreshed.content.slice(marker, refreshed.content.indexOf(';', marker) + 1);
+    expect(snippet).toContain('"nova":1');
+    expect(snippet).toContain('"clodex:openai:added-later":1');
+    expect(snippet).toContain('"sol":1');
   });
 
   it('refreshes every baked effort table when extended capabilities are removed', () => {
