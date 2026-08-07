@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.2](https://github.com/bman654/clodex/compare/v2.2.1...v2.2.2) (2026-08-07)
+
+
+### Bug Fixes
+
+* **oauth:** snapshot function_call arguments in the sanitized downstream shape ([#80](https://github.com/bman654/clodex/issues/80)) ([7c2d1fd](https://github.com/bman654/clodex/commit/7c2d1fdfe40d6cd61bcafebf6935bec6d13b81d7))
+
 ## [2.2.1](https://github.com/bman654/clodex/compare/v2.2.0...v2.2.1) (2026-08-07)
 
 
