@@ -79,6 +79,8 @@ export function cachedModelToLocal(
     interleavedReasoningField: cached.interleavedReasoningField ?? modelsDev?.interleaved?.field,
     useResponsesLite: cached.useResponsesLite,
     preferWebSockets: cached.preferWebSockets,
+    modalities: cached.modalities,
+    compatibility: cached.compatibility,
   };
 }
 

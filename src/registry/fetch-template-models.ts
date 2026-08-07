@@ -141,6 +141,103 @@ function parseModelList(body: OpenAiModelListResponse, npm: string): CachedModel
   return models;
 }
 
+function materializeTemplateModel(
+  template: ProviderTemplate,
+  model: NonNullable<ProviderTemplate['staticModels']>[number],
+  baseUrl: string,
+): CachedModel {
+  const npm = model.npm ?? template.npm;
+  const { id, upstreamModelId: normalizedUpstream } = normalizeGoogleModelId(model.id, npm);
+  const family = model.family ?? (id.split(/[-/:]/)[0] ?? id);
+  const freeStatus = model.freeStatus ?? classifyFreeStatus({ model });
+
+  return {
+    ...model,
+    id,
+    name: normalizeGoogleDisplayName(model.name, id),
+    upstreamModelId: model.upstreamModelId ?? normalizedUpstream,
+    family,
+    brand: model.brand ?? deriveBrand(family),
+    contextWindow: model.contextWindow ?? resolveContextWindow(id),
+    isFree: model.isFree ?? isFreeStatus(freeStatus),
+    freeStatus,
+    modelFormat: model.modelFormat ?? modelFormatForNpm(npm),
+    npm,
+    apiUrl: model.apiUrl ?? baseUrl,
+  };
+}
+
+function normalizeTemplateOverlay(
+  template: ProviderTemplate,
+  model: NonNullable<ProviderTemplate['staticModels']>[number],
+): NonNullable<ProviderTemplate['staticModels']>[number] {
+  const npm = model.npm ?? template.npm;
+  const { id } = normalizeGoogleModelId(model.id, npm);
+  const family = model.family;
+  const hasFreeMetadata = model.cost !== undefined
+    || model.isFree !== undefined
+    || model.freeStatus !== undefined;
+  const freeStatus = hasFreeMetadata
+    ? model.freeStatus ?? classifyFreeStatus({ model })
+    : undefined;
+
+  return {
+    ...model,
+    id,
+    name: normalizeGoogleDisplayName(model.name, id),
+    ...(model.upstreamModelId !== undefined
+      ? { upstreamModelId: normalizeGoogleModelId(model.upstreamModelId, npm).upstreamModelId }
+      : {}),
+    ...(model.npm !== undefined ? { npm } : {}),
+    ...(model.modelFormat !== undefined
+      ? { modelFormat: model.modelFormat }
+      : model.npm !== undefined
+        ? { modelFormat: modelFormatForNpm(npm) }
+        : {}),
+    ...(family !== undefined ? { family, brand: model.brand ?? deriveBrand(family) } : {}),
+    ...(freeStatus !== undefined
+      ? {
+          freeStatus,
+          isFree: model.isFree ?? isFreeStatus(freeStatus),
+        }
+      : {}),
+  };
+}
+
+/**
+ * Layer curated per-model metadata over a provider's live model list.
+ *
+ * Mixed-protocol providers expose one discovery endpoint but require different
+ * SDK packages and base URLs per model. `allowlist` also provides a fail-closed
+ * way to exclude protocols the runtime intentionally does not support.
+ */
+export function applyTemplateModelMetadata(
+  template: ProviderTemplate,
+  discovered: CachedModel[],
+  _baseUrl: string,
+): CachedModel[] {
+  const curated = new Map(
+    (template.staticModels ?? [])
+      .map(model => normalizeTemplateOverlay(template, model))
+      .map(model => [model.id, model] as const),
+  );
+
+  const visible = template.staticModelPolicy === 'allowlist'
+    ? discovered.filter(model => curated.has(model.id))
+    : discovered;
+
+  return visible.map(model => {
+    const overlay = curated.get(model.id);
+    if (!overlay) return model;
+    return {
+      ...model,
+      ...overlay,
+      id: model.id,
+      upstreamModelId: overlay.upstreamModelId ?? model.upstreamModelId,
+    };
+  });
+}
+
 export interface FetchTemplateModelsResult {
   models: CachedModel[];
   baseUrl: string;
@@ -166,19 +263,8 @@ export async function fetchTemplateModels(
   }
 
   if (template.modelSource === 'static-seed') {
-    const models: CachedModel[] = (template.staticModels || []).map(sm => {
-      const family = sm.id.split(/[-/:]/)[0] ?? sm.id;
-      return {
-        id: sm.id,
-        name: sm.name,
-        upstreamModelId: sm.id,
-        family,
-        brand: deriveBrand(family),
-        contextWindow: resolveContextWindow(sm.id),
-        modelFormat: modelFormatForNpm(template.npm),
-        npm: template.npm,
-      };
-    });
+    const models = (template.staticModels ?? [])
+      .map(model => materializeTemplateModel(template, model, baseUrl));
     return { models, baseUrl };
   }
 
@@ -260,7 +346,7 @@ export async function fetchTemplateModels(
       // Failed to parse, use empty object
     }
 
-    const models = parseModelList(json, template.npm);
+    const models = applyTemplateModelMetadata(template, parseModelList(json, template.npm), baseUrl);
     if (models.length === 0) {
       return {
         models: [],

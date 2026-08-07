@@ -1400,6 +1400,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
           interleavedReasoningField: selectedModel.interleavedReasoningField,
           useResponsesLite: selectedModel.useResponsesLite,
           preferWebSockets: selectedModel.preferWebSockets,
+          compatibility: selectedModel.compatibility,
           headers: activeProvider.headers,
         },
         launchApiKey ?? '',

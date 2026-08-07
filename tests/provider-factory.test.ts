@@ -275,6 +275,88 @@ describe('getReasoningCapabilities', () => {
     });
     expect(effortProviderOptions('@ai-sdk/openai-compatible', 'low', 'glm-5.2')).toBeUndefined();
   });
+
+
+  it('honors a curated per-model effort map before family defaults', () => {
+    const metadata = {
+      providerId: 'opencode-go',
+      reasoning: true,
+      compatibility: {
+        reasoningEffortMap: { low: null, high: 'max' },
+      },
+    };
+
+    expect(getPatchReasoningCapabilities(
+      '@ai-sdk/openai-compatible',
+      'custom-reasoning-model',
+      metadata,
+    )).toMatchObject({
+      levels: ['high'],
+      defaultLevel: 'high',
+      mode: 'controllable',
+      source: 'provider-metadata',
+    });
+    expect(effortProviderOptions(
+      '@ai-sdk/openai-compatible',
+      'low',
+      'custom-reasoning-model',
+      metadata,
+    )).toBeUndefined();
+    expect(effortProviderOptions(
+      '@ai-sdk/openai-compatible',
+      'high',
+      'custom-reasoning-model',
+      metadata,
+    )).toEqual({ opencodeGo: { reasoningEffort: 'max' } });
+  });
+
+  it('uses generic documented effort controls when compatibility explicitly enables them', () => {
+    const metadata = {
+      providerId: 'opencode-go',
+      reasoning: true,
+      compatibility: {
+        supportsReasoningEffort: true,
+        thinkingFormat: 'qwen' as const,
+      },
+    };
+
+    expect(getPatchReasoningCapabilities(
+      '@ai-sdk/openai-compatible',
+      'qwen-custom',
+      metadata,
+    )).toMatchObject({
+      levels: ['low', 'medium', 'high'],
+      defaultLevel: 'medium',
+      mode: 'controllable',
+      source: 'provider-metadata',
+    });
+    expect(effortProviderOptions(
+      '@ai-sdk/openai-compatible',
+      'high',
+      'qwen-custom',
+      metadata,
+    )).toEqual({ opencodeGo: { reasoningEffort: 'high' } });
+  });
+
+  it('treats an explicit reasoning-effort disable as internal-only reasoning', () => {
+    const metadata = {
+      providerId: 'opencode-go',
+      reasoning: true,
+      compatibility: { supportsReasoningEffort: false },
+    };
+
+    expect(getReasoningCapabilities(
+      '@ai-sdk/openai-compatible',
+      'kimi-custom',
+      metadata,
+    )).toMatchObject({ levels: [], mode: 'internal-only', source: 'provider-metadata' });
+    expect(effortProviderOptions(
+      '@ai-sdk/openai-compatible',
+      'high',
+      'kimi-custom',
+      metadata,
+    )).toBeUndefined();
+  });
 });
 
 describe('effortProviderOptions + deepMergeProviderOptions', () => {
@@ -558,6 +640,49 @@ describe('createLanguageModel', () => {
       apiKey: 'sk-test',
       baseURL: 'https://api.z.ai/api/coding/paas/v4',
       headers: { 'X-Plan': 'coding' },
+    });
+    vi.doUnmock('@ai-sdk/openai-compatible');
+  });
+
+  it('installs the per-model compatibility request transformer for openai-compatible providers', async () => {
+    const factory = vi.fn((modelId: string) => ({ modelId }));
+    const createOpenAICompatible = vi.fn(() => factory);
+    vi.doMock('@ai-sdk/openai-compatible', () => ({ createOpenAICompatible }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai-compatible',
+      modelId: 'deepseek-v4-pro',
+      apiKey: 'sk-test',
+      baseURL: 'https://mixed.example/v1',
+      providerId: 'opencode-go',
+      compatibility: {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        maxTokensField: 'max_tokens',
+        thinkingFormat: 'deepseek',
+      },
+    });
+
+    expect(createOpenAICompatible).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'opencode-go',
+      apiKey: 'sk-test',
+      baseURL: 'https://mixed.example/v1',
+      transformRequestBody: expect.any(Function),
+    }));
+    const options = createOpenAICompatible.mock.calls[0]?.[0] as {
+      transformRequestBody: (body: Record<string, unknown>) => Record<string, unknown>;
+    };
+    expect(options.transformRequestBody({
+      store: false,
+      max_completion_tokens: 4096,
+      reasoning_effort: 'high',
+      messages: [{ role: 'developer', content: 'instructions' }],
+    })).toEqual({
+      max_tokens: 4096,
+      reasoning_effort: 'high',
+      thinking: { type: 'enabled' },
+      messages: [{ role: 'system', content: 'instructions' }],
     });
     vi.doUnmock('@ai-sdk/openai-compatible');
   });

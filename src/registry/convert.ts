@@ -17,12 +17,14 @@ function modelToCached(model: LocalProviderModel): CachedModel {
     freeStatus: model.freeStatus,
     modelFormat: model.modelFormat,
     npm: model.npm,
-    apiUrl: model.apiBaseUrl,
+    apiUrl: model.apiBaseUrl ?? model.baseUrl,
     supportedParameters: model.supportedParameters,
     reasoning: model.reasoning,
     interleavedReasoningField: model.interleavedReasoningField,
     useResponsesLite: model.useResponsesLite,
     preferWebSockets: model.preferWebSockets,
+    modalities: model.modalities,
+    compatibility: model.compatibility,
   };
 }
 

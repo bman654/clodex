@@ -59,6 +59,7 @@ describe('registry io', () => {
       name: 'Groq',
       enabled: true,
       authRef: 'keyring:provider:groq',
+      preserveModelPricing: true,
       api: { npm: '@ai-sdk/groq' },
       addedAt: '2026-06-09T00:00:00.000Z',
       modelsCache: {
@@ -77,6 +78,7 @@ describe('registry io', () => {
     expect(loaded.providers).toHaveLength(1);
     expect(loaded.providers[0]?.id).toBe('groq');
     expect(loaded.providers[0]?.modelsCache?.models[0]?.npm).toBe('@ai-sdk/groq');
+    expect(loaded.providers[0]?.preserveModelPricing).toBe(true);
   });
 
   it('writes providers.json with restrictive permissions', () => {
@@ -296,12 +298,22 @@ describe('materializeRegistry', () => {
           upstreamModelId: 'gpt-5.5',
           modelFormat: 'openai',
           npm: '@ai-sdk/openai',
+          modalities: ['text', 'image'],
+          compatibility: {
+            reasoningEffortMap: { high: 'max' },
+            thinkingFormat: 'deepseek',
+          },
         }],
       },
     });
     const locals = materializeRegistry(registry, () => 'sk-test');
     expect(locals).toHaveLength(1);
     expect(locals[0]?.models[0]?.upstreamModelId).toBe('gpt-5.5');
+    expect(locals[0]?.models[0]?.modalities).toEqual(['text', 'image']);
+    expect(locals[0]?.models[0]?.compatibility).toEqual({
+      reasoningEffortMap: { high: 'max' },
+      thinkingFormat: 'deepseek',
+    });
     expect(locals[0]?.apiKey).toBe('sk-test');
     expect(locals[0]?.authType).toBe('oauth');
   });

@@ -1,4 +1,5 @@
-import { Readable } from 'node:stream';
+import { Readable, Transform } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
 import type { ServerResponse } from 'node:http';
 import { sanitizeCredential } from './server/auth.js';
 import { CLAUDE_CODE_USER_AGENT } from './oauth/claude-identity.js';
@@ -105,6 +106,51 @@ export interface RelayAnthropicOptions {
   onTokenRefreshed?: (token: string) => void;
   onUpstreamError?: (statusCode: number, body: string) => void;
   signal?: AbortSignal;
+  /**
+   * Echo this exact model id in the relayed response instead of the upstream's.
+   * Claude Code resolves context windows from the response `model` field but
+   * uses the request id for preflight, so a passthrough route selected through
+   * an alias must echo the alias or auto-compaction misses its window config
+   * (see CLAUDE.md "alias response-model echo"). Rewrites the JSON body's
+   * `model` and the SSE `message_start` event; every other byte passes through.
+   */
+  responseModelOverride?: string;
+}
+
+/**
+ * Line-preserving SSE transform that rewrites the `message_start` event's
+ * `message.model` to the requested id. Buffers only up to one line; every
+ * line that is not a parseable `message_start` data line passes through
+ * byte-for-byte.
+ */
+export function anthropicSseModelRewrite(override: string): Transform {
+  const decoder = new StringDecoder('utf8');
+  let tail = '';
+  const rewriteLine = (line: string): string => {
+    if (!line.startsWith('data:') || !line.includes('"message_start"')) return line;
+    try {
+      const parsed = JSON.parse(line.slice(5)) as { type?: string; message?: { model?: unknown } };
+      if (parsed.type === 'message_start' && parsed.message && typeof parsed.message.model === 'string') {
+        parsed.message.model = override;
+        return 'data: ' + JSON.stringify(parsed);
+      }
+    } catch {
+      // Not a single-line JSON payload; relay it untouched.
+    }
+    return line;
+  };
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      const lines = (tail + decoder.write(chunk)).split('\n');
+      tail = lines.pop() ?? '';
+      const rewritten = lines.map(rewriteLine);
+      callback(null, rewritten.length ? rewritten.join('\n') + '\n' : '');
+    },
+    flush(callback) {
+      const rest = tail + decoder.end();
+      callback(null, rest ? rewriteLine(rest) : '');
+    },
+  });
 }
 
 export async function relayAnthropicMessages(
@@ -153,9 +199,16 @@ export async function relayAnthropicMessages(
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
     });
-    Readable.fromWeb(upstreamRes.body as Parameters<typeof Readable.fromWeb>[0])
-      .on('error', () => res.destroy())
-      .pipe(res);
+    const upstream = Readable.fromWeb(upstreamRes.body as Parameters<typeof Readable.fromWeb>[0])
+      .on('error', () => res.destroy());
+    if (options.responseModelOverride) {
+      upstream
+        .pipe(anthropicSseModelRewrite(options.responseModelOverride))
+        .on('error', () => res.destroy())
+        .pipe(res);
+    } else {
+      upstream.pipe(res);
+    }
     return;
   }
 
@@ -165,13 +218,22 @@ export async function relayAnthropicMessages(
     return;
   }
 
-  const text = await upstreamRes.text();
+  let text = await upstreamRes.text();
+  let parsed: unknown;
   try {
-    JSON.parse(text);
+    parsed = JSON.parse(text);
   } catch {
     res.writeHead(502, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Upstream response was not valid JSON' } }));
     return;
+  }
+  if (
+    options.responseModelOverride
+    && parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    && typeof (parsed as Record<string, unknown>).model === 'string'
+  ) {
+    (parsed as Record<string, unknown>).model = options.responseModelOverride;
+    text = JSON.stringify(parsed);
   }
   res.writeHead(200, {
     'Content-Type': 'application/json',

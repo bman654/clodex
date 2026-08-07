@@ -228,6 +228,7 @@ export function applyPricingToRegistryProviders(
   const index = buildPricingIndex(cache);
   let changed = false;
   for (const provider of registry.providers) {
+    if (provider.preserveModelPricing) continue;
     if (!provider.modelsCache?.models.length) continue;
     const platform = TEMPLATE_TO_PRICING_PLATFORM[provider.templateId] ?? TEMPLATE_TO_PRICING_PLATFORM[provider.id];
     const enriched = enrichModelsWithPricing(provider.modelsCache.models, index, platform);

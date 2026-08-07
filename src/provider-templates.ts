@@ -1,7 +1,12 @@
 // src/provider-templates.ts — builtin provider templates for clodex providers add
 
+import type { CachedModel } from './registry/types.js';
+
 export type ProviderAuthType = 'api' | 'oauth' | 'none';
 export type ProviderModelSource = 'api-list' | 'static-seed' | 'manual-only';
+export type ProviderStaticModelPolicy = 'overlay' | 'allowlist';
+export type ProviderTemplateModel = Pick<CachedModel, 'id' | 'name'>
+  & Partial<Omit<CachedModel, 'id' | 'name'>>;
 
 export interface ProviderTemplate {
   id: string;
@@ -18,7 +23,12 @@ export interface ProviderTemplate {
   /** Static headers this provider requires on every request (model listing and runtime). */
   headers?: Record<string, string>;
   modelSource: ProviderModelSource;
-  staticModels?: Array<{ id: string; name: string }>;
+  /** Curated model metadata layered over live discovery or used as a static seed. */
+  staticModels?: ProviderTemplateModel[];
+  /** `allowlist` hides live models absent from staticModels; `overlay` keeps them. */
+  staticModelPolicy?: ProviderStaticModelPolicy;
+  /** Keep provider/curated costs instead of replacing them with the global pricing cache. */
+  preserveModelPricing?: boolean;
   supported: boolean;
   addable?: boolean;
   hidden?: boolean;

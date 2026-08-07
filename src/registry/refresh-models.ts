@@ -251,7 +251,7 @@ async function refreshApiListProvider(
       return { models: [], error: fetched.error ?? 'No models returned.', baseUrl: fetched.baseUrl };
     }
     return {
-      models: fetched.models.map(m => ({ ...m, apiUrl: fetched.baseUrl })),
+      models: fetched.models.map(m => ({ ...m, apiUrl: m.apiUrl ?? fetched.baseUrl })),
       baseUrl: fetched.baseUrl,
     };
   }
@@ -274,7 +274,7 @@ async function refreshApiListProvider(
   return {
     models: usableModels.map(m => ({
       ...m,
-      apiUrl: fetched.baseUrl,
+      apiUrl: m.apiUrl ?? fetched.baseUrl,
     })),
     baseUrl: fetched.baseUrl,
   };
@@ -421,7 +421,9 @@ export async function refreshProviderModels(
 
     const pricingCache = loadPricingCache();
     const platform = pricingPlatformForProvider(provider.templateId, provider.id);
-    const enriched = enrichModelsWithPricing(models, buildPricingIndex(pricingCache), platform);
+    const enriched = provider.preserveModelPricing
+      ? models
+      : enrichModelsWithPricing(models, buildPricingIndex(pricingCache), platform);
 
     await withRegistryWriteLock(() => {
       const currentRegistry = loadRegistryStrict();

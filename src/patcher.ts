@@ -278,6 +278,7 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
         reasoning: model.reasoning ?? modelsDev?.reasoning,
         interleavedReasoningField:
           model.interleavedReasoningField ?? modelsDev?.interleaved?.field,
+        compatibility: model.compatibility,
         upstreamModelId,
       });
       meta.set(`${provider.id}:${model.id}`, {

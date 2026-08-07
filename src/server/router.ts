@@ -353,6 +353,12 @@ async function handleAnthropicMessages(
       extraHeaders: model.headers,
       refreshToken,
       onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
+      // Echo the exact requested id when it differs from the upstream id, so
+      // clients that key context windows on the response model still resolve.
+      responseModelOverride:
+        typeof body.model === 'string' && body.model !== upstreamModelId(model)
+          ? body.model
+          : undefined,
       onUpstreamError: options.inferenceLogPath
         ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
             requestId,
@@ -406,6 +412,7 @@ async function handleAnthropicMessages(
         supportedParameters: model.supportedParameters,
         reasoning: model.reasoning,
         interleavedReasoningField: model.interleavedReasoningField,
+        compatibility: model.compatibility,
         upstreamModelId: upstreamModelId(model),
       },
       maxTools: npmMaxTools,
@@ -725,6 +732,7 @@ async function getOrInitLanguageModel(
       headers: model.headers,
       useResponsesLite: model.useResponsesLite,
       preferWebSockets: model.preferWebSockets,
+      compatibility: model.compatibility,
       onWebSocketDiagnostic: webSocketDiagnosticsLogPath
         ? event => writeWebSocketDiagnosticLog(webSocketDiagnosticsLogPath, event)
         : undefined,

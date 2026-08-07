@@ -101,6 +101,9 @@ function parseProvider(raw: unknown): RegistryProvider | null {
   if (p.subscriptionFilter === 'free') {
     provider.subscriptionFilter = p.subscriptionFilter;
   }
+  if (typeof p.preserveModelPricing === 'boolean') {
+    provider.preserveModelPricing = p.preserveModelPricing;
+  }
   if (p.authType === 'api' || p.authType === 'oauth' || p.authType === 'none') {
     provider.authType = p.authType;
   }
@@ -127,6 +130,9 @@ function hasValidStrictProviderFields(raw: unknown): boolean {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
   const provider = raw as Record<string, unknown>;
   if (hasOwn(provider, 'subscriptionFilter') && provider.subscriptionFilter !== 'free') {
+    return false;
+  }
+  if (hasOwn(provider, 'preserveModelPricing') && typeof provider.preserveModelPricing !== 'boolean') {
     return false;
   }
   if (

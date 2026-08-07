@@ -6,6 +6,7 @@ import { normalizeModelAliases } from '../model-aliases.js';
 import { maskGatewayModelId } from './vendor-mask.js';
 import type { FreeStatus } from '../free-models.js';
 import type { ModelAlias } from '../types.js';
+import type { ModelRuntimeCompatibility } from '../model-runtime-compatibility.js';
 
 export interface GatewayModelOptions {
   maskGatewayIds?: boolean;
@@ -46,6 +47,8 @@ export interface ServerModelInfo {
   useResponsesLite?: boolean;
   /** Backend capability: model must use the WebSocket Responses transport instead of HTTP. */
   preferWebSockets?: boolean;
+  /** Provider-neutral per-model wire quirks. */
+  compatibility?: ModelRuntimeCompatibility;
   /** Fallback reasoning effort when the client omits output_config.effort. */
   defaultEffort?: string;
   contextWindow?: number;

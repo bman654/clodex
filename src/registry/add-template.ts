@@ -116,11 +116,13 @@ export async function addProviderFromTemplate(
 
   const pricingCache = loadPricingCache();
   const platform = pricingPlatformForProvider(template.id, template.id);
-  const pricedModels = enrichModelsWithPricing(
-    usableModels.map(m => ({ ...m, apiUrl: fetched.baseUrl })),
-    buildPricingIndex(pricingCache),
-    platform,
-  );
+  const discoveredModels = usableModels.map(m => ({
+    ...m,
+    apiUrl: m.apiUrl ?? fetched.baseUrl,
+  }));
+  const pricedModels = template.preserveModelPricing
+    ? discoveredModels
+    : enrichModelsWithPricing(discoveredModels, buildPricingIndex(pricingCache), platform);
   const account = `provider:${template.id}`;
   const result: AddTemplateResult = await withProviderMutationLock(template.id, async () => {
     const currentState = await withRegistryWriteLock(() => {
@@ -183,6 +185,7 @@ export async function addProviderFromTemplate(
           enabled: true,
           authRef,
           authType: trimmedKey ? template.authType : 'none',
+          ...(template.preserveModelPricing ? { preserveModelPricing: true } : {}),
           ...(!trimmedKey && template.anonymousFreeModels
             ? { subscriptionFilter: 'free' as const }
             : {}),

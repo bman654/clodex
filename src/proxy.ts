@@ -57,6 +57,7 @@ import {
 import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-websocket.js';
 import { resolveContextWindow } from './context-window.js';
 import { listenTcpServer } from './listener-ready.js';
+import type { ModelRuntimeCompatibility } from './model-runtime-compatibility.js';
 
 type ProxyLog = (message: string | (() => string)) => void;
 
@@ -248,6 +249,8 @@ export interface ProxyRoute {
   useResponsesLite?: boolean;
   /** Backend capability: model must use the WebSocket Responses transport instead of HTTP. */
   preferWebSockets?: boolean;
+  /** Provider-neutral per-model wire quirks. */
+  compatibility?: ModelRuntimeCompatibility;
   /** Static headers sent on every upstream request (e.g. a plan/auth-tracking header a custom endpoint requires). */
   headers?: Record<string, string>;
 }
@@ -531,6 +534,13 @@ export async function startProxyCatalog(
             refreshToken: route.refreshToken,
             onTokenRefreshed: refreshed => { route.apiKey = refreshed; },
             signal: clientAbort.signal,
+            // A route selected through a clodex: id or short alias must echo the
+            // exact requested id back, or patched Claude Code misses the alias
+            // context-window key and can skip auto-compaction.
+            responseModelOverride:
+              typeof originalModel === 'string' && originalModel !== route.realModelId
+                ? originalModel
+                : undefined,
             onUpstreamError: inferenceLogPath
               ? (statusCode, errorContent) => writeInferenceResponseErrorLog(inferenceLogPath, {
                   modelId: originalModel,
@@ -577,6 +587,7 @@ export async function startProxyCatalog(
               supportedParameters: route.supportedParameters,
               reasoning: route.reasoning,
               interleavedReasoningField: route.interleavedReasoningField,
+              compatibility: route.compatibility,
               upstreamModelId: route.realModelId,
             },
           });
@@ -596,6 +607,7 @@ export async function startProxyCatalog(
             headers: route.headers,
             useResponsesLite: route.useResponsesLite,
             preferWebSockets: route.preferWebSockets,
+            compatibility: route.compatibility,
             onDebug: (msg: string) => plog(() => msg),
             onWebSocketDiagnostic: webSocketDiagnosticsLogPath
               ? event => writeWebSocketDiagnosticLog(webSocketDiagnosticsLogPath, event)
@@ -826,6 +838,7 @@ export function startProxy(
     interleavedReasoningField?: string;
     useResponsesLite?: boolean;
     preferWebSockets?: boolean;
+    compatibility?: ModelRuntimeCompatibility;
     headers?: Record<string, string>;
   },
   apiKey?: string,
@@ -851,6 +864,7 @@ export function startProxy(
     interleavedReasoningField: sdk?.interleavedReasoningField,
     useResponsesLite: sdk?.useResponsesLite,
     preferWebSockets: sdk?.preferWebSockets,
+    compatibility: sdk?.compatibility,
     headers: sdk?.headers,
   }], clientModelId, debug);
 }

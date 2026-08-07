@@ -122,6 +122,7 @@ export function localProvidersToServerModels(localProviders: LocalProvider[]): S
       interleavedReasoningField: model.interleavedReasoningField,
       useResponsesLite: model.useResponsesLite,
       preferWebSockets: model.preferWebSockets,
+      compatibility: model.compatibility,
       headers: provider.headers,
       providerData: provider.providerData,
     }))

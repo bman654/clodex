@@ -37,22 +37,45 @@ const providers: LocalProvider[] = [
 ];
 
 describe('HTTP proxy routes', () => {
-  it('uses stable provider-prefixed names and includes only AI SDK favorites', () => {
+  it('uses stable provider-prefixed names for SDK and Anthropic passthrough favorites', () => {
     const result = buildHttpProxyRoutes(providers, [
       { providerId: 'groq', modelId: 'llama-3.3-70b' },
       { providerId: 'anthropic', modelId: 'claude-sonnet-4-6' },
       { providerId: 'missing', modelId: 'gone' },
     ]);
 
-    expect(result.routes).toHaveLength(1);
+    expect(result.routes).toHaveLength(2);
     expect(result.routes[0]).toMatchObject({
       aliasId: 'clodex:groq:llama-3.3-70b[1m]',
       realModelId: 'llama-3.3-70b-versatile',
       npm: '@ai-sdk/groq',
       apiKey: 'groq-key',
     });
-    expect(result.unsupported).toEqual([{ providerId: 'anthropic', modelId: 'claude-sonnet-4-6' }]);
+    expect(result.routes[1]).toMatchObject({
+      aliasId: 'clodex:anthropic:claude-sonnet-4-6[1m]',
+      realModelId: 'claude-sonnet-4-6',
+      modelFormat: 'anthropic',
+      upstreamUrl: 'https://api.anthropic.com',
+      apiKey: 'anthropic-key',
+    });
+    expect(result.unsupported).toEqual([]);
     expect(result.unavailable).toEqual([{ providerId: 'missing', modelId: 'gone' }]);
+  });
+
+  it('rejects an Anthropic favorite without a passthrough base URL', () => {
+    const missingBase = [{
+      ...providers[1]!,
+      models: [{ ...providers[1]!.models[0]!, baseUrl: undefined }],
+    }];
+
+    const result = buildHttpProxyRoutes(missingBase, [
+      { providerId: 'anthropic', modelId: 'claude-sonnet-4-6' },
+    ]);
+
+    expect(result.routes).toEqual([]);
+    expect(result.unsupported).toEqual([
+      { providerId: 'anthropic', modelId: 'claude-sonnet-4-6' },
+    ]);
   });
 
   it('does not create a route when the provider credential is empty', () => {

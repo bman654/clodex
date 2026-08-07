@@ -45,7 +45,7 @@ export interface ResolvedHttpProxyAlias {
   sourceNames?: string[];
 }
 
-/** Build a positive allowlist: only favorite AI-SDK routes can leave Anthropic's path. */
+/** Build a positive allowlist: only explicitly configured favorite routes can leave Anthropic's path. */
 export function buildHttpProxyRoutes(
   providers: LocalProvider[],
   favorites: FavoriteModel[],
@@ -66,7 +66,10 @@ export function buildHttpProxyRoutes(
       unavailable.push(favorite);
       continue;
     }
-    if (model.modelFormat !== 'openai' || !isSdkMigratedNpm(model.npm)) {
+    const supported = model.modelFormat === 'anthropic'
+      ? Boolean(model.baseUrl)
+      : isSdkMigratedNpm(model.npm);
+    if (!supported) {
       unsupported.push(favorite);
       continue;
     }

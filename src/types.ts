@@ -1,6 +1,7 @@
 // src/types.ts
 
 import type { FreeStatus } from './free-models.js';
+import type { ModelRuntimeCompatibility } from './model-runtime-compatibility.js';
 
 export type ModelFormat = 'anthropic' | 'openai' | 'unsupported';
 
@@ -42,6 +43,8 @@ export interface LocalProviderModel {
   isFree?: boolean;
   freeStatus?: FreeStatus;
   modalities?: ('text' | 'image')[];
+  /** Provider-neutral per-model wire quirks. */
+  compatibility?: ModelRuntimeCompatibility;
 }
 
 export interface LocalProvider {

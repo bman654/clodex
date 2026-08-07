@@ -14,6 +14,10 @@ import {
   injectClaudeIdentity,
 } from './oauth/claude-identity.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
+import {
+  transformOpenAiCompatibleRequestBody,
+  type ModelRuntimeCompatibility,
+} from './model-runtime-compatibility.js';
 
 /** Models that must use /v1/responses instead of /v1/chat/completions. */
 const RESPONSES_ONLY_PREFIXES = [
@@ -110,6 +114,8 @@ export interface ProviderModelSpec {
   useResponsesLite?: boolean;
   /** Backend capability: model must use the WebSocket Responses transport instead of HTTP. */
   preferWebSockets?: boolean;
+  /** Provider-neutral per-model wire quirks. */
+  compatibility?: ModelRuntimeCompatibility;
   /** Optional debug logger (wired to the proxy trace log) for transport-level diagnostics. */
   onDebug?: (msg: string) => void;
   /** Optional privacy-safe structured WebSocket diagnostics. */
@@ -249,6 +255,12 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
       ...(spec.authType !== 'none' && apiKey.trim() ? { apiKey } : {}),
       ...(spec.authType === 'none' ? { fetch: fetchWithoutCredentialHeaders } : {}),
       ...(spec.headers ? { headers: spec.headers } : {}),
+      ...(spec.compatibility
+        ? {
+            transformRequestBody: (body: Record<string, unknown>) =>
+              transformOpenAiCompatibleRequestBody(body, spec.compatibility!),
+          }
+        : {}),
     };
     model = createOpenAICompatible({
       ...options,
@@ -292,6 +304,8 @@ export interface ReasoningMetadata {
   supportedParameters?: string[];
   reasoning?: boolean;
   interleavedReasoningField?: string;
+  /** Provider-neutral per-model wire quirks. */
+  compatibility?: ModelRuntimeCompatibility;
   /**
    * Bare upstream model id (e.g. 'grok-4.5'), distinct from the request's `model`
    * field which may be a gateway alias or catalog slug (e.g. 'xai-oauth__grok-4.5').
@@ -626,6 +640,90 @@ function mapCodexEffortToGeminiBudget(effort: string): number | undefined {
   return GEMINI_25_BUDGETS[level];
 }
 
+function compatibilityReasoningCapabilities(
+  metadata?: ReasoningMetadata,
+): ReasoningCapabilities | undefined {
+  const compatibility = metadata?.compatibility;
+  if (!compatibility) return undefined;
+
+  if (compatibility.supportsReasoningEffort === false) {
+    return metadata?.reasoning === false
+      ? EMPTY_REASONING
+      : {
+          ...EMPTY_REASONING,
+          mode: 'internal-only',
+          source: 'provider-metadata',
+          confidence: 'documented',
+        };
+  }
+
+  if (compatibility.reasoningEffortMap) {
+    const levels = Object.entries(compatibility.reasoningEffortMap)
+      .filter(([, mapped]) => mapped !== null)
+      .map(([level]) => level);
+    if (levels.length === 0) {
+      return metadata?.reasoning === false
+        ? EMPTY_REASONING
+        : {
+            ...EMPTY_REASONING,
+            mode: 'internal-only',
+            source: 'provider-metadata',
+            confidence: 'documented',
+          };
+    }
+
+    const preferredDefault = ['medium', 'high', 'max', 'low'].find(level => levels.includes(level));
+    return {
+      levels,
+      defaultLevel: preferredDefault ?? levels[0]!,
+      supportsSummaries: false,
+      mode: 'controllable',
+      source: 'provider-metadata',
+      confidence: 'documented',
+      wireFormat: compatibility.thinkingFormat === 'deepseek'
+        ? { kind: 'deepseek-thinking' }
+        : { kind: 'openai-reasoning-effort' },
+    };
+  }
+
+  if (
+    compatibility.supportsReasoningEffort === true
+    || compatibility.thinkingFormat !== undefined
+  ) {
+    if (metadata?.reasoning === false) return EMPTY_REASONING;
+    return {
+      levels: ['low', 'medium', 'high'],
+      defaultLevel: 'medium',
+      supportsSummaries: false,
+      mode: 'controllable',
+      source: 'provider-metadata',
+      confidence: 'documented',
+      wireFormat: compatibility.thinkingFormat === 'deepseek'
+        ? { kind: 'deepseek-thinking' }
+        : { kind: 'openai-reasoning-effort' },
+    };
+  }
+
+  return undefined;
+}
+
+function compatibilityReasoningEffort(
+  effort: string,
+  modelId: string,
+  compatibility: ModelRuntimeCompatibility,
+): string | undefined {
+  if (compatibility.supportsReasoningEffort === false) return undefined;
+  const map = compatibility.reasoningEffortMap;
+  if (map) {
+    if (!Object.prototype.hasOwnProperty.call(map, effort)) return undefined;
+    return map[effort] ?? undefined;
+  }
+  if (compatibility.supportsReasoningEffort === true || compatibility.thinkingFormat !== undefined) {
+    return mapCodexEffortToOpenAI(effort, modelId);
+  }
+  return undefined;
+}
+
 /** Per-model reasoning UI + wire metadata for Codex catalog and adapters. */
 export function getReasoningCapabilities(
   npm: string,
@@ -633,6 +731,8 @@ export function getReasoningCapabilities(
   metadata?: ReasoningMetadata,
 ): ReasoningCapabilities {
   const id = modelId.toLowerCase();
+  const compatibilityCapabilities = compatibilityReasoningCapabilities(metadata);
+  if (compatibilityCapabilities) return compatibilityCapabilities;
 
   if (isOpenRouterRoute(npm, metadata)) {
     return openRouterReasoningCapabilities(metadata);
@@ -806,8 +906,12 @@ export function getPatchReasoningCapabilities(
   modelId: string,
   metadata?: ReasoningMetadata,
 ): ReasoningCapabilities {
+  if (metadata?.compatibility?.supportsReasoningEffort === false) {
+    return compatibilityReasoningCapabilities(metadata) ?? EMPTY_REASONING;
+  }
   if (
     metadata?.reasoning === false
+    && !metadata?.compatibility?.reasoningEffortMap
     && !hasSupportedParameter(metadata, 'reasoning_effort')
     && !hasSupportedParameter(metadata, 'reasoning')
   ) {
@@ -848,13 +952,25 @@ export function effortProviderOptions(
 ): Record<string, Record<string, unknown>> | undefined {
   if (!effort) return undefined;
 
+  if (npm === '@ai-sdk/openai-compatible' && modelId && metadata?.compatibility) {
+    const reasoningEffort = compatibilityReasoningEffort(
+      effort,
+      modelId,
+      metadata.compatibility,
+    );
+    if (!reasoningEffort) return undefined;
+    const key = metadata.providerId ? toCamelCase(metadata.providerId) : 'openaiCompatible';
+    return { [key]: { reasoningEffort } };
+  }
+
   if (isOpenRouterRoute(npm, metadata)) {
     const caps = openRouterReasoningCapabilities(metadata);
     if (caps.mode !== 'controllable') return undefined;
     const allowed = new Set(OPENROUTER_EFFORT_LEVELS);
-    const mapped = allowed.has(effort as typeof OPENROUTER_EFFORT_LEVELS[number])
-      ? effort
-      : effort === 'max'
+    const candidate = effort;
+    const mapped = allowed.has(candidate as typeof OPENROUTER_EFFORT_LEVELS[number])
+      ? candidate
+      : candidate === 'max'
         ? 'xhigh'
         : undefined;
     return mapped
@@ -934,9 +1050,10 @@ export function effortProviderOptions(
     }
     if (hasSupportedParameter(metadata, 'reasoning')) {
       const allowed = new Set(OPENROUTER_EFFORT_LEVELS);
-      const mapped = allowed.has(effort as typeof OPENROUTER_EFFORT_LEVELS[number])
-        ? effort
-        : effort === 'max' ? 'xhigh' : undefined;
+      const candidate = effort;
+      const mapped = allowed.has(candidate as typeof OPENROUTER_EFFORT_LEVELS[number])
+        ? candidate
+        : candidate === 'max' ? 'xhigh' : undefined;
       return mapped
         ? { openrouter: { reasoning: { effort: mapped, exclude: false } } }
         : undefined;

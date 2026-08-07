@@ -1,6 +1,12 @@
 // tests/upstream-forward.test.ts
-import { describe, it, expect, vi } from 'vitest';
-import { anthropicUpstreamHeaders, fetchWithOAuthRetry } from '../src/upstream-forward.js';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import type { Transform } from 'node:stream';
+import {
+  anthropicUpstreamHeaders,
+  fetchWithOAuthRetry,
+  anthropicSseModelRewrite,
+  relayAnthropicMessages,
+} from '../src/upstream-forward.js';
 
 describe('anthropicUpstreamHeaders', () => {
   it('includes bearer and x-api-key', () => {
@@ -123,5 +129,114 @@ describe('fetchWithOAuthRetry', () => {
     expect(result.refreshed).toBe(true);
     expect(request).toHaveBeenCalledTimes(2);
     expect(refreshToken).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('anthropicSseModelRewrite', () => {
+  const collect = async (transform: Transform, chunks: string[]): Promise<string> => {
+    const out: Buffer[] = [];
+    transform.on('data', chunk => out.push(Buffer.from(chunk)));
+    for (const chunk of chunks) transform.write(Buffer.from(chunk, 'utf8'));
+    await new Promise<void>((resolve, reject) => {
+      transform.on('end', resolve);
+      transform.on('error', reject);
+      transform.end();
+    });
+    return Buffer.concat(out).toString('utf8');
+  };
+
+  const messageStart = 'event: message_start\n'
+    + 'data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5","usage":{"input_tokens":1}}}\n\n';
+  const textDelta = 'event: content_block_delta\n'
+    + 'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"model claude-sonnet-4-5"}}\n\n';
+
+  it('rewrites only the message_start model and passes every other byte through', async () => {
+    const out = await collect(anthropicSseModelRewrite('clodex:acme:sonnet[200k]'), [messageStart + textDelta]);
+    expect(out).toContain('"model":"clodex:acme:sonnet[200k]"');
+    expect(out).not.toContain('"model":"claude-sonnet-4-5"');
+    // Content text mentioning the upstream id is untouched.
+    expect(out).toContain('"text":"model claude-sonnet-4-5"');
+    expect(out.endsWith('\n\n')).toBe(true);
+  });
+
+  it('rewrites a message_start split across chunk boundaries mid-field', async () => {
+    const whole = messageStart + textDelta;
+    const split = whole.indexOf('"model":"claude') + 12;
+    const out = await collect(
+      anthropicSseModelRewrite('alias-x'),
+      [whole.slice(0, split), whole.slice(split)],
+    );
+    expect(out).toContain('"model":"alias-x"');
+    expect(out).not.toContain('"model":"claude-sonnet-4-5"');
+  });
+
+  it('passes malformed data lines through unchanged', async () => {
+    const malformed = 'data: {"type":"message_start","message":{oops\n\n';
+    const out = await collect(anthropicSseModelRewrite('alias-x'), [malformed]);
+    expect(out).toBe(malformed);
+  });
+});
+
+describe('relayAnthropicMessages responseModelOverride', () => {
+  const makeRes = () => {
+    const chunks: Buffer[] = [];
+    let headers: Record<string, string> = {};
+    let status = 0;
+    const res = {
+      writeHead(code: number, hdrs: Record<string, string>) { status = code; headers = hdrs; return res; },
+      write(chunk: unknown) { chunks.push(Buffer.from(chunk as Buffer)); return true; },
+      end(chunk?: unknown) { if (chunk) chunks.push(Buffer.from(chunk as Buffer)); res.finished = true; res.emit?.('finish'); },
+      destroy() { /* noop */ },
+      on() { return res; },
+      once() { return res; },
+      emit() { return false; },
+      removeListener() { return res; },
+      finished: false,
+      body: () => Buffer.concat(chunks).toString('utf8'),
+      status: () => status,
+      headers: () => headers,
+    };
+    return res;
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('rewrites the JSON body model to the requested id', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ id: 'msg_1', type: 'message', model: 'claude-sonnet-4-5', content: [] }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )));
+    const res = makeRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'claude-sonnet-4-5' },
+      'key',
+      false,
+      { responseModelOverride: 'clodex:acme:sonnet[200k]' },
+    );
+    expect(res.status()).toBe(200);
+    const body = JSON.parse(res.body()) as { model: string };
+    expect(body.model).toBe('clodex:acme:sonnet[200k]');
+    expect(res.headers()['Content-Length']).toBe(String(Buffer.byteLength(res.body())));
+  });
+
+  it('leaves the JSON body untouched without an override', async () => {
+    const raw = JSON.stringify({ id: 'msg_1', type: 'message', model: 'claude-sonnet-4-5', content: [] });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(raw, {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+    const res = makeRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'claude-sonnet-4-5' },
+      'key',
+      false,
+      {},
+    );
+    expect(res.body()).toBe(raw);
   });
 });

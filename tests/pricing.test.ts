@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  applyPricingToRegistryProviders,
   buildPricingIndex,
   enrichModelsWithPricing,
   loadBundledPricingCache,
@@ -49,6 +50,49 @@ describe('pricing enrich', () => {
     }];
     const enriched = enrichModelsWithPricing(models, index, 'groq');
     expect(enriched[0]?.cost?.input).toBe(0.59);
+  });
+
+  it('preserves provider-owned pricing when the registry opts out of enrichment', () => {
+    const registry = {
+      schemaVersion: 1 as const,
+      providers: [{
+        id: 'mixed-provider',
+        templateId: 'mixed-provider',
+        name: 'Mixed Provider',
+        enabled: true,
+        authRef: 'keyring:provider:mixed-provider',
+        preserveModelPricing: true,
+        api: { npm: '@ai-sdk/openai-compatible' },
+        addedAt: '2026-08-07T00:00:00.000Z',
+        modelsCache: {
+          fetchedAt: '2026-08-07T00:00:00.000Z',
+          models: [{
+            id: 'kimi-k2.7-code',
+            name: 'Kimi K2.7 Code',
+            upstreamModelId: 'kimi-k2.7-code',
+            modelFormat: 'openai' as const,
+            cost: { input: 0.95, output: 4 },
+          }],
+        },
+      }],
+    };
+    const changed = applyPricingToRegistryProviders(registry, {
+      models: [{
+        model_id: 'kimi-k2.7-code',
+        pricing: [{
+          platform: 'openrouter',
+          tier: 'standard',
+          input_per_1m_tokens: 99,
+          output_per_1m_tokens: 199,
+        }],
+      }],
+    });
+
+    expect(changed).toBe(false);
+    expect(registry.providers[0]?.modelsCache?.models[0]?.cost).toEqual({
+      input: 0.95,
+      output: 4,
+    });
   });
 
   it('marks enriched zero-cost models as verified free', () => {

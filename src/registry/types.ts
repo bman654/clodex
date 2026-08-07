@@ -1,6 +1,7 @@
 // src/registry/types.ts — native provider registry schema (no secrets)
 
 import type { FreeStatus } from '../free-models.js';
+import type { ModelRuntimeCompatibility } from '../model-runtime-compatibility.js';
 
 export const REGISTRY_SCHEMA_VERSION = 1;
 
@@ -32,6 +33,10 @@ export interface CachedModel {
   useResponsesLite?: boolean;
   /** Backend capability: model must use the WebSocket Responses transport instead of HTTP. */
   preferWebSockets?: boolean;
+  /** Supported input modalities preserved from curated provider metadata. */
+  modalities?: ('text' | 'image')[];
+  /** Provider-neutral per-model wire quirks. */
+  compatibility?: ModelRuntimeCompatibility;
 }
 
 export interface RegistryProvider {
@@ -42,6 +47,8 @@ export interface RegistryProvider {
   authRef: string;
   authType?: 'api' | 'oauth' | 'none';
   subscriptionFilter?: RegistrySubscriptionFilter;
+  /** Keep provider/curated costs instead of replacing them with the global pricing cache. */
+  preserveModelPricing?: boolean;
   api: {
     npm?: string;
     url?: string;

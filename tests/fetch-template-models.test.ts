@@ -198,6 +198,86 @@ describe('fetchTemplateModels', () => {
     );
   });
 
+  it('overlays curated mixed-protocol metadata and allowlists live models', async () => {
+    const mixedTemplate = template({
+      id: 'mixed-provider',
+      name: 'Mixed Provider',
+      npm: '@ai-sdk/openai-compatible',
+      defaultBaseUrl: 'https://mixed.example/v1',
+      staticModelPolicy: 'allowlist',
+      staticModels: [
+        {
+          id: 'qwen-max',
+          name: 'Qwen Max',
+          upstreamModelId: 'qwen-max',
+          modelFormat: 'anthropic',
+          npm: '@ai-sdk/anthropic',
+          apiUrl: 'https://mixed.example/anthropic',
+          contextWindow: 1_000_000,
+          modalities: ['text', 'image'],
+        },
+        {
+          id: 'kimi-code',
+          name: 'Kimi Code',
+          upstreamModelId: 'kimi-code',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+          apiUrl: 'https://mixed.example/v1',
+          contextWindow: 262_144,
+          compatibility: {
+            reasoningEffortMap: { low: null, high: 'max' },
+            thinkingFormat: 'deepseek',
+          },
+        },
+      ],
+    });
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        data: [
+          {
+            id: 'qwen-max',
+            name: 'live qwen',
+            pricing: { input_per_1m_tokens: 2, output_per_1m_tokens: 6 },
+          },
+          {
+            id: 'kimi-code',
+            name: 'live kimi',
+            supported_parameters: ['tools', 'reasoning_effort'],
+          },
+          { id: 'responses-only', name: 'unsupported responses model' },
+        ],
+      }),
+    } as Response);
+
+    const result = await fetchTemplateModels(mixedTemplate, 'sk-test');
+
+    expect(result.error).toBeUndefined();
+    expect(result.models.map(model => model.id)).toEqual(['qwen-max', 'kimi-code']);
+    expect(result.models[0]).toMatchObject({
+      name: 'Qwen Max',
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      apiUrl: 'https://mixed.example/anthropic',
+      contextWindow: 1_000_000,
+      modalities: ['text', 'image'],
+      cost: { input: 2, output: 6 },
+    });
+    expect(result.models[1]).toMatchObject({
+      name: 'Kimi Code',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      apiUrl: 'https://mixed.example/v1',
+      contextWindow: 262_144,
+      compatibility: {
+        reasoningEffortMap: { low: null, high: 'max' },
+        thinkingFormat: 'deepseek',
+      },
+      supportedParameters: ['tools', 'reasoning_effort'],
+    });
+  });
+
   it('derives verified free status from zero pricing even when provider flag is false', async () => {
     vi.mocked(fetch).mockResolvedValue({
       ok: true,
