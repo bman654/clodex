@@ -2228,157 +2228,327 @@ describe('createResponsesWebSocketFetch', () => {
       .not.toHaveProperty('reasoningNormalizationGap');
   });
 
+  /** The mismatch record the head-decision diagnostic kept for the first head. */
+  function firstHeadMismatch(diagnostics: ResponsesWebSocketDiagnosticEvent[]): Record<string, unknown> {
+    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
+    return (decision.heads as { mismatch: Record<string, unknown> }[])[0]!.mismatch;
+  }
+
   // Drives one mismatch between a stored function_call and the call Claude echoes
-  // back. The stored side rides in on the FIRST request's own input, which is how a
-  // forked strip rule presents: the head holds an unstripped call while the client
-  // echoes the stripped one.
+  // back.
+  //
+  // The stored call is emitted BY UPSTREAM, so it reaches the head through
+  // `response.output_item.done` → `expectedAssistantItems` → `sanitizedCallArguments`
+  // → `entry.expectedAssistant`. That is the only region a forked strip rule can
+  // ever diverge in: a request's own `input` is stored verbatim and never
+  // re-stripped, so staging the stored call there would exercise the predicate
+  // while leaving the wiring — that the detector is applied over the snapshotted
+  // region at all — completely unguarded.
   async function runToolArgumentMismatch(options: {
     accountId: string;
     responseId: string;
-    storedArguments: string;
-    echoedArguments: string;
+    /** What upstream emits. The snapshot applies the strip rule to it. */
+    upstreamCall: Record<string, unknown>;
+    /** What the client sends back on the next turn. */
+    echoedCall: Record<string, unknown>;
     tools?: unknown[];
-  }): Promise<{ stderr: string[]; diagnostics: ResponsesWebSocketDiagnosticEvent[] }> {
+    /** Tools declared on the SECOND turn, when they differ from the first. */
+    replayTools?: unknown[];
+  }): Promise<{
+    stderr: string[];
+    trace: string[];
+    diagnostics: ResponsesWebSocketDiagnosticEvent[];
+  }> {
     const stderr: string[] = [];
     const spy = vi.spyOn(process.stderr, 'write')
       .mockImplementation((chunk: unknown) => { stderr.push(String(chunk)); return true; });
     try {
       const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
-      const extra = options.tools ? { tools: options.tools } : {};
-      const storedCall = {
-        type: 'function_call', call_id: 'call_g', name: 'Grep', arguments: options.storedArguments,
-      };
-      const storedOutput = { type: 'function_call_output', call_id: 'call_g', output: 'hits' };
-      const input = [
-        { role: 'user', content: [{ type: 'input_text', text: 'search it' }] },
-        storedCall,
-        storedOutput,
-      ];
-      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      const trace: string[] = [];
+      const input = [{ role: 'user', content: [{ type: 'input_text', text: 'search it' }] }];
+      const headExtra = options.tools ? { tools: options.tools } : {};
+      const replayExtra = options.replayTools ? { tools: options.replayTools } : headExtra;
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, message => trace.push(message), {
         accountId: options.accountId,
         onDiagnostic: event => diagnostics.push(event),
       });
       const first = await wsFetch('https://x', {
-        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, extra)),
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, headExtra)),
       });
       const socket = lastSocket();
       socket.emit('open');
-      emitTextResponse(socket, options.responseId, 'ok');
+      socket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.created', response: { id: options.responseId },
+      })));
+      socket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.done', output_index: 0, item: options.upstreamCall,
+      })));
+      socket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.completed', response: { id: options.responseId },
+      })));
       await readAll(first);
 
-      // Same call_id, same tool — only the argument bytes differ.
-      const echoed = [
-        input[0]!,
-        { type: 'function_call', call_id: 'call_g', name: 'Grep', arguments: options.echoedArguments },
-        storedOutput,
-        { role: 'user', content: [{ type: 'input_text', text: 'again' }] },
-      ];
+      const output = {
+        type: 'function_call_output', call_id: options.echoedCall.call_id, output: 'hits',
+      };
       const second = await wsFetch('https://x', {
-        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(echoed, extra)),
+        method: 'POST', headers: {},
+        body: JSON.stringify(sessionPayload([...input, options.echoedCall, output], replayExtra)),
       });
       emitTextResponse(lastSocket(), `${options.responseId}_next`, 'done');
       await readAll(second);
-      return { stderr, diagnostics };
+      return { stderr, trace, diagnostics };
     } finally {
       spy.mockRestore();
     }
   }
 
+  /** Upstream call the snapshot strips nothing from, plus the echo that carries filler. */
+  const FORKED_STRIP = {
+    upstreamCall: {
+      type: 'function_call', id: 'fc_1', call_id: 'call_g', name: 'Grep',
+      arguments: '{"pattern":"x"}', status: 'completed',
+    },
+    // The strip rule is the only thing that removes a null-valued key on the way
+    // to the client, so an echo that still carries one means the head and the
+    // client no longer agree about that rule.
+    echoedCall: {
+      type: 'function_call', call_id: 'call_g', name: 'Grep', arguments: '{"pattern":"x","glob":null}',
+    },
+  };
+
   it('warns on stderr when the filler-strip rule has forked', async () => {
     const { stderr, diagnostics } = await runToolArgumentMismatch({
       accountId: 'acct-tool-gap-forked',
       responseId: 'resp_tool_gap',
-      // Identical once the shared strip rule runs: the null is exactly what
-      // sanitizeToolInput removes, so this can only be the rule diverging.
-      storedArguments: '{"pattern":"x","glob":null}',
-      echoedArguments: '{"pattern":"x"}',
+      ...FORKED_STRIP,
     });
 
     expect(stderr.join('')).toContain('filler-strip rule is applied');
-    expect(stderr.join('')).toContain('regression of #84');
     expect(stderr.join('')).toContain('Grep');
+    // The warning reports what was observed. `equalAfterStrip` cannot tell which
+    // side stopped applying the rule, so it must not name a cause as certain.
+    expect(stderr.join('')).toContain('the head should have matched');
+    expect(stderr.join('')).not.toContain('#84');
     const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
     expect(decision.decision).toBe('history_mismatch_new_head');
-    expect((decision.heads as { mismatch: Record<string, unknown> }[])[0]!.mismatch)
+    expect(firstHeadMismatch(diagnostics))
       .toMatchObject({ toolArgumentNormalizationGap: { tool: 'Grep', equalAfterStrip: true } });
   });
 
+  it('reports a repeated tool-argument gap once rather than on every turn', async () => {
+    const first = await runToolArgumentMismatch({
+      accountId: 'acct-tool-gap-repeat-1', responseId: 'resp_tool_repeat_1', ...FORKED_STRIP,
+    });
+    const second = await runToolArgumentMismatch({
+      accountId: 'acct-tool-gap-repeat-2', responseId: 'resp_tool_repeat_2', ...FORKED_STRIP,
+    });
+
+    // Dedup is the only thing bounding this: the cap counts distinct signatures,
+    // so without it one forked tool would print on every turn, forever, into the
+    // terminal Claude Code's UI owns.
+    expect(first.stderr.join('')).toContain('filler-strip rule is applied');
+    expect(second.stderr.join('')).toBe('');
+  });
+
   it('records but does not warn when the arguments differ beyond filler', async () => {
-    const { stderr, diagnostics } = await runToolArgumentMismatch({
+    const { stderr, trace, diagnostics } = await runToolArgumentMismatch({
       accountId: 'acct-tool-gap-value',
       responseId: 'resp_tool_value',
       // A real value change under the same call_id is indistinguishable from a
       // client that genuinely re-sent something else, so stderr must stay quiet.
-      storedArguments: '{"pattern":"x"}',
-      echoedArguments: '{"pattern":"y"}',
+      upstreamCall: {
+        type: 'function_call', id: 'fc_1', call_id: 'call_g', name: 'Grep',
+        arguments: '{"pattern":"x"}', status: 'completed',
+      },
+      echoedCall: {
+        type: 'function_call', call_id: 'call_g', name: 'Grep', arguments: '{"pattern":"y"}',
+      },
     });
 
     expect(stderr.join('')).toBe('');
-    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
-    expect((decision.heads as { mismatch: Record<string, unknown> }[])[0]!.mismatch)
+    // Silent on stderr, but --trace alone must still show the counted gap: a
+    // diagnostic nobody can reach without a second opt-in is how #84 hid.
+    expect(trace.join('\n')).toContain('tool argument mismatch beyond the strip rule: Grep');
+    expect(firstHeadMismatch(diagnostics))
+      .toMatchObject({ toolArgumentNormalizationGap: { tool: 'Grep', equalAfterStrip: false } });
+  });
+
+  it('stays silent when the divergence is somewhere other than the arguments', async () => {
+    const { stderr, diagnostics } = await runToolArgumentMismatch({
+      accountId: 'acct-tool-gap-other-field',
+      responseId: 'resp_tool_other_field',
+      // `namespace` stands in for any item field upstream may attach that the
+      // echo does not carry back. The arguments are byte-identical, so the strip
+      // rule is provably not what diverged and claiming it did would be a lie
+      // told in the one warning whose value depends on being believed.
+      upstreamCall: {
+        type: 'function_call', id: 'fc_1', call_id: 'call_g', name: 'Grep',
+        arguments: '{"pattern":"x"}', namespace: 'mcp__server', status: 'completed',
+      },
+      echoedCall: {
+        type: 'function_call', call_id: 'call_g', name: 'Grep', arguments: '{"pattern":"x"}',
+      },
+    });
+
+    expect(stderr.join('')).toBe('');
+    expect(firstHeadMismatch(diagnostics))
       .toMatchObject({ toolArgumentNormalizationGap: { tool: 'Grep', equalAfterStrip: false } });
   });
 
   it('respects the tool schema when deciding the rule forked', async () => {
+    const tools = [{
+      type: 'function', name: 'Grep',
+      parameters: { type: 'object', properties: { matches: { type: 'array' } }, required: ['matches'] },
+    }];
     const { stderr, diagnostics } = await runToolArgumentMismatch({
       accountId: 'acct-tool-gap-required',
       responseId: 'resp_tool_required',
-      // `matches` is REQUIRED, so its empty array is an intentional value that the
-      // strip rule keeps. Dropping it is a real difference, not filler.
-      tools: [{
-        type: 'function', name: 'Grep',
-        parameters: { type: 'object', properties: { matches: { type: 'array' } }, required: ['matches'] },
-      }],
-      storedArguments: '{"matches":[]}',
-      echoedArguments: '{}',
+      // `matches` is REQUIRED, so the snapshot keeps its empty array — it is an
+      // intentional value, not filler. An echo that dropped it is a real
+      // difference the strip rule does not explain.
+      tools,
+      upstreamCall: {
+        type: 'function_call', id: 'fc_1', call_id: 'call_g', name: 'Grep',
+        arguments: '{"matches":[]}', status: 'completed',
+      },
+      echoedCall: { type: 'function_call', call_id: 'call_g', name: 'Grep', arguments: '{}' },
     });
 
     expect(stderr.join('')).toBe('');
-    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
-    expect((decision.heads as { mismatch: Record<string, unknown> }[])[0]!.mismatch)
+    expect(firstHeadMismatch(diagnostics))
       .toMatchObject({ toolArgumentNormalizationGap: { equalAfterStrip: false } });
   });
 
+  it('judges the gap by the schema the head was snapshotted under', async () => {
+    const { stderr, diagnostics } = await runToolArgumentMismatch({
+      accountId: 'acct-tool-gap-schema-drift',
+      responseId: 'resp_tool_schema_drift',
+      // The head was stripped when `glob` was optional, so its empty array was
+      // filler and the snapshot dropped it. The echo still carries it: a real
+      // fork. The second turn marks `glob` required — an MCP server or subagent
+      // changing the tool list mid-session — which must not be allowed to
+      // re-judge what the head was already stripped under and silence the gap.
+      tools: [{
+        type: 'function', name: 'Grep',
+        parameters: {
+          type: 'object',
+          properties: { pattern: { type: 'string' }, glob: { type: 'array' } },
+          required: ['pattern'],
+        },
+      }],
+      replayTools: [{
+        type: 'function', name: 'Grep',
+        parameters: {
+          type: 'object',
+          properties: { pattern: { type: 'string' }, glob: { type: 'array' } },
+          required: ['pattern', 'glob'],
+        },
+      }],
+      upstreamCall: {
+        type: 'function_call', id: 'fc_1', call_id: 'call_g', name: 'Grep',
+        arguments: '{"pattern":"x","glob":[]}', status: 'completed',
+      },
+      echoedCall: {
+        type: 'function_call', call_id: 'call_g', name: 'Grep', arguments: '{"pattern":"x","glob":[]}',
+      },
+    });
+
+    expect(stderr.join('')).toContain('filler-strip rule is applied');
+    expect(firstHeadMismatch(diagnostics))
+      .toMatchObject({ toolArgumentNormalizationGap: { tool: 'Grep', equalAfterStrip: true } });
+  });
+
   it('stays silent when a different call_id makes it a genuine branch', async () => {
+    const { stderr, diagnostics } = await runToolArgumentMismatch({
+      accountId: 'acct-tool-gap-branch',
+      responseId: 'resp_branch',
+      upstreamCall: {
+        type: 'function_call', id: 'fc_1', call_id: 'call_g', name: 'Grep',
+        arguments: '{"pattern":"x"}', status: 'completed',
+      },
+      // A regenerated call carries a NEW call_id — that is a branch, not our bug.
+      echoedCall: {
+        type: 'function_call', call_id: 'call_h', name: 'Grep', arguments: '{"pattern":"x","glob":null}',
+      },
+    });
+
+    expect(stderr.join('')).toBe('');
+    expect(firstHeadMismatch(diagnostics)).not.toHaveProperty('toolArgumentNormalizationGap');
+  });
+
+  it('does not warn about a tool gap on a head that lost to a better match', async () => {
     const stderr: string[] = [];
     const spy = vi.spyOn(process.stderr, 'write')
       .mockImplementation((chunk: unknown) => { stderr.push(String(chunk)); return true; });
     try {
       const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
-      const storedOutput = { type: 'function_call_output', call_id: 'call_g', output: 'hits' };
-      const input = [
-        { role: 'user', content: [{ type: 'input_text', text: 'search it' }] },
-        { type: 'function_call', call_id: 'call_g', name: 'Grep', arguments: '{"pattern":"x","glob":null}' },
-        storedOutput,
-      ];
+      const input = [{ role: 'user', content: [{ type: 'input_text', text: 'inspect it' }] }];
       const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
-        accountId: 'acct-tool-gap-branch',
+        accountId: 'acct-tool-gap-not-selected',
         onDiagnostic: event => diagnostics.push(event),
       });
+
       const first = await wsFetch('https://x', {
         method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
       });
-      lastSocket().emit('open');
-      emitTextResponse(lastSocket(), 'resp_branch', 'ok');
+      const socket1 = lastSocket();
+      socket1.emit('open');
+      socket1.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_t1' } })));
+      socket1.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.done', output_index: 0,
+        item: {
+          type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'Read',
+          arguments: '{"path":"a.ts"}', status: 'completed',
+        },
+      })));
+      socket1.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_t1' } })));
       await readAll(first);
 
-      // A regenerated call carries a NEW call_id — that is a branch, not our bug.
+      // The echo carries filler the head does not, so head 1 cannot match and
+      // this turn legitimately warns while opening head 2.
+      const call1 = {
+        type: 'function_call', call_id: 'call_1', name: 'Read', arguments: '{"path":"a.ts","offset":null}',
+      };
+      const out1 = { type: 'function_call_output', call_id: 'call_1', output: 'a' };
+      const turn2 = [...input, call1, out1];
       const second = await wsFetch('https://x', {
-        method: 'POST', headers: {},
-        body: JSON.stringify(sessionPayload([
-          input[0]!,
-          { type: 'function_call', call_id: 'call_h', name: 'Grep', arguments: '{"pattern":"x"}' },
-          { type: 'function_call_output', call_id: 'call_h', output: 'hits' },
-          { role: 'user', content: [{ type: 'input_text', text: 'again' }] },
-        ])),
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(turn2)),
       });
-      emitTextResponse(lastSocket(), 'resp_branch_next', 'done');
+      const socket2 = lastSocket();
+      socket2.emit('open');
+      socket2.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_t2' } })));
+      socket2.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.done', output_index: 0,
+        item: {
+          type: 'function_call', id: 'fc_2', call_id: 'call_2', name: 'Read',
+          arguments: '{"path":"b.ts"}', status: 'completed',
+        },
+      })));
+      socket2.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_t2' } })));
       await readAll(second);
+      expect(stderr.join('')).toContain('filler-strip rule is applied');
 
-      expect(stderr.join('')).toBe('');
+      // Clear the dedupe so a stray warning on this next turn would be visible.
+      resetToolArgumentGapWarningsForTests();
+      stderr.length = 0;
+
+      const call2 = { type: 'function_call', call_id: 'call_2', name: 'Read', arguments: '{"path":"b.ts"}' };
+      const out2 = { type: 'function_call_output', call_id: 'call_2', output: 'b' };
+      const third = await wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([...turn2, call2, out2])),
+      });
+
       const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
-      expect((decision.heads as { mismatch: Record<string, unknown> }[])[0]!.mismatch)
-        .not.toHaveProperty('toolArgumentNormalizationGap');
+      expect(decision.decision).toBe('continuation');
+      // Head 1 still carries the gap in the diagnostic record ...
+      expect((decision.heads as { mismatch: Record<string, unknown> }[])
+        .some(head => head.mismatch.toolArgumentNormalizationGap !== undefined)).toBe(true);
+      // ... but this turn continued, so nothing was degraded and the terminal
+      // must stay quiet.
+      expect(stderr.join('')).toBe('');
+      emitTextResponse(lastSocket(), 'resp_t2_next', 'done');
+      await readAll(third);
     } finally {
       spy.mockRestore();
     }
@@ -2445,6 +2615,7 @@ describe('createResponsesWebSocketFetch', () => {
 
       // Clear the dedupe so a stray warning on this next turn would be visible.
       resetReasoningGapWarningsForTests();
+      resetToolArgumentGapWarningsForTests();
       stderr.length = 0;
 
       const call2 = { type: 'function_call', call_id: 'call_2', name: 'Read', arguments: '{"path":"b.ts"}' };
