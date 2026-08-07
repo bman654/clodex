@@ -52,14 +52,20 @@ export interface ProviderTemplate {
 /**
  * OpenCode Go's /models endpoint is availability data and answers without
  * authentication, so the shared api-list flow's models fetch cannot validate a
- * pasted key. Probe the authenticated chat-completions endpoint with a
- * deliberately empty body: authentication is evaluated before request
- * validation, so a bad key yields 401/403 while a good key yields an ordinary
- * request-validation error. Every other outcome — including an unreachable
- * upstream — is inconclusive and passes, so the probe can only ever reject
- * keys the upstream itself rejected.
+ * pasted key. Probe the authenticated chat-completions endpoint instead.
+ *
+ * The gateway resolves the request's model BEFORE evaluating the key: a body
+ * without a supported model returns 401 ModelError for every key, valid or
+ * not, so the probe must name a model from the committed catalog. Even then,
+ * only an auth-shaped rejection (401/403 whose error reads as AuthError /
+ * invalid key) rejects the credential; every other outcome — validation
+ * errors, unparseable bodies, an unreachable upstream — is inconclusive and
+ * passes, so the probe can only ever reject keys the upstream itself
+ * rejected as keys.
  */
 export async function verifyOpenCodeGoCredential(apiKey: string, baseUrl: string): Promise<string | null> {
+  const model = buildOpenCodeGoModels().find(entry => entry.modelFormat === 'openai');
+  if (!model) return null;
   try {
     const response = await fetch(`${baseUrl.replace(/\/+$/, '')}/chat/completions`, {
       method: 'POST',
@@ -67,13 +73,25 @@ export async function verifyOpenCodeGoCredential(apiKey: string, baseUrl: string
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ model: model.upstreamModelId ?? model.id }),
     });
-    try {
-      await response.body?.cancel?.();
-    } catch { /* the status is all the probe needs */ }
     if (response.status === 401 || response.status === 403) {
-      return 'OpenCode Go rejected this API key (authentication failed). Check the key and try again.';
+      let authRejected = false;
+      try {
+        const parsed = JSON.parse(await response.text()) as { error?: { type?: string; message?: string } };
+        const errorType = String(parsed.error?.type ?? '');
+        const message = String(parsed.error?.message ?? '');
+        authRejected = /auth/i.test(errorType) || /api key|unauthoriz|authentication/i.test(message);
+      } catch {
+        // An unparseable 401 is inconclusive, not proof of a bad key.
+      }
+      if (authRejected) {
+        return 'OpenCode Go rejected this API key (authentication failed). Check the key and try again.';
+      }
+    } else {
+      try {
+        await response.body?.cancel?.();
+      } catch { /* only auth rejections matter to the probe */ }
     }
   } catch {
     // Unreachable probe is inconclusive; the models fetch surfaces network errors.

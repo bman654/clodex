@@ -159,22 +159,44 @@ describe('verifyOpenCodeGoCredential', () => {
     vi.unstubAllGlobals();
   });
 
-  it('rejects a key the upstream answers with 401', async () => {
-    const fetchMock = vi.fn(async () => new Response('{"error":"unauthorized"}', { status: 401 }));
+  const authError = '{"type":"error","error":{"type":"AuthError","message":"Invalid API key."}}';
+  const modelError = '{"type":"error","error":{"type":"ModelError","message":"Model {{model}} is not supported"}}';
+
+  it('rejects a key the upstream answers with an auth-shaped 401, probing with a catalog model', async () => {
+    const fetchMock = vi.fn(async () => new Response(authError, { status: 401 }));
     vi.stubGlobal('fetch', fetchMock);
     const error = await verifyOpenCodeGoCredential('bad-key', OPENCODE_GO_COMPLETIONS_BASE_URL);
     expect(error).toContain('authentication failed');
     const [url, init] = fetchMock.mock.calls[0]! as [string, RequestInit];
     expect(url).toBe(`${OPENCODE_GO_COMPLETIONS_BASE_URL}/chat/completions`);
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer bad-key');
+    // The gateway resolves the model BEFORE the key, so the probe must name a
+    // committed catalog model or every key looks rejected.
+    const body = JSON.parse(String(init.body)) as { model?: string };
+    const catalogIds = buildOpenCodeGoModels()
+      .filter(entry => entry.modelFormat === 'openai')
+      .map(entry => entry.upstreamModelId ?? entry.id);
+    expect(catalogIds).toContain(body.model);
   });
 
-  it('rejects on 403 as well', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('forbidden', { status: 403 })));
+  it('rejects an auth-shaped 403 as well', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(authError, { status: 403 })));
     expect(await verifyOpenCodeGoCredential('bad-key', OPENCODE_GO_COMPLETIONS_BASE_URL)).not.toBeNull();
   });
 
-  it('accepts a key whose empty-body probe fails ordinary request validation', async () => {
+  it('treats a 401 ModelError as inconclusive, never a key rejection', async () => {
+    // Live behavior that broke the original empty-body probe: the gateway
+    // returns 401 ModelError for an unsupported model REGARDLESS of the key.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(modelError, { status: 401 })));
+    expect(await verifyOpenCodeGoCredential('good-key', OPENCODE_GO_COMPLETIONS_BASE_URL)).toBeNull();
+  });
+
+  it('treats an unparseable 401 as inconclusive', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>gateway</html>', { status: 401 })));
+    expect(await verifyOpenCodeGoCredential('good-key', OPENCODE_GO_COMPLETIONS_BASE_URL)).toBeNull();
+  });
+
+  it('accepts a key whose probe fails ordinary request validation', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{"error":"messages required"}', { status: 400 })));
     expect(await verifyOpenCodeGoCredential('good-key', OPENCODE_GO_COMPLETIONS_BASE_URL)).toBeNull();
   });
