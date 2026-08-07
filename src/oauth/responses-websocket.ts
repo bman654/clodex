@@ -502,6 +502,98 @@ export function resetReasoningGapWarningsForTests(): void {
   warnedReasoningGaps.clear();
 }
 
+/**
+ * Detects a `function_call` that diverged for a reason that can only be ours.
+ *
+ * `call_id` is the tool call's identity. Claude Code echoes back the call it was
+ * handed, so when both sides are a `function_call` carrying the SAME `call_id`
+ * and `name` yet different `arguments`, the two objects describe the same call
+ * and the continuation should have been accepted — the remaining difference is a
+ * normalization gap on our side. A genuine rewind or branch regenerates the call
+ * and produces a NEW `call_id`, so those never reach here and the signal stays
+ * clean.
+ *
+ * `equalAfterStrip` separates the two mechanisms. When applying the shared
+ * filler-strip rule to both sides makes them equal, the rule has forked between
+ * the translation layer and the chain-head snapshot — that is #84 returning, and
+ * it is the case worth shouting about. When they still differ, the arguments took
+ * a shape `sanitizedCallArguments` deliberately passes through untouched (a
+ * scalar, an array, or malformed JSON), which is worth counting but is not a
+ * regression.
+ */
+function toolArgumentNormalizationGap(
+  expected: unknown,
+  actual: unknown,
+  payload: JsonObject,
+): Record<string, unknown> | undefined {
+  if (conversationItemKind(expected) !== 'function_call') return undefined;
+  if (conversationItemKind(actual) !== 'function_call') return undefined;
+  const left = expected as JsonObject;
+  const right = actual as JsonObject;
+  const callId = left.call_id;
+  if (typeof callId !== 'string' || !callId || callId !== right.call_id) return undefined;
+  if (typeof left.name !== 'string' || left.name !== right.name) return undefined;
+  // Same call, same tool, different bytes. Compare NORMALIZED arguments so the
+  // canonical-JSON reconciliation this file already applies is not re-reported.
+  if (canonicalJson(normalizeToolCallJson(left)) === canonicalJson(normalizeToolCallJson(right))) {
+    return undefined;
+  }
+  const required = requiredToolProps(payload).get(left.name);
+  const stripped = (item: JsonObject): string | undefined => {
+    if (typeof item.arguments !== 'string') return undefined;
+    const raw = item.arguments.trim();
+    try {
+      const parsed: unknown = raw === '' ? {} : JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+      return canonicalJson(sanitizeToolInput(parsed as Record<string, unknown>, required));
+    } catch { return undefined; }
+  };
+  const leftStripped = stripped(left);
+  const rightStripped = stripped(right);
+  return {
+    tool: left.name,
+    equalAfterStrip: leftStripped !== undefined && leftStripped === rightStripped,
+  };
+}
+
+const warnedToolArgumentGaps = new Set<string>();
+const MAX_TOOL_ARGUMENT_GAP_WARNINGS = 3;
+
+/**
+ * Surfaces a forked filler-strip rule on stderr, for the same reason the
+ * reasoning one does: without it this failure is invisible without `--trace` or
+ * `--ws-diagnostics`, and it presents only as a quietly larger prompt. #84 cost
+ * real tokens for weeks and was found by mining 11k ledger records, not by anyone
+ * noticing. Same dedup + hard cap, because this shares a terminal with Claude
+ * Code's interactive UI and must never become a stream.
+ */
+function warnToolArgumentNormalizationGap(
+  gap: Record<string, unknown>,
+  log?: (message: string) => void,
+): void {
+  const tool = typeof gap.tool === 'string' ? gap.tool : 'unknown';
+  const signature = `${tool}:filler`;
+  const message = `clodex: warning: tool call "${tool}" failed the continuation match, but both `
+    + 'sides are identical once the filler-strip rule is applied. That rule has diverged between '
+    + 'the translation layer and the chain-head snapshot (a regression of #84). Prompt caching is '
+    + 'degraded for this turn — please report it at https://github.com/bman654/clodex/issues';
+  try { log?.(`tool argument normalization gap: ${signature}`); } catch { /* ignore */ }
+  if (warnedToolArgumentGaps.has(signature)) return;
+  if (warnedToolArgumentGaps.size >= MAX_TOOL_ARGUMENT_GAP_WARNINGS) return;
+  warnedToolArgumentGaps.add(signature);
+  try {
+    process.stderr.write(`${message}\n`);
+    if (warnedToolArgumentGaps.size === MAX_TOOL_ARGUMENT_GAP_WARNINGS) {
+      process.stderr.write('clodex: warning: further tool-argument normalization warnings suppressed.\n');
+    }
+  } catch { /* a warning must never break a request */ }
+}
+
+/** Test seam: the warning cap is process-wide and would leak between cases. */
+export function resetToolArgumentGapWarningsForTests(): void {
+  warnedToolArgumentGaps.clear();
+}
+
 function continuationMismatchDetails(
   entry: ConnectionEntry,
   payload: JsonObject,
@@ -525,6 +617,15 @@ function continuationMismatchDetails(
   const actual = mismatch < full.length ? full[mismatch] : undefined;
   const reasoningGap = reasoningNormalizationGap(expected, actual);
   if (reasoningGap && warnOnGap) warnReasoningNormalizationGap(reasoningGap, log);
+  const toolArgumentGap = toolArgumentNormalizationGap(expected, actual, payload);
+  // Only the provably-ours case reaches stderr. `equalAfterStrip === false` means
+  // the arguments differ for a reason the strip rule cannot explain, and a client
+  // that genuinely re-sent a different value under the same call_id is
+  // indistinguishable from a defect — warning there would cry wolf in a terminal
+  // shared with Claude Code's UI. Those are still recorded on the diagnostic.
+  if (toolArgumentGap?.equalAfterStrip === true && warnOnGap) {
+    warnToolArgumentNormalizationGap(toolArgumentGap, log);
+  }
   return {
     fullItems: full.length,
     expectedPrefixItems: prefix.length,
@@ -541,6 +642,7 @@ function continuationMismatchDetails(
           ),
         }
       : {}),
+    ...(toolArgumentGap ? { toolArgumentNormalizationGap: toolArgumentGap } : {}),
   };
 }
 
@@ -1020,7 +1122,7 @@ function withoutEphemeralFields(item: JsonObject): JsonObject {
  * array. The Responses provider passes each function tool's JSON schema
  * through as `parameters` unmodified, so these are the same `required` sets
  * the Anthropic translation layer consults when it sanitizes tool input on
- * the way to the client (`sanitizeToolInput` in sdk-adapter.ts).
+ * the way to the client (the shared `sanitizeToolInput` in tool-input-sanitize.ts).
  */
 function requiredToolProps(payload: JsonObject): Map<string, Set<string>> {
   const map = new Map<string, Set<string>>();
