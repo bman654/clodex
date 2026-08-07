@@ -646,13 +646,27 @@ function continuationMismatchDetails(
   const actual = mismatch < full.length ? full[mismatch] : undefined;
   const reasoningGap = reasoningNormalizationGap(expected, actual);
   if (reasoningGap && warnOnGap) warnReasoningNormalizationGap(reasoningGap, log);
+  // Claude may legitimately omit stored reasoning items (continuationMatch's
+  // omitted_reasoning mode), which shifts the exact-prefix divergence onto a
+  // reasoning-vs-call pair and would hide a forked strip rule sitting on the
+  // very next call. Align the canary to the first non-reasoning stored item
+  // in that case; everything else still uses the exact divergence pair.
+  let gapExpected = expected;
+  if (conversationItemKind(expected) === 'reasoning' && conversationItemKind(actual) === 'function_call') {
+    for (let index = mismatch; index < prefix.length; index += 1) {
+      if (conversationItemKind(prefix[index]) !== 'reasoning') {
+        gapExpected = prefix[index];
+        break;
+      }
+    }
+  }
   let toolArgumentGap: Record<string, unknown> | undefined;
   // Detection is pure bookkeeping on top of a request that already succeeded, so
   // it must not be able to reject one. No throw is reachable today; this is here
   // so the next person editing the predicate cannot make one fatal.
   try {
     toolArgumentGap = toolArgumentNormalizationGap(
-      expected,
+      gapExpected,
       actual,
       // The head's own schema when it has one; the current turn's tools are only a
       // fallback for a head that predates the snapshot (see headRequiredToolProps).
@@ -1923,6 +1937,15 @@ export function createResponsesWebSocketFetch(
         `history mismatch starting an additional chain; retained ${candidates.length} existing head(s) `
         + `(${continuationMismatchSummary(diagnosticEntry, payload, debug, mismatchDump)})`,
       );
+      // No head matched, so clodex abandoned EVERY candidate this turn — a
+      // normalization gap on any of them is a give-up-shaped gap. Warning only
+      // for the most recently used head lets a strip-rule regression on an
+      // older head go silent behind a newer head's ordinary mismatch. The
+      // dedup + hard cap in the warn helpers keep this from becoming a stream.
+      for (const candidate of candidates) {
+        if (candidate === diagnosticEntry || candidate.inFlight) continue;
+        continuationMismatchDetails(candidate, payload, debug, true);
+      }
       decision = 'history_mismatch_new_head';
     } else if (partitionKey) {
       decision = 'new_partition_head';
