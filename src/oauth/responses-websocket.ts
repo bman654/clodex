@@ -549,8 +549,37 @@ function continuationMismatchSummary(
   log?: (message: string) => void,
 ): string {
   const details = continuationMismatchDetails(entry, payload, log, true);
-  return `full_items=${details.fullItems} expected_prefix_items=${details.expectedPrefixItems} `
+  let summary = `full_items=${details.fullItems} expected_prefix_items=${details.expectedPrefixItems} `
     + `first_mismatch=${details.firstMismatch} expected=${details.expectedKind} actual=${details.actualKind}`;
+  // The hashes make same-kind mismatches diagnosable from the log alone. With
+  // CLODEX_MISMATCH_DUMP=1 the canonical bytes of both divergent items land in
+  // the debug log too — that file is 0600, but `--trace` re-reads it and
+  // prints matching lines to stdout on exit, so raw conversation content can
+  // reach the terminal; the CLAUDE.md entry for the variable carries the
+  // privacy tradeoff.
+  if (details.expectedHash || details.actualHash) {
+    summary += ` expected_hash=${details.expectedHash ?? 'none'} actual_hash=${details.actualHash ?? 'none'}`;
+  }
+  if (process.env.CLODEX_MISMATCH_DUMP === '1' && log) {
+    const full = inputArray(payload);
+    const prefix = [...(entry.requestInput ?? []), ...(entry.expectedAssistant ?? [])];
+    const index = typeof details.firstMismatch === 'number' ? details.firstMismatch : -1;
+    if (index >= 0) {
+      log(`mismatch dump expected[${index}]: ${mismatchDumpLine(prefix, index)}`);
+      log(`mismatch dump actual[${index}]: ${mismatchDumpLine(full, index)}`);
+    }
+  }
+  return summary;
+}
+
+/** One side of a mismatch dump: canonical item bytes, capped, or `(absent)`
+ * when the divergence is one history simply ending before the other. */
+function mismatchDumpLine(items: unknown[], index: number): string {
+  if (index >= items.length) return '(absent)';
+  const line = canonicalJson(normalizeToolCallJson(items[index]));
+  const max = 2_000;
+  const marker = ' [truncated]';
+  return line.length <= max ? line : line.slice(0, max - marker.length) + marker;
 }
 
 /**
