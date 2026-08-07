@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.1](https://github.com/bman654/clodex/compare/v2.2.0...v2.2.1) (2026-08-07)
+
+
+### Bug Fixes
+
+* **patcher:** accept the 2.1.224 minified Agent-tool model enum shape ([#85](https://github.com/bman654/clodex/issues/85)) ([2ec0916](https://github.com/bman654/clodex/commit/2ec0916dfdf7d594b4ef4242a6b6c19091291d86))
+
 ## [2.2.0](https://github.com/bman654/clodex/compare/v2.1.9...v2.2.0) (2026-08-07)
 
 
