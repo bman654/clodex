@@ -64,6 +64,8 @@ const PRISTINE_BUNDLE = [
   'function I_e(e){if(SNr(e))return!1;let t=Ede(e,"xhigh_effort");if(t!==void 0)return t;return!1}',
   'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return!1}',
   'function ait(e){return ww(lo(e))?.default_effort??"high"}',
+  'function cwdOf(){let p=process.env.PWD;return p}',
+  'function childEnv(){let e=extra(),t=Object.keys(e).length>0,n=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{},s=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0;if(!t&&!s)return process.env;let u={...process.env,...e,...n};delete u.CLAUDE_CODE_OAUTH_TOKEN;return u}function mcpAllow(){let e=process.env.CLAUDE_CODE_MCP_ALLOWLIST_ENV;return e}',
 ].join('\n');
 
 let home: string;
