@@ -70,12 +70,13 @@ clodex-claude [args...]     # second bin: launch claude bridged to a running clo
 
 Every SDK generation entry point resolves `CLODEX_UPSTREAM_MAX_RETRIES`
 through `src/upstream-retry.ts`. Unset or malformed values leave the SDK's
-two-retry default in control; valid integers are bounded to 0–8. Eight retries
-produce 510 seconds of default exponential backoff, which fits inside the
-adapter's ten-minute total timeout, while a ninth does not. Keep translated and
-OpenAI-format streaming and non-streaming consumers wired together. This
-policy can recover only before output begins; replay after partial output could
-duplicate content or tool calls.
+two-retry default in control; valid integers are bounded to 0–5. Five retries
+complete before the translated streaming paths' 120-second no-data timeout;
+larger integers clamp to 5 with a one-time stderr warning. This idle deadline,
+not the separate ten-minute total timeout, is the effective retry ceiling. Keep
+translated and OpenAI-format streaming and non-streaming consumers wired
+together. This policy can recover only before output begins; replay after
+partial output could duplicate content or tool calls.
 
 Connection pools are **process-wide**, not per-partition: `maxConnections` (established, default 32) and `maxNurseryConnections` (default 8). A head starts in the nursery and is promoted to established only when it is successfully continued, so a workload that fans out into many concurrent subagent conversations — which all inherit the parent's Claude session id and therefore share one partition — can evict heads before their next turn and lose the continuation. Both caps are overridable via `CLODEX_WS_MAX_CONNECTIONS` / `CLODEX_WS_MAX_NURSERY_CONNECTIONS` (integer 1–1024; a malformed value is logged and ignored). An explicit programmatic option still outranks the environment so tests are never perturbed. Eviction reasons (`nursery_lru_cap`, `established_lru_cap`, `idle_ttl`, `nursery_idle_ttl`, `hard_ttl`) are reported in the `evictions` array on every `ws_head_decision` diagnostic — sustained `*_lru_cap` counts are the signal that a cap is too small.
 

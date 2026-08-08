@@ -857,10 +857,7 @@ export async function streamAnthropicResponse(
   const result = streamText({
     model,
     ...params,
-    maxRetries: upstreamMaxRetries(
-      process.env,
-      message => log?.(() => message),
-    ),
+    maxRetries: upstreamMaxRetries(),
     abortSignal,
     onError: () => {},
   } as Parameters<typeof streamText>[0]);

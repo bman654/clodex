@@ -276,12 +276,14 @@ clodex --version    # version
 - `CLODEX_CLAUDE_PATH` overrides Claude Code binary discovery.
 - **Outbound proxy:** when `HTTP_PROXY`/`HTTPS_PROXY` (and optionally `NO_PROXY`) are set in clodex's environment, all clodex-originated network calls honor them — OAuth sign-in and token refresh, model-list and models.dev refreshes, upstream OpenAI API calls, and the ChatGPT/Codex OAuth WebSocket transport (tunneled via HTTP CONNECT).
 - **Upstream retries:** set `CLODEX_UPSTREAM_MAX_RETRIES` to an integer from
-  `0` through `8` to override the SDK's default of two retries for retryable
+  `0` through `5` to override the SDK's default of two retries for retryable
   provider failures. `0` disables retries. The SDK honors valid
   `retry-after`/`retry-after-ms` headers and otherwise uses exponential
-  backoff. Unset, empty, or invalid values preserve the default. A stream that
-  fails after output begins cannot be replayed safely and still terminates the
-  request.
+  backoff. Larger integers clamp to `5` with a one-time warning because a sixth
+  retry cannot complete before the translated streaming paths' 120-second
+  no-data timeout. Unset, empty, or malformed values preserve the default. A
+  stream that fails after output begins cannot be replayed safely and still
+  terminates the request.
 
 ## Known limitations
 
