@@ -3,154 +3,210 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
-const REPOSITORY = 'monotykamary/pi-opencode-go-provider';
-const DEFAULT_REF = 'main';
+// OpenCode's own catalog service (the opencode CLI consumes the same feed).
+// Supplies per-model metadata: name, context window, cost, modalities.
+const MODELS_DEV_URL = 'https://models.dev/api.json';
+const PROVIDER_ID = 'opencode-go';
 const MODELS_PATH = resolve('src/data/opencode-go-models.json');
 const CONSTANTS_PATH = resolve('src/data/opencode-go-models.ts');
-const SUPPORTED_APIS = new Set(['anthropic-messages', 'openai-completions']);
-const NPM_FOR_API = {
-  'anthropic-messages': '@ai-sdk/anthropic',
-  'openai-completions': '@ai-sdk/openai-compatible',
+
+const COMPLETIONS_BASE_URL = 'https://opencode.ai/zen/go/v1';
+const ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go';
+
+// models.dev does not publish per-model wire transport, and the family-level
+// summary in the Zen docs is not reliable per model (minimax-m3 is
+// Anthropic-format while minimax-m2.x are Chat Completions; gpt-5.6-luna rides
+// Chat Completions, not Responses). This map is clodex's live-validated
+// routing knowledge: catalog entries only exist for ids mapped here. A new
+// model on models.dev surfaces in the updater's "unmapped" report and is added
+// once its transport is verified against the live endpoint. Responses-only
+// models (grok, mainline gpt) are deliberately absent.
+const TRANSPORTS = {
+  'deepseek-v4-flash': 'openai-completions',
+  'deepseek-v4-pro': 'openai-completions',
+  'glm-5.1': 'openai-completions',
+  'glm-5.2': 'openai-completions',
+  'gpt-5.6-luna': 'openai-completions',
+  'hy3': 'openai-completions',
+  'kimi-k2.6': 'openai-completions',
+  'kimi-k2.7-code': 'openai-completions',
+  'kimi-k3': 'openai-completions',
+  'mimo-v2.5': 'openai-completions',
+  'mimo-v2.5-pro': 'openai-completions',
+  'minimax-m2.7': 'openai-completions',
+  'minimax-m3': 'anthropic-messages',
+  'qwen3.6-plus': 'openai-completions',
+  'qwen3.7-max': 'anthropic-messages',
+  'qwen3.7-plus': 'anthropic-messages',
+  'qwen3.8-max': 'anthropic-messages',
 };
 
-function requestHeaders() {
-  const headers = {
-    Accept: 'application/vnd.github+json',
-    'User-Agent': 'clodex-opencode-go-catalog-updater',
-  };
-  if (process.env.GITHUB_TOKEN?.trim()) {
-    headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN.trim()}`;
-  }
-  return headers;
-}
+// Clodex-side compatibility behavior per model, validated against the live
+// endpoint. models.dev carries none of this; it travels with the transport map.
+const PATCHES = {
+  'deepseek-v4-flash': {
+    reasoningEffortMap: { minimal: null, low: null, medium: null, high: 'high', max: 'max' },
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+    requiresReasoningContentOnAssistantMessages: true,
+    thinkingFormat: 'deepseek',
+  },
+  'deepseek-v4-pro': {
+    reasoningEffortMap: { minimal: null, low: null, medium: null, high: 'high', max: 'max' },
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+    requiresReasoningContentOnAssistantMessages: true,
+    thinkingFormat: 'deepseek',
+  },
+  'glm-5.1': {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+  },
+  'glm-5.2': {
+    reasoningEffortMap: { off: null, minimal: null, low: null, medium: null, high: 'high', xhigh: null, max: 'max' },
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+  },
+  'hy3': {
+    reasoningEffortMap: { off: 'none', minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: null },
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+  },
+  'kimi-k2.6': {
+    reasoningEffortMap: { minimal: null, low: null, medium: null },
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    thinkingFormat: 'deepseek',
+    supportsReasoningEffort: false,
+    maxTokensField: 'max_tokens',
+    supportsLongCacheRetention: false,
+  },
+  'kimi-k2.7-code': {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+  },
+  'kimi-k3': {
+    reasoningEffortMap: { off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, max: 'max' },
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+  },
+  'mimo-v2.5': {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+  },
+  'mimo-v2.5-pro': {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+  },
+  'minimax-m2.7': {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+  },
+  'qwen3.6-plus': {
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    thinkingFormat: 'qwen',
+    maxTokensField: 'max_tokens',
+  },
+};
 
-async function fetchJson(url, headers = {}) {
-  const response = await fetch(url, { headers });
+async function fetchJson(url) {
+  const response = await fetch(url, {
+    headers: { 'User-Agent': 'clodex-opencode-go-catalog-updater' },
+  });
   if (!response.ok) {
     throw new Error(`HTTP ${response.status} fetching ${url}`);
   }
   return response.json();
 }
 
-async function resolveSourceRef(ref) {
-  const result = await fetchJson(
-    `https://api.github.com/repos/${REPOSITORY}/commits/${encodeURIComponent(ref)}`,
-    requestHeaders(),
-  );
-  if (typeof result.sha !== 'string' || !/^[0-9a-f]{40}$/i.test(result.sha)) {
-    throw new Error(`GitHub did not return a commit SHA for ${ref}`);
-  }
-  return result.sha;
-}
-
-function applyPatch(model, patch = {}) {
-  const merged = { ...model, ...patch };
-  if (model.cost || patch.cost) {
-    merged.cost = { ...(model.cost ?? {}), ...(patch.cost ?? {}) };
-  }
-  if (model.compat || patch.compat) {
-    merged.compat = { ...(model.compat ?? {}), ...(patch.compat ?? {}) };
-  }
-  return merged;
-}
-
-
-function buildSourceModels(baseModels, customModels, patches) {
-  const byId = new Map();
-  for (const model of baseModels) {
-    if (!model || typeof model.id !== 'string') continue;
-    byId.set(model.id, applyPatch(model, patches[model.id]));
-  }
-  for (const model of customModels) {
-    if (!model || typeof model.id !== 'string') continue;
-    byId.set(model.id, applyPatch(model, patches[model.id]));
-  }
-  return [...byId.values()];
-}
-
-function toClodexModel(model) {
-  const compatibility = {
-    ...(model.compat ?? {}),
-    ...(model.thinkingLevelMap ? { reasoningEffortMap: model.thinkingLevelMap } : {}),
-  };
+function toClodexModel(id, devModel) {
+  const transport = TRANSPORTS[id];
+  const anthropic = transport === 'anthropic-messages';
+  const devCost = devModel.cost ?? {};
   const cost = {
-    input: model.cost?.input ?? 0,
-    output: model.cost?.output ?? 0,
-    ...(model.cost?.cacheRead ? { cache_read: model.cost.cacheRead } : {}),
-    ...(model.cost?.cacheWrite ? { cache_write: model.cost.cacheWrite } : {}),
+    input: devCost.input ?? 0,
+    output: devCost.output ?? 0,
+    ...(devCost.cache_read ? { cache_read: devCost.cache_read } : {}),
+    ...(devCost.cache_write ? { cache_write: devCost.cache_write } : {}),
   };
+  const compatibility = PATCHES[id];
+  const modalities = (devModel.modalities?.input ?? ['text'])
+    .filter(value => value === 'text' || value === 'image');
 
   return {
-    id: model.id,
-    name: model.name,
-    contextWindow: model.contextWindow,
+    id,
+    name: devModel.name ?? id,
+    contextWindow: devModel.limit?.context,
     cost,
-    modelFormat: model.api === 'anthropic-messages' ? 'anthropic' : 'openai',
-    npm: NPM_FOR_API[model.api],
-    apiUrl: model.baseUrl,
-    reasoning: model.reasoning === true,
-    modalities: (model.input ?? ['text']).filter(value => value === 'text' || value === 'image'),
-    ...(Object.keys(compatibility).length > 0 ? { compatibility } : {}),
-    upstreamModelId: model.id,
-    family: model.id.split('-')[0] ?? model.id,
+    modelFormat: anthropic ? 'anthropic' : 'openai',
+    npm: anthropic ? '@ai-sdk/anthropic' : '@ai-sdk/openai-compatible',
+    apiUrl: anthropic ? ANTHROPIC_BASE_URL : COMPLETIONS_BASE_URL,
+    reasoning: devModel.reasoning === true,
+    modalities,
+    ...(compatibility ? { compatibility } : {}),
+    upstreamModelId: id,
+    family: id.split('-')[0] ?? id,
   };
 }
 
-async function updateSourceConstant(sha) {
+async function updateSourceConstant(fetchedAt) {
   const source = await readFile(CONSTANTS_PATH, 'utf8');
-  const pattern = /export const OPENCODE_GO_SOURCE_REF = '[0-9a-f]{40}';/;
+  const pattern = /export const OPENCODE_GO_SOURCE_FETCHED_AT = '[^']*';/;
   if (!pattern.test(source)) {
-    throw new Error('Could not find OPENCODE_GO_SOURCE_REF in opencode-go-models.ts');
+    throw new Error('Could not find OPENCODE_GO_SOURCE_FETCHED_AT in opencode-go-models.ts');
   }
   await writeFile(
     CONSTANTS_PATH,
-    source.replace(pattern, `export const OPENCODE_GO_SOURCE_REF = '${sha}';`),
+    source.replace(pattern, `export const OPENCODE_GO_SOURCE_FETCHED_AT = '${fetchedAt}';`),
   );
 }
 
 async function main() {
-  const requestedRef = process.env.OPENCODE_GO_SOURCE_REF?.trim() || DEFAULT_REF;
-  const sha = await resolveSourceRef(requestedRef);
-  const rawBase = `https://raw.githubusercontent.com/${REPOSITORY}/${sha}`;
-  const [baseModels, patches, customModels] = await Promise.all([
-    fetchJson(`${rawBase}/models.json`),
-    fetchJson(`${rawBase}/patch.json`),
-    fetchJson(`${rawBase}/custom-models.json`),
-  ]);
-  if (
-    !Array.isArray(baseModels)
-    || !Array.isArray(customModels)
-    || !patches
-    || typeof patches !== 'object'
-  ) {
-    throw new Error('Unexpected upstream catalog shape');
+  const catalog = await fetchJson(MODELS_DEV_URL);
+  const provider = catalog?.[PROVIDER_ID];
+  const devModels = provider?.models;
+  if (!devModels || typeof devModels !== 'object') {
+    throw new Error(`models.dev catalog has no "${PROVIDER_ID}" provider models`);
   }
 
   const supported = [];
-  const excluded = [];
-  for (const model of buildSourceModels(baseModels, customModels, patches)) {
-    if (!SUPPORTED_APIS.has(model.api)) {
-      excluded.push(`${model.id} (${model.api ?? 'unknown'})`);
+  const unmapped = [];
+  for (const [id, devModel] of Object.entries(devModels).sort(([a], [b]) => a.localeCompare(b))) {
+    if (!TRANSPORTS[id]) {
+      unmapped.push(id);
       continue;
     }
-    supported.push(toClodexModel(model));
+    supported.push(toClodexModel(id, devModel));
   }
 
-  if (supported.length === 0) {
-    throw new Error('Upstream catalog produced no supported models');
+  const missing = Object.keys(TRANSPORTS).filter(id => !devModels[id]);
+  if (missing.length > 0) {
+    throw new Error(`Transport-mapped models missing from models.dev: ${missing.join(', ')}`);
   }
-  const ids = new Set();
-  for (const model of supported) {
-    if (ids.has(model.id)) throw new Error(`Duplicate model id: ${model.id}`);
-    ids.add(model.id);
+  if (supported.length === 0) {
+    throw new Error('models.dev catalog produced no supported models');
   }
 
   await writeFile(MODELS_PATH, `${JSON.stringify(supported, null, 2)}\n`);
-  await updateSourceConstant(sha);
+  await updateSourceConstant(new Date().toISOString());
 
-  console.log(`Updated ${supported.length} OpenCode Go models from ${sha}.`);
-  if (excluded.length > 0) {
-    console.log(`Excluded unsupported transports: ${excluded.join(', ')}`);
+  console.log(`Updated ${supported.length} OpenCode Go models from ${MODELS_DEV_URL} (${PROVIDER_ID}).`);
+  if (unmapped.length > 0) {
+    console.log(
+      'Present on models.dev but not transport-mapped (verify wire protocol '
+      + `against the live endpoint, then add to TRANSPORTS): ${unmapped.join(', ')}`,
+    );
   }
 }
 

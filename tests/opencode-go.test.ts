@@ -3,7 +3,8 @@ import {
   buildOpenCodeGoModels,
   OPENCODE_GO_ANTHROPIC_BASE_URL,
   OPENCODE_GO_COMPLETIONS_BASE_URL,
-  OPENCODE_GO_SOURCE_REF,
+  OPENCODE_GO_SOURCE,
+  OPENCODE_GO_SOURCE_FETCHED_AT,
 } from '../src/data/opencode-go-models.js';
 import { buildHttpProxyRoutes } from '../src/http-proxy/routes.js';
 import { getTemplateById, verifyOpenCodeGoCredential } from '../src/provider-templates.js';
@@ -24,11 +25,12 @@ function liveModel(id: string): CachedModel {
 }
 
 describe('OpenCode Go catalog', () => {
-  it('pins an immutable upstream revision and excludes Responses-only models', () => {
+  it('records its OpenCode catalog source and excludes Responses-only models', () => {
     const models = buildOpenCodeGoModels();
     const ids = models.map(model => model.id);
 
-    expect(OPENCODE_GO_SOURCE_REF).toMatch(/^[0-9a-f]{40}$/);
+    expect(OPENCODE_GO_SOURCE).toBe('https://models.dev/api.json');
+    expect(new Date(OPENCODE_GO_SOURCE_FETCHED_AT).toISOString()).toBe(OPENCODE_GO_SOURCE_FETCHED_AT);
     expect(models).toHaveLength(17);
     expect(new Set(ids).size).toBe(models.length);
     expect(ids).not.toContain('grok-4.5');

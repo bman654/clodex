@@ -21,18 +21,18 @@ The selective proxy diverts only explicit `clodex:opencode-go:...` model ids or 
 
 ## Supported transport scope
 
-The upstream OpenCode Go catalog also contains Responses-API models. Clodex intentionally excludes those entries from this provider. At the source revision currently pinned by Clodex, the excluded entry is Grok 4.5. The supported catalog contains only Anthropic Messages and Chat Completions models.
+The upstream OpenCode Go catalog also contains Responses-API models. Clodex intentionally excludes those entries from this provider (currently Grok 4.5; other unmapped ids are reported by the updater until their transport is verified). The supported catalog contains only Anthropic Messages and Chat Completions models.
 
 Live `/models` results are treated as availability data. Clodex layers its committed catalog over those results to supply the correct protocol, endpoint, context window, modalities, pricing, and compatibility behavior per model. Models absent from the committed allowlist are hidden even when the live endpoint advertises them.
 
 ## Updating the catalog
 
-The committed catalog is generated from a pinned revision of `monotykamary/pi-opencode-go-provider`:
+The committed catalog is generated directly from OpenCode's own catalog service (`models.dev/api.json`, provider `opencode-go`):
 
 ```bash
 pnpm update:opencode-go
 ```
 
-The updater resolves the requested source ref to an immutable commit, merges upstream `models.json`, `patch.json`, and `custom-models.json`, filters unsupported transports, writes `src/data/opencode-go-models.json`, and updates the pinned commit constant. It defaults to upstream `main`; set `OPENCODE_GO_SOURCE_REF` to review a specific branch, tag, or commit.
+The updater takes per-model metadata (name, context window, cost, modalities) from models.dev and merges it with the transport map and compatibility patches maintained in `scripts/update-opencode-go-models.mjs` — models.dev does not publish wire transports, and per-model routing is live-validated clodex knowledge. Only transport-mapped ids enter the catalog; new models on models.dev are reported as unmapped so their transport can be verified against the live endpoint before they ship. The script records the fetch time in `OPENCODE_GO_SOURCE_FETCHED_AT`.
 
 Review catalog, pricing, endpoint, and compatibility changes before committing generated output. In particular, a model changing between Anthropic Messages, Chat Completions, and Responses is a routing change rather than a cosmetic catalog refresh.
