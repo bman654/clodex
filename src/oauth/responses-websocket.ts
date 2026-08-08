@@ -83,6 +83,7 @@ interface RequestContext {
   responseId?: string;
   pendingEvents: unknown[];
   emittedModelData: boolean;
+  emittedDownstreamData: boolean;
   transportRetryPending: boolean;
   outputByIndex: Map<number, OutputAccumulator>;
   outputIndexByItemId: Map<string, number>;
@@ -914,6 +915,7 @@ function emitContextDiagnostic(
     retried: ctx.retried,
     frameCount: ctx.frameCount,
     emittedModelData: ctx.emittedModelData,
+    emittedDownstreamData: ctx.emittedDownstreamData,
     responseIdReceived: Boolean(ctx.responseId),
     inFlightMs: entry.inFlightStartedAt === undefined
       ? undefined
@@ -1254,6 +1256,7 @@ function expectedAssistantItems(ctx: RequestContext): unknown[] {
 
 function encodeSse(ctx: RequestContext, event: unknown): void {
   if (ctx.closed) return;
+  ctx.emittedDownstreamData = true;
   ctx.controller.enqueue(ctx.encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
 }
 
@@ -1317,15 +1320,14 @@ function retryTransportFailure(
     ctx.closed
     || entry.current !== ctx
     || ctx.retried
-    || ctx.frameCount !== 0
-    || ctx.emittedModelData
+    || !transportReplaySafe(ctx)
   ) {
     return false;
   }
 
   ctx.retried = true;
   ctx.transportRetryPending = true;
-  entry.debug('transport failed before any response frame; retrying once with full context');
+  entry.debug('transport failed before downstream output; retrying once with full context');
   emitContextDiagnostic(entry, ctx, {
     event: 'ws_transport_retry',
     outcome: 'started',
@@ -1365,9 +1367,9 @@ function handleTransportFailure(
 ): void {
   if (retryTransportFailure(entry, ctx, diagnosticDetails)) return;
   if (ctx.closed || entry.current !== ctx) return;
-  if (ctx.retried && ctx.frameCount === 0 && !ctx.emittedModelData) {
+  if (ctx.retried && ctx.transportRetryPending && transportReplaySafe(ctx)) {
     ctx.transportRetryPending = false;
-    entry.debug('transport retry exhausted before any response frame');
+    entry.debug('transport retry exhausted before downstream output');
     emitContextDiagnostic(entry, ctx, {
       event: 'ws_transport_retry',
       outcome: 'exhausted',
@@ -1498,6 +1500,12 @@ function resetContextForRetry(ctx: RequestContext): void {
   ctx.reasoningPartsByItemId.clear();
   ctx.recentUpstreamEventTypes = [];
   ctx.emittedProtocolAnomalies.clear();
+}
+
+function transportReplaySafe(ctx: RequestContext): boolean {
+  return !ctx.emittedDownstreamData
+    && !ctx.emittedModelData
+    && ctx.outputByIndex.size === 0;
 }
 
 function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
@@ -2008,6 +2016,7 @@ export function createResponsesWebSocketFetch(
           frameCount: 0,
           pendingEvents: [],
           emittedModelData: false,
+          emittedDownstreamData: false,
           transportRetryPending: false,
           outputByIndex: new Map(),
           outputIndexByItemId: new Map(),
