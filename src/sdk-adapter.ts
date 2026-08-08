@@ -207,10 +207,12 @@ function translateTopLevelSystemForOpenAi(
 ): ModelMessage[] {
   if (!system) return [];
   if (typeof system === 'string') {
-    return system.trim() ? [{ role: 'system', content: system } as ModelMessage] : [];
+    const stripped = stripClaudeCodeBillingHeader(system);
+    return stripped?.trim() ? [{ role: 'system', content: stripped } as ModelMessage] : [];
   }
   return system.flatMap(block => {
-    const text = typeof block === 'string' ? block : block.text ?? '';
+    const raw = typeof block === 'string' ? block : block.text ?? '';
+    const text = stripClaudeCodeBillingHeader(raw) ?? '';
     if (!text.trim()) return [];
     const cacheControl = typeof block === 'string' ? undefined : block.cache_control;
     return [{
@@ -471,9 +473,15 @@ export function translateRequest(
 
   // Claude Code prepends an Anthropic-only billing attribution block whose
   // `cch` value changes every request. It is envelope metadata, not a model
-  // instruction, and forwarding it to OpenAI would invalidate the stable
-  // prompt prefix. Anthropic passthrough and non-OAuth providers are untouched.
-  const baseSystem = systemToString(body.system, options?.openAiOAuth === true);
+  // instruction, and forwarding it invalidates the stable prompt prefix on
+  // EVERY translated provider — OpenAI-compatible gateways hash the request
+  // prefix for implicit caching, and third-party Anthropic-format providers
+  // cache up to breakpoints, so a volatile first system line caps their cache
+  // hits at the first few hundred tokens (observed live: kimi-k3 via OpenCode
+  // Zen froze at 256-512 cached tokens per call). Strip it on every
+  // SDK-translated route; Anthropic passthrough does not go through
+  // translateRequest and still forwards it.
+  const baseSystem = systemToString(body.system, true);
   const systemText = baseSystem?.trim() || (options?.openAiOAuth ? 'You are a coding assistant.' : undefined);
 
   // resolveUpstreamTools uses the shared proxy types; the adapter keeps its own

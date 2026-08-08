@@ -205,7 +205,7 @@ describe('translateRequest', () => {
     expect(params.maxOutputTokens).toBeUndefined();
   });
 
-  it('strips Claude Code Anthropic billing attribution from OpenAI OAuth instructions only', () => {
+  it('strips Claude Code Anthropic billing attribution on every translated route', () => {
     const body = {
       model: 'gpt-5.6-terra',
       system: [
@@ -216,6 +216,10 @@ describe('translateRequest', () => {
       ],
       messages: [{ role: 'user' as const, content: 'hello' }],
     };
+    const changedCchSystem = [
+      { text: 'x-anthropic-billing-header: cc_version=2.1.207.9bb; cc_entrypoint=cli; cch=cb57d;' },
+      body.system[1]!,
+    ];
 
     const oauth = translateRequest(body, '@ai-sdk/openai', { openAiOAuth: true });
     expect(oauth.providerOptions?.openai?.instructions)
@@ -223,18 +227,39 @@ describe('translateRequest', () => {
 
     const changedAttribution = translateRequest({
       ...body,
-      system: [
-        { text: 'x-anthropic-billing-header: cc_version=2.1.207.9bb; cc_entrypoint=cli; cch=cb57d;' },
-        body.system[1]!,
-      ],
+      system: changedCchSystem,
     }, '@ai-sdk/openai', { openAiOAuth: true });
     expect(changedAttribution.providerOptions?.openai?.instructions)
       .toBe(oauth.providerOptions?.openai?.instructions);
     expect(changedAttribution.providerOptions?.openai?.promptCacheKey)
       .toBe(oauth.providerOptions?.openai?.promptCacheKey);
 
+    // Public OpenAI API-key route (pre-5.6 → instructions path): the volatile
+    // header must not churn the implicit-cache prefix or the promptCacheKey.
     const publicApi = translateRequest({ ...body, model: 'gpt-5.5' }, '@ai-sdk/openai');
-    expect(publicApi.instructions).toContain('x-anthropic-billing-header:');
+    expect(publicApi.instructions).toBe('You are Claude Code.\nFollow the user instructions.');
+    const publicApiChangedCch = translateRequest(
+      { ...body, model: 'gpt-5.5', system: changedCchSystem }, '@ai-sdk/openai');
+    expect(publicApiChangedCch.providerOptions?.openai?.promptCacheKey)
+      .toBe(publicApi.providerOptions?.openai?.promptCacheKey);
+
+    // OpenAI-compatible gateways hash the request prefix for implicit
+    // caching — the header must never reach them.
+    const compatible = translateRequest({ ...body, model: 'kimi-k3' }, '@ai-sdk/openai-compatible');
+    expect(compatible.instructions).toBe('You are Claude Code.\nFollow the user instructions.');
+
+    // Third-party Anthropic-format providers cache up to breakpoints; a
+    // volatile first system block invalidates every cached prefix.
+    const anthropicCompatible = translateRequest({ ...body, model: 'qwen3.8-max' }, '@ai-sdk/anthropic');
+    expect(anthropicCompatible.instructions).toBe('You are Claude Code.\nFollow the user instructions.');
+
+    // Explicit-breakpoint path (gpt-5.6+ public API) emits top-level system
+    // blocks as system messages — the billing block must be dropped there too.
+    const explicitCaching = translateRequest({ ...body, model: 'gpt-5.6' }, '@ai-sdk/openai');
+    expect(explicitCaching.instructions).toBeUndefined();
+    const systemMessages = explicitCaching.messages.filter(m => m.role === 'system');
+    expect(systemMessages).toHaveLength(1);
+    expect(systemMessages[0]?.content).toBe('You are Claude Code.\nFollow the user instructions.');
   });
 
   it('maps output_config.effort to Google thinking budget without dropping includeThoughts', () => {
