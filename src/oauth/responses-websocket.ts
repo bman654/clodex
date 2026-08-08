@@ -646,13 +646,27 @@ function continuationMismatchDetails(
   const actual = mismatch < full.length ? full[mismatch] : undefined;
   const reasoningGap = reasoningNormalizationGap(expected, actual);
   if (reasoningGap && warnOnGap) warnReasoningNormalizationGap(reasoningGap, log);
+  // Claude may legitimately omit stored reasoning items (continuationMatch's
+  // omitted_reasoning mode), which shifts the exact-prefix divergence onto a
+  // reasoning-vs-call pair and would hide a forked strip rule sitting on the
+  // very next call. Align the canary to the first non-reasoning stored item
+  // in that case; everything else still uses the exact divergence pair.
+  let gapExpected = expected;
+  if (conversationItemKind(expected) === 'reasoning' && conversationItemKind(actual) === 'function_call') {
+    for (let index = mismatch; index < prefix.length; index += 1) {
+      if (conversationItemKind(prefix[index]) !== 'reasoning') {
+        gapExpected = prefix[index];
+        break;
+      }
+    }
+  }
   let toolArgumentGap: Record<string, unknown> | undefined;
   // Detection is pure bookkeeping on top of a request that already succeeded, so
   // it must not be able to reject one. No throw is reachable today; this is here
   // so the next person editing the predicate cannot make one fatal.
   try {
     toolArgumentGap = toolArgumentNormalizationGap(
-      expected,
+      gapExpected,
       actual,
       // The head's own schema when it has one; the current turn's tools are only a
       // fallback for a head that predates the snapshot (see headRequiredToolProps).
@@ -697,8 +711,9 @@ function continuationMismatchSummary(
   payload: JsonObject,
   log?: (message: string) => void,
   mismatchDump = false,
+  precomputedDetails?: Record<string, unknown>,
 ): string {
-  const details = continuationMismatchDetails(entry, payload, log, true);
+  const details = precomputedDetails ?? continuationMismatchDetails(entry, payload, log, true);
   let summary = `full_items=${details.fullItems} expected_prefix_items=${details.expectedPrefixItems} `
     + `first_mismatch=${details.firstMismatch} expected=${details.expectedKind} actual=${details.actualKind}`;
   // The hashes make same-kind mismatches diagnosable from the log alone. With
@@ -1891,6 +1906,7 @@ export function createResponsesWebSocketFetch(
     let persistent = Boolean(partitionKey);
     let promotedConnectionId: number | undefined;
     let decision: 'continuation' | 'parallel_isolated' | 'history_mismatch_new_head' | 'new_partition_head' | 'unpartitioned_socket';
+    let candidateMismatchDetails: Map<ConnectionEntry, Record<string, unknown>> | undefined;
 
     if (selected && selectedDelta) {
       sendPayload = { ...payload, input: selectedDelta, previous_response_id: selected.responseId };
@@ -1919,9 +1935,26 @@ export function createResponsesWebSocketFetch(
     } else if (diagnosticEntry) {
       // A rewind, branch, or hidden auxiliary inference gets its own full-context
       // head. Existing heads remain eligible for later exact-prefix matches.
+      const diagnosticMismatch = continuationMismatchDetails(diagnosticEntry, payload, debug, true);
+      candidateMismatchDetails = new Map([[diagnosticEntry, diagnosticMismatch]]);
+      // Every abandoned non-diagnostic head warns independently of diagnostics.
+      // Cache each mismatch so the diagnostic payload does not evaluate it again.
+      for (const candidate of candidates) {
+        if (candidate === diagnosticEntry) continue;
+        candidateMismatchDetails.set(
+          candidate,
+          continuationMismatchDetails(candidate, payload, debug, true),
+        );
+      }
       debug(
         `history mismatch starting an additional chain; retained ${candidates.length} existing head(s) `
-        + `(${continuationMismatchSummary(diagnosticEntry, payload, debug, mismatchDump)})`,
+        + `(${continuationMismatchSummary(
+          diagnosticEntry,
+          payload,
+          debug,
+          mismatchDump,
+          diagnosticMismatch,
+        )})`,
       );
       decision = 'history_mismatch_new_head';
     } else if (partitionKey) {
@@ -1987,7 +2020,8 @@ export function createResponsesWebSocketFetch(
         ttlPausedMs: entry.ttlPausedMs,
         idleMs: Math.max(0, now - entry.lastUsedAt),
         promptChanges: changedPromptFields(entry.promptFieldHashes, promptFieldHashes),
-        mismatch: continuationMismatchDetails(entry, payload, debug),
+        mismatch: candidateMismatchDetails?.get(entry)
+          ?? continuationMismatchDetails(entry, payload, debug),
       })),
       evictions,
     }, diagnosticCorrelation);
