@@ -12,6 +12,7 @@ import { ensureHttpProxyCertificates } from './ca.js';
 import { normalizeRouteLookupId } from '../context-model-id.js';
 import { listenTcpServer } from '../listener-ready.js';
 import { routeUnavailableMessage } from '../route-unavailable.js';
+import { outboundHttpProxyAgent } from '../outbound-proxy.js';
 import { HTTP_PROXY_MODEL_PREFIX, type ResolvedHttpProxyAlias } from './routes.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
@@ -269,6 +270,7 @@ function forwardRawAnthropicRequest(
   rawBody: Buffer,
   origin: URL,
   rejectUnauthorized: boolean,
+  agent?: https.Agent,
   onErrorResponse?: (statusCode: number, body: string) => void,
   onResponseUsage?: (usage: ResponseUsage) => void,
   lifecycle?: {
@@ -346,6 +348,7 @@ function forwardRawAnthropicRequest(
       headers: requestHeadersWithoutProxyHeaders(req),
       servername: net.isIP(origin.hostname) ? undefined : origin.hostname,
       rejectUnauthorized,
+      agent,
     }, upstreamRes => {
       headersReceived = true;
       statusCode = upstreamRes.statusCode ?? 502;
@@ -724,17 +727,23 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     reservedModelIds.add(normalizeRouteLookupId(modelId));
   }
   const anthropicOrigin = new URL(options.anthropicOrigin ?? 'https://api.anthropic.com');
+  const anthropicAgent = await outboundHttpProxyAgent(anthropicOrigin.href);
   let adapter: ProxyHandle | null = options.adapterHandle ?? null;
-  if (options.routes.length > 0) {
-    adapter ??= await startProxyCatalog(
-      options.routes,
-      options.routes[0]!.aliasId,
-      options.debug,
-      options.inferenceLogPath,
-      options.debugLogPath,
-      options.webSocketDiagnosticsLogPath,
-      options.modelAliases,
-    );
+  try {
+    if (options.routes.length > 0) {
+      adapter ??= await startProxyCatalog(
+        options.routes,
+        options.routes[0]!.aliasId,
+        options.debug,
+        options.inferenceLogPath,
+        options.debugLogPath,
+        options.webSocketDiagnosticsLogPath,
+        options.modelAliases,
+      );
+    }
+  } catch (err) {
+    anthropicAgent?.destroy();
+    throw err;
   }
   const adapterAgent = adapter ? new http.Agent({ keepAlive: true }) : undefined;
   let shuttingDown = false;
@@ -877,6 +886,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         rawBody,
         anthropicOrigin,
         options.anthropicRejectUnauthorized ?? true,
+        anthropicAgent,
         messagesEndpoint === 'messages' && options.inferenceLogPath
           ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
               requestId,
@@ -919,6 +929,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       rawBody,
       anthropicOrigin,
       options.anthropicRejectUnauthorized ?? true,
+      anthropicAgent,
     );
   });
 
@@ -980,6 +991,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     );
   } catch (err) {
     adapterAgent?.destroy();
+    anthropicAgent?.destroy();
     adapter?.close();
     throw err;
   }
@@ -999,6 +1011,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       for (const socket of sockets) socket.destroy();
       await new Promise<void>(resolve => proxyServer.close(() => resolve()));
       mitmServer.close();
+      anthropicAgent?.destroy();
       adapter?.close();
     },
   };

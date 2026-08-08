@@ -14,6 +14,29 @@ import { shouldInterceptConnect, startHttpProxy } from '../src/http-proxy/server
 
 const testHome = mkdtempSync(join(tmpdir(), 'clodex-http-proxy-'));
 const previousRelayHome = process.env['CLODEX_HOME'];
+const outboundProxyEnvNames = [
+  'HTTPS_PROXY',
+  'https_proxy',
+  'HTTP_PROXY',
+  'http_proxy',
+  'NO_PROXY',
+  'no_proxy',
+] as const;
+
+function replaceOutboundProxyEnv(httpsProxy: string): () => void {
+  const previous = Object.fromEntries(
+    outboundProxyEnvNames.map(name => [name, process.env[name]]),
+  ) as Record<typeof outboundProxyEnvNames[number], string | undefined>;
+  for (const name of outboundProxyEnvNames) delete process.env[name];
+  process.env['HTTPS_PROXY'] = httpsProxy;
+  return () => {
+    for (const name of outboundProxyEnvNames) {
+      const value = previous[name];
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  };
+}
 
 async function listen(server: http.Server | https.Server): Promise<number> {
   server.listen(0, '127.0.0.1');
@@ -430,6 +453,96 @@ describe('selective HTTP proxy', () => {
       expect(receivedAuth).toBe('Bearer subscription-oauth-token');
     } finally {
       await proxy.close();
+      await new Promise<void>(resolve => origin.close(() => resolve()));
+    }
+  });
+
+  it('streams raw passthrough through the configured CONNECT proxy', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    let receivedPath: string | undefined;
+    let receivedAuthorization: string | undefined;
+    let receivedBody = Buffer.alloc(0);
+    const origin = https.createServer({
+      key: certificates.serverKey,
+      cert: certificates.serverCert,
+    }, async (req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      await once(req, 'end');
+      receivedBody = Buffer.concat(chunks);
+      receivedPath = req.url;
+      receivedAuthorization = req.headers.authorization;
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Connection': 'close' });
+      res.write('event: message_start\ndata: {"type":"message_start"}\n\n');
+      res.end('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+    });
+    const originPort = await listen(origin);
+
+    let connectLine: string | undefined;
+    let proxyAuthorization: string | undefined;
+    const tunnelSockets = new Set<net.Socket>();
+    const upstreamProxy = net.createServer(client => {
+      tunnelSockets.add(client);
+      client.once('close', () => tunnelSockets.delete(client));
+      let buffered = Buffer.alloc(0);
+      const readConnect = (chunk: Buffer) => {
+        buffered = Buffer.concat([buffered, chunk]);
+        const boundary = buffered.indexOf('\r\n\r\n');
+        if (boundary === -1) return;
+        client.removeListener('data', readConnect);
+        const headerLines = buffered.subarray(0, boundary).toString('ascii').split('\r\n');
+        connectLine = headerLines[0];
+        proxyAuthorization = headerLines
+          .find(line => line.toLowerCase().startsWith('proxy-authorization:'))
+          ?.slice('proxy-authorization:'.length)
+          .trim();
+        const target = net.connect(originPort, '127.0.0.1');
+        tunnelSockets.add(target);
+        target.once('close', () => tunnelSockets.delete(target));
+        target.once('error', () => client.destroy());
+        target.once('connect', () => {
+          client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+          const remainder = buffered.subarray(boundary + 4);
+          if (remainder.length > 0) target.write(remainder);
+          client.pipe(target);
+          target.pipe(client);
+        });
+      };
+      client.on('data', readConnect);
+      client.once('error', () => client.destroy());
+    });
+    const upstreamProxyPort = await listen(upstreamProxy);
+    const restoreProxyEnv = replaceOutboundProxyEnv(
+      `http://test-user:test-pass@127.0.0.1:${upstreamProxyPort}`,
+    );
+    let proxy: Awaited<ReturnType<typeof startHttpProxy>> | undefined;
+
+    try {
+      proxy = await startHttpProxy({
+        routes: [],
+        anthropicOrigin: `https://127.0.0.1:${originPort}`,
+        anthropicRejectUnauthorized: false,
+      });
+      const response = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/v1/messages',
+        '{"model":"claude-test","stream":true}',
+      );
+
+      expect(response).toContain('200 OK');
+      expect(response).toContain('event: message_start');
+      expect(response).toContain('event: message_stop');
+      expect(connectLine).toBe(`CONNECT 127.0.0.1:${originPort} HTTP/1.1`);
+      expect(proxyAuthorization).toBe('Basic dGVzdC11c2VyOnRlc3QtcGFzcw==');
+      expect(receivedPath).toBe('/v1/messages');
+      expect(receivedAuthorization).toBe('Bearer subscription-oauth-token');
+      expect(receivedBody.toString()).toBe('{"model":"claude-test","stream":true}');
+    } finally {
+      restoreProxyEnv();
+      await proxy?.close();
+      for (const socket of tunnelSockets) socket.destroy();
+      await new Promise<void>(resolve => upstreamProxy.close(() => resolve()));
       await new Promise<void>(resolve => origin.close(() => resolve()));
     }
   });
