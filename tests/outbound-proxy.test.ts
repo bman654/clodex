@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 import {
   hasOutboundProxyEnv,
   noProxyBypasses,
+  outboundHttpProxyAgent,
   outboundProxyUrlForTarget,
 } from '../src/outbound-proxy.js';
 
@@ -54,6 +55,22 @@ describe('outboundProxyUrlForTarget', () => {
     const env = { HTTPS_PROXY: PROXY, NO_PROXY: 'api.openai.com' };
     expect(outboundProxyUrlForTarget('https://api.openai.com/v1', env)).toBeUndefined();
     expect(outboundProxyUrlForTarget('https://chatgpt.com/x', env)).toBe(PROXY);
+  });
+});
+
+describe('outboundHttpProxyAgent', () => {
+  it('builds an agent only when the target is not bypassed', async () => {
+    const direct = await outboundHttpProxyAgent('https://api.example.test', {
+      HTTPS_PROXY: PROXY,
+      NO_PROXY: 'api.example.test',
+    });
+    expect(direct).toBeUndefined();
+
+    const proxied = await outboundHttpProxyAgent('https://api.example.test', {
+      HTTPS_PROXY: PROXY,
+    });
+    expect(proxied).toBeDefined();
+    proxied?.destroy();
   });
 });
 
