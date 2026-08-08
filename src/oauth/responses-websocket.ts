@@ -18,7 +18,6 @@ import { sanitizeToolInput } from '../tool-input-sanitize.js';
 const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite';
 const TERMINAL_EVENT_TYPES = new Set(['response.completed', 'response.failed', 'response.incomplete']);
 const FAILURE_EVENT_TYPES = new Set(['error', 'response.failed', 'response.incomplete']);
-const TRANSPORT_REPLAY_SAFE_EVENT_TYPES = new Set(['response.created']);
 
 export const RESPONSES_WS_HARD_TTL_MS = 55 * 60_000;
 export const RESPONSES_WS_IDLE_TTL_MS = 30 * 60_000;
@@ -1368,7 +1367,7 @@ function handleTransportFailure(
 ): void {
   if (retryTransportFailure(entry, ctx, diagnosticDetails)) return;
   if (ctx.closed || entry.current !== ctx) return;
-  if (ctx.retried && transportReplaySafe(ctx)) {
+  if (ctx.retried && ctx.transportRetryPending && transportReplaySafe(ctx)) {
     ctx.transportRetryPending = false;
     entry.debug('transport retry exhausted before downstream output');
     emitContextDiagnostic(entry, ctx, {
@@ -1493,7 +1492,6 @@ function finishInFlightPeriod(entry: ConnectionEntry, now: number): void {
 function resetContextForRetry(ctx: RequestContext): void {
   ctx.continued = false;
   ctx.sendPayload = ctx.originalPayload;
-  ctx.frameCount = 0;
   ctx.pendingEvents = [];
   ctx.emittedModelData = false;
   ctx.responseId = undefined;
@@ -1505,11 +1503,9 @@ function resetContextForRetry(ctx: RequestContext): void {
 }
 
 function transportReplaySafe(ctx: RequestContext): boolean {
-  if (ctx.emittedDownstreamData || ctx.emittedModelData) return false;
-  if (ctx.frameCount === 0) return true;
-  return ctx.frameCount === 1
-    && ctx.recentUpstreamEventTypes.length === 1
-    && TRANSPORT_REPLAY_SAFE_EVENT_TYPES.has(ctx.recentUpstreamEventTypes[0]!);
+  return !ctx.emittedDownstreamData
+    && !ctx.emittedModelData
+    && ctx.outputByIndex.size === 0;
 }
 
 function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {

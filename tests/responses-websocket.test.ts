@@ -470,7 +470,7 @@ describe('createResponsesWebSocketFetch', () => {
     expect(JSON.stringify(diagnostics)).not.toContain('private cancelled failure');
   });
 
-  it('retries after a buffered control frame when no downstream data was emitted', async () => {
+  it('retries after multiple buffered control frames when no output was emitted', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
       onDiagnostic: event => diagnostics.push(event),
@@ -485,10 +485,14 @@ describe('createResponsesWebSocketFetch', () => {
     });
     const first = lastSocket();
     first.emit('open');
-    first.emit('message', Buffer.from(JSON.stringify({
-      type: 'response.created',
-      response: { id: 'resp_abandoned' },
-    })));
+    for (const event of [
+      { type: 'response.created', response: { id: 'resp_abandoned' } },
+      { type: 'response.queued', response: { id: 'resp_abandoned' } },
+      { type: 'response.in_progress', response: { id: 'resp_abandoned' } },
+      { type: 'response.reasoning_summary_part.added', item_id: 'reasoning_abandoned' },
+    ]) {
+      first.emit('message', Buffer.from(JSON.stringify(event)));
+    }
     first.emit('close', 1006, Buffer.from(''));
 
     expect(fakeSockets).toHaveLength(2);
@@ -508,7 +512,7 @@ describe('createResponsesWebSocketFetch', () => {
       outcome: 'started',
       source: 'socket_close',
       closeCode: 1006,
-      frameCount: 1,
+      frameCount: 4,
       emittedModelData: false,
       emittedDownstreamData: false,
     }));
@@ -516,65 +520,9 @@ describe('createResponsesWebSocketFetch', () => {
       event: 'ws_transport_retry',
       outcome: 'recovered',
       connectionId: 2,
-      frameCount: 1,
+      frameCount: 5,
       emittedDownstreamData: false,
     }));
-  });
-
-  it('does not retry after an unrecognized control frame has arrived', async () => {
-    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
-    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
-      onDiagnostic: event => diagnostics.push(event),
-    });
-    const res = await wsFetch('https://x', {
-      method: 'POST',
-      headers: {},
-      body: JSON.stringify(sessionPayload([])),
-    });
-    const socket = lastSocket();
-    socket.emit('open');
-    socket.emit('message', Buffer.from(JSON.stringify({
-      type: 'response.in_progress',
-      response: { id: 'resp_unknown' },
-    })));
-    socket.emit(
-      'error',
-      Object.assign(new Error('private post-frame failure'), { code: 'ECONNRESET' }),
-    );
-
-    expect(fakeSockets).toHaveLength(1);
-    expect(await readAll(res)).toContain('websocket_transport_error');
-    expect(diagnostics).not.toContainEqual(expect.objectContaining({
-      event: 'ws_transport_retry',
-      outcome: 'started',
-    }));
-    expect(diagnostics).toContainEqual(expect.objectContaining({
-      event: 'ws_response_error',
-      connectionId: 1,
-      frameCount: 1,
-      emittedModelData: false,
-    }));
-  });
-
-  it('does not retry after repeated response creation frames', async () => {
-    const wsFetch = createResponsesWebSocketFetch(WS_URL);
-    const res = await wsFetch('https://x', {
-      method: 'POST',
-      headers: {},
-      body: JSON.stringify(sessionPayload([])),
-    });
-    const socket = lastSocket();
-    socket.emit('open');
-    for (const responseId of ['resp_first', 'resp_duplicate']) {
-      socket.emit('message', Buffer.from(JSON.stringify({
-        type: 'response.created',
-        response: { id: responseId },
-      })));
-    }
-    socket.emit('close', 1006, Buffer.from(''));
-
-    expect(fakeSockets).toHaveLength(1);
-    expect(await readAll(res)).toContain('websocket_transport_error');
   });
 
   it('does not retry after model output has reached the downstream stream', async () => {
@@ -2909,6 +2857,47 @@ describe('createResponsesWebSocketFetch', () => {
     emitTextResponse(replacement, 'resp_recovered', 'recovered');
     const body = await readAll(second);
     expect(body).not.toContain('previous_response_not_found');
+  });
+
+  it('does not report transport exhaustion for a continuation retry', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'one' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-retry-transport-diagnostics',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const firstSocket = lastSocket();
+    firstSocket.emit('open');
+    emitTextResponse(firstSocket, 'resp_old', 'answer');
+    await readAll(first);
+
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([
+        ...input,
+        { role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+        { role: 'user', content: [{ type: 'input_text', text: 'two' }] },
+      ])),
+    });
+    firstSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error', status: 400,
+      error: { code: 'previous_response_not_found', message: 'gone' },
+    })));
+    const replacement = lastSocket();
+    replacement.emit('close', 1006, Buffer.from(''));
+
+    expect(await readAll(second)).toContain('websocket_transport_error');
+    expect(diagnostics).not.toContainEqual(expect.objectContaining({
+      event: 'ws_transport_retry',
+      outcome: 'exhausted',
+    }));
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_error',
+      source: 'socket_close',
+      frameCount: 1,
+    }));
   });
 
   it('still logs a retried rejection, which no error_frame record covers', async () => {
