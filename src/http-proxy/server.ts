@@ -160,6 +160,8 @@ export interface HttpProxyOptions {
   anthropicOrigin?: string;
   /** Test hook for a local self-signed Anthropic origin. */
   anthropicRejectUnauthorized?: boolean;
+  /** Test hook for exercising Anthropic request socket failures. */
+  anthropicRequest?: typeof https.request;
   /** Test hook for observing relay-route isolation without calling an AI provider. */
   adapterHandle?: ProxyHandle;
   /** Test hook for exercising adapter request transport failures. */
@@ -269,6 +271,7 @@ function forwardRawAnthropicRequest(
   rawBody: Buffer,
   origin: URL,
   rejectUnauthorized: boolean,
+  requestImpl: typeof https.request = https.request,
   onErrorResponse?: (statusCode: number, body: string) => void,
   onResponseUsage?: (usage: ResponseUsage) => void,
   lifecycle?: {
@@ -337,7 +340,39 @@ function forwardRawAnthropicRequest(
       resolve();
     };
     const errorType = (err: Error): string => (err as NodeJS.ErrnoException).code ?? err.name;
-    const upstream = https.request({
+    const failUpstream = (err: Error) => {
+      if (clientDisconnected || failed) {
+        done();
+        return;
+      }
+      failed = true;
+      stopProgress();
+      const now = Date.now();
+      writeLifecycle('response_failed', {
+        statusCode: 502,
+        phase: responsePhase(),
+        durationMs: now - startedAt,
+        idleMs: now - lastActivityAt,
+        bytes,
+        chunks,
+        errorType: errorType(err),
+        terminationSource: 'upstream_failure',
+      });
+      onErrorResponse?.(502, `Anthropic upstream unreachable: ${err.message}`);
+      if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
+      res.end(`Anthropic upstream unreachable: ${err.message}`);
+      done();
+    };
+    let requestSocket: Socket | undefined;
+    let onRequestSocketError: ((err: Error) => void) | undefined;
+    const detachRequestSocketError = () => {
+      if (requestSocket && onRequestSocketError) {
+        requestSocket.removeListener('error', onRequestSocketError);
+      }
+      requestSocket = undefined;
+      onRequestSocketError = undefined;
+    };
+    const upstream = requestImpl({
       protocol: 'https:',
       hostname: origin.hostname,
       port: origin.port || 443,
@@ -347,6 +382,11 @@ function forwardRawAnthropicRequest(
       servername: net.isIP(origin.hostname) ? undefined : origin.hostname,
       rejectUnauthorized,
     }, upstreamRes => {
+      detachRequestSocketError();
+      if (failed) {
+        upstreamRes.destroy();
+        return;
+      }
       headersReceived = true;
       statusCode = upstreamRes.statusCode ?? 502;
       lastActivityAt = Date.now();
@@ -392,6 +432,14 @@ function forwardRawAnthropicRequest(
         done();
       });
     });
+    upstream.once('socket', socket => {
+      requestSocket = socket;
+      onRequestSocketError = err => {
+        failUpstream(err);
+        upstream.destroy(err);
+      };
+      socket.once('error', onRequestSocketError);
+    });
     res.once('finish', () => {
       stopProgress();
       if (failed || clientDisconnected) return;
@@ -423,27 +471,8 @@ function forwardRawAnthropicRequest(
       done();
     });
     upstream.once('error', err => {
-      if (clientDisconnected) {
-        done();
-        return;
-      }
-      failed = true;
-      stopProgress();
-      const now = Date.now();
-      writeLifecycle('response_failed', {
-        statusCode: 502,
-        phase: responsePhase(),
-        durationMs: now - startedAt,
-        idleMs: now - lastActivityAt,
-        bytes,
-        chunks,
-        errorType: errorType(err),
-        terminationSource: 'upstream_failure',
-      });
-      onErrorResponse?.(502, `Anthropic upstream unreachable: ${err.message}`);
-      if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
-      res.end(`Anthropic upstream unreachable: ${err.message}`);
-      done();
+      detachRequestSocketError();
+      failUpstream(err);
     });
     upstream.end(rawBody);
   });
@@ -877,6 +906,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         rawBody,
         anthropicOrigin,
         options.anthropicRejectUnauthorized ?? true,
+        options.anthropicRequest,
         messagesEndpoint === 'messages' && options.inferenceLogPath
           ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
               requestId,
@@ -919,6 +949,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       rawBody,
       anthropicOrigin,
       options.anthropicRejectUnauthorized ?? true,
+      options.anthropicRequest,
     );
   });
 

@@ -109,6 +109,24 @@ function adapterRequestWithResponseEvents(
   }) as unknown as typeof http.request;
 }
 
+function anthropicRequestWithSocketError(error: Error): typeof https.request {
+  return ((_options: https.RequestOptions, _onResponse: (response: http.IncomingMessage) => void) => {
+    const request = new EventEmitter() as EventEmitter & {
+      end(body?: Buffer): void;
+      destroy(error?: Error): void;
+    };
+    request.end = () => {
+      queueMicrotask(() => {
+        const socket = new EventEmitter();
+        request.emit('socket', socket);
+        socket.emit('error', error);
+      });
+    };
+    request.destroy = () => {};
+    return request;
+  }) as unknown as typeof https.request;
+}
+
 async function adapterResponseFailureEntries(
   logName: string,
   emitEvents: (response: http.IncomingMessage) => void,
@@ -224,6 +242,39 @@ describe('selective HTTP proxy', () => {
       for (const client of clients) client.destroy();
       await proxy.close();
       await new Promise<void>(resolve => upstream.close(() => resolve()));
+    }
+  });
+
+  it('returns 502 when the upstream request socket resets before a response', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    const origin = https.createServer({
+      key: certificates.serverKey,
+      cert: certificates.serverCert,
+    }, (_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Connection': 'close' });
+      res.end('{}');
+    });
+    const originPort = await listen(origin);
+    const socketError = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+    const proxy = await startHttpProxy({
+      routes: [],
+      anthropicOrigin: `https://127.0.0.1:${originPort}`,
+      anthropicRejectUnauthorized: false,
+      anthropicRequest: anthropicRequestWithSocketError(socketError),
+    });
+
+    try {
+      const response = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/api/oauth/usage',
+        '{}',
+      );
+      expect(response).toContain('502 Bad Gateway');
+      expect(response).toContain('Anthropic upstream unreachable: socket hang up');
+    } finally {
+      await proxy.close();
+      await new Promise<void>(resolve => origin.close(() => resolve()));
     }
   });
 
