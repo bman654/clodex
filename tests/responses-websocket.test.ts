@@ -2251,6 +2251,10 @@ describe('createResponsesWebSocketFetch', () => {
     upstreamCall: Record<string, unknown>;
     /** What the client sends back on the next turn. */
     echoedCall: Record<string, unknown>;
+    /** Optional upstream reasoning that the client omits on replay. */
+    storedReasoning?: Record<string, unknown>;
+    /** Disable diagnostics to prove warning side effects do not depend on a listener. */
+    captureDiagnostics?: boolean;
     tools?: unknown[];
     /** Tools declared on the SECOND turn, when they differ from the first. */
     replayTools?: unknown[];
@@ -2270,7 +2274,9 @@ describe('createResponsesWebSocketFetch', () => {
       const replayExtra = options.replayTools ? { tools: options.replayTools } : headExtra;
       const wsFetch = createResponsesWebSocketFetch(WS_URL, message => trace.push(message), {
         accountId: options.accountId,
-        onDiagnostic: event => diagnostics.push(event),
+        ...(options.captureDiagnostics === false
+          ? {}
+          : { onDiagnostic: (event: ResponsesWebSocketDiagnosticEvent) => diagnostics.push(event) }),
       });
       const first = await wsFetch('https://x', {
         method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, headExtra)),
@@ -2280,8 +2286,15 @@ describe('createResponsesWebSocketFetch', () => {
       socket.emit('message', Buffer.from(JSON.stringify({
         type: 'response.created', response: { id: options.responseId },
       })));
+      if (options.storedReasoning) {
+        socket.emit('message', Buffer.from(JSON.stringify({
+          type: 'response.output_item.done', output_index: 0, item: options.storedReasoning,
+        })));
+      }
       socket.emit('message', Buffer.from(JSON.stringify({
-        type: 'response.output_item.done', output_index: 0, item: options.upstreamCall,
+        type: 'response.output_item.done',
+        output_index: options.storedReasoning ? 1 : 0,
+        item: options.upstreamCall,
       })));
       socket.emit('message', Buffer.from(JSON.stringify({
         type: 'response.completed', response: { id: options.responseId },
@@ -2460,51 +2473,38 @@ describe('createResponsesWebSocketFetch', () => {
   });
 
   it('still catches a forked rule when Claude omits the stored reasoning item', async () => {
-    const stderr: string[] = [];
-    const spy = vi.spyOn(process.stderr, 'write')
-      .mockImplementation((chunk: unknown) => { stderr.push(String(chunk)); return true; });
-    try {
-      const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
-      const storedOutput = { type: 'function_call_output', call_id: 'call_o', output: 'hits' };
-      // Reasoning precedes the call in the stored prefix; the echo omits it,
-      // shifting the exact divergence onto a reasoning-vs-call pair that
-      // would hide the forked rule on the very next call.
-      const input = [
-        { role: 'user', content: [{ type: 'input_text', text: 'search it' }] },
-        { type: 'reasoning', encrypted_content: 'enc_o', summary: [] },
-        { type: 'function_call', call_id: 'call_o', name: 'Grep', arguments: '{"pattern":"x","glob":null}' },
-        storedOutput,
-      ];
-      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
-        accountId: 'acct-tool-gap-omitted', onDiagnostic: event => diagnostics.push(event),
-      });
-      const first = await wsFetch('https://x', {
-        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
-      });
-      lastSocket().emit('open');
-      emitTextResponse(lastSocket(), 'resp_omit', 'ok');
-      await readAll(first);
+    const storedReasoning = {
+      type: 'reasoning', id: 'rs_1', encrypted_content: 'enc_o', summary: [], status: 'completed',
+    };
+    // Both items are emitted by upstream into expectedAssistant. The replay omits
+    // reasoning, so omitted-reasoning alignment must re-aim the detector at the call.
+    const { stderr, trace, diagnostics } = await runToolArgumentMismatch({
+      accountId: 'acct-tool-gap-omitted',
+      responseId: 'resp_omit',
+      storedReasoning,
+      ...FORKED_STRIP,
+    });
 
-      const second = await wsFetch('https://x', {
-        method: 'POST', headers: {},
-        body: JSON.stringify(sessionPayload([
-          input[0]!,
-          { type: 'function_call', call_id: 'call_o', name: 'Grep', arguments: '{"pattern":"x"}' },
-          storedOutput,
-          { role: 'user', content: [{ type: 'input_text', text: 'again' }] },
-        ])),
-      });
-      emitTextResponse(lastSocket(), 'resp_omit_next', 'done');
-      await readAll(second);
+    expect(stderr.join('')).toContain('filler-strip rule');
+    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
+    expect(decision.decision).toBe('history_mismatch_new_head');
+    expect((decision.heads as { mismatch: Record<string, unknown> }[])[0]!.mismatch)
+      .toMatchObject({ toolArgumentNormalizationGap: { tool: 'Grep', equalAfterStrip: true } });
+    // diagnosticEntry is evaluated once before continuationMismatchSummary;
+    // formatting the summary and heads must not duplicate its pre-dedup trace side effect.
+    expect(trace.filter(line => line.includes('tool argument normalization gap: Grep:filler')))
+      .toHaveLength(1);
 
-      expect(stderr.join('')).toContain('filler-strip rule');
-      const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
-      expect(decision.decision).toBe('history_mismatch_new_head');
-      expect((decision.heads as { mismatch: Record<string, unknown> }[])[0]!.mismatch)
-        .toMatchObject({ toolArgumentNormalizationGap: { tool: 'Grep', equalAfterStrip: true } });
-    } finally {
-      spy.mockRestore();
-    }
+    resetToolArgumentGapWarningsForTests();
+    const withoutListener = await runToolArgumentMismatch({
+      accountId: 'acct-tool-gap-omitted-no-listener',
+      responseId: 'resp_omit_no_listener',
+      storedReasoning,
+      captureDiagnostics: false,
+      ...FORKED_STRIP,
+    });
+    expect(withoutListener.diagnostics).toEqual([]);
+    expect(withoutListener.stderr.join('')).toContain('filler-strip rule');
   });
 
   it('warns for a gap on an older head even when a newer head mismatches ordinarily', async () => {
@@ -2512,48 +2512,170 @@ describe('createResponsesWebSocketFetch', () => {
     const spy = vi.spyOn(process.stderr, 'write')
       .mockImplementation((chunk: unknown) => { stderr.push(String(chunk)); return true; });
     try {
-      const user = { role: 'user', content: [{ type: 'input_text', text: 'search it' }] };
-      const gapOut = { type: 'function_call_output', call_id: 'call_m', output: 'hits' };
-      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-tool-gap-multi' });
-      // Older head: carries the unstripped call (the forked-rule shape).
-      const first = await wsFetch('https://x', {
-        method: 'POST', headers: {},
-        body: JSON.stringify(sessionPayload([
-          user,
-          { type: 'function_call', call_id: 'call_m', name: 'Grep', arguments: '{"pattern":"x","glob":null}' },
-          gapOut,
-        ])),
+      async function runScenario(
+        suffix: string,
+        captureDiagnostics: boolean,
+      ): Promise<ResponsesWebSocketDiagnosticEvent[]> {
+        const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+        const user = { role: 'user', content: [{ type: 'input_text', text: 'search it' }] };
+        const gapOut = { type: 'function_call_output', call_id: 'call_g', output: 'hits' };
+        let clock = 1_000_000;
+        const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+          accountId: `acct-tool-gap-multi-${suffix}`,
+          now: () => (clock += 1),
+          ...(captureDiagnostics ? { onDiagnostic: (event: ResponsesWebSocketDiagnosticEvent) => {
+            diagnostics.push(event);
+          } } : {}),
+        });
+        // Older head: upstream emits the call into expectedAssistant, where the
+        // snapshot strip rule is applied.
+        const first = await wsFetch('https://x', {
+          method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([user])),
+        });
+        const firstSocket = lastSocket();
+        firstSocket.emit('open');
+        firstSocket.emit('message', Buffer.from(JSON.stringify({
+          type: 'response.created', response: { id: `resp_multi_a_${suffix}` },
+        })));
+        firstSocket.emit('message', Buffer.from(JSON.stringify({
+          type: 'response.output_item.done', output_index: 0, item: FORKED_STRIP.upstreamCall,
+        })));
+        firstSocket.emit('message', Buffer.from(JSON.stringify({
+          type: 'response.completed', response: { id: `resp_multi_a_${suffix}` },
+        })));
+        await readAll(first);
+
+        // Newer head: an unrelated conversation with a distinct prompt snapshot.
+        const second = await wsFetch('https://x', {
+          method: 'POST', headers: {},
+          body: JSON.stringify(sessionPayload(
+            [{ role: 'user', content: [{ type: 'input_text', text: 'something else' }] }],
+            { instructions: 'You are a newer coding assistant.' },
+          )),
+        });
+        lastSocket().emit('open');
+        emitTextResponse(lastSocket(), `resp_multi_b_${suffix}`, 'ok');
+        await readAll(second);
+
+        // Replay echoes the older head's filler-bearing call. Warning only for the
+        // newer diagnostic entry would let this regression go silent.
+        const third = await wsFetch('https://x', {
+          method: 'POST', headers: {},
+          body: JSON.stringify(sessionPayload([
+            user,
+            FORKED_STRIP.echoedCall,
+            gapOut,
+            { role: 'user', content: [{ type: 'input_text', text: 'again' }] },
+          ])),
+        });
+        emitTextResponse(lastSocket(), `resp_multi_c_${suffix}`, 'done');
+        await readAll(third);
+        return diagnostics;
+      }
+
+      const diagnostics = await runScenario('diagnostics', true);
+      expect(stderr.join('')).toContain('filler-strip rule');
+      const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
+      expect(decision.decision).toBe('history_mismatch_new_head');
+      // The distinct prompt snapshot proves the newer head became diagnosticEntry.
+      expect(decision.promptChanges).toEqual(['instructions']);
+      const heads = decision.heads as { idleMs: number }[];
+      expect(heads[0]!.idleMs).toBeGreaterThan(heads[1]!.idleMs);
+
+      resetToolArgumentGapWarningsForTests();
+      stderr.length = 0;
+      const withoutListener = await runScenario('no-listener', false);
+      expect(withoutListener).toEqual([]);
+      expect(stderr.join('')).toContain('filler-strip rule');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('warns for a reasoning gap on an older head when a newer head mismatches ordinarily', async () => {
+    const stderr: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => { stderr.push(String(chunk)); return true; });
+    try {
+      const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+      const user = { role: 'user', content: [{ type: 'input_text', text: 'inspect it' }] };
+      const echoedReasoning = {
+        type: 'reasoning', encrypted_content: 'enc_multi_gap', summary: GAP_SUMMARY,
+      };
+      const echoedCall = {
+        type: 'function_call', call_id: 'call_multi_gap', name: 'Read', arguments: '{"path":"a.ts"}',
+      };
+      const output = {
+        type: 'function_call_output', call_id: 'call_multi_gap', output: 'contents',
+      };
+      let clock = 1_000_000;
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-reasoning-gap-multi',
+        now: () => (clock += 1),
+        onDiagnostic: event => diagnostics.push(event),
       });
-      lastSocket().emit('open');
-      emitTextResponse(lastSocket(), 'resp_multi_a', 'ok');
+
+      // Older head: upstream stages the reasoning item in expectedAssistant.
+      const first = await wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([user])),
+      });
+      const firstSocket = lastSocket();
+      firstSocket.emit('open');
+      firstSocket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.created', response: { id: 'resp_reasoning_multi_a' },
+      })));
+      firstSocket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.done', output_index: 0,
+        item: {
+          type: 'reasoning', id: 'rs_multi_gap', encrypted_content: 'enc_multi_gap',
+          content: [{ type: 'reasoning_text', text: 'private' }], summary: GAP_SUMMARY,
+        },
+      })));
+      firstSocket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.done', output_index: 1,
+        item: {
+          type: 'function_call', id: 'fc_multi_gap', call_id: 'call_multi_gap', name: 'Read',
+          arguments: '{"path":"a.ts"}', status: 'completed',
+        },
+      })));
+      firstSocket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.completed', response: { id: 'resp_reasoning_multi_a' },
+      })));
       await readAll(first);
-      // Newer head: unrelated conversation — will mismatch ordinarily and be
-      // the diagnostic entry.
+
+      // Newer head mismatches ordinarily and must become diagnosticEntry.
       const second = await wsFetch('https://x', {
         method: 'POST', headers: {},
-        body: JSON.stringify(sessionPayload([
-          { role: 'user', content: [{ type: 'input_text', text: 'something else' }] },
-        ])),
+        body: JSON.stringify(sessionPayload(
+          [{ role: 'user', content: [{ type: 'input_text', text: 'something else' }] }],
+          { instructions: 'You are a newer coding assistant.' },
+        )),
       });
       lastSocket().emit('open');
-      emitTextResponse(lastSocket(), 'resp_multi_b', 'ok');
+      emitTextResponse(lastSocket(), 'resp_reasoning_multi_b', 'ok');
       await readAll(second);
 
-      // Replay echoes the OLDER head's call sanitized. Warning only for the
-      // most recently used head would let this regression go silent.
+      // Same encrypted blob but unequal content is the reasoning detector's gap shape.
       const third = await wsFetch('https://x', {
         method: 'POST', headers: {},
         body: JSON.stringify(sessionPayload([
           user,
-          { type: 'function_call', call_id: 'call_m', name: 'Grep', arguments: '{"pattern":"x"}' },
-          gapOut,
+          echoedReasoning,
+          echoedCall,
+          output,
           { role: 'user', content: [{ type: 'input_text', text: 'again' }] },
         ])),
       });
-      emitTextResponse(lastSocket(), 'resp_multi_c', 'done');
+      emitTextResponse(lastSocket(), 'resp_reasoning_multi_c', 'done');
       await readAll(third);
 
-      expect(stderr.join('')).toContain('filler-strip rule');
+      expect(stderr.join('')).toContain('identical encrypted_content');
+      expect(stderr.join('')).not.toContain('filler-strip rule');
+      const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
+      expect(decision.decision).toBe('history_mismatch_new_head');
+      expect(decision.promptChanges).toEqual(['instructions']);
+      const heads = decision.heads as { idleMs: number }[];
+      expect(heads[0]!.idleMs).toBeGreaterThan(heads[1]!.idleMs);
     } finally {
       spy.mockRestore();
     }
