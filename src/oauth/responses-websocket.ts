@@ -711,8 +711,9 @@ function continuationMismatchSummary(
   payload: JsonObject,
   log?: (message: string) => void,
   mismatchDump = false,
+  precomputedDetails?: Record<string, unknown>,
 ): string {
-  const details = continuationMismatchDetails(entry, payload, log, true);
+  const details = precomputedDetails ?? continuationMismatchDetails(entry, payload, log, true);
   let summary = `full_items=${details.fullItems} expected_prefix_items=${details.expectedPrefixItems} `
     + `first_mismatch=${details.firstMismatch} expected=${details.expectedKind} actual=${details.actualKind}`;
   // The hashes make same-kind mismatches diagnosable from the log alone. With
@@ -1905,6 +1906,7 @@ export function createResponsesWebSocketFetch(
     let persistent = Boolean(partitionKey);
     let promotedConnectionId: number | undefined;
     let decision: 'continuation' | 'parallel_isolated' | 'history_mismatch_new_head' | 'new_partition_head' | 'unpartitioned_socket';
+    let candidateMismatchDetails: Map<ConnectionEntry, Record<string, unknown>> | undefined;
 
     if (selected && selectedDelta) {
       sendPayload = { ...payload, input: selectedDelta, previous_response_id: selected.responseId };
@@ -1933,19 +1935,27 @@ export function createResponsesWebSocketFetch(
     } else if (diagnosticEntry) {
       // A rewind, branch, or hidden auxiliary inference gets its own full-context
       // head. Existing heads remain eligible for later exact-prefix matches.
+      const diagnosticMismatch = continuationMismatchDetails(diagnosticEntry, payload, debug, true);
+      candidateMismatchDetails = new Map([[diagnosticEntry, diagnosticMismatch]]);
+      // Every abandoned non-diagnostic head warns independently of diagnostics.
+      // Cache each mismatch so the diagnostic payload does not evaluate it again.
+      for (const candidate of candidates) {
+        if (candidate === diagnosticEntry) continue;
+        candidateMismatchDetails.set(
+          candidate,
+          continuationMismatchDetails(candidate, payload, debug, true),
+        );
+      }
       debug(
         `history mismatch starting an additional chain; retained ${candidates.length} existing head(s) `
-        + `(${continuationMismatchSummary(diagnosticEntry, payload, debug, mismatchDump)})`,
+        + `(${continuationMismatchSummary(
+          diagnosticEntry,
+          payload,
+          debug,
+          mismatchDump,
+          diagnosticMismatch,
+        )})`,
       );
-      // No head matched, so clodex abandoned EVERY candidate this turn — a
-      // normalization gap on any of them is a give-up-shaped gap. Warning only
-      // for the most recently used head lets a strip-rule regression on an
-      // older head go silent behind a newer head's ordinary mismatch. The
-      // dedup + hard cap in the warn helpers keep this from becoming a stream.
-      for (const candidate of candidates) {
-        if (candidate === diagnosticEntry || candidate.inFlight) continue;
-        continuationMismatchDetails(candidate, payload, debug, true);
-      }
       decision = 'history_mismatch_new_head';
     } else if (partitionKey) {
       decision = 'new_partition_head';
@@ -2010,7 +2020,8 @@ export function createResponsesWebSocketFetch(
         ttlPausedMs: entry.ttlPausedMs,
         idleMs: Math.max(0, now - entry.lastUsedAt),
         promptChanges: changedPromptFields(entry.promptFieldHashes, promptFieldHashes),
-        mismatch: continuationMismatchDetails(entry, payload, debug),
+        mismatch: candidateMismatchDetails?.get(entry)
+          ?? continuationMismatchDetails(entry, payload, debug),
       })),
       evictions,
     }, diagnosticCorrelation);
