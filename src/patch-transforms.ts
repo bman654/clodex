@@ -23,7 +23,7 @@
 import { isReservedModelAlias } from './model-aliases.js';
 import {
   CHILD_NETWORK_ENV_VARS,
-  ORIGINAL_NETWORK_ENV_VAR,
+  NETWORK_ENV_CONTRACT_VAR,
 } from './network-env.js';
 
 /**
@@ -38,7 +38,7 @@ import {
  * hash of the transform inputs to force that decision to be made rather than
  * forgotten.
  */
-export const PATCH_TRANSFORMS_VERSION = 3;
+export const PATCH_TRANSFORMS_VERSION = 4;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -550,31 +550,41 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // PATCH 10 — child command network environment.
   //
   // The wrapper routes the parent client through a local bridge and records the
-  // network variables it replaced. Restore that snapshot only in the client's
-  // shared child-environment builder. The builder's existing filtering still
-  // runs against the restored copy, while nested wrapped client launches retain
-  // the parent's bridge environment and are routed again by the wrapper.
+  // external and injected values. In the shared child-environment builder,
+  // revert a key only while its live value still equals the Clodex injection.
+  // Settings-level overrides therefore remain authoritative, and the builder's
+  // existing filtering continues against the resulting copy.
   // ---------------------------------------------------------------------------
   {
     const marker = '/*ccpatch:child-network-env*/';
-    const snapshotVar = q(ORIGINAL_NETWORK_ENV_VAR);
+    const contractVar = q(NETWORK_ENV_CONTRACT_VAR);
     const networkVars = JSON.stringify(CHILD_NETWORK_ENV_VARS);
     applyOnce(
       'PATCH 10: child network environment',
-      /(function [\w$]+\(\)\{)((?=[\s\S]{0,5000}?CLAUDE_CODE_REMOTE)(?=[\s\S]{0,7000}?CLAUDE_CODE_OAUTH_TOKEN)[\s\S]*?)(\}function [\w$]+\(\)\{let [\w$]+=process\.env\.CLAUDE_CODE_MCP_ALLOWLIST_ENV)/,
+      /(function [\w$]+\(\)\{)((?=[\s\S]{0,5000}?CLAUDE_CODE_REMOTE)(?=[\s\S]{0,7000}?CLAUDE_CODE_OAUTH_TOKEN)(?:(?!\}\s*function )[\s\S])*?)(\}\s*function [\w$]+\(\)\{let [\w$]+=process\.env\.CLAUDE_CODE_MCP_ALLOWLIST_ENV)/,
       (_match, head, body, tail) => {
         const restoredBody = body!.replace(/process\.env/g, '_clodexChildEnv');
         const restore = marker
-          + 'let _clodexChildEnv=process.env,_clodexOriginalNetwork=_clodexChildEnv[' + snapshotVar + '];'
-          + 'if(_clodexOriginalNetwork!==void 0){_clodexChildEnv={..._clodexChildEnv};'
-          + 'delete _clodexChildEnv[' + snapshotVar + '];try{'
-          + 'let _clodexNetwork=JSON.parse(_clodexOriginalNetwork);'
-          + 'if(_clodexNetwork&&typeof _clodexNetwork==="object"&&!Array.isArray(_clodexNetwork))'
+          + 'let _clodexChildEnv=process.env,_clodexNetworkRaw=_clodexChildEnv[' + contractVar + '];'
+          + 'if(_clodexNetworkRaw!==void 0){_clodexChildEnv={..._clodexChildEnv};'
+          + 'delete _clodexChildEnv[' + contractVar + '];try{'
+          + 'let _clodexNetwork=JSON.parse(_clodexNetworkRaw);'
+          + 'if(_clodexNetwork&&typeof _clodexNetwork==="object"&&!Array.isArray(_clodexNetwork)'
+          + '&&_clodexNetwork.version===1&&_clodexNetwork.original'
+          + '&&typeof _clodexNetwork.original==="object"&&!Array.isArray(_clodexNetwork.original)'
+          + '&&_clodexNetwork.injected&&typeof _clodexNetwork.injected==="object"'
+          + '&&!Array.isArray(_clodexNetwork.injected))'
           + 'for(let _clodexKey of ' + networkVars + '){'
-          + 'if(typeof _clodexNetwork[_clodexKey]==="string")'
-          + '_clodexChildEnv[_clodexKey]=_clodexNetwork[_clodexKey];'
-          + 'else delete _clodexChildEnv[_clodexKey]}}catch(_clodexError){'
-          + 'if(!(_clodexError instanceof SyntaxError))throw _clodexError}}';
+          + 'if(Object.prototype.hasOwnProperty.call(_clodexNetwork.original,_clodexKey)'
+          + '&&Object.prototype.hasOwnProperty.call(_clodexNetwork.injected,_clodexKey)){'
+          + 'let _clodexOriginal=_clodexNetwork.original[_clodexKey],'
+          + '_clodexInjected=_clodexNetwork.injected[_clodexKey],'
+          + '_clodexCurrent=_clodexChildEnv[_clodexKey]===void 0?null:_clodexChildEnv[_clodexKey];'
+          + 'if((typeof _clodexOriginal==="string"||_clodexOriginal===null)'
+          + '&&(typeof _clodexInjected==="string"||_clodexInjected===null)'
+          + '&&_clodexCurrent===_clodexInjected){if(_clodexOriginal===null)'
+          + 'delete _clodexChildEnv[_clodexKey];else '
+          + '_clodexChildEnv[_clodexKey]=_clodexOriginal}}}}catch(_clodexError){}}';
         return head! + restore + restoredBody + tail!;
       },
       { marker, required: true },

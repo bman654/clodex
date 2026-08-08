@@ -452,8 +452,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 3,
-      digest: '978d5da896287f19242d534151f76edd092dd5f858088d8117c57f336ccb9218',
+      version: 4,
+      digest: 'f41ca3e2bc2d80cd8577ec9192c84f01b3202afd6965963fcac09b1f7be1418b',
     });
   });
 });
@@ -647,6 +647,7 @@ const CLAUDE_CORE_FIXTURE = [
   'function rz(x){switch(x){case"best":{return "opus"}default:return null}}',
   'function opts(e,t,r){let n=cur(),o=(n==="opus")?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}',
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
+  'function cwdOf(){let p=process.env.PWD;return p}',
   'function childEnv(){let e=extra(),t=Object.keys(e).length>0,n=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{},s=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0;if(!t&&!s)return process.env;let u={...process.env,...e,...n};delete u.CLAUDE_CODE_OAUTH_TOKEN;return u}function mcpAllow(){let e=process.env.CLAUDE_CODE_MCP_ALLOWLIST_ENV;return e}',
 ].join('\n');
 
@@ -1250,11 +1251,6 @@ describe('patch script identity naming', () => {
 
   it('restores the original network environment for child commands', () => {
     const out = runPatchScript(config);
-    const originalNetwork = {
-      HTTPS_PROXY: 'http://corp-proxy.example:8080',
-      NO_PROXY: '.internal.example',
-      NODE_EXTRA_CA_CERTS: '/tmp/corporate-ca.pem',
-    };
     const env = executeChildEnv(out, {
       PATH: '/usr/bin',
       HTTPS_PROXY: 'http://127.0.0.1:3457',
@@ -1264,15 +1260,40 @@ describe('patch script identity naming', () => {
       NO_PROXY: 'localhost',
       no_proxy: 'localhost',
       NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
-      CLODEX_ORIGINAL_NETWORK_ENV: JSON.stringify(originalNetwork),
+      CLAUDE_CODE_CLODEX_NETWORK_ENV: JSON.stringify({
+        version: 1,
+        original: {
+          HTTPS_PROXY: 'http://corp-proxy.example:8080',
+          HTTP_PROXY: null,
+          https_proxy: null,
+          http_proxy: null,
+          NO_PROXY: '.internal.example',
+          no_proxy: null,
+          NODE_EXTRA_CA_CERTS: '/tmp/corporate-ca.pem',
+        },
+        injected: {
+          HTTPS_PROXY: 'http://127.0.0.1:3457',
+          HTTP_PROXY: 'http://127.0.0.1:3457',
+          https_proxy: 'http://127.0.0.1:3457',
+          http_proxy: 'http://127.0.0.1:3457',
+          NO_PROXY: 'localhost',
+          no_proxy: 'localhost',
+          NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
+        },
+      }),
     });
 
-    expect(env).toMatchObject({ PATH: '/usr/bin', ...originalNetwork });
+    expect(env).toMatchObject({
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://corp-proxy.example:8080',
+      NO_PROXY: '.internal.example',
+      NODE_EXTRA_CA_CERTS: '/tmp/corporate-ca.pem',
+    });
     expect(env['HTTP_PROXY']).toBeUndefined();
     expect(env['https_proxy']).toBeUndefined();
     expect(env['http_proxy']).toBeUndefined();
     expect(env['no_proxy']).toBeUndefined();
-    expect(env['CLODEX_ORIGINAL_NETWORK_ENV']).toBeUndefined();
+    expect(env['CLAUDE_CODE_CLODEX_NETWORK_ENV']).toBeUndefined();
   });
 
   it('keeps the native child environment unchanged without a wrapper snapshot', () => {
@@ -1285,21 +1306,60 @@ describe('patch script identity naming', () => {
     expect(executeChildEnv(out, env)).toBe(env);
   });
 
-  it('removes bridge network settings when the original environment had none', () => {
+  it('preserves a network value replaced after the bridge was injected', () => {
+    const out = runPatchScript(config);
+    const env = executeChildEnv(out, {
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://settings-proxy.example:9000',
+      CLAUDE_CODE_CLODEX_NETWORK_ENV: JSON.stringify({
+        version: 1,
+        original: { HTTPS_PROXY: 'http://corp-proxy.example:8080' },
+        injected: { HTTPS_PROXY: 'http://127.0.0.1:3457' },
+      }),
+    });
+
+    expect(env).toEqual({
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://settings-proxy.example:9000',
+    });
+  });
+
+  it('removes a matching bridge value when the external environment had none', () => {
     const out = runPatchScript(config);
     const env = executeChildEnv(out, {
       PATH: '/usr/bin',
       HTTPS_PROXY: 'http://127.0.0.1:3457',
-      HTTP_PROXY: 'http://127.0.0.1:3457',
-      https_proxy: 'http://127.0.0.1:3457',
-      http_proxy: 'http://127.0.0.1:3457',
-      NO_PROXY: 'localhost',
-      no_proxy: 'localhost',
-      NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
-      CLODEX_ORIGINAL_NETWORK_ENV: '{}',
+      CLAUDE_CODE_CLODEX_NETWORK_ENV: JSON.stringify({
+        version: 1,
+        original: { HTTPS_PROXY: null },
+        injected: { HTTPS_PROXY: 'http://127.0.0.1:3457' },
+      }),
     });
 
     expect(env).toEqual({ PATH: '/usr/bin' });
+  });
+
+  it.each([
+    ['array', '[]'],
+    ['null', 'null'],
+    ['non-string value', JSON.stringify({
+      version: 1,
+      original: { HTTPS_PROXY: null },
+      injected: { HTTPS_PROXY: 42 },
+    })],
+    ['invalid JSON', '{'],
+  ])('fails open for %s child-network metadata', (_name, contract) => {
+    const out = runPatchScript(config);
+    const env = executeChildEnv(out, {
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://127.0.0.1:3457',
+      CLAUDE_CODE_CLODEX_NETWORK_ENV: contract,
+    });
+
+    expect(env).toEqual({
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://127.0.0.1:3457',
+    });
   });
 
   it('falls back to the canonical id as the identity when a model has no alias', () => {

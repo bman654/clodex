@@ -41,6 +41,7 @@ import {
 } from './registry/lock.js';
 import type { ConflictInfo } from './types.js';
 import { removeAnthropicProxyBypass } from './wrapper-env.js';
+import { networkEnvBaseline, recordNetworkEnvMutation } from './network-env.js';
 
 export function detectConflicts(): ConflictInfo[] {
   return CONFLICTING_ENV_VARS.filter(name => process.env[name] !== undefined).map(name => ({
@@ -192,8 +193,13 @@ export function buildChildEnv(
  * intact, remove only endpoint modes that would bypass api.anthropic.com, and
  * trust the per-user clodex CA for this child process.
  */
-export function buildHttpProxyChildEnv(proxyPort: number, caCertPath: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+export function buildHttpProxyChildEnv(
+  proxyPort: number,
+  caCertPath: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const baseline = networkEnvBaseline(baseEnv);
+  const env: NodeJS.ProcessEnv = { ...baseline };
   for (const name of CONFLICTING_ENV_VARS) {
     if (name === 'ANTHROPIC_API_KEY' || name === 'ANTHROPIC_AUTH_TOKEN' || name === 'ANTHROPIC_MODEL') continue;
     delete env[name];
@@ -205,6 +211,7 @@ export function buildHttpProxyChildEnv(proxyPort: number, caCertPath: string): N
   env['http_proxy'] = proxyUrl;
   env['NODE_EXTRA_CA_CERTS'] = caCertPath;
   removeAnthropicProxyBypass(env);
+  recordNetworkEnvMutation(baseline, env);
   return env;
 }
 
