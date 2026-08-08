@@ -9,6 +9,72 @@ vi.mock('ai', () => ({
   jsonSchema: vi.fn((schema: unknown) => schema),
 }));
 
+describe('configured upstream retries', () => {
+  it('passes the retry budget to streaming responses', async () => {
+    const previous = process.env['CLODEX_UPSTREAM_MAX_RETRIES'];
+    process.env['CLODEX_UPSTREAM_MAX_RETRIES'] = '4';
+    async function* stream() {
+      yield { type: 'finish', finishReason: 'stop' };
+    }
+    vi.mocked(streamText).mockReturnValue({ stream: stream() } as never);
+
+    try {
+      await streamOpenAiResponse({} as never, { messages: [] }, 'test-model', () => {});
+
+      expect(vi.mocked(streamText).mock.calls[0]![0].maxRetries).toBe(4);
+    } finally {
+      if (previous === undefined) delete process.env['CLODEX_UPSTREAM_MAX_RETRIES'];
+      else process.env['CLODEX_UPSTREAM_MAX_RETRIES'] = previous;
+      vi.mocked(streamText).mockReset();
+    }
+  });
+
+  it('passes the retry budget to collected stream responses', async () => {
+    const previous = process.env['CLODEX_UPSTREAM_MAX_RETRIES'];
+    process.env['CLODEX_UPSTREAM_MAX_RETRIES'] = '4';
+    async function* stream() {
+      yield { type: 'finish', finishReason: 'stop' };
+    }
+    vi.mocked(streamText).mockReturnValue({ stream: stream() } as never);
+
+    try {
+      await generateOpenAiResponse(
+        {} as never,
+        { messages: [] },
+        'test-model',
+        { forceStream: true },
+      );
+
+      expect(vi.mocked(streamText).mock.calls[0]![0].maxRetries).toBe(4);
+    } finally {
+      if (previous === undefined) delete process.env['CLODEX_UPSTREAM_MAX_RETRIES'];
+      else process.env['CLODEX_UPSTREAM_MAX_RETRIES'] = previous;
+      vi.mocked(streamText).mockReset();
+    }
+  });
+
+  it('passes the retry budget to non-streaming responses', async () => {
+    const previous = process.env['CLODEX_UPSTREAM_MAX_RETRIES'];
+    process.env['CLODEX_UPSTREAM_MAX_RETRIES'] = '4';
+    vi.mocked(generateText).mockResolvedValue({
+      text: 'done',
+      toolCalls: [],
+      finishReason: 'stop',
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+    } as never);
+
+    try {
+      await generateOpenAiResponse({} as never, { messages: [] }, 'test-model');
+
+      expect(vi.mocked(generateText).mock.calls[0]![0].maxRetries).toBe(4);
+    } finally {
+      if (previous === undefined) delete process.env['CLODEX_UPSTREAM_MAX_RETRIES'];
+      else process.env['CLODEX_UPSTREAM_MAX_RETRIES'] = previous;
+      vi.mocked(generateText).mockReset();
+    }
+  });
+});
+
 describe('streamOpenAiResponse', () => {
   it('propagates an SDK error instead of completing a failed stream', async () => {
     const upstreamError = { statusCode: 429, message: 'rate limited' };

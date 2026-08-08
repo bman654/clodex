@@ -21,6 +21,7 @@ import { resolveUpstreamTools } from './tool-search.js';
 import { sanitizeToolInput } from './tool-input-sanitize.js';
 import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-types.js';
 import { anthropicErrorType, upstreamHttpStatus } from './upstream-error.js';
+import { upstreamMaxRetries } from './upstream-retry.js';
 import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
 
 export { silenceSdkWarnings };
@@ -856,6 +857,7 @@ export async function streamAnthropicResponse(
   const result = streamText({
     model,
     ...params,
+    maxRetries: upstreamMaxRetries(),
     abortSignal,
     onError: () => {},
   } as Parameters<typeof streamText>[0]);
@@ -925,6 +927,7 @@ export async function generateAnthropicResponse(
     const r = streamText({
       model,
       ...params,
+      maxRetries: upstreamMaxRetries(),
       abortSignal,
       onError: () => {},
     } as Parameters<typeof streamText>[0]);
@@ -984,6 +987,7 @@ export async function generateAnthropicResponse(
       const r = await generateText({
         model,
         ...params,
+        maxRetries: upstreamMaxRetries(),
         abortSignal: generateAbort.signal,
       } as Parameters<typeof generateText>[0]);
       ({ text, toolCalls, finishReason, usage } = r);
