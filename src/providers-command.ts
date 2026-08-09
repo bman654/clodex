@@ -20,7 +20,11 @@ import {
 } from './registry/crud.js';
 import { reconcilePendingCredentialDeletes } from './registry/credential-lifecycle.js';
 import { loadRegistry } from './registry/io.js';
-import { refreshAllProviderModels, refreshProviderModels } from './registry/refresh-models.js';
+import {
+  providerModelRefreshBoundaryError,
+  refreshAllProviderModels,
+  refreshProviderModels,
+} from './registry/refresh-models.js';
 import { resolveRefreshCredential } from './registry/refresh-credentials.js';
 import { authenticateProvider, providerAuthHelpText, type ProviderAuthMethod } from './registry/provider-auth.js';
 import { supportsNativeOAuth } from './oauth/types.js';
@@ -28,6 +32,7 @@ import { browseAllModels } from './prompts.js';
 import { cachedModelToLocal } from './registry/materialize.js';
 import { loadPreferences } from './config.js';
 import type { LocalProvider } from './types.js';
+import { effectiveProviderCachedModels } from './data/opencode-go-models.js';
 import {
   fmtEnabledStar,
   fmtProvider,
@@ -194,6 +199,11 @@ export async function runProvidersRefreshModels(providerId?: string): Promise<nu
     const provider = registry.providers.find(p => p.id === providerId);
     if (!provider) {
       p.log.error(`Provider not found: ${providerId}`);
+      return 1;
+    }
+    const boundaryError = providerModelRefreshBoundaryError(provider);
+    if (boundaryError) {
+      p.log.error(`${provider.name}: ${boundaryError}`);
       return 1;
     }
     const spinner = p.spinner();
@@ -437,7 +447,8 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
   const provider = registry.providers.find(pr => pr.id === id);
   if (!provider) return 'back';
 
-  const modelCount = provider.modelsCache?.models.length ?? 0;
+  const effectiveModels = effectiveProviderCachedModels(provider);
+  const modelCount = effectiveModels.length;
   const authLabel = formatRegistryAuthLabel(provider);
   printProviderDetailPanel(provider.name, modelCount, authLabel);
 
@@ -478,8 +489,7 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
   if (p.isCancel(action) || action === 'back') return 'back';
 
   if (action === 'browse') {
-    const cachedModels = provider.modelsCache?.models ?? [];
-    const localModels = cachedModels
+    const localModels = effectiveModels
       .map(m => cachedModelToLocal(m, provider))
       .filter((m): m is NonNullable<typeof m> => m !== null);
     const localProvider: LocalProvider = {

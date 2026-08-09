@@ -25,6 +25,7 @@ clodex models                  # 3. pick favorite models and aliases
 clodex models --alias sol=clodex:openai-oauth:gpt-5.6-sol
 clodex models --alias luna=clodex:openai-oauth:gpt-5.6-luna
 clodex models --alias terra=clodex:openai-oauth:gpt-5.6-terra
+clodex models --effort-policy provider-default  # optional: unsupported worker effort policy
 clodex patch                   # 4. (optional) patch Claude Code so those models are first-class
 clodex claude                  # 5. launch Claude Code on an OpenAI model
 ```
@@ -228,7 +229,18 @@ Manage favorite models (max 20) and short aliases. Favorites feed the endpoint-m
 | `--list` | Print the exact `clodex:<provider-id>:<model-id>` names (and aliases) without opening the manager |
 | `--alias <name=target>` | Save a short name for a favorite, e.g. `--alias sol=clodex:openai-oauth:gpt-5.6-sol` (the `clodex:` prefix is optional in the target) |
 | `--unalias <name>` | Remove a saved short name |
+| `--effort-policy <provider-default\|up\|down\|exact>` | Save the global rule for an explicit worker effort the target does not support |
 | `--help`, `--version` | Help / version |
+
+The default effort policy is `provider-default`: an unsupported explicit level
+is omitted and the target provider chooses. `up` and `down` round to the nearest
+level in the target model's exact ladder (saturating at an edge); `exact`
+rejects the request with HTTP 400. Aliases always inherit their target's ladder.
+Changing the policy affects new clodex processes, so restart running Claude or
+server sessions. `clodex patch` also writes exact sparse ladders into Claude's
+picker—for example DeepSeek V4 Flash exposes `low/high/max`, DeepSeek V4 Pro
+exposes `high/max`, and the OpenCode Qwen 3.6–3.8 Messages models expose
+`high/max`. An omitted effort remains omitted.
 
 ### `clodex providers [subcommand]`
 

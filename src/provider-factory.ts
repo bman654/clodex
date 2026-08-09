@@ -18,6 +18,7 @@ import {
   transformOpenAiCompatibleRequestBody,
   type ModelRuntimeCompatibility,
 } from './model-runtime-compatibility.js';
+import { EffortResolutionError } from './effort-policy.js';
 
 /** Models that must use /v1/responses instead of /v1/chat/completions. */
 const RESPONSES_ONLY_PREFIXES = [
@@ -324,15 +325,19 @@ export interface ReasoningCapabilities {
   wireFormat?: ReasoningWireFormat;
 }
 
-const ANTHROPIC_EFFORT_LEVELS = ['low', 'medium', 'high'] as const;
+const ANTHROPIC_LEGACY_EFFORT_LEVELS = ['low', 'medium', 'high'] as const;
+/** Adaptive-thinking Claude 4.6+ models additionally accept `max`. */
+const ANTHROPIC_ADAPTIVE_EFFORT_LEVELS = ['low', 'medium', 'high', 'max'] as const;
+/** Models explicitly documented by the Anthropic SDK as additionally accepting `xhigh`. */
+const ANTHROPIC_XHIGH_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 const OPENAI_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
 const GPT_56_EFFORT_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 const GEMINI_EFFORT_LEVELS = ['low', 'medium', 'high'] as const;
-const MISTRAL_EFFORT_LEVELS = ['high', 'off'] as const;
+const MISTRAL_EFFORT_LEVELS = ['off', 'high'] as const;
 const XAI_EFFORT_LEVELS = ['none', 'low', 'medium', 'high'] as const;
 const OPENROUTER_EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 /** DeepSeek V4 wire values (low/medium map to high; xhigh maps to max). */
-const DEEPSEEK_EFFORT_LEVELS = ['high', 'max', 'off'] as const;
+const DEEPSEEK_EFFORT_LEVELS = ['off', 'high', 'max'] as const;
 /** GLM-5.2 published efforts (OpenRouter metadata): high and xhigh, default high. */
 const GLM_52_EFFORT_LEVELS = ['high', 'xhigh'] as const;
 
@@ -366,16 +371,29 @@ const GEMINI_25_BUDGETS: Record<string, number> = {
   none: 0,
 };
 
-/** Claude adaptive-thinking models (opus/sonnet/haiku 4.6+, fable, mythos). */
-function isClaudeReasoningModel(modelId: string): boolean {
+function isClaudeLegacyEffortModel(modelId: string): boolean {
+  return /^claude-opus-4-5(?:[-@]|$)/i.test(modelId);
+}
+
+/** Models the installed Anthropic SDK explicitly marks as adaptive-thinking capable. */
+function isClaudeAdaptiveEffortModel(modelId: string): boolean {
+  return /^claude-(?:sonnet-4-6|opus-4-(?:6|7|8)|fable-5|sonnet-5)(?:[-@]|$)/i.test(modelId);
+}
+
+function isClaudeEffortModel(modelId: string): boolean {
+  return isClaudeAdaptiveEffortModel(modelId) || isClaudeLegacyEffortModel(modelId);
+}
+
+function isClaudeXhighEffortModel(modelId: string): boolean {
   const lower = modelId.toLowerCase();
-  if (!lower.startsWith('claude-')) return false;
-  if (lower.includes('fable') || lower.includes('mythos')) return true;
-  const m = lower.match(/claude-(?:opus|sonnet|haiku)-(\d+)-(\d+)/);
-  if (!m) return false;
-  const major = Number(m[1]);
-  const minor = Number(m[2]);
-  return major > 4 || (major === 4 && minor >= 6);
+  return /^claude-(?:opus-4-(?:7|8)|fable-5|sonnet-5)(?:[-@]|$)/.test(lower);
+}
+
+function claudeEffortLevels(modelId: string): readonly string[] {
+  if (isClaudeLegacyEffortModel(modelId)) return ANTHROPIC_LEGACY_EFFORT_LEVELS;
+  return isClaudeXhighEffortModel(modelId)
+    ? ANTHROPIC_XHIGH_EFFORT_LEVELS
+    : ANTHROPIC_ADAPTIVE_EFFORT_LEVELS;
 }
 
 function isGeminiReasoningModel(modelId: string): boolean {
@@ -536,7 +554,8 @@ function deepSeekEffortProviderOptions(
   };
 }
 
-function mapCodexEffortToAnthropic(effort: string): string | undefined {
+function mapCodexEffortToAnthropic(effort: string, modelId: string): string | undefined {
+  const adaptive = isClaudeAdaptiveEffortModel(modelId);
   switch (effort) {
     case 'none':
     case 'minimal':
@@ -547,9 +566,13 @@ function mapCodexEffortToAnthropic(effort: string): string | undefined {
     case 'high':
     case 'xhigh':
     case 'max':
-      return effort === 'xhigh' ? 'high' : effort === 'max' ? 'max' : 'high';
+      return effort === 'xhigh'
+        ? (adaptive ? (isClaudeXhighEffortModel(modelId) ? 'xhigh' : 'max') : 'high')
+        : effort === 'max' ? (adaptive ? 'max' : 'high') : 'high';
     default:
-      if (ANTHROPIC_EFFORT_LEVELS.includes(effort as typeof ANTHROPIC_EFFORT_LEVELS[number])) {
+      if (ANTHROPIC_XHIGH_EFFORT_LEVELS.includes(
+        effort as typeof ANTHROPIC_XHIGH_EFFORT_LEVELS[number],
+      )) {
         return effort;
       }
       return undefined;
@@ -655,6 +678,8 @@ function compatibilityExpressesReasoningIntent(
 ): boolean {
   return compatibility.supportsReasoningEffort !== undefined
     || compatibility.reasoningEffortMap !== undefined
+    || compatibility.anthropicThinkingBudgetMap !== undefined
+    || compatibility.reasoningEffortDefault !== undefined
     || compatibility.thinkingFormat !== undefined;
 }
 
@@ -667,6 +692,43 @@ function compatibilityReasoningCapabilities(
   // Stated up front so the predicate is visibly the same one the effort path
   // gates on.
   if (!compatibilityExpressesReasoningIntent(compatibility)) return undefined;
+
+  if (compatibility.anthropicThinkingBudgetMap) {
+    const budgetEntries = Object.entries(compatibility.anthropicThinkingBudgetMap);
+    if (budgetEntries.some(([, budget]) => !Number.isInteger(budget) || budget <= 0)) {
+      throw new EffortResolutionError({
+        code: 'invalid-supported-effort',
+        message: 'Model effort capabilities contain an invalid Anthropic thinking budget.',
+        statusCode: 500,
+      });
+    }
+    const levels = budgetEntries.map(([level]) => level);
+    if (levels.length === 0) {
+      return metadata?.reasoning === false
+        ? EMPTY_REASONING
+        : {
+            ...EMPTY_REASONING,
+            mode: 'internal-only',
+            source: 'provider-metadata',
+            confidence: 'documented',
+          };
+    }
+    const configuredDefault = compatibility.reasoningEffortDefault;
+    const defaultLevel = configuredDefault === null
+      ? ''
+      : configuredDefault !== undefined && levels.includes(configuredDefault)
+        ? configuredDefault
+        : '';
+    return {
+      levels,
+      defaultLevel,
+      supportsSummaries: false,
+      mode: 'controllable',
+      source: 'provider-metadata',
+      confidence: 'documented',
+      wireFormat: { kind: 'anthropic-thinking' },
+    };
+  }
 
   if (compatibility.supportsReasoningEffort === false) {
     return metadata?.reasoning === false
@@ -695,9 +757,15 @@ function compatibilityReasoningCapabilities(
     }
 
     const preferredDefault = ['medium', 'high', 'max', 'low'].find(level => levels.includes(level));
+    const configuredDefault = compatibility.reasoningEffortDefault;
+    const defaultLevel = configuredDefault === null
+      ? ''
+      : configuredDefault !== undefined && levels.includes(configuredDefault)
+        ? configuredDefault
+        : preferredDefault ?? levels[0]!;
     return {
       levels,
-      defaultLevel: preferredDefault ?? levels[0]!,
+      defaultLevel,
       supportsSummaries: false,
       mode: 'controllable',
       source: 'provider-metadata',
@@ -761,10 +829,10 @@ export function getReasoningCapabilities(
   }
 
   if (npm === '@ai-sdk/anthropic' || id.startsWith('claude-')) {
-    const isClaude = isClaudeReasoningModel(modelId);
+    const isClaude = isClaudeEffortModel(modelId);
     if (isClaude || metadata?.reasoning) {
       return {
-        levels: [...ANTHROPIC_EFFORT_LEVELS],
+        levels: [...(isClaude ? claudeEffortLevels(modelId) : ANTHROPIC_LEGACY_EFFORT_LEVELS)],
         defaultLevel: 'high',
         supportsSummaries: true,
         mode: 'controllable',
@@ -934,6 +1002,7 @@ export function getPatchReasoningCapabilities(
   if (
     metadata?.reasoning === false
     && !metadata?.compatibility?.reasoningEffortMap
+    && !metadata?.compatibility?.anthropicThinkingBudgetMap
     && !hasSupportedParameter(metadata, 'reasoning_effort')
     && !hasSupportedParameter(metadata, 'reasoning')
   ) {
@@ -942,17 +1011,30 @@ export function getPatchReasoningCapabilities(
 
   const capabilities = getReasoningCapabilities(npm, modelId, metadata);
   const seenProviderOptions = new Set<string>();
+  const levels = capabilities.levels.filter(level => {
+    const providerOptions = effortProviderOptions(npm, level, modelId, metadata);
+    if (!providerOptions) return false;
+    const fingerprint = JSON.stringify(providerOptions);
+    if (seenProviderOptions.has(fingerprint)) return false;
+    seenProviderOptions.add(fingerprint);
+    return true;
+  });
+
+  if (capabilities.mode === 'controllable' && levels.length === 0) {
+    return {
+      ...capabilities,
+      levels,
+      defaultLevel: '',
+      mode: 'internal-only',
+    };
+  }
 
   return {
     ...capabilities,
-    levels: capabilities.levels.filter(level => {
-      const providerOptions = effortProviderOptions(npm, level, modelId, metadata);
-      if (!providerOptions) return false;
-      const fingerprint = JSON.stringify(providerOptions);
-      if (seenProviderOptions.has(fingerprint)) return false;
-      seenProviderOptions.add(fingerprint);
-      return true;
-    }),
+    levels,
+    defaultLevel: levels.includes(capabilities.defaultLevel)
+      ? capabilities.defaultLevel
+      : '',
   };
 }
 
@@ -973,6 +1055,13 @@ export function effortProviderOptions(
   metadata?: ReasoningMetadata,
 ): Record<string, Record<string, unknown>> | undefined {
   if (!effort) return undefined;
+
+  const thinkingBudget = metadata?.compatibility?.anthropicThinkingBudgetMap?.[effort];
+  if (thinkingBudget !== undefined) {
+    return Number.isInteger(thinkingBudget) && thinkingBudget > 0
+      ? { anthropic: { thinking: { type: 'enabled', budgetTokens: thinkingBudget } } }
+      : undefined;
+  }
 
   // Only when the block expresses reasoning intent. On a wire-shape-only block
   // `compatibilityReasoningEffort` answers "no opinion", and returning here on
@@ -1026,11 +1115,12 @@ export function effortProviderOptions(
   }
 
   if (npm === '@ai-sdk/anthropic' || npm === VERTEX_ANTHROPIC_NPM) {
-    if (!modelId || !isClaudeReasoningModel(modelId)) return undefined;
-    const mapped = mapCodexEffortToAnthropic(effort);
-    return mapped
-      ? { anthropic: { thinking: { type: 'adaptive', effort: mapped } } }
-      : undefined;
+    if (!modelId || !isClaudeEffortModel(modelId)) return undefined;
+    const mapped = mapCodexEffortToAnthropic(effort, modelId);
+    if (!mapped) return undefined;
+    return isClaudeAdaptiveEffortModel(modelId)
+      ? { anthropic: { thinking: { type: 'adaptive' }, effort: mapped } }
+      : { anthropic: { effort: mapped } };
   }
 
   if (npm === '@ai-sdk/google') {

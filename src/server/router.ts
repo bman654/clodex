@@ -1,5 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import {
+  isNativeClaudeCodeOAuthBetaRoute,
+  normalizeAnthropicBetaHeader,
+  shouldDisableExperimentalAnthropicBetas,
+} from '../anthropic-beta-policy.js';
 import { isAuthorized } from './auth.js';
 import {
   formatGatewayAnthropicModels,
@@ -18,7 +23,11 @@ import {
   type OpenAiRequest,
 } from '../openai-adapter.js';
 import { sendJson, readBody } from '../http-utils.js';
-import { relayAnthropicMessages, resolveOAuthRetryReplacement } from '../upstream-forward.js';
+import {
+  relayAnthropicMessages,
+  resolveOAuthRetryReplacement,
+  UpstreamUnreachableError,
+} from '../upstream-forward.js';
 import {
   anthropicPromptTooLongMessage,
   estimateAnthropicInputTokens,
@@ -40,7 +49,12 @@ import {
   type InferenceRequestLogEntry,
 } from '../trace-log.js';
 import type { LanguageModel } from 'ai';
-import { createLanguageModel, isSdkMigratedNpm, maxToolsForNpm } from '../provider-factory.js';
+import {
+  createLanguageModel,
+  getPatchReasoningCapabilities,
+  isSdkMigratedNpm,
+  maxToolsForNpm,
+} from '../provider-factory.js';
 import {
   anthropicErrorType,
   formatUpstreamError,
@@ -54,12 +68,26 @@ import {
   streamAnthropicResponse,
   generateAnthropicResponse,
   silenceSdkWarnings,
-  anthropicEffortFromRequest,
+  validatedAnthropicEffortFromRequest,
   extractClaudeSessionId,
   type AnthropicRequest,
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
 import { listenTcpServer, tcpListenerUrlHost } from '../listener-ready.js';
+import {
+  applyAnthropicEffortResolution,
+  transformOpenAiCompatibleRequestBody,
+} from '../model-runtime-compatibility.js';
+import {
+  DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+  EFFORT_RESOLUTION_HEADER,
+  MAX_EFFORT_RESOLUTION_WARNINGS,
+  EffortResolutionError,
+  effortResolutionDiagnostic,
+  resolveEffort,
+  type EffortResolution,
+  type UnsupportedEffortPolicy,
+} from '../effort-policy.js';
 
 export interface ServerOptions {
   host: string;
@@ -81,6 +109,8 @@ export interface ServerOptions {
   inferenceLogPath?: string;
   /** Opt-in request-envelope and WebSocket head-decision diagnostics. */
   webSocketDiagnosticsLogPath?: string;
+  /** Startup snapshot of the global unsupported-effort policy. */
+  unsupportedEffortPolicy?: UnsupportedEffortPolicy;
 }
 
 export interface ServerHandle {
@@ -180,9 +210,31 @@ export async function startServer(options: ServerOptions): Promise<ServerHandle>
   silenceSdkWarnings();
   const languageModelCache: LanguageModelCache = new Map();
   const plog = makeServerLog(options.debugLogPath);
+  const reportedEffortDecisions = new Set<string>();
+  const reportEffortDecision = (
+    resolution: EffortResolution,
+    model: ServerModelInfo,
+    levels: readonly string[],
+    res: ServerResponse,
+  ) => {
+    const diagnostic = effortResolutionDiagnostic(resolution, {
+      targetId: upstreamModelId(model),
+      supportedLevels: levels,
+    });
+    if (!diagnostic) return;
+    res.setHeader(EFFORT_RESOLUTION_HEADER, diagnostic);
+    if (
+      !reportedEffortDecisions.has(diagnostic)
+      && reportedEffortDecisions.size < MAX_EFFORT_RESOLUTION_WARNINGS
+    ) {
+      reportedEffortDecisions.add(diagnostic);
+      plog(() => `effort-resolution ${diagnostic}`);
+      process.stderr.write(`[clodex] effort adjusted: ${diagnostic}\n`);
+    }
+  };
 
   const server = createServer((req, res) => {
-    void routeRequest(req, res, options, languageModelCache, plog);
+    void routeRequest(req, res, options, languageModelCache, plog, reportEffortDecision);
   });
 
   const address = await listenTcpServer(server, options.port, options.host);
@@ -199,7 +251,19 @@ export async function startServer(options: ServerOptions): Promise<ServerHandle>
   };
 }
 
-async function routeRequest(req: IncomingMessage, res: ServerResponse, options: ServerOptions, modelCache: LanguageModelCache, plog: PLog): Promise<void> {
+async function routeRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: ServerOptions,
+  modelCache: LanguageModelCache,
+  plog: PLog,
+  reportEffortDecision: (
+    resolution: EffortResolution,
+    model: ServerModelInfo,
+    levels: readonly string[],
+    res: ServerResponse,
+  ) => void,
+): Promise<void> {
   try {
     const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname;
     plog(`${req.method} ${pathname}`);
@@ -239,7 +303,12 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse, options: 
     }
 
     if (req.method === 'POST' && pathname === '/anthropic/v1/messages') {
-      await handleAnthropicMessages(req, res, options, modelCache, plog);
+      await handleAnthropicMessages(req, res, options, modelCache, plog, reportEffortDecision);
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/anthropic/v1/messages/count_tokens') {
+      await handleAnthropicCountTokens(req, res, options, plog);
       return;
     }
 
@@ -254,11 +323,10 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse, options: 
   }
 }
 
-async function handleAnthropicMessages(
+async function handleAnthropicCountTokens(
   req: IncomingMessage,
   res: ServerResponse,
   options: ServerOptions,
-  modelCache: LanguageModelCache,
   plog: PLog,
 ): Promise<void> {
   const body = await readJson(req);
@@ -268,9 +336,133 @@ async function handleAnthropicMessages(
   }
 
   const model = lookupModel(res, options.catalog, body.model);
+  if (!model) return;
+
+  if (
+    model.modelFormat !== 'anthropic'
+    || model.compatibility?.supportsCountTokens === false
+  ) {
+    const inputTokens = estimateAnthropicInputTokens(body);
+    plog(() => `token-count: local estimate model=${body.model} input_tokens=${inputTokens}`);
+    res.setHeader('x-relay-token-count-source', 'local-estimate');
+    sendJson(res, 200, { input_tokens: inputTokens });
+    return;
+  }
+
+  if (model.baseUrl && !/^https?:\/\//i.test(model.baseUrl)) {
+    sendJson(res, 400, { error: { message: 'Invalid provider baseUrl: must be http:// or https://' } });
+    return;
+  }
+  if (!model.baseUrl) {
+    sendJson(res, 400, { error: { message: `Model ${model.id} has no Anthropic baseUrl configured` } });
+    return;
+  }
+
+  let apiKey: string;
+  try {
+    apiKey = await resolveModelApiKey(model, options.apiKey);
+  } catch (err) {
+    sendJson(res, 401, {
+      error: { message: err instanceof Error ? err.message : String(err) },
+    });
+    return;
+  }
+
+  const inboundBeta = normalizeAnthropicBetaHeader(req.headers['anthropic-beta']);
+  const authType = model.authType ?? 'api';
+  const disableExperimentalBetas = shouldDisableExperimentalAnthropicBetas(model);
+  const nativeClaudeCodeOAuth = isNativeClaudeCodeOAuthBetaRoute(model);
+  const refreshToken = authType === 'oauth' && model.providerId && model.authRef
+    ? (rejectedAccessToken: string) => resolveModelApiKey(
+        model,
+        options.apiKey,
+        rejectedAccessToken,
+      )
+    : undefined;
+  const targetUrl = `${model.baseUrl}/v1/messages/count_tokens`;
+  const forwardBody = { ...body, model: upstreamModelId(model) };
+
+  try {
+    await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, false, {
+      inboundBeta,
+      disableExperimentalBetas,
+      authType,
+      nativeClaudeCodeOAuth,
+      anthropicAuthMode: model.anthropicAuthMode,
+      log: message => plog(message),
+      extraHeaders: model.headers,
+      refreshToken,
+      onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
+    });
+  } catch (err) {
+    const message = err instanceof UpstreamUnreachableError ? err.message : String(err);
+    plog(() => `anthropic token-count error: ${message}`);
+    sendJson(res, 502, { error: { message } });
+  }
+}
+
+async function handleAnthropicMessages(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: ServerOptions,
+  modelCache: LanguageModelCache,
+  plog: PLog,
+  reportEffortDecision: (
+    resolution: EffortResolution,
+    model: ServerModelInfo,
+    levels: readonly string[],
+    res: ServerResponse,
+  ) => void,
+): Promise<void> {
+  let body = await readJson(req);
+  if (!body) {
+    sendJson(res, 400, { error: { message: 'Invalid JSON body' } });
+    return;
+  }
+
+  const model = lookupModel(res, options.catalog, body.model);
   if (!model) {
     plog(`model not found: ${body.model}`);
     return;
+  }
+  const reasoningMetadata = {
+    providerId: model.providerId,
+    apiBaseUrl: model.apiBaseUrl,
+    supportedParameters: model.supportedParameters,
+    reasoning: model.reasoning,
+    interleavedReasoningField: model.interleavedReasoningField,
+    compatibility: model.compatibility,
+    upstreamModelId: upstreamModelId(model),
+  };
+  let effortResolution: EffortResolution | undefined;
+  let requestedEffort: string | undefined;
+  try {
+    requestedEffort = validatedAnthropicEffortFromRequest(body as AnthropicRequest);
+    if (requestedEffort !== undefined) {
+      const capabilities = getPatchReasoningCapabilities(
+        model.npm ?? (model.modelFormat === 'anthropic' ? '@ai-sdk/anthropic' : ''),
+        upstreamModelId(model),
+        reasoningMetadata,
+      );
+      effortResolution = resolveEffort(
+        requestedEffort,
+        capabilities.levels,
+        options.unsupportedEffortPolicy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+      );
+      reportEffortDecision(effortResolution, model, capabilities.levels, res);
+      if (model.modelFormat === 'anthropic') {
+        body = applyAnthropicEffortResolution(body, model.compatibility, effortResolution);
+      }
+    }
+  } catch (error) {
+    if (error instanceof EffortResolutionError) {
+      sendJson(res, error.statusCode, {
+        type: 'error',
+        error: { type: anthropicErrorType(error.statusCode), message: error.message },
+      });
+      return;
+    }
+    throw error;
   }
   const requestId = randomUUID();
   const claudeSessionIdHeader = Array.isArray(req.headers['x-claude-code-session-id'])
@@ -309,26 +501,26 @@ async function handleAnthropicMessages(
       });
       return;
     }
-    const betaHeaderRaw = req.headers['anthropic-beta'];
-    const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
+    const inboundBeta = normalizeAnthropicBetaHeader(req.headers['anthropic-beta']);
     const clientWantsStream = Boolean(body.stream);
     const forwardBody: Record<string, unknown> = { ...body, model: upstreamModelId(model) };
     const authType = model.authType ?? 'api';
-    const isOAuth = authType === 'oauth';
+    const nativeClaudeCodeOAuth = isNativeClaudeCodeOAuthBetaRoute(model);
 
     auditInference(options, {
       requestId,
       modelId: body.model,
-      effort: anthropicEffortFromRequest(body as AnthropicRequest) ?? model.defaultEffort,
+      effort: requestedEffort ?? model.defaultEffort,
       claudeSessionId,
       provider: inferenceProvider(model),
       route: 'passthrough',
       requestPreview: getLatestMessagePreview(body.messages, body.system),
     });
 
-    let effectiveBeta = inboundBeta;
+    const disableExperimentalBetas = shouldDisableExperimentalAnthropicBetas(model);
+    let effectiveBeta = disableExperimentalBetas ? undefined : inboundBeta;
     let claudeCodeSessionId: string | undefined;
-    if (isOAuth) {
+    if (nativeClaudeCodeOAuth) {
       const seed = model.providerId ?? upstreamModelId(model);
       const identity = injectClaudeIdentity(forwardBody, model.providerData, seed);
       if (model.providerId === 'claude-code') injectClaudeCodeBillingSystemLine(forwardBody);
@@ -336,7 +528,7 @@ async function handleAnthropicMessages(
       effectiveBeta = selectBetaFlags(forwardBody, upstreamModelId(model), inboundBeta);
     }
 
-    const refreshToken = isOAuth && model.providerId && model.authRef
+    const refreshToken = authType === 'oauth' && model.providerId && model.authRef
       ? (rejectedAccessToken: string) => resolveModelApiKey(
           model,
           options.apiKey,
@@ -344,10 +536,13 @@ async function handleAnthropicMessages(
         )
       : undefined;
 
-    plog(() => `anthropic-passthrough → ${messagesUrl} oauth=${isOAuth} stream=${clientWantsStream}`);
+    plog(() => `anthropic-passthrough → ${messagesUrl} oauth=${authType === 'oauth'} stream=${clientWantsStream}`);
     await relayAnthropicMessages(res, messagesUrl, forwardBody, apiKey, clientWantsStream, {
       inboundBeta: effectiveBeta,
+      disableExperimentalBetas,
       authType,
+      nativeClaudeCodeOAuth,
+      anthropicAuthMode: model.anthropicAuthMode,
       log: message => plog(message),
       claudeCodeSessionId,
       extraHeaders: model.headers,
@@ -390,7 +585,7 @@ async function handleAnthropicMessages(
     auditInference(options, {
       requestId,
       modelId: body.model,
-      effort: anthropicEffortFromRequest(body as AnthropicRequest) ?? model.defaultEffort,
+      effort: requestedEffort ?? model.defaultEffort,
       claudeSessionId,
       provider: inferenceProvider(model),
       route: 'translated',
@@ -403,18 +598,13 @@ async function handleAnthropicMessages(
     }
     const openAiOAuth = model.npm === '@ai-sdk/openai' && model.authType === 'oauth';
     const params = sdkTranslateRequest(body as unknown as AnthropicRequest, model.npm!, {
-      defaultEffort: anthropicEffortFromRequest(body as AnthropicRequest) ? undefined : model.defaultEffort,
+      defaultEffort: requestedEffort === undefined ? model.defaultEffort : undefined,
       openAiOAuth,
       claudeSessionId,
-      reasoningMetadata: {
-        providerId: model.providerId,
-        apiBaseUrl: model.apiBaseUrl,
-        supportedParameters: model.supportedParameters,
-        reasoning: model.reasoning,
-        interleavedReasoningField: model.interleavedReasoningField,
-        compatibility: model.compatibility,
-        upstreamModelId: upstreamModelId(model),
-      },
+      reasoningMetadata,
+      ...(effortResolution
+        ? { resolvedEffort: effortResolution.resolvedEffort ?? null }
+        : {}),
       maxTools: npmMaxTools,
     });
     const clientWantsStream = Boolean(body.stream);
@@ -558,9 +748,14 @@ async function handleOpenAIChatCompletions(
       });
       return;
     }
+    const compatibleBody = model.compatibility
+      ? transformOpenAiCompatibleRequestBody(body, model.compatibility)
+      : body;
     // The client may have addressed the model via a gateway alias or saved
     // short alias — the upstream API only knows its own wire id.
-    const forwardBody = body.model === upstreamModelId(model) ? body : { ...body, model: upstreamModelId(model) };
+    const forwardBody = compatibleBody.model === upstreamModelId(model)
+      ? compatibleBody
+      : { ...compatibleBody, model: upstreamModelId(model) };
     auditInference(options, {
       modelId: body.model,
       effort: openAiEffort(body),

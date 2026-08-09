@@ -32,6 +32,16 @@ interface ProviderModelListRow {
   prefer_websockets?: boolean;
 }
 
+/** Preserve the first occurrence/order of each provider-reported model id. */
+export function dedupeCachedModels(models: CachedModel[]): CachedModel[] {
+  const seen = new Set<string>();
+  return models.filter(model => {
+    if (seen.has(model.id)) return false;
+    seen.add(model.id);
+    return true;
+  });
+}
+
 function modelFormatForNpm(npm: string): 'anthropic' | 'openai' {
   return npm === '@ai-sdk/anthropic' ? 'anthropic' : 'openai';
 }
@@ -225,7 +235,10 @@ export function applyTemplateModelMetadata(
     ? discovered.filter(model => curated.has(model.id))
     : discovered;
 
-  return visible.map(model => {
+  // Provider model-list endpoints occasionally repeat ids. Persisting those
+  // duplicates makes add/refresh counts disagree with every runtime surface,
+  // which necessarily de-duplicates routes by id.
+  return dedupeCachedModels(visible).map(model => {
     const overlay = curated.get(model.id);
     if (!overlay) return model;
     return {
@@ -260,6 +273,15 @@ export async function fetchTemplateModels(
       error: 'This provider needs a base URL.',
     };
   }
+
+  const defaultBaseUrl = template.defaultBaseUrl?.trim().replace(/\/+$/, '');
+  const customBaseOverride = Boolean(
+    trimmedOverride
+    && trimmedOverride.replace(/\/+$/, '') !== defaultBaseUrl,
+  );
+  const metadataTemplate = customBaseOverride
+    ? { ...template, staticModels: undefined, staticModelPolicy: undefined }
+    : template;
 
   // No template declares `static-seed` today, so this arm and
   // `materializeTemplateModel` are unreachable — kept deliberately, not
@@ -351,7 +373,7 @@ export async function fetchTemplateModels(
     }
 
     const discovered = parseModelList(json, template.npm);
-    const models = applyTemplateModelMetadata(template, discovered);
+    const models = applyTemplateModelMetadata(metadataTemplate, discovered);
     if (models.length === 0) {
       // An allowlist template can end up empty for two very different reasons,
       // and "no models were returned" points at the wrong one when upstream

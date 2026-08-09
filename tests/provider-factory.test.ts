@@ -130,16 +130,37 @@ describe('maxToolsForNpm', () => {
 describe('getReasoningCapabilities', () => {
   it('returns anthropic levels for claude-sonnet-4-6', () => {
     const caps = getReasoningCapabilities('@ai-sdk/anthropic', 'claude-sonnet-4-6');
-    expect(caps.levels).toEqual(['low', 'medium', 'high']);
+    expect(caps.levels).toEqual(['low', 'medium', 'high', 'max']);
     expect(caps.defaultLevel).toBe('high');
     expect(caps.supportsSummaries).toBe(true);
   });
 
-  it('returns anthropic levels for Vertex Claude models', () => {
-    const caps = getReasoningCapabilities(VERTEX_ANTHROPIC_NPM, 'claude-sonnet-4-6');
+  it('returns the documented legacy effort ladder for claude-opus-4-5', () => {
+    const caps = getReasoningCapabilities('@ai-sdk/anthropic', 'claude-opus-4-5');
     expect(caps.levels).toEqual(['low', 'medium', 'high']);
     expect(caps.defaultLevel).toBe('high');
+  });
+
+  it('returns anthropic levels for Vertex Claude models', () => {
+    const caps = getReasoningCapabilities(VERTEX_ANTHROPIC_NPM, 'claude-sonnet-4-6@default');
+    expect(caps.levels).toEqual(['low', 'medium', 'high', 'max']);
+    expect(caps.defaultLevel).toBe('high');
     expect(caps.wireFormat).toEqual({ kind: 'anthropic-thinking' });
+
+    const legacy = getReasoningCapabilities(VERTEX_ANTHROPIC_NPM, 'claude-opus-4-5@20251101');
+    expect(legacy.levels).toEqual(['low', 'medium', 'high']);
+  });
+
+  it('adds xhigh without dropping max for the documented newer Claude models', () => {
+    for (const modelId of [
+      'claude-opus-4-7',
+      'claude-opus-4-8-20260801',
+      'claude-fable-5',
+      'claude-sonnet-5-20260801',
+    ]) {
+      expect(getReasoningCapabilities('@ai-sdk/anthropic', modelId).levels)
+        .toEqual(['low', 'medium', 'high', 'xhigh', 'max']);
+    }
   });
 
   it('returns empty levels for non-reasoning anthropic model', () => {
@@ -149,9 +170,20 @@ describe('getReasoningCapabilities', () => {
     expect(caps.supportsSummaries).toBe(false);
   });
 
+  it('does not infer effort support for undocumented future Claude families', () => {
+    for (const modelId of [
+      'claude-haiku-4-6',
+      'claude-mythos-5',
+      'claude-opus-5',
+    ]) {
+      expect(getReasoningCapabilities('@ai-sdk/anthropic', modelId).levels).toEqual([]);
+      expect(effortProviderOptions('@ai-sdk/anthropic', 'high', modelId)).toBeUndefined();
+    }
+  });
+
   it('returns high/off only for mistral-large', () => {
     const caps = getReasoningCapabilities('@ai-sdk/mistral', 'mistral-large');
-    expect(caps.levels).toEqual(['high', 'off']);
+    expect(caps.levels).toEqual(['off', 'high']);
     expect(caps.defaultLevel).toBe('high');
   });
 
@@ -192,8 +224,19 @@ describe('getReasoningCapabilities', () => {
         reasoning: true,
       });
       expect(caps.levels).toEqual([]);
+      expect(caps.defaultLevel).toBe('');
+      expect(caps.mode).toBe('internal-only');
     },
   );
+
+  it('downgrades inferred Anthropic effort when no level has a valid wire option', () => {
+    const caps = getPatchReasoningCapabilities('@ai-sdk/anthropic', 'claude-sonnet-4-5', {
+      reasoning: true,
+    });
+    expect(caps.levels).toEqual([]);
+    expect(caps.defaultLevel).toBe('');
+    expect(caps.mode).toBe('internal-only');
+  });
 
   it('does not advertise a Kimi level that duplicates another wire option', () => {
     const caps = getPatchReasoningCapabilities(
@@ -245,7 +288,7 @@ describe('getReasoningCapabilities', () => {
 
   it('returns high/max/off for deepseek-v4-flash', () => {
     const caps = getReasoningCapabilities('@ai-sdk/openai-compatible', 'deepseek-v4-flash');
-    expect(caps.levels).toEqual(['high', 'max', 'off']);
+    expect(caps.levels).toEqual(['off', 'high', 'max']);
     expect(caps.defaultLevel).toBe('high');
   });
 
@@ -338,6 +381,54 @@ describe('getReasoningCapabilities', () => {
     )).toEqual({ opencodeGo: { reasoningEffort: 'high' } });
   });
 
+  it('uses exact sparse Anthropic budget ladders without inventing a default', () => {
+    const metadata = {
+      providerId: 'opencode-go',
+      reasoning: true,
+      compatibility: {
+        anthropicThinkingBudgetMap: { high: 16_000, max: 31_999 },
+        reasoningEffortDefault: null,
+      },
+    };
+    expect(getPatchReasoningCapabilities(
+      '@ai-sdk/anthropic',
+      'qwen3.6-plus',
+      metadata,
+    )).toMatchObject({
+      levels: ['high', 'max'],
+      defaultLevel: '',
+      mode: 'controllable',
+      wireFormat: { kind: 'anthropic-thinking' },
+    });
+    expect(effortProviderOptions(
+      '@ai-sdk/anthropic',
+      'max',
+      'qwen3.6-plus',
+      metadata,
+    )).toEqual({
+      anthropic: { thinking: { type: 'enabled', budgetTokens: 31_999 } },
+    });
+  });
+
+  it('treats an explicit Anthropic budget map as authoritative reasoning capability', () => {
+    expect(getPatchReasoningCapabilities(
+      '@ai-sdk/anthropic',
+      'custom-budget-model',
+      {
+        reasoning: false,
+        compatibility: {
+          anthropicThinkingBudgetMap: { high: 8_000 },
+          reasoningEffortDefault: null,
+        },
+      },
+    )).toMatchObject({
+      levels: ['high'],
+      defaultLevel: '',
+      mode: 'controllable',
+      wireFormat: { kind: 'anthropic-thinking' },
+    });
+  });
+
   it('treats an explicit reasoning-effort disable as internal-only reasoning', () => {
     const metadata = {
       providerId: 'opencode-go',
@@ -420,8 +511,23 @@ describe('effortProviderOptions + deepMergeProviderOptions', () => {
   });
 
   it('maps Vertex Claude effort to Anthropic thinking options', () => {
-    expect(effortProviderOptions(VERTEX_ANTHROPIC_NPM, 'medium', 'claude-sonnet-4-6')).toEqual({
-      anthropic: { thinking: { type: 'adaptive', effort: 'medium' } },
+    expect(effortProviderOptions(VERTEX_ANTHROPIC_NPM, 'medium', 'claude-sonnet-4-6@default')).toEqual({
+      anthropic: { thinking: { type: 'adaptive' }, effort: 'medium' },
+    });
+  });
+
+  it('preserves native Claude adaptive max and model-gated xhigh effort', () => {
+    expect(effortProviderOptions('@ai-sdk/anthropic', 'max', 'claude-opus-4-6')).toEqual({
+      anthropic: { thinking: { type: 'adaptive' }, effort: 'max' },
+    });
+    expect(effortProviderOptions('@ai-sdk/anthropic', 'xhigh', 'claude-opus-4-6')).toEqual({
+      anthropic: { thinking: { type: 'adaptive' }, effort: 'max' },
+    });
+    expect(effortProviderOptions('@ai-sdk/anthropic', 'xhigh', 'claude-opus-4-7')).toEqual({
+      anthropic: { thinking: { type: 'adaptive' }, effort: 'xhigh' },
+    });
+    expect(effortProviderOptions('@ai-sdk/anthropic', 'medium', 'claude-opus-4-5')).toEqual({
+      anthropic: { effort: 'medium' },
     });
   });
 });

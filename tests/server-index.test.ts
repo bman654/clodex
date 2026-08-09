@@ -18,6 +18,7 @@ const state = vi.hoisted(() => ({
   maskGatewayIds: true,
   startMode: 'quick' as 'configure' | 'quick' | null,
   modelAliases: [] as Array<{ name: string; providerId: string; modelId: string }>,
+  effortPolicy: 'down' as const,
   startServerOptions: null as any,
   close: vi.fn<() => Promise<void>>(async () => undefined),
   askServerStartMode: vi.fn(async () => 'quick' as 'configure' | 'quick' | null),
@@ -52,6 +53,7 @@ vi.mock('../src/config.js', () => ({
   loadPreferences: () => ({
     favoriteModels: [],
     modelAliases: state.modelAliases,
+    effortPolicy: state.effortPolicy,
   }),
   setSavedServerPassword: (password: string) => {
     state.savedPassword = password;
@@ -200,6 +202,7 @@ describe('runServerCommand', () => {
       port: 17645,
       apiKey: 'registry-local',
       serverPassword: null,
+      unsupportedEffortPolicy: 'down',
     });
     expect(state.close).toHaveBeenCalledOnce();
     expect(discovery.register).toHaveBeenCalledWith(expect.objectContaining({

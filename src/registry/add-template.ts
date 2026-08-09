@@ -12,7 +12,7 @@ import {
   queueCredentialDelete,
   reconcilePendingCredentialDeletes,
 } from './credential-lifecycle.js';
-import { fetchTemplateModels } from './fetch-template-models.js';
+import { dedupeCachedModels, fetchTemplateModels } from './fetch-template-models.js';
 import { loadRegistryStrict, saveRegistry } from './io.js';
 import {
   withCredentialMutationLock,
@@ -132,7 +132,7 @@ export async function addProviderFromTemplate(
 
   const pricingCache = loadPricingCache();
   const platform = pricingPlatformForProvider(template.id, template.id);
-  const discoveredModels = usableModels.map(m => ({
+  const discoveredModels = dedupeCachedModels(usableModels).map(m => ({
     ...m,
     apiUrl: m.apiUrl ?? fetched.baseUrl,
   }));

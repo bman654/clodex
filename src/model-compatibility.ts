@@ -13,6 +13,10 @@ export interface CompatibilityContext {
   providerId: string;
   modelId: string;
   agent: CompatibilityAgent;
+  /** A validated provider resolver, rather than models.dev, owns coding capability truth for this model. */
+  codingCapabilitiesAuthoritative?: boolean;
+  /** The configured provider identity is custom and must not inherit models.dev capability claims. */
+  ignoreModelsDevCapabilities?: boolean;
 }
 
 export interface IncompatibleModelEntry {
@@ -55,9 +59,11 @@ export function hideReason(ctx: CompatibilityContext): string | null {
   const blacklist = findBlacklistEntry(ctx);
   if (blacklist) return `[blacklist:${blacklist.category}] ${blacklist.reason}`;
 
-  const modelsDev = findModelsDevModel(ctx.providerId, ctx.modelId, loadModelsDevCache());
-  if (modelsDev && shouldHideByModelsDevCapabilities(modelsDev)) {
-    return '[models.dev] incompatible capabilities for coding agents';
+  if (!ctx.codingCapabilitiesAuthoritative && !ctx.ignoreModelsDevCapabilities) {
+    const modelsDev = findModelsDevModel(ctx.providerId, ctx.modelId, loadModelsDevCache());
+    if (modelsDev && shouldHideByModelsDevCapabilities(modelsDev)) {
+      return '[models.dev] incompatible capabilities for coding agents';
+    }
   }
 
   return null;

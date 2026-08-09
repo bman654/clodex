@@ -9,6 +9,11 @@ import { findModelsDevModel } from './models-dev.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js';
 import { isValidProviderId } from './validate.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
+import {
+  effectiveProviderCachedModels,
+  ignoresModelsDevForOpenCodeGoProvider,
+} from '../data/opencode-go-models.js';
+import { resolveAnthropicAuthMode } from '../anthropic-auth-mode.js';
 
 export type CredentialResolver = (provider: RegistryProvider) => string | null;
 
@@ -54,7 +59,10 @@ export function cachedModelToLocal(
   const endpoint = resolveEndpoint(npm, apiUrl);
   if (endpoint === null) return null;
 
-  const modelsDev = findModelsDevModel(provider.id, cached.id);
+  const ignoreModelsDevCapabilities = ignoresModelsDevForOpenCodeGoProvider(provider);
+  const modelsDev = ignoreModelsDevCapabilities
+    ? null
+    : findModelsDevModel(provider.id, cached.id);
   const { id, upstreamModelId } = normalizeGoogleModelId(cached.id, npm);
   const normalizedUpstream = normalizeGoogleModelId(cached.upstreamModelId ?? cached.id, npm).upstreamModelId;
   const family = npm === '@ai-sdk/google' ? (id.split(/[-/:]/)[0] ?? id) : (cached.family ?? '');
@@ -75,8 +83,14 @@ export function cachedModelToLocal(
     freeStatus,
     contextWindow: cached.contextWindow ?? resolveContextWindow(id),
     supportedParameters: cached.supportedParameters,
-    reasoning: cached.reasoning ?? modelsDev?.reasoning,
-    interleavedReasoningField: cached.interleavedReasoningField ?? modelsDev?.interleaved?.field,
+    reasoning: cached.codingCapabilitiesAuthoritative
+      ? cached.reasoning
+      : cached.reasoning ?? modelsDev?.reasoning,
+    codingCapabilitiesAuthoritative: cached.codingCapabilitiesAuthoritative,
+    ignoreModelsDevCapabilities: ignoreModelsDevCapabilities || undefined,
+    interleavedReasoningField: cached.codingCapabilitiesAuthoritative
+      ? cached.interleavedReasoningField
+      : cached.interleavedReasoningField ?? modelsDev?.interleaved?.field,
     useResponsesLite: cached.useResponsesLite,
     preferWebSockets: cached.preferWebSockets,
     modalities: cached.modalities,
@@ -115,8 +129,10 @@ function materializeOne(
   if (provider.authType === undefined && credential === 'local' && !legacyAnonymous) return null;
   const anonymous = explicitAnonymous || legacyAnonymous;
   const apiKey = anonymous ? '' : credential ?? '';
+  const anthropicAuthMode = resolveAnthropicAuthMode(provider);
   const models: LocalProviderModel[] = [];
-  for (const cached of provider.modelsCache?.models ?? []) {
+  const cachedModels = effectiveProviderCachedModels(provider);
+  for (const cached of cachedModels) {
     const freeStatus = classifyFreeStatus({
       model: cached,
       providerId: provider.id,
@@ -125,7 +141,13 @@ function materializeOne(
     if (freeOnly && !isFreeStatus(freeStatus)) continue;
     const model = cachedModelToLocal(cached, provider);
     if (!model) continue;
-    if (shouldHideModel({ providerId: provider.id, modelId: model.id, agent })) continue;
+    if (shouldHideModel({
+      providerId: provider.id,
+      modelId: model.id,
+      agent,
+      codingCapabilitiesAuthoritative: model.codingCapabilitiesAuthoritative,
+      ignoreModelsDevCapabilities: model.ignoreModelsDevCapabilities,
+    })) continue;
     models.push(model);
   }
   if (models.length === 0) return null;
@@ -138,6 +160,7 @@ function materializeOne(
     apiKey,
     authRef: anonymous ? 'none:anonymous' : provider.authRef,
     authType: anonymous ? 'none' : provider.authType,
+    ...(anthropicAuthMode ? { anthropicAuthMode } : {}),
     headers: provider.api.headers,
     models,
   };

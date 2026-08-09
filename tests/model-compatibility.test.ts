@@ -39,6 +39,15 @@ describe('shouldHideModel', () => {
     expect(findBlacklistEntry(ctx)).not.toBeNull();
     expect(hideReason(ctx)).toContain('blacklist');
   });
+
+  it('keeps the explicit blacklist authoritative over provider capability metadata', () => {
+    expect(shouldHideModel({
+      providerId: 'openai',
+      modelId: 'z-ai/glm4.7',
+      agent: 'claude',
+      codingCapabilitiesAuthoritative: true,
+    })).toBe(true);
+  });
 });
 
 describe('models.dev capability rules', () => {
@@ -60,6 +69,23 @@ describe('models.dev capability rules', () => {
       modelId: 'gemini-2.5-flash-preview-tts',
       agent: 'claude',
     })).toBe(true);
+  });
+
+  it('bypasses only models.dev auto-hide for validated provider-resolver capabilities', () => {
+    const ordinary = {
+      providerId: 'qiniu-ai',
+      modelId: 'deepseek-v3',
+      agent: 'claude' as const,
+    };
+    expect(shouldHideModel(ordinary)).toBe(true);
+    expect(shouldHideModel({
+      ...ordinary,
+      codingCapabilitiesAuthoritative: true,
+    })).toBe(false);
+    expect(shouldHideModel({
+      ...ordinary,
+      ignoreModelsDevCapabilities: true,
+    })).toBe(false);
   });
 
   it('does not hide text-output models with missing tool_call field', () => {

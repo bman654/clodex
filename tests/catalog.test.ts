@@ -11,6 +11,7 @@ import * as env from '../src/env.js';
 import { modelAliasTarget } from '../src/model-aliases.js';
 import type { ModelInfo } from '../src/types.js';
 import type { FavoriteModel, LocalProvider, ModelAlias } from '../src/types.js';
+import { NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE } from '../src/anthropic-beta-policy.js';
 
 const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:openai-oauth`;
 
@@ -245,6 +246,37 @@ describe('localModelToRoute', () => {
       { rejectedAccessToken: 'rejected-token' },
     );
     resolveSpy.mockRestore();
+  });
+
+  it('grants beta provenance only to an exact native Claude Code OAuth route', () => {
+    const nativeModel: LocalProvider['models'][number] = {
+      id: 'claude-sonnet-4-6',
+      name: 'Claude Sonnet 4.6',
+      family: 'claude',
+      brand: 'Anthropic',
+      modelFormat: 'anthropic',
+      upstreamModelId: 'claude-sonnet-4-6',
+      baseUrl: 'https://api.anthropic.com',
+    };
+    const routeFor = (
+      id: string,
+      authType: LocalProvider['authType'],
+      baseUrl = nativeModel.baseUrl,
+    ) => localModelToRoute({
+      id,
+      name: id,
+      apiKey: 'token',
+      authType,
+      models: [{ ...nativeModel, baseUrl }],
+    }, { ...nativeModel, baseUrl });
+
+    expect(routeFor('claude-code', 'oauth')).toMatchObject({
+      anthropicBetaProvenance: NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE,
+    });
+    expect(routeFor('generic-oauth', 'oauth')?.anthropicBetaProvenance).toBeUndefined();
+    expect(routeFor('claude-code', 'none')?.anthropicBetaProvenance).toBeUndefined();
+    expect(routeFor('claude-code', 'oauth', 'https://messages.example')?.anthropicBetaProvenance)
+      .toBeUndefined();
   });
 
   it('propagates Responses-Lite / WebSocket capability flags onto the route', () => {

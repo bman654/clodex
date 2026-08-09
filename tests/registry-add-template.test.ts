@@ -34,7 +34,10 @@ vi.mock('../src/env.js', async importOriginal => {
   };
 });
 vi.mock('../src/provider-factory.js', () => ({ isSdkMigratedNpm: vi.fn() }));
-vi.mock('../src/registry/fetch-template-models.js', () => ({ fetchTemplateModels: vi.fn() }));
+vi.mock('../src/registry/fetch-template-models.js', async importOriginal => ({
+  ...(await importOriginal<typeof import('../src/registry/fetch-template-models.js')>()),
+  fetchTemplateModels: vi.fn(),
+}));
 vi.mock('../src/registry/io.js', () => ({
   loadRegistry: vi.fn(),
   loadRegistryStrict: vi.fn(),
@@ -372,6 +375,28 @@ describe('registry/add-template', () => {
       'key_123',
     );
     expect(io.saveRegistry).toHaveBeenCalled();
+  });
+
+  it('deduplicates provider model ids before persisting and reporting the add count', async () => {
+    const model = {
+      id: 'model-1',
+      name: 'First Model 1',
+      upstreamModelId: 'model-1',
+      family: 'fam',
+      brand: 'brand',
+      modelFormat: 'openai' as const,
+    };
+    vi.mocked(fetchTemplate.fetchTemplateModels).mockResolvedValue({
+      models: [model, { ...model, name: 'Duplicate Model 1' }],
+      baseUrl: 'https://api.example.com',
+    });
+
+    const res = await addProviderFromTemplate(dummyTemplate, 'key_123');
+
+    expect(res).toMatchObject({ added: true, modelCount: 1 });
+    expect(res.provider?.modelsCache?.models).toEqual([
+      expect.objectContaining({ id: 'model-1', name: 'First Model 1' }),
+    ]);
   });
 
   it('represents optional no-key access without a stored credential reference', async () => {

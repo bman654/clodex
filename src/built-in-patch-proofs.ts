@@ -56,6 +56,24 @@ function capturePattern(
   return captureNeedle(source, name, uniqueMatch(source, name, pattern));
 }
 
+function capturePatternOccurrences(
+  source: string,
+  name: string,
+  pattern: RegExp,
+  expected: number,
+): BuiltInPatchProof[] {
+  const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
+  const matches = [...source.matchAll(new RegExp(pattern.source, flags))].map(match => match[0]);
+  if (matches.length !== expected) {
+    throw new Error(`clodex patch: could not capture built-in postcondition: ${name}`);
+  }
+  return matches.map((match, index) => ({
+    name: `${name} (${index + 1}/${expected})`,
+    protectedText: match,
+    occurrences: 1,
+  }));
+}
+
 function normalizedPatchName(name: string): string {
   return name.replace(/ \(refresh\)$/, '');
 }
@@ -157,6 +175,22 @@ export function captureBuiltInPatchProofs(
   addPattern(
     'PATCH 8c: max effort capability',
     effortProofPattern('/*ccpatch:max-effort*/'),
+  );
+  addPattern(
+    'PATCH 8d: exact effort level helper',
+    /\/\*ccpatch:effort-level-list\*\/var _ccl=Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\([\w$]+\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_ccl!==void 0\)return _ccl\.filter\(function\(_cclv\)\{return [\w$]+\(_cclv,[\w$]+\)\}\);/,
+  );
+  if (protectsResult(results, 'PATCH 8e: exact effort metadata lists')) {
+    proofs.push(...capturePatternOccurrences(
+      source,
+      'PATCH 8e: exact effort metadata lists',
+      /supportedEffortLevels:\(\/\*ccpatch:effort-level-consumer\*\/Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\([\w$]+\|\|""\)\.trim\(\)\.toLowerCase\(\)\]\?\?PM\)\.filter\(\([\w$]+\)=>\{if\([\w$]+==="max"&&![\w$]+\([\w$]+\)\)return!1;if\([\w$]+==="xhigh"&&![\w$]+\([\w$]+\)\)return!1;return!0\}\)/,
+      2,
+    ));
+  }
+  addPattern(
+    'PATCH 8f: preserve requested effort',
+    /\/\*ccpatch:requested-effort\*\/if\(typeof [\w$]+==="string"&&[\w$]+\([\w$]+\)\)\{var _ccl=Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\([\w$]+\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_ccl!==void 0\)return [\w$]+;\}/,
   );
   addPattern(
     'PATCH 9: default effort',

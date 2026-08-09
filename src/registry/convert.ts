@@ -20,6 +20,7 @@ function modelToCached(model: LocalProviderModel): CachedModel {
     apiUrl: model.apiBaseUrl ?? model.baseUrl,
     supportedParameters: model.supportedParameters,
     reasoning: model.reasoning,
+    codingCapabilitiesAuthoritative: model.codingCapabilitiesAuthoritative,
     interleavedReasoningField: model.interleavedReasoningField,
     useResponsesLite: model.useResponsesLite,
     preferWebSockets: model.preferWebSockets,

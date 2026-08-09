@@ -2,7 +2,7 @@
 
 import { isDeepStrictEqual } from 'node:util';
 import { fetchAnthropicModels } from './custom-endpoint.js';
-import { fetchTemplateModels } from './fetch-template-models.js';
+import { dedupeCachedModels, fetchTemplateModels } from './fetch-template-models.js';
 import { loadRegistryStrict, saveRegistry } from './io.js';
 import { withRegistryWriteLock } from './lock.js';
 import { resolveModelSource } from './model-source.js';
@@ -28,6 +28,9 @@ import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
 import { getInstalledClaudeVersion } from '../launch.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
+import {
+  isFailClosedOpenCodeGoBoundaryProvider,
+} from '../data/opencode-go-models.js';
 
 export interface RefreshProviderResult {
   id: string;
@@ -225,6 +228,7 @@ async function refreshApiListProvider(
 ): Promise<{ models: CachedModel[]; baseUrl?: string; error?: string }> {
   const npm = provider.api.npm ?? '@ai-sdk/openai-compatible';
   const catalogTemplate = resolveProviderTemplate(provider);
+  const configuredUrl = provider.api.url?.trim();
   const baseUrl = effectiveProviderBaseUrl(provider, catalogTemplate);
 
   if (!baseUrl) {
@@ -232,7 +236,6 @@ async function refreshApiListProvider(
   }
 
   let safeBaseUrl = baseUrl;
-  const configuredUrl = provider.api.url?.trim();
   const templateDefault = catalogTemplate?.defaultBaseUrl?.trim();
   if (configuredUrl && configuredUrl !== templateDefault) {
     const urlCheck = await validateCustomEndpointUrl(baseUrl, {
@@ -312,6 +315,13 @@ function providerDiscoveryInputsMatch(
     && isDeepStrictEqual(current.api, started.api);
 }
 
+/** Fail closed before any credential or network dispatch crosses OpenCode identity boundaries. */
+export function providerModelRefreshBoundaryError(provider: RegistryProvider): string | undefined {
+  return isFailClosedOpenCodeGoBoundaryProvider(provider)
+    ? 'OpenCode Go has no verified API base URL. Remove and re-add the provider before refreshing.'
+    : undefined;
+}
+
 export async function refreshProviderModels(
   providerId: string,
   apiKey: string | null,
@@ -321,6 +331,10 @@ export async function refreshProviderModels(
   const provider = workingRegistry.providers.find(p => p.id === providerId);
   if (!provider) {
     return { id: providerId, name: providerId, ok: false, reason: 'Provider not found.' };
+  }
+  const boundaryError = providerModelRefreshBoundaryError(provider);
+  if (boundaryError) {
+    return { id: provider.id, name: provider.name, ok: false, reason: boundaryError };
   }
 
   const source = resolveModelSource(provider);
@@ -335,7 +349,7 @@ export async function refreshProviderModels(
   }
 
   try {
-    const previousModelCount = provider.modelsCache?.models.length ?? 0;
+    const previousModelCount = cachedModelCount(provider);
     let models: CachedModel[] = [];
     let baseUrl: string | undefined;
     let oauthFallbackReason: string | undefined;
@@ -420,11 +434,12 @@ export async function refreshProviderModels(
       baseUrl = fetched.baseUrl;
     }
 
+    const uniqueModels = dedupeCachedModels(models);
     const pricingCache = loadPricingCache();
     const platform = pricingPlatformForProvider(provider.templateId, provider.id);
     const enriched = providerPreservesModelPricing(provider)
-      ? models
-      : enrichModelsWithPricing(models, buildPricingIndex(pricingCache), platform);
+      ? uniqueModels
+      : enrichModelsWithPricing(uniqueModels, buildPricingIndex(pricingCache), platform);
 
     await withRegistryWriteLock(() => {
       const currentRegistry = loadRegistryStrict();
@@ -468,6 +483,11 @@ export async function refreshAllProviderModels(
   const enabledProviders = registry.providers.filter(p => p.enabled);
 
   for (const provider of enabledProviders) {
+    const boundaryError = providerModelRefreshBoundaryError(provider);
+    if (boundaryError) {
+      refreshed.push({ id: provider.id, name: provider.name, ok: false, reason: boundaryError });
+      continue;
+    }
     const key = await resolveRefreshCredential(provider, resolveKey);
     refreshed.push(await refreshProviderModels(provider.id, key));
   }

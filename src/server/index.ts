@@ -372,6 +372,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     }
     return runHttpProxyServerCommand(false, options.wsDiagnostics, options.port, noDiscovery);
   }
+  const prefs = loadPreferences();
   const apiKey = await resolveServerUpstreamApiKey();
   if (!apiKey) {
     p.log.error('No providers configured. Run `clodex providers` to add OpenAI.');
@@ -406,7 +407,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
       models = filterServerModelsByProviders(models, runConfig.exposedProviders);
     }
     if (runConfig.favoritesOnly) {
-      const favorites = loadPreferences().favoriteModels ?? [];
+      const favorites = prefs.favoriteModels ?? [];
       if (favorites.length === 0) {
         spinner.stop(pc.red('No favorite models configured'));
         p.log.error('Run `clodex models` to add favorites, or turn off favorites-only in the server wizard.');
@@ -451,7 +452,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   // ids — the same alias table the proxy-mode MITM resolves — so a patched
   // Claude Code or a direct API client can send e.g. "luna". They are never
   // advertised in /models listings; see createGatewayModelCatalog.
-  const normalizedAliases = normalizeModelAliases(loadPreferences().modelAliases);
+  const normalizedAliases = normalizeModelAliases(prefs.modelAliases);
   const baseCatalog = createGatewayModelCatalog(models, gateway);
   const unavailableAliases = normalizedAliases.accepted.filter(({ alias }) => (
     !models.some(model => (
@@ -502,6 +503,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     aliasNames: new Set(modelAliases.map(alias => alias.name)),
     inferenceLogPath,
     webSocketDiagnosticsLogPath,
+    unsupportedEffortPolicy: prefs.effortPolicy,
   });
 
   console.log('');

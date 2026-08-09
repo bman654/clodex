@@ -52,8 +52,9 @@ export function detectConflicts(): ConflictInfo[] {
 /** Restore first-party-like Claude Code behavior when routing through a proxy or gateway. */
 export function applyClaudeCodeThirdPartyCompat(env: NodeJS.ProcessEnv): void {
   // Custom ANTHROPIC_BASE_URL disables MCP tool search by default, loading every
-  // MCP tool (100+) on every turn. Requires defer_loading on tools — do not set
-  // CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS when using the local translation proxy.
+  // MCP tool (100+) on every turn. Requires defer_loading on tools — clodex must
+  // not add blanket beta suppression for a proxied route. An explicit value the
+  // operator supplied in the parent environment remains authoritative.
   env['ENABLE_TOOL_SEARCH'] = 'true';
   // Third-party routes may enable a shorter system prompt that drops conversational
   // guardrails while hooks/plugins still inject agentic instructions.
