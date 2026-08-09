@@ -155,9 +155,15 @@ describe('buildFavoritesList', () => {
       modelId: m.id,
     }));
 
-    const { resolved } = await buildFavoritesList(undefined, favorites, customCtx, 5);
+    const { resolved, capacitySkippedFavorites } = await buildFavoritesList(
+      undefined,
+      favorites,
+      customCtx,
+      5,
+    );
 
     expect(resolved).toHaveLength(5);
+    expect(capacitySkippedFavorites).toEqual(favorites.slice(5));
   });
 
   it('can drop favorites that resolve to an empty API key', async () => {

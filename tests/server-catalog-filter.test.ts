@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildServerFavoriteCatalog,
   filterServerModelsByFreeStatus,
   filterServerModelsByFavorites,
   filterServerModelsByProviders,
@@ -52,10 +53,25 @@ describe('filterServerModelsByFavorites', () => {
 
   it('keeps only favorited provider/model pairs', () => {
     const filtered = filterServerModelsByFavorites(models, [
-      { providerId: 'google', modelId: 'gemini-3.5-flash' },
       { providerId: 'xai', modelId: 'grok-4.3' },
+      { providerId: 'google', modelId: 'gemini-3.5-flash' },
     ]);
-    expect(filtered.map(m => m.id)).toEqual(['gemini-3.5-flash', 'grok-4.3']);
+    expect(filtered.map(m => m.id)).toEqual(['grok-4.3', 'gemini-3.5-flash']);
+  });
+
+  it('projects the first favorites and reports both unavailable and capacity omissions', () => {
+    const result = buildServerFavoriteCatalog(models, [
+      { providerId: 'xai', modelId: 'grok-4.3' },
+      { providerId: 'missing', modelId: 'gone' },
+      { providerId: 'google', modelId: 'gemini-3.5-flash' },
+      { providerId: 'openai', modelId: 'gpt-5.5-fast' },
+    ], 3);
+
+    expect(result.models.map(model => model.id)).toEqual(['grok-4.3', 'gemini-3.5-flash']);
+    expect(result.unavailableFavorites).toEqual([{ providerId: 'missing', modelId: 'gone' }]);
+    expect(result.capacitySkippedFavorites).toEqual([
+      { providerId: 'openai', modelId: 'gpt-5.5-fast' },
+    ]);
   });
 });
 

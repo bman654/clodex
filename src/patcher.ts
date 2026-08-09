@@ -38,6 +38,8 @@ import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
+import { MAX_MODEL_CATALOG } from './constants.js';
+import { projectFavoriteExposure } from './favorites.js';
 import { getAppHome } from './paths.js';
 import { loadPreferences, savePreferences } from './config.js';
 import {
@@ -143,6 +145,8 @@ function writePatchManifest(manifest: PatchManifest, path = getPatchManifestPath
 
 export interface DesiredPatchConfig {
   config: PatchScriptModelConfig;
+  /** Saved favorites omitted because the Claude Code patch catalog is full. */
+  capacitySkippedFavorites: Array<{ providerId: string; modelId: string }>;
   /** Model ids whose context window is unknown (defaulting to Claude Code's 200k). */
   unknownWindows: string[];
   /** Saved aliases excluded from the patch while remaining in configuration. */
@@ -171,31 +175,39 @@ export function buildPatchModelConfig(
   favorites: Array<{ providerId: string; modelId: string }>,
   aliases: unknown,
   modelMetaFor: (providerId: string, modelId: string) => PatchModelMeta | undefined,
+  max = MAX_MODEL_CATALOG,
 ): DesiredPatchConfig {
+  const projection = projectFavoriteExposure(favorites, { max });
+  const exposedFavorites = projection.exposedFavorites;
   const config: PatchScriptModelConfig = {};
   const unknownWindows: string[] = [];
   const normalizedAliases = normalizeModelAliases(aliases);
-  const favoriteTargets = new Set(
+  const savedFavoriteTargets = new Set(
     favorites.map(favorite => `${favorite.providerId}:${favorite.modelId}`),
+  );
+  const exposedFavoriteTargets = new Set(
+    exposedFavorites.map(favorite => `${favorite.providerId}:${favorite.modelId}`),
   );
   const targetRejections: ModelAliasRejection[] = normalizedAliases.accepted
     .filter(({ alias }) => (
-      !favoriteTargets.has(`${alias.providerId}:${alias.modelId}`)
+      !exposedFavoriteTargets.has(`${alias.providerId}:${alias.modelId}`)
     ))
     .flatMap(({ sources }) => sources.map(source => ({
       alias: source,
-      reason: 'target-not-favorite',
+      reason: savedFavoriteTargets.has(`${String(source.providerId)}:${String(source.modelId)}`)
+        ? 'target-not-exposed'
+        : 'target-not-favorite',
     })));
   const aliasByFavorite = new Map(
     normalizedAliases.aliases
-      .filter(alias => favoriteTargets.has(`${alias.providerId}:${alias.modelId}`))
+      .filter(alias => exposedFavoriteTargets.has(`${alias.providerId}:${alias.modelId}`))
       .map(alias => [
         `${alias.providerId}:${alias.modelId}`,
         alias.name,
       ]),
   );
 
-  for (const favorite of favorites) {
+  for (const favorite of exposedFavorites) {
     const id = stripOneMContextSuffix(httpProxyModelId(favorite.providerId, favorite.modelId));
     if (config[id]) continue;
     const meta = modelMetaFor(favorite.providerId, favorite.modelId);
@@ -213,6 +225,7 @@ export function buildPatchModelConfig(
   }
   return {
     config,
+    capacitySkippedFavorites: projection.capacitySkippedFavorites,
     unknownWindows,
     rejectedAliases: [
       ...normalizedAliases.rejected,
@@ -921,6 +934,16 @@ export async function runPatchCommand(opts: {
   if (Object.keys(desired.config).length === 0) {
     p.log.error('No favorite models to patch. Save favorites with `clodex models` first.');
     return 1;
+  }
+  if (desired.capacitySkippedFavorites.length > 0) {
+    p.log.warn(
+      `${desired.capacitySkippedFavorites.length} saved favorite${desired.capacitySkippedFavorites.length === 1 ? '' : 's'} `
+      + `not patched because clodex limits the Claude-facing patch catalog to ${MAX_MODEL_CATALOG} models. `
+      + 'The first saved favorites remain active; skipped entries were preserved:\n'
+      + desired.capacitySkippedFavorites
+        .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+        .join('\n'),
+    );
   }
   for (const id of desired.unknownWindows) {
     p.log.warn(`No context window metadata for ${id} — Claude Code will assume the 200k default.`);

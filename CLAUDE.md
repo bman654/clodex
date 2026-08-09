@@ -202,7 +202,10 @@ Interactive launch flow and real-provider behavior are verified manually.
   + `clodex patch` reports correct per-model windows.
 - Cost display in Claude Code is always inaccurate for routed third-party models (Claude Code applies
   its own pricing table).
-- `MAX_MODEL_CATALOG = 20` (`constants.ts`) — favorites cap and max catalog routes.
+- `MAX_FAVORITES = 100` is the persisted curation cap; `MAX_MODEL_CATALOG = 20` is the separate
+  Claude-facing route, discovery, and patch cap. Every surface uses the first saved favorites in
+  order and reports exact capacity omissions; an endpoint launch's separately exposed starting model
+  consumes one catalog slot.
 - OpenAI catalog ids may differ from upstream API ids — `upstreamModelId` carries the real API id.
 - Never commit `dist/` (gitignored, rebuilt by CI), never hardcode a version string
   (`package.json` is the source of truth), and never run `npm publish` locally.

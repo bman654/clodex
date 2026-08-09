@@ -180,4 +180,42 @@ describe('HTTP proxy routes', () => {
     );
     expect(routes.aliases[0]?.sourceNames).toEqual(['LLaMa']);
   });
+
+  it('exposes only the first saved favorites and keeps later aliases inactive', () => {
+    const manyProvider: LocalProvider = {
+      id: 'many',
+      name: 'Many Models',
+      apiKey: 'many-key',
+      models: Array.from({ length: 25 }, (_, index) => ({
+        id: `model-${index}`,
+        upstreamModelId: `upstream-${index}`,
+        name: `Model ${index}`,
+        family: 'test',
+        brand: 'Other',
+        modelFormat: 'openai' as const,
+        npm: '@ai-sdk/openai-compatible',
+      })),
+    };
+    const favorites = manyProvider.models.map(model => ({
+      providerId: manyProvider.id,
+      modelId: model.id,
+    }));
+
+    const result = buildHttpProxyRoutes([manyProvider], favorites, [{
+      name: 'late',
+      providerId: manyProvider.id,
+      modelId: 'model-20',
+    }]);
+
+    expect(result.routes.map(route => route.aliasId)).toEqual(
+      favorites.slice(0, 20).map(favorite => `clodex:${favorite.providerId}:${favorite.modelId}`),
+    );
+    expect(result.capacitySkippedFavorites).toEqual(favorites.slice(20));
+    expect(result.aliases).toEqual([]);
+    expect(result.unavailableAliases).toEqual([{
+      name: 'late',
+      providerId: 'many',
+      modelId: 'model-20',
+    }]);
+  });
 });
