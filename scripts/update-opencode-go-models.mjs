@@ -400,7 +400,7 @@ async function main() {
       invalid.push(`${model.id}: contextWindow=${JSON.stringify(model.contextWindow)}`);
     }
     // eslint-disable-next-line no-control-regex
-    if (typeof model.name !== 'string' || model.name.trim() === '' || /[ -]/.test(model.name)) {
+    if (typeof model.name !== 'string' || model.name.trim() === '' || /[\x00-\x1f\x7f]/.test(model.name)) {
       invalid.push(`${model.id}: name=${JSON.stringify(model.name)}`);
     }
   }
