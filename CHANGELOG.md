@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.3.0](https://github.com/bman654/clodex/compare/v2.2.2...v2.3.0) (2026-08-09)
+
+
+### Features
+
+* **oauth:** omitted-reasoning alignment and abandoned-head canary coverage ([#91](https://github.com/bman654/clodex/issues/91)) ([c0e6c04](https://github.com/bman654/clodex/commit/c0e6c04623cdbbb675c043e24d9b52aa26eb0baf))
+* **oauth:** warn on stderr when the tool-argument strip rule forks ([#89](https://github.com/bman654/clodex/issues/89)) ([827215a](https://github.com/bman654/clodex/commit/827215a8dcbad8d0cfc1f3f59a8087a5df5dc97b))
+
+
+### Bug Fixes
+
+* **proxy:** make upstream retry budget configurable ([#82](https://github.com/bman654/clodex/issues/82)) ([f585c7b](https://github.com/bman654/clodex/commit/f585c7b47c9264b2cd4639de2deb23b4a19e84bd))
+* **sdk:** strip the volatile Claude Code billing header on every translated route ([#93](https://github.com/bman654/clodex/issues/93)) ([db8d0cb](https://github.com/bman654/clodex/commit/db8d0cbafd0719a5a00160aab1be6dac4dd7db78))
+* **transport:** replay control-only socket failures ([#83](https://github.com/bman654/clodex/issues/83)) ([7ff2114](https://github.com/bman654/clodex/commit/7ff2114e04a555e3d538fa10cd6a9de897c6b22b))
+
 ## [2.2.2](https://github.com/bman654/clodex/compare/v2.2.1...v2.2.2) (2026-08-07)
 
 
