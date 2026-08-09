@@ -15,6 +15,15 @@ export const CODEX_RESPONSES_LITE_VERSION = '0.144.1';
 // OpenAI-Beta opt-in for the WebSocket Responses transport.
 export const CODEX_RESPONSES_WEBSOCKETS_BETA = 'responses_websockets=2026-02-06';
 
+/**
+ * Ceiling for every credential/catalog probe a provider add performs. Kept in
+ * one place so a newly added probe cannot quietly become the only unbounded
+ * call on that path: these run under a spinner, and an upstream that accepts
+ * and then stalls (captive portal, egress filter, a proxy that never answers)
+ * otherwise hangs the CLI with no way out but Ctrl-C.
+ */
+export const TEST_TIMEOUT_MS = 10_000;
+
 // These must be removed from the child process environment to avoid conflicts
 // with Vertex AI, Bedrock, AWS, Foundry, and any stale Anthropic config.
 export const CONFLICTING_ENV_VARS = [

@@ -1,5 +1,6 @@
 // src/provider-templates.ts — builtin provider templates for clodex providers add
 
+import { TEST_TIMEOUT_MS } from './constants.js';
 import type { CachedModel } from './registry/types.js';
 import {
   buildOpenCodeGoModels,
@@ -74,6 +75,11 @@ export async function verifyOpenCodeGoCredential(apiKey: string, baseUrl: string
         Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({ model: model.upstreamModelId ?? model.id }),
+      // This is the FIRST thing a user hits after pasting a key, and it runs
+      // under a spinner. Without a deadline an upstream that accepts and then
+      // stalls leaves no exit but Ctrl-C. The catch below already treats an
+      // abort as inconclusive, so fail-open semantics are unchanged.
+      signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
     });
     if (response.status === 401 || response.status === 403) {
       let authRejected = false;
@@ -81,7 +87,16 @@ export async function verifyOpenCodeGoCredential(apiKey: string, baseUrl: string
         const parsed = JSON.parse(await response.text()) as { error?: { type?: string; message?: string } };
         const errorType = String(parsed.error?.type ?? '');
         const message = String(parsed.error?.message ?? '');
-        authRejected = /auth/i.test(errorType) || /api key|unauthoriz|authentication/i.test(message);
+        // Anchored: the probe names one fixed model, so a plan-gated model
+        // answers 403 UnauthorizedModelError ("your plan does not include …")
+        // on a perfectly good key. An unanchored /auth/i matches inside
+        // "Unauthorized" and would reject that key at add time, blaming the
+        // key for an entitlement problem. Only a type that IS an auth error,
+        // or a message that talks about the key itself, counts.
+        authRejected = /^(?:auth|authentication|authorization)(?:_?error)?$/i.test(errorType)
+          || /\b(?:invalid|bad|missing|expired|incorrect)\b[^.]{0,40}\bapi[ _-]?key\b/i.test(message)
+          || /\bapi[ _-]?key\b[^.]{0,40}\b(?:invalid|not valid|expired|incorrect|missing)\b/i.test(message)
+          || /\bauthentication (?:failed|error)\b/i.test(message);
       } catch {
         // An unparseable 401 is inconclusive, not proof of a bad key.
       }
@@ -123,7 +138,11 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     // /models is availability data (answers without auth), so the shared
     // api-list validation cannot catch a bad key; probe before persisting.
     verifyCredential: verifyOpenCodeGoCredential,
-    staticModels: buildOpenCodeGoModels(),
+    // A getter, not a value: PROVIDER_TEMPLATES is a module-level literal, so
+    // an eager call would deep-clone 17 catalog entries on every single CLI
+    // invocation — `clodex --help` included — for a list most commands never
+    // read. Still returns an isolated copy per access, as callers expect.
+    get staticModels() { return buildOpenCodeGoModels(); },
     staticModelPolicy: 'allowlist',
     preserveModelPricing: true,
     supported: true,

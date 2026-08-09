@@ -35,6 +35,20 @@ clodex claude                  # 5. launch Claude Code on an OpenAI model
 4. **Patch** *(optional but recommended for proxy mode)* — bakes your favorites and aliases into the Claude Code binary so they pass model validation, appear in `/model`, and report their real context windows. Re-run after each `claude` update; `clodex patch --restore` undoes it. This step is required if you want to use clodex-routed models as subagents via the Agent tool.
 5. **Launch** — starts Claude Code bridged to the model you choose.
 
+## Supported providers
+
+| Provider | Auth | Support |
+|---|---|---|
+| OpenAI | API key | Fully supported by the clodex maintainer |
+| OpenAI (ChatGPT / Codex plan) | OAuth | Fully supported by the clodex maintainer |
+| OpenCode Go | API key | Community-supported — maintained by its contributor |
+
+**Community-supported** means the maintainer holds no account for that service,
+so it cannot be exercised against the live API here or debugged when the vendor
+changes something. Such an integration is reviewed and tested like everything
+else and shipped gladly — it just depends on its contributor when upstream
+moves. New providers land under this tier by default.
+
 ## Difference between Clodex and other solutions
 
 | Feature | Clodex | relay-ai | CLIProxyAPI | Various process-based solutions |

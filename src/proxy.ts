@@ -432,7 +432,18 @@ export async function startProxyCatalog(
         return;
       }
       const route = resolvedRoute ?? defaultRoute;
-      if (messagesEndpoint === 'count_tokens' && route.modelFormat !== 'anthropic') {
+      // Anthropic-format is not the same question as "implements
+      // count_tokens". Before third-party anthropic-format routes existed the
+      // local path was the only one ever taken; now a route whose upstream
+      // documents no token-counting endpoint would forward the count and
+      // answer Claude Code's token accounting with a 404. Only an explicit
+      // `false` diverts — an unset capability keeps forwarding, so a custom
+      // Anthropic-compatible endpoint that does implement it is unaffected.
+      if (
+        messagesEndpoint === 'count_tokens'
+        && (route.modelFormat !== 'anthropic'
+          || route.compatibility?.supportsCountTokens === false)
+      ) {
         const inputTokens = estimateAnthropicInputTokens(anthropicBody);
         plog(() => `token-count: local estimate model=${originalModel} input_tokens=${inputTokens}`);
         res.setHeader('x-relay-token-count-source', 'local-estimate');

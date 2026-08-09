@@ -1,6 +1,6 @@
 // tests/upstream-forward.test.ts
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import type { Transform } from 'node:stream';
+import { Writable, type Transform } from 'node:stream';
 import {
   anthropicUpstreamHeaders,
   fetchWithOAuthRetry,
@@ -238,5 +238,99 @@ describe('relayAnthropicMessages responseModelOverride', () => {
       {},
     );
     expect(res.body()).toBe(raw);
+  });
+});
+
+describe('relayAnthropicMessages streaming', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * A REAL Writable, unlike the object mock above: the streaming path reaches
+   * the client through `.pipe(res)`, so a plain object never exercises it.
+   * That is the gap this suite had — `anthropicSseModelRewrite` was well
+   * covered directly, but deleting the `.pipe(...)` that installs it in the
+   * relay left every test green.
+   */
+  function makeStreamRes() {
+    const chunks: Buffer[] = [];
+    let status = 0;
+    let headers: Record<string, string> = {};
+    const res = new Writable({
+      write(chunk: Buffer, _enc, cb) { chunks.push(Buffer.from(chunk)); cb(); },
+    }) as Writable & {
+      writeHead: (code: number, hdrs?: Record<string, string>) => unknown;
+      body: () => string;
+      status: () => number;
+      headers: () => Record<string, string>;
+    };
+    res.writeHead = (code, hdrs) => { status = code; headers = hdrs ?? {}; return res; };
+    res.body = () => Buffer.concat(chunks).toString('utf8');
+    res.status = () => status;
+    res.headers = () => headers;
+    return res;
+  }
+
+  const SSE = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"id":"msg_1","model":"qwen3.8-max","content":[]}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}',
+    '',
+    'event: message_stop',
+    'data: {"type":"message_stop"}',
+    '',
+  ].join('\n');
+
+  it('pipes the streaming body through the model rewrite', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(SSE, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })));
+    const res = makeStreamRes();
+    const done = new Promise<void>(resolve => res.on('finish', () => resolve()));
+
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'qwen3.8-max', stream: true },
+      'key',
+      true,
+      { responseModelOverride: 'clodex:opencode-go:qwen3.8-max[1m]' },
+    );
+    await done;
+
+    expect(res.status()).toBe(200);
+    expect(res.headers()['Content-Type']).toBe('text/event-stream');
+    const body = res.body();
+    // The echo invariant: the client sees back exactly the id it asked for.
+    expect(body).toContain('"model":"clodex:opencode-go:qwen3.8-max[1m]"');
+    expect(body).not.toContain('"model":"qwen3.8-max"');
+    // Every other line survives byte-for-byte.
+    expect(body).toContain('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}');
+    expect(body).toContain('event: message_stop');
+  });
+
+  it('streams through untouched without an override', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(SSE, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })));
+    const res = makeStreamRes();
+    const done = new Promise<void>(resolve => res.on('finish', () => resolve()));
+
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'qwen3.8-max', stream: true },
+      'key',
+      true,
+      {},
+    );
+    await done;
+
+    expect(res.body()).toBe(SSE);
   });
 });

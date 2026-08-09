@@ -251,6 +251,44 @@ describe('SDK anonymous route handling', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it('answers count_tokens locally when the route declares no upstream support', async () => {
+    // Speaking the Messages API does not imply implementing count_tokens.
+    // Forwarding it to an upstream without the endpoint answers Claude Code's
+    // token accounting with a 404 instead of a number, which is the failure
+    // this capability exists to avoid.
+    const fetchMock = vi.fn(async () => new Response('not found', { status: 404 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const handle = await startProxy(
+      'https://anonymous.example',
+      'anonymous-model',
+      false,
+      undefined,
+      {
+        providerId: 'local',
+        authType: 'none',
+        modelFormat: 'anthropic',
+        compatibility: { supportsCountTokens: false },
+      },
+      '',
+    );
+
+    try {
+      const tokens = await postToProxy(handle.port, handle.token, {
+        model: 'anonymous-model',
+        messages: [{ role: 'user', content: 'count this' }],
+      }, undefined, '/v1/messages/count_tokens');
+
+      expect(tokens.status).toBe(200);
+      expect(JSON.parse(tokens.body).input_tokens).toBeGreaterThan(0);
+      // The point of the capability: upstream is never asked.
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('catalog model aliases', () => {
