@@ -406,7 +406,16 @@
       "supportsStore": false,
       "supportsDeveloperRole": false,
       "thinkingFormat": "qwen",
-      "maxTokensField": "max_tokens"
+      "maxTokensField": "max_tokens",
+      "reasoningEffortMap": {
+        "medium": "high",
+        "minimal": "high",
+        "low": "high",
+        "high": "high",
+        "xhigh": "high",
+        "max": "high",
+        "off": null
+      }
     },
     "upstreamModelId": "qwen3.6-plus",
     "family": "qwen3.6"

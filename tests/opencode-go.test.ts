@@ -9,6 +9,8 @@ import {
 import { TEST_TIMEOUT_MS } from '../src/constants.js';
 import { buildHttpProxyRoutes } from '../src/http-proxy/routes.js';
 import { getTemplateById, verifyOpenCodeGoCredential } from '../src/provider-templates.js';
+import { effortProviderOptions, getPatchReasoningCapabilities } from '../src/provider-factory.js';
+import { transformOpenAiCompatibleRequestBody } from '../src/model-runtime-compatibility.js';
 import { applyTemplateModelMetadata } from '../src/registry/fetch-template-models.js';
 import { materializeRegistry } from '../src/registry/materialize.js';
 import type { CachedModel, ProviderRegistry } from '../src/registry/types.js';
@@ -275,5 +277,54 @@ describe('verifyOpenCodeGoCredential', () => {
       expect(await verifyOpenCodeGoCredential('bad-key', OPENCODE_GO_COMPLETIONS_BASE_URL), body)
         .toContain('authentication failed');
     }
+  });
+});
+
+describe('qwen3.6-plus reasoning toggle', () => {
+  const model = buildOpenCodeGoModels().find(entry => entry.id === 'qwen3.6-plus')!;
+  const meta = {
+    reasoning: model.reasoning,
+    compatibility: model.compatibility,
+    providerId: 'opencode-go',
+  };
+
+  it('turns thinking on for every selectable level, max included', () => {
+    // Qwen accepts no reasoning_effort — `thinkingFormat: 'qwen'` injects the
+    // boolean `enable_thinking` and only does so when an effort is PRESENT, so
+    // the effort value is an internal signal rather than a wire control.
+    // Before the map, mapCodexEffortToOpenAI dropped `max` along with `off`
+    // and `minimal`, so choosing MAX silently disabled thinking while `low`
+    // enabled it — backwards, and invisible.
+    for (const level of ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+      const options = effortProviderOptions(model.npm!, level, model.id, meta as never) as
+        Record<string, Record<string, unknown>> | undefined;
+      const effort = options?.opencodeGo?.reasoningEffort as string | undefined;
+      expect(effort, level).toBeTruthy();
+      const body = transformOpenAiCompatibleRequestBody(
+        { model: model.id, reasoning_effort: effort },
+        model.compatibility,
+      ) as Record<string, unknown>;
+      expect(body.enable_thinking, level).toBe(true);
+    }
+  });
+
+  it('leaves thinking off when the user asks for off', () => {
+    const options = effortProviderOptions(model.npm!, 'off', model.id, meta as never);
+    expect(options).toBeUndefined();
+    const body = transformOpenAiCompatibleRequestBody(
+      { model: model.id },
+      model.compatibility,
+    ) as Record<string, unknown>;
+    expect(body.enable_thinking).toBeUndefined();
+  });
+
+  it('offers one level, and the default is a level it actually offers', () => {
+    // The grades are cosmetic while the control is a boolean, so the dedup in
+    // getPatchReasoningCapabilities collapsing them is the desired outcome —
+    // but the surviving level must be the preferred default, or the client
+    // shows a default it cannot select.
+    const patch = getPatchReasoningCapabilities(model.npm!, model.id, meta as never);
+    expect(patch.levels).toEqual(['medium']);
+    expect(patch.levels).toContain(patch.defaultLevel);
   });
 });

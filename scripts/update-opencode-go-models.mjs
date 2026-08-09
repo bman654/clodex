@@ -181,6 +181,25 @@ const PATCHES = {
     supportsReasoningEffort: false,
   },
   'qwen3.6-plus': {
+    // Qwen has no reasoning_effort: models.dev publishes a toggle plus a token
+    // budget, and DashScope's control is the boolean `enable_thinking`. But
+    // `thinkingFormat: 'qwen'` only injects that boolean when a
+    // reasoning_effort is PRESENT, so the effort value is load-bearing as an
+    // internal signal even though the upstream ignores its value.
+    //
+    // Without a map, mapCodexEffortToOpenAI dropped `off`, `minimal` and also
+    // `max` — so choosing MAX silently disabled thinking while `low` enabled
+    // it. Mapping every on-level to one value makes the toggle honest: any
+    // level thinks, `off` does not. getPatchReasoningCapabilities dedups
+    // identical provider options, so the client offers a single level instead
+    // of four grades that do the same thing — and `medium` is listed FIRST
+    // because that order decides which level survives the dedup, and it has to
+    // be the preferred default or the client shows a default it cannot select.
+    //
+    // Grading this for real means sending enable_thinking + thinking_budget
+    // and dropping reasoning_effort. That changes the wire and needs a live
+    // key to validate, so it is tracked separately rather than guessed here.
+    reasoningEffortMap: { medium: 'high', minimal: 'high', low: 'high', high: 'high', xhigh: 'high', max: 'high', off: null },
     supportsStore: false,
     supportsDeveloperRole: false,
     thinkingFormat: 'qwen',
