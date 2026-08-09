@@ -11,6 +11,7 @@ import { buildHttpProxyRoutes } from '../src/http-proxy/routes.js';
 import { getTemplateById, verifyOpenCodeGoCredential } from '../src/provider-templates.js';
 import { effortProviderOptions, getPatchReasoningCapabilities } from '../src/provider-factory.js';
 import { transformOpenAiCompatibleRequestBody } from '../src/model-runtime-compatibility.js';
+import { projectNativeEffort } from '../src/patch-transforms.js';
 import { applyTemplateModelMetadata } from '../src/registry/fetch-template-models.js';
 import { materializeRegistry } from '../src/registry/materialize.js';
 import type { CachedModel, ProviderRegistry } from '../src/registry/types.js';
@@ -295,7 +296,7 @@ describe('qwen3.6-plus reasoning toggle', () => {
     // Before the map, mapCodexEffortToOpenAI dropped `max` along with `off`
     // and `minimal`, so choosing MAX silently disabled thinking while `low`
     // enabled it — backwards, and invisible.
-    for (const level of ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']) {
+    for (const level of ['low', 'medium', 'high', 'xhigh', 'max']) {
       const options = effortProviderOptions(model.npm!, level, model.id, meta as never) as
         Record<string, Record<string, unknown>> | undefined;
       const effort = options?.opencodeGo?.reasoningEffort as string | undefined;
@@ -318,13 +319,17 @@ describe('qwen3.6-plus reasoning toggle', () => {
     expect(body.enable_thinking).toBeUndefined();
   });
 
-  it('offers one level, and the default is a level it actually offers', () => {
-    // The grades are cosmetic while the control is a boolean, so the dedup in
-    // getPatchReasoningCapabilities collapsing them is the desired outcome —
-    // but the surviving level must be the preferred default, or the client
-    // shows a default it cannot select.
+  it('keeps a capability the patcher will actually accept', () => {
+    // The grades are cosmetic while the upstream control is a boolean, so
+    // collapsing them to one level is tempting — but getPatchReasoningCapabilities
+    // dedups identical provider options, and projectNativeEffort DISCARDS any
+    // capability missing low/medium/high. A one-level capability therefore
+    // leaves a patched client with no effort control at all, which is worse
+    // than cosmetic grades.
     const patch = getPatchReasoningCapabilities(model.npm!, model.id, meta as never);
-    expect(patch.levels).toEqual(['medium']);
     expect(patch.levels).toContain(patch.defaultLevel);
+    for (const base of ['low', 'medium', 'high']) expect(patch.levels).toContain(base);
+    expect(projectNativeEffort({ levels: patch.levels, defaultLevel: patch.defaultLevel! }))
+      .toBeTruthy();
   });
 });

@@ -408,12 +408,12 @@
       "thinkingFormat": "qwen",
       "maxTokensField": "max_tokens",
       "reasoningEffortMap": {
-        "medium": "high",
-        "minimal": "high",
-        "low": "high",
+        "low": "low",
+        "medium": "medium",
         "high": "high",
-        "xhigh": "high",
-        "max": "high",
+        "xhigh": "xhigh",
+        "max": "max",
+        "minimal": null,
         "off": null
       }
     },

@@ -190,17 +190,21 @@ const PATCHES = {
     //
     // Without a map, mapCodexEffortToOpenAI dropped `off`, `minimal` and also
     // `max` — so choosing MAX silently disabled thinking while `low` enabled
-    // it. Mapping every on-level to one value makes the toggle honest: any
-    // level thinks, `off` does not. getPatchReasoningCapabilities dedups
-    // identical provider options, so the client offers a single level instead
-    // of four grades that do the same thing — and `medium` is listed FIRST
-    // because that order decides which level survives the dedup, and it has to
-    // be the preferred default or the client shows a default it cannot select.
+    // it. Every level except `off` now maps to something, which is what fixes
+    // that: any level thinks, `off` does not.
+    //
+    // DISTINCT values, not one repeated. Collapsing them to a single value is
+    // tempting — the grades are cosmetic while the upstream control is a
+    // boolean — but getPatchReasoningCapabilities dedups identical provider
+    // options, and `projectNativeEffort` in patch-transforms.ts discards any
+    // capability missing low/medium/high. A one-level capability therefore
+    // leaves a patched client with NO effort control at all, which is worse
+    // than cosmetic grades. The upstream ignores the string either way.
     //
     // Grading this for real means sending enable_thinking + thinking_budget
     // and dropping reasoning_effort. That changes the wire and needs a live
     // key to validate, so it is tracked separately rather than guessed here.
-    reasoningEffortMap: { medium: 'high', minimal: 'high', low: 'high', high: 'high', xhigh: 'high', max: 'high', off: null },
+    reasoningEffortMap: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max', minimal: null, off: null },
     supportsStore: false,
     supportsDeveloperRole: false,
     thinkingFormat: 'qwen',
