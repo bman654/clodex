@@ -7,6 +7,7 @@ import {
   lookupModelCost,
   normalizeModelIdCandidates,
   pickPricingRow,
+  providerPreservesModelPricing,
 } from '../src/registry/pricing.js';
 import type { CachedModel } from '../src/registry/types.js';
 
@@ -120,5 +121,26 @@ describe('pricing enrich', () => {
       isFree: true,
       freeStatus: 'verified_free',
     });
+  });
+});
+
+describe('providerPreservesModelPricing', () => {
+  it('honours an explicit flag on the provider record', () => {
+    expect(providerPreservesModelPricing({ templateId: 'openai', preserveModelPricing: true })).toBe(true);
+    expect(providerPreservesModelPricing({ templateId: 'opencode-go', preserveModelPricing: false })).toBe(false);
+  });
+
+  it('falls back to the template when the record lost the field', () => {
+    // The regression this closes: an older clodex parses providers.json,
+    // drops the field it does not know, and saves it back. Without the
+    // fallback the setting is gone for good and a curated price is silently
+    // replaced by a cache guess on the next enrich — cost display only, which
+    // is exactly why nobody would notice.
+    expect(providerPreservesModelPricing({ templateId: 'opencode-go' })).toBe(true);
+  });
+
+  it('defaults to false for a template that does not ask to keep its prices', () => {
+    expect(providerPreservesModelPricing({ templateId: 'openai' })).toBe(false);
+    expect(providerPreservesModelPricing({ templateId: 'no-such-template' })).toBe(false);
   });
 });

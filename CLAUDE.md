@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**clodex** bridges Claude Code to OpenAI models — OpenAI API key (`openai`) or ChatGPT/Codex-plan OAuth (`openai-oauth`). It is a trimmed fork of relay-ai (full commit history preserved). Prime directive of the fork applies to future work too: the translation, caching, auto-compaction, and OAuth-continuation code took extensive real-world testing — prefer surgical changes over restructuring.
+**clodex** bridges Claude Code to non-Anthropic models. OpenAI is first-class and maintainer-supported — API key (`openai`) or ChatGPT/Codex-plan OAuth (`openai-oauth`); further providers (currently OpenCode Go) are community-supported, see README §Supported providers for what that tier means. It is a trimmed fork of relay-ai (full commit history preserved). Prime directive of the fork applies to future work too: the translation, caching, auto-compaction, and OAuth-continuation code took extensive real-world testing — prefer surgical changes over restructuring.
 
 ## Release workflow
 
@@ -80,7 +80,13 @@ A reasoning item echoed back by Claude Code that carries the same `encrypted_con
 
 **Critical URL constraint:** Anthropic-passthrough base URLs must NOT include `/v1` — the Anthropic SDK appends `/v1/messages` itself.
 
-**Provider registry** (`src/registry/`): only two providers exist — templates in `src/provider-templates.ts` (`openai` API-key template with `https://api.openai.com/v1`, and `openai-oauth`). `provider-auth.ts` implements the OpenAI device-code OAuth flow; `refresh-models.ts` fetches the model list (3-tier fetch for OAuth). Materialization (`materialize.ts`) turns registry providers into `LocalProvider`s with per-model `npm`/`baseUrl`/`upstreamModelId`.
+**Provider registry** (`src/registry/`): templates live in `src/provider-templates.ts` — `openai` (API key, `https://api.openai.com/v1`), `openai-oauth`, and `opencode-go`. `provider-auth.ts` implements the OpenAI device-code OAuth flow; `refresh-models.ts` fetches the model list (3-tier fetch for OAuth). Materialization (`materialize.ts`) turns registry providers into `LocalProvider`s with per-model `npm`/`baseUrl`/`upstreamModelId`.
+
+Three cross-cutting concepts a new provider may need:
+
+- **`verifyCredential`** (`provider-templates.ts`) — an optional per-template probe run by `add-template.ts` *before* the credential is persisted, for providers whose `/models` endpoint answers without auth and so cannot validate a key. It must fail OPEN: only a response that is unambiguously about the key itself rejects it, because the alternative is refusing a good key on an unrelated error. Bounded by `TEST_TIMEOUT_MS` like every other probe.
+- **`staticModelPolicy` / `preserveModelPricing`** (`provider-templates.ts`, `registry/pricing.ts`) — `allowlist` hides live models absent from `staticModels` (fail-closed: an unknown id never becomes a route), `overlay` keeps them. `preserveModelPricing` keeps provider-supplied prices instead of the global pricing cache; read it through `providerPreservesModelPricing()`, which falls back to the template so an older clodex round trip cannot drop the flag permanently.
+- **`ModelRuntimeCompatibility`** (`src/model-runtime-compatibility.ts`) — provider-neutral per-model wire quirks: reasoning effort ladder, thinking format, `max_tokens` field name, `store`/`developer`-role support, and whether the upstream implements `count_tokens`. Two rules: a block that says nothing about reasoning must fall through to the model-name rules, not suppress them (`compatibilityExpressesReasoningIntent` gates both paths); and these values are clodex's own live-validated knowledge, never read from an upstream feed — cross-check them against models.dev's `reasoning_options`, but keep the source local.
 
 Registry writes use atomic hard-link lock publication, so the filesystem containing `CLODEX_HOME` must support hard links. A parseable lock owned by a live PID is never reclaimed based on age; contenders wait for a bounded interval and fail with the owner PID. Malformed locks and locks owned by dead PIDs remain reclaimable. This live-owner rule is what makes the final ownership check before `providers.json` publication meaningful because a concurrent process cannot invalidate a live writer between its check and rename.
 
@@ -125,5 +131,5 @@ Registry writes use atomic hard-link lock publication, so the filesystem contain
 - The `::ts::` separator in tool_use ids encodes reasoning signatures for round-tripping; would only break if a signature literally contained `::ts::`.
 - In endpoint switch-menu mode the displayed context window reflects the **launch** model and does not update on live `/model` switch (Claude Code fetches `/v1/models` once at startup). Proxy mode + `clodex patch` reports correct per-model windows.
 - Cost display in Claude Code is always inaccurate for OpenAI models (Claude Code applies its own pricing table).
-- `MAX_MODEL_CATALOG = 20` (`constants.ts`) — favorites cap and max catalog routes.
+- `MAX_MODEL_CATALOG = 20` (`constants.ts`) — favorites cap and max catalog routes. Binding at `addFavorite`, which refuses past the cap; the route/`/v1/models` sites re-apply it defensively and so cannot currently fire. Providers with large catalogs make it much easier to hit — OpenCode Go alone contributes 17 selectable models — so expect to curate favorites rather than star everything.
 - OpenAI catalog ids may differ from upstream API ids — `upstreamModelId` carries the real API id.

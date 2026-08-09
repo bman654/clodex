@@ -20,7 +20,8 @@ import {
 import { dirname, join } from 'node:path';
 import bundledPricing from '../data/pricing-cache.json';
 import { getAppHome } from '../paths.js';
-import type { CachedModel } from './types.js';
+import { getTemplateById } from '../provider-templates.js';
+import type { CachedModel, RegistryProvider } from './types.js';
 import { loadRegistryStrict, saveRegistry } from './io.js';
 import { withRegistryWriteLock, withRegistryWriteLockSync } from './lock.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
@@ -70,6 +71,24 @@ export const TEMPLATE_TO_PRICING_PLATFORM: Record<string, string> = {
   nvidia: 'nvidia',
   venice: 'openrouter',
 };
+
+/**
+ * Whether provider-supplied prices must survive the global pricing cache.
+ *
+ * Falls back to the TEMPLATE when the provider record does not carry the flag.
+ * An older clodex that parses and re-saves `providers.json` drops fields it
+ * does not know, so without this the setting is lost permanently on the next
+ * write and a curated price is silently replaced by a cache guess. The
+ * consequence is cost display only, which is exactly why it would go
+ * unnoticed; reading through to the template makes the flag idempotent.
+ */
+export function providerPreservesModelPricing(
+  provider: Pick<RegistryProvider, 'preserveModelPricing' | 'templateId'>,
+): boolean {
+  return provider.preserveModelPricing
+    ?? getTemplateById(provider.templateId)?.preserveModelPricing
+    ?? false;
+}
 
 export function loadBundledPricingCache(): PricingCacheFile {
   return bundledPricing as unknown as PricingCacheFile;
@@ -228,7 +247,7 @@ export function applyPricingToRegistryProviders(
   const index = buildPricingIndex(cache);
   let changed = false;
   for (const provider of registry.providers) {
-    if (provider.preserveModelPricing) continue;
+    if (providerPreservesModelPricing(provider)) continue;
     if (!provider.modelsCache?.models.length) continue;
     const platform = TEMPLATE_TO_PRICING_PLATFORM[provider.templateId] ?? TEMPLATE_TO_PRICING_PLATFORM[provider.id];
     const enriched = enrichModelsWithPricing(provider.modelsCache.models, index, platform);

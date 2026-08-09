@@ -6,8 +6,12 @@ import {
   OPENCODE_GO_SOURCE,
   OPENCODE_GO_SOURCE_FETCHED_AT,
 } from '../src/data/opencode-go-models.js';
+import { TEST_TIMEOUT_MS } from '../src/constants.js';
 import { buildHttpProxyRoutes } from '../src/http-proxy/routes.js';
 import { getTemplateById, verifyOpenCodeGoCredential } from '../src/provider-templates.js';
+import { effortProviderOptions, getPatchReasoningCapabilities } from '../src/provider-factory.js';
+import { transformOpenAiCompatibleRequestBody } from '../src/model-runtime-compatibility.js';
+import { projectNativeEffort } from '../src/patch-transforms.js';
 import { applyTemplateModelMetadata } from '../src/registry/fetch-template-models.js';
 import { materializeRegistry } from '../src/registry/materialize.js';
 import type { CachedModel, ProviderRegistry } from '../src/registry/types.js';
@@ -25,6 +29,15 @@ function liveModel(id: string): CachedModel {
 }
 
 describe('OpenCode Go catalog', () => {
+  /**
+   * The exact literals below — the total, the 4/13 format split, and
+   * gpt-5.6-luna's precise cost — are deliberate tripwires, not incidental
+   * assertions. The catalog is generated, so a regeneration that silently
+   * adds, drops, or reprices a model should FAIL here and be re-read by a
+   * human rather than shipped. If you are here after `npm run
+   * update:opencode-go`, the right move is to check the diff and update these
+   * numbers on purpose — not to loosen them.
+   */
   it('records its OpenCode catalog source and excludes Responses-only models', () => {
     const models = buildOpenCodeGoModels();
     const ids = models.map(model => model.id);
@@ -84,7 +97,7 @@ describe('OpenCode Go catalog', () => {
       liveModel('deepseek-v4-pro'),
       liveModel('grok-4.5'),
       liveModel('unknown-future-model'),
-    ], OPENCODE_GO_COMPLETIONS_BASE_URL);
+    ]);
 
     expect(result.map(model => model.id)).toEqual(['qwen3.8-max', 'deepseek-v4-pro']);
     expect(result[0]).toMatchObject({
@@ -106,7 +119,7 @@ describe('OpenCode Go catalog', () => {
     const models = applyTemplateModelMetadata(template, [
       liveModel('qwen3.8-max'),
       liveModel('deepseek-v4-pro'),
-    ], OPENCODE_GO_COMPLETIONS_BASE_URL);
+    ]);
     const registry: ProviderRegistry = {
       schemaVersion: 1,
       providers: [{
@@ -210,5 +223,113 @@ describe('verifyOpenCodeGoCredential', () => {
 
   it('is wired on the template so the add flow probes before persisting', () => {
     expect(getTemplateById('opencode-go')?.verifyCredential).toBe(verifyOpenCodeGoCredential);
+  });
+
+  it('bounds the probe on the shared deadline so a stalled upstream cannot hang the CLI', async () => {
+    // This is the first thing a user hits after pasting a key, under a
+    // spinner: without a deadline an upstream that accepts and then never
+    // answers leaves no exit but Ctrl-C. Asserted on the deadline itself
+    // rather than by waiting one out — fake timers do not reach
+    // AbortSignal.timeout's internal timer, and a real 10s wait in the suite
+    // is exactly the kind of cost this test exists to prevent.
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
+    const seen: Array<AbortSignal | null | undefined> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      seen.push(init.signal);
+      return new Response('{}', { status: 400 });
+    }));
+
+    try {
+      await verifyOpenCodeGoCredential('any-key', OPENCODE_GO_COMPLETIONS_BASE_URL);
+      expect(timeoutSpy).toHaveBeenCalledWith(TEST_TIMEOUT_MS);
+      expect(seen[0], 'probe must carry the deadline signal').toBeInstanceOf(AbortSignal);
+    } finally {
+      timeoutSpy.mockRestore();
+    }
+  });
+
+  it('treats an aborted probe as inconclusive rather than a bad key', async () => {
+    // The other half of the deadline contract: hitting it must not reject the
+    // credential, or a stalled network would look like a wrong key.
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      throw Object.assign(new Error('This operation was aborted'), { name: 'TimeoutError' });
+    }));
+    expect(await verifyOpenCodeGoCredential('good-key', OPENCODE_GO_COMPLETIONS_BASE_URL)).toBeNull();
+  });
+
+  it('does not read an entitlement rejection as a bad key', async () => {
+    // The probe names ONE fixed model. If that model is ever plan-gated, a
+    // perfectly good key answers 403 here — and an unanchored /auth/i matches
+    // inside "Unauthorized", rejecting the key at add time for a plan problem.
+    const entitlement = '{"error":{"type":"UnauthorizedModelError","message":"Your plan does not include deepseek-v4-flash."}}';
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(entitlement, { status: 403 })));
+    expect(await verifyOpenCodeGoCredential('good-key', OPENCODE_GO_COMPLETIONS_BASE_URL)).toBeNull();
+  });
+
+  it('still rejects the key when upstream names the key itself', async () => {
+    // The other half: anchoring must not blunt the real case.
+    for (const body of [
+      '{"error":{"type":"authentication_error","message":"nope"}}',
+      '{"error":{"type":"ServerError","message":"Invalid API key provided."}}',
+      '{"error":{"type":"ServerError","message":"The API key is expired."}}',
+      '{"error":{"type":"ServerError","message":"Authentication failed."}}',
+    ]) {
+      vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 401 })));
+      expect(await verifyOpenCodeGoCredential('bad-key', OPENCODE_GO_COMPLETIONS_BASE_URL), body)
+        .toContain('authentication failed');
+    }
+  });
+});
+
+describe('qwen3.6-plus reasoning toggle', () => {
+  const model = buildOpenCodeGoModels().find(entry => entry.id === 'qwen3.6-plus')!;
+  const meta = {
+    reasoning: model.reasoning,
+    compatibility: model.compatibility,
+    providerId: 'opencode-go',
+  };
+
+  it('turns thinking on for every selectable level, max included', () => {
+    // Qwen accepts no reasoning_effort — `thinkingFormat: 'qwen'` injects the
+    // boolean `enable_thinking` and only does so when an effort is PRESENT, so
+    // the effort value is an internal signal rather than a wire control.
+    // Before the map, mapCodexEffortToOpenAI dropped `max` along with `off`
+    // and `minimal`, so choosing MAX silently disabled thinking while `low`
+    // enabled it — backwards, and invisible.
+    for (const level of ['low', 'medium', 'high', 'xhigh', 'max']) {
+      const options = effortProviderOptions(model.npm!, level, model.id, meta as never) as
+        Record<string, Record<string, unknown>> | undefined;
+      const effort = options?.opencodeGo?.reasoningEffort as string | undefined;
+      expect(effort, level).toBeTruthy();
+      const body = transformOpenAiCompatibleRequestBody(
+        { model: model.id, reasoning_effort: effort },
+        model.compatibility,
+      ) as Record<string, unknown>;
+      expect(body.enable_thinking, level).toBe(true);
+    }
+  });
+
+  it('leaves thinking off when the user asks for off', () => {
+    const options = effortProviderOptions(model.npm!, 'off', model.id, meta as never);
+    expect(options).toBeUndefined();
+    const body = transformOpenAiCompatibleRequestBody(
+      { model: model.id },
+      model.compatibility,
+    ) as Record<string, unknown>;
+    expect(body.enable_thinking).toBeUndefined();
+  });
+
+  it('keeps a capability the patcher will actually accept', () => {
+    // The grades are cosmetic while the upstream control is a boolean, so
+    // collapsing them to one level is tempting — but getPatchReasoningCapabilities
+    // dedups identical provider options, and projectNativeEffort DISCARDS any
+    // capability missing low/medium/high. A one-level capability therefore
+    // leaves a patched client with no effort control at all, which is worse
+    // than cosmetic grades.
+    const patch = getPatchReasoningCapabilities(model.npm!, model.id, meta as never);
+    expect(patch.levels).toContain(patch.defaultLevel);
+    for (const base of ['low', 'medium', 'high']) expect(patch.levels).toContain(base);
+    expect(projectNativeEffort({ levels: patch.levels, defaultLevel: patch.defaultLevel! }))
+      .toBeTruthy();
   });
 });

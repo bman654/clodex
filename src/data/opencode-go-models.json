@@ -84,7 +84,8 @@
     "compatibility": {
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens"
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": false
     },
     "upstreamModelId": "glm-5.1",
     "family": "glm"
@@ -141,7 +142,21 @@
       "image"
     ],
     "upstreamModelId": "gpt-5.6-luna",
-    "family": "gpt"
+    "family": "gpt",
+    "compatibility": {
+      "reasoningEffortMap": {
+        "off": "none",
+        "minimal": null,
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max"
+      },
+      "supportsStore": false,
+      "supportsDeveloperRole": false,
+      "maxTokensField": "max_tokens"
+    }
   },
   {
     "id": "hy3",
@@ -229,7 +244,8 @@
     "compatibility": {
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens"
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": false
     },
     "upstreamModelId": "kimi-k2.7-code",
     "family": "kimi"
@@ -288,7 +304,8 @@
     "compatibility": {
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens"
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": false
     },
     "upstreamModelId": "mimo-v2.5",
     "family": "mimo"
@@ -312,7 +329,8 @@
     "compatibility": {
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens"
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": false
     },
     "upstreamModelId": "mimo-v2.5-pro",
     "family": "mimo"
@@ -336,7 +354,8 @@
     "compatibility": {
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens"
+      "maxTokensField": "max_tokens",
+      "supportsReasoningEffort": false
     },
     "upstreamModelId": "minimax-m2.7",
     "family": "minimax"
@@ -359,7 +378,11 @@
       "image"
     ],
     "upstreamModelId": "minimax-m3",
-    "family": "minimax"
+    "family": "minimax",
+    "compatibility": {
+      "supportsCountTokens": false,
+      "supportsReasoningEffort": false
+    }
   },
   {
     "id": "qwen3.6-plus",
@@ -383,7 +406,16 @@
       "supportsStore": false,
       "supportsDeveloperRole": false,
       "thinkingFormat": "qwen",
-      "maxTokensField": "max_tokens"
+      "maxTokensField": "max_tokens",
+      "reasoningEffortMap": {
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max",
+        "minimal": null,
+        "off": null
+      }
     },
     "upstreamModelId": "qwen3.6-plus",
     "family": "qwen3.6"
@@ -406,7 +438,11 @@
       "text"
     ],
     "upstreamModelId": "qwen3.7-max",
-    "family": "qwen3.7"
+    "family": "qwen3.7",
+    "compatibility": {
+      "supportsCountTokens": false,
+      "supportsReasoningEffort": false
+    }
   },
   {
     "id": "qwen3.7-plus",
@@ -427,7 +463,11 @@
       "image"
     ],
     "upstreamModelId": "qwen3.7-plus",
-    "family": "qwen3.7"
+    "family": "qwen3.7",
+    "compatibility": {
+      "supportsCountTokens": false,
+      "supportsReasoningEffort": false
+    }
   },
   {
     "id": "qwen3.8-max",
@@ -448,6 +488,10 @@
       "image"
     ],
     "upstreamModelId": "qwen3.8-max",
-    "family": "qwen3.8"
+    "family": "qwen3.8",
+    "compatibility": {
+      "supportsCountTokens": false,
+      "supportsReasoningEffort": false
+    }
   }
 ]
