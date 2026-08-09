@@ -63,8 +63,9 @@ const TRANSPORTS = {
 // bare toggle, or nothing), and it is the closest thing to an authority on
 // what OpenCode's GATEWAY accepts — which is not the same set the upstream
 // vendor documents for its own endpoint. Treat it as the cross-check these
-// entries are validated against, never as their source; `pnpm test` asserts
-// the two agree so a regeneration cannot silently widen or narrow a ladder.
+// entries are validated against, never as their source: `assertEffortLadders`
+// below fails this updater if a map would send an effort value the feed does
+// not publish, and reports the safe direction rather than failing on it.
 const PATCHES = {
   'deepseek-v4-flash': {
     reasoningEffortMap: { minimal: null, low: null, medium: null, high: 'high', max: 'max' },
@@ -207,6 +208,77 @@ const PATCHES = {
   },
 };
 
+/**
+ * Cross-check every local effort map against what the feed publishes.
+ *
+ * The invariant is a SUBSET, not equality, and the asymmetry is the point.
+ * Sending a value the gateway does not publish risks a rejected request, so it
+ * fails the update. Sending fewer than it publishes is merely conservative —
+ * `deepseek-v4-flash` omits a `low` the feed lists — so that is reported and
+ * left to a human, because widening a ladder is exactly the change that wants
+ * live validation rather than a script's confidence.
+ *
+ * This exists because the vendor's own API and OpenCode's gateway disagree:
+ * Z.ai documents seven effort levels for GLM-5.2 and Moonshot documents three
+ * for K3, while the feed publishes `high/max` and `max`. Two entries were
+ * briefly widened to the vendor ladders before that was understood.
+ */
+function assertEffortLadders(supported, devModels) {
+  const errors = [];
+  const notes = [];
+  for (const model of supported) {
+    const options = devModels[model.id]?.reasoning_options;
+    const published = new Set(
+      (Array.isArray(options) ? options : [])
+        .filter(option => option?.type === 'effort')
+        .flatMap(option => option.values ?? []),
+    );
+    const compatibility = model.compatibility ?? {};
+    if (compatibility.supportsReasoningEffort === false) {
+      if (published.size > 0) {
+        notes.push(`${model.id}: suppressed locally, feed publishes ${[...published].sort().join('/')}`);
+      }
+      continue;
+    }
+    const map = compatibility.reasoningEffortMap;
+    if (!map) {
+      notes.push(`${model.id}: no local map — falls back to generic rules, cannot be cross-checked`);
+      continue;
+    }
+    const sent = new Set(Object.values(map).filter(value => value !== null));
+    // A model the feed describes as a bare TOGGLE, mapped locally with a
+    // thinkingFormat, is the one legitimate way to send an effort the feed does
+    // not publish: the value is an internal signal that makes the transform
+    // inject the upstream's real control (`enable_thinking`), and the upstream
+    // ignores the effort string itself. Recognised by shape rather than by id,
+    // so any future toggle-only model gets the same treatment — and still
+    // reported, because the honest fix is to send the vendor's own field.
+    const togglesOnly = published.size === 0
+      && (Array.isArray(options) ? options : []).some(option => option?.type === 'toggle')
+      && compatibility.thinkingFormat !== undefined;
+    if (togglesOnly) {
+      notes.push(
+        `${model.id}: effort is a toggle proxy (feed publishes a toggle, not a ladder) — `
+        + 'the value is an internal signal for the thinkingFormat transform',
+      );
+      continue;
+    }
+    const unpublished = [...sent].filter(value => !published.has(value)).sort();
+    if (unpublished.length > 0) {
+      errors.push(
+        `${model.id}: maps to ${unpublished.join('/')}, which models.dev does not publish `
+        + `(feed: ${[...published].sort().join('/') || 'no effort ladder'})`,
+      );
+      continue;
+    }
+    const unused = [...published].filter(value => !sent.has(value)).sort();
+    if (unused.length > 0) {
+      notes.push(`${model.id}: feed also publishes ${unused.join('/')}, not sent locally`);
+    }
+  }
+  return { errors, notes };
+}
+
 async function fetchJson(url) {
   const response = await fetch(url, {
     headers: { 'User-Agent': 'clodex-opencode-go-catalog-updater' },
@@ -269,16 +341,23 @@ function toClodexModel(id, devModel) {
   };
 }
 
-async function updateSourceConstant(fetchedAt) {
+/**
+ * Resolve the new constants file content WITHOUT writing it.
+ *
+ * Ordering alone cannot make two file writes atomic — whichever goes first, an
+ * interruption leaves the other stale. What it can do is move the one failure
+ * that is actually likely, the regex ceasing to match after an unrelated edit
+ * to the constants file, ahead of every write. Both writes then fail only on
+ * real I/O trouble, and the catalog goes first so the timestamp is a commit
+ * marker for a catalog already on disk rather than a promise about one.
+ */
+async function prepareSourceConstant(fetchedAt) {
   const source = await readFile(CONSTANTS_PATH, 'utf8');
   const pattern = /export const OPENCODE_GO_SOURCE_FETCHED_AT = '[^']*';/;
   if (!pattern.test(source)) {
     throw new Error('Could not find OPENCODE_GO_SOURCE_FETCHED_AT in opencode-go-models.ts');
   }
-  await writeFile(
-    CONSTANTS_PATH,
-    source.replace(pattern, `export const OPENCODE_GO_SOURCE_FETCHED_AT = '${fetchedAt}';`),
-  );
+  return source.replace(pattern, `export const OPENCODE_GO_SOURCE_FETCHED_AT = '${fetchedAt}';`);
 }
 
 async function main() {
@@ -325,14 +404,26 @@ async function main() {
     throw new Error(`models.dev returned unusable metadata:\n  ${invalid.join('\n  ')}`);
   }
 
-  // Timestamp FIRST. If the constant's regex ever stops matching,
-  // updateSourceConstant throws — and doing it after the catalog write would
-  // leave a new catalog stamped with a stale fetch date, which is worse than
-  // failing with both files untouched.
-  await updateSourceConstant(new Date().toISOString());
+  const ladders = assertEffortLadders(supported, devModels);
+  if (ladders.errors.length > 0) {
+    throw new Error(
+      'Local effort maps send values models.dev does not publish for the OpenCode gateway:\n  '
+      + ladders.errors.join('\n  '),
+    );
+  }
+
+  // Resolve the constants content before either write, so the likely failure —
+  // the regex no longer matching — aborts with both files untouched rather
+  // than stranding one of them. Catalog first, timestamp second: the timestamp
+  // then marks a catalog that is already on disk.
+  const constantsContent = await prepareSourceConstant(new Date().toISOString());
   await writeFile(MODELS_PATH, `${JSON.stringify(supported, null, 2)}\n`);
+  await writeFile(CONSTANTS_PATH, constantsContent);
 
   console.log(`Updated ${supported.length} OpenCode Go models from ${MODELS_DEV_URL} (${PROVIDER_ID}).`);
+  for (const note of ladders.notes) {
+    console.log(`Effort ladder note — ${note}`);
+  }
   if (unmapped.length > 0) {
     console.log(
       'Present on models.dev but not transport-mapped (verify wire protocol '
