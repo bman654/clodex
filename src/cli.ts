@@ -8,7 +8,7 @@ import { findClaudeBinary, launchClaude } from './launch.js';
 import { detectConflicts, buildChildEnv, buildHttpProxyChildEnv } from './env.js';
 import { claudeCodeClientModelId } from './context-model-id.js';
 import { needsFirstRunSetup, runFirstRunWizard } from './first-run.js';
-import { MAX_MODEL_CATALOG } from './constants.js';
+import { MAX_FAVORITES, MAX_MODEL_CATALOG } from './constants.js';
 import { startProxy, startProxyCatalog } from './proxy.js';
 import type { ProxyHandle, ProxyModelAlias, ProxyRoute } from './proxy.js';
 import {
@@ -23,6 +23,7 @@ import { fetchProviderCatalog, providersForPicker, resolveLocalProviderApiKey } 
 import { VERSION } from './constants.js';
 import type { ParsedArgs, FavoriteModel, LocalProvider, LocalProviderModel } from './types.js';
 import { addFavorite, removeFavorite, isFavorite } from './favorites.js';
+import { httpProxyModelId } from './http-proxy/routes.js';
 import {
   canonicalModelAliasName,
   modelAliasMatchesName,
@@ -364,7 +365,7 @@ ${pc.bold('Commands:')}
   claude      Launch Claude Code bridged to configured model providers
   server      Run a foreground gateway (endpoint or proxy mode)
   patch       Patch the Claude Code binary so clodex models are first-class
-  models      Manage favorite models and aliases (max ${MAX_MODEL_CATALOG})
+  models      Curate favorite models (max ${MAX_FAVORITES}; up to ${MAX_MODEL_CATALOG} exposed) and aliases
   favorites   Alias for models
   providers   Add or sign in to model providers
 
@@ -417,7 +418,7 @@ ${pc.bold('Providers:')}
   opencode-go    OpenCode Go API key — add with clodex providers add
 
 ${pc.bold('Model switching:')}
-  Run clodex models to save favorites (max ${MAX_MODEL_CATALOG}).
+  Run clodex models to save favorites (max ${MAX_FAVORITES}; up to ${MAX_MODEL_CATALOG} exposed).
   When favorites exist, endpoint mode starts a multi-route proxy and Claude
   Code /model lists your starting model plus favorites for live switching.
   With no favorites, launch uses a single model.
@@ -539,7 +540,9 @@ ${pc.bold('Usage:')}
 ${pc.bold('Behavior:')}
   Opens an interactive manager to add or remove favorites.
   Search all providers at once (paginated results) or browse one provider at a time.
-  Favorites are saved to ~/.clodex/config.json (max ${MAX_MODEL_CATALOG}).
+  Favorites are saved to ~/.clodex/config.json (max ${MAX_FAVORITES}).
+  Claude-facing catalogs and patches expose up to the first ${MAX_MODEL_CATALOG} in saved order.
+  In endpoint launch mode, the selected starting model consumes one catalog slot.
   --list prints the exact clodex:<provider-id>:<model-id> names available in
   proxy mode, without opening the interactive manager.
   --alias <name=target> saves a short name for a proxy-mode favorite. The
@@ -739,7 +742,7 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
       return 1;
     }
   }
-  const maxFavorites = MAX_MODEL_CATALOG;
+  const maxFavorites = MAX_FAVORITES;
   const scopeName = 'Favorite Models';
   relayIntro(scopeName);
 
@@ -1280,11 +1283,34 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
       p.log.error('Could not resolve a proxy route for the selected model.');
       return 1;
     }
-    const { routes: catalogRoutes, droppedFavorites } = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
+    const {
+      routes: catalogRoutes,
+      droppedFavorites,
+      capacitySkippedFavorites,
+    } = buildCatalogRoutes(
+      startingRoute,
+      favorites,
+      resolveRoute,
+      MAX_MODEL_CATALOG,
+      { providerId: activeProvider.id, modelId: selectedModel.id },
+    );
     if (droppedFavorites.length > 0) {
       p.log.warn(
         `Skipping ${droppedFavorites.length} favorite${droppedFavorites.length === 1 ? '' : 's'} `
-        + 'that are no longer available in /model',
+        + 'that are no longer available in /model. Saved entries were preserved:\n'
+        + droppedFavorites
+          .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+          .join('\n'),
+      );
+    }
+    if (capacitySkippedFavorites.length > 0) {
+      p.log.warn(
+        `${capacitySkippedFavorites.length} saved favorite${capacitySkippedFavorites.length === 1 ? '' : 's'} `
+        + `not exposed because clodex limits this /model catalog to ${MAX_MODEL_CATALOG} models. `
+        + 'The starting model and first saved favorites remain active; skipped entries were preserved:\n'
+        + capacitySkippedFavorites
+          .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+          .join('\n'),
       );
     }
 

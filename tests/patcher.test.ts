@@ -224,6 +224,29 @@ describe('buildPatchModelConfig', () => {
       warn.mockRestore();
     }
   });
+
+  it('patches only the first catalog-sized favorite window and rejects aliases beyond it', () => {
+    const manyFavorites = Array.from({ length: 25 }, (_, index) => ({
+      providerId: 'provider',
+      modelId: `model-${index}`,
+    }));
+    const desired = buildPatchModelConfig(
+      manyFavorites,
+      [{ name: 'late', providerId: 'provider', modelId: 'model-20' }],
+      () => ({ contextWindow: 200_000 }),
+    );
+
+    expect(Object.keys(desired.config)).toEqual(
+      manyFavorites.slice(0, 20).map(favorite => (
+        `clodex:${favorite.providerId}:${favorite.modelId}`
+      )),
+    );
+    expect(desired.capacitySkippedFavorites).toEqual(manyFavorites.slice(20));
+    expect(desired.rejectedAliasRejections).toEqual([{
+      alias: { name: 'late', providerId: 'provider', modelId: 'model-20' },
+      reason: 'target-not-exposed',
+    }]);
+  });
 });
 
 describe('buildDesiredPatchConfig', () => {
@@ -452,6 +475,46 @@ describe('buildDesiredPatchConfig', () => {
     const desired = buildDesiredPatchConfig();
 
     expect(desired.config['clodex:qiniu-ai:kimi-k2']?.effort).toBeUndefined();
+  });
+
+  it('enforces the Claude-facing cap through the disk-only desired config path', () => {
+    const models = Array.from({ length: 25 }, (_, index) => ({
+      id: `model-${index}`,
+      name: `Model ${index}`,
+      contextWindow: 200_000,
+      modelFormat: 'openai',
+    }));
+    const favorites = models.map(model => ({ providerId: 'openai', modelId: model.id }));
+    writeFileSync(
+      join(home, 'config.json'),
+      JSON.stringify({ favoriteModels: favorites }),
+    );
+    writeFileSync(
+      join(home, 'providers.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        providers: [{
+          id: 'openai',
+          templateId: 'openai',
+          name: 'OpenAI',
+          enabled: true,
+          authRef: 'env:OPENAI_API_KEY',
+          api: { npm: '@ai-sdk/openai' },
+          modelsCache: {
+            fetchedAt: '2026-07-27T00:00:00.000Z',
+            models,
+          },
+          addedAt: '2026-07-27T00:00:00.000Z',
+        }],
+      }),
+    );
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(Object.keys(desired.config)).toEqual(
+      favorites.slice(0, 20).map(favorite => `clodex:${favorite.providerId}:${favorite.modelId}`),
+    );
+    expect(desired.capacitySkippedFavorites).toEqual(favorites.slice(20));
   });
 });
 

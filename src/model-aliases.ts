@@ -26,7 +26,8 @@ export type ModelAliasRejectionReason =
   | 'reserved-name'
   | 'invalid-target'
   | 'conflicting-targets'
-  | 'target-not-favorite';
+  | 'target-not-favorite'
+  | 'target-not-exposed';
 
 /** Unvalidated saved alias record retained exactly as read from configuration. */
 export interface StoredModelAlias {
@@ -96,6 +97,8 @@ export function describeModelAliasRejection(reason: ModelAliasRejectionReason): 
       return 'conflicting targets';
     case 'target-not-favorite':
       return 'target is not a saved favorite';
+    case 'target-not-exposed':
+      return 'target is outside the active Claude Code catalog';
   }
 }
 
