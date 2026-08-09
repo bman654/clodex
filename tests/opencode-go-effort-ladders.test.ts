@@ -83,16 +83,56 @@ describe('updater effort-ladder cross-check', () => {
     expect(result.notes[0]).toContain('cannot be cross-checked');
   });
 
-  it('passes the committed catalog against the shape the feed publishes today', async () => {
-    // Guards the committed data, not just the function: every entry either
-    // matches, is suppressed, or is one of the two documented exceptions.
+  /**
+   * What models.dev published for the OpenCode Go gateway when these maps were
+   * last verified, recorded by hand.
+   *
+   * A snapshot, NOT derived from the catalog — deriving the expectation from
+   * the thing under test is how the previous version of this assertion came to
+   * be unfailable. Widening a ladder here is a deliberate two-line edit that
+   * says "I checked the feed again", which is exactly the friction wanted: the
+   * gateway's set and the upstream vendor's documented set are different
+   * things, and two entries in this PR were widened to the vendor's before
+   * that was understood.
+   */
+  const FEED_AS_VERIFIED: Record<string, string[] | 'toggle'> = {
+    'deepseek-v4-flash': ['low', 'high', 'max'],
+    'deepseek-v4-pro': ['high', 'max'],
+    'glm-5.2': ['high', 'max'],
+    'gpt-5.6-luna': ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+    hy3: ['none', 'low', 'high'],
+    'kimi-k3': ['max'],
+    'qwen3.6-plus': 'toggle',
+  };
+
+  it('every committed map stays within the ladder the gateway published', async () => {
     const check = await loadChecker();
     const models = buildOpenCodeGoModels();
-    const feed = Object.fromEntries(models.map(model => {
-      const values = Object.values(model.compatibility?.reasoningEffortMap ?? {})
-        .filter((value): value is string => typeof value === 'string');
-      return [model.id, values.length > 0 ? effortFeed([...new Set(values)]) : toggleFeed()];
-    }));
-    expect(check(models, feed).errors).toEqual([]);
+    const feed = Object.fromEntries(
+      Object.entries(FEED_AS_VERIFIED).map(([id, published]) =>
+        [id, published === 'toggle' ? toggleFeed() : effortFeed(published)]),
+    );
+    // Any model without a snapshot entry is suppressed or unmapped; the
+    // checker skips those, and a map appearing on one would surface as an
+    // error rather than passing unnoticed.
+    const result = check(models, feed);
+    expect(result.errors).toEqual([]);
+  });
+
+  it('that assertion can actually fail', async () => {
+    // Guards the guard. The previous version built its expectation from the
+    // catalog, so widening glm-5.2 to a ladder the gateway does not publish
+    // still passed 6/6 — pure false assurance.
+    const check = await loadChecker();
+    const widened = buildOpenCodeGoModels().map(model => model.id === 'glm-5.2'
+      ? { ...model, compatibility: { ...model.compatibility, reasoningEffortMap: { low: 'low', high: 'high', max: 'max' } } }
+      : model);
+    const feed = Object.fromEntries(
+      Object.entries(FEED_AS_VERIFIED).map(([id, published]) =>
+        [id, published === 'toggle' ? toggleFeed() : effortFeed(published)]),
+    );
+    const errors = check(widened, feed).errors;
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain('glm-5.2');
   });
 });
