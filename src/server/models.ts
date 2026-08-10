@@ -7,6 +7,7 @@ import { maskGatewayModelId } from './vendor-mask.js';
 import type { FreeStatus } from '../free-models.js';
 import type { ModelAlias } from '../types.js';
 import type { ModelRuntimeCompatibility } from '../model-runtime-compatibility.js';
+import type { AnthropicBetaProvenance } from '../anthropic-beta-policy.js';
 
 export interface GatewayModelOptions {
   maskGatewayIds?: boolean;
@@ -39,6 +40,8 @@ export interface ServerModelInfo {
   /** Exact registry credential reference used for OAuth retry; never returned in API responses. */
   authRef?: string;
   authType?: 'api' | 'oauth' | 'none';
+  /** Positive proof that this route speaks native Claude Code OAuth beta semantics. */
+  anthropicBetaProvenance?: AnthropicBetaProvenance;
   oauthAccountId?: string;
   supportedParameters?: string[];
   reasoning?: boolean;

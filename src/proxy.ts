@@ -58,6 +58,12 @@ import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-webso
 import { resolveContextWindow } from './context-window.js';
 import { listenTcpServer } from './listener-ready.js';
 import type { ModelRuntimeCompatibility } from './model-runtime-compatibility.js';
+import {
+  isNativeClaudeCodeOAuthBetaRoute,
+  normalizeAnthropicBetaHeader,
+  shouldDisableExperimentalAnthropicBetas,
+  type AnthropicBetaProvenance,
+} from './anthropic-beta-policy.js';
 
 type ProxyLog = (message: string | (() => string)) => void;
 
@@ -238,6 +244,8 @@ export interface ProxyRoute {
   baseURL?: string;  // base URL for openai-compatible / openrouter SDK providers
   providerId?: string;
   authType?: 'api' | 'oauth' | 'none';
+  /** Positive proof that this route speaks native Claude Code OAuth beta semantics. */
+  anthropicBetaProvenance?: AnthropicBetaProvenance;
   oauthAccountId?: string;
   providerData?: Record<string, unknown>;
   /** Resolves the current OAuth token before dispatch and once more after an upstream HTTP 401. */
@@ -468,6 +476,8 @@ export async function startProxyCatalog(
       }
       const upstreamUrl = route.upstreamUrl;
       const routeAuthType = route.authType ?? 'api';
+      const disableExperimentalBetas = shouldDisableExperimentalAnthropicBetas(route);
+      const nativeClaudeCodeOAuth = isNativeClaudeCodeOAuthBetaRoute(route);
 
       plog(() =>
         `POST /v1/messages - alias=${originalModel} route=${route.realModelId} format=${route.modelFormat} key=${routeAuthType === 'none' ? 'none' : apiKey ? `len:${apiKey.length}` : 'MISSING'}`,
@@ -481,15 +491,15 @@ export async function startProxyCatalog(
           return;
         }
 
-        const betaHeaderRaw = req.headers['anthropic-beta'];
-        const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
+        const inboundBeta = normalizeAnthropicBetaHeader(req.headers['anthropic-beta']);
         const forwardBody = { ...anthropicBody, model: route.realModelId };
         const targetUrl = `${upstreamUrl}/v1/messages/count_tokens`;
-        const isOAuth = routeAuthType === 'oauth';
         try {
           await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, false, {
             inboundBeta,
+            disableExperimentalBetas,
             authType: routeAuthType,
+            nativeClaudeCodeOAuth,
             log: message => plog(message),
             extraHeaders: route.headers,
             refreshToken: route.refreshToken,
@@ -514,15 +524,12 @@ export async function startProxyCatalog(
       // Forward raw Anthropic body (with real model id) directly to the upstream.
       // No translation needed — the upstream speaks Anthropic natively.
       if (route.modelFormat === 'anthropic') {
-        const betaHeaderRaw = req.headers['anthropic-beta'];
-        const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
+        const inboundBeta = normalizeAnthropicBetaHeader(req.headers['anthropic-beta']);
         const forwardBody = { ...anthropicBody, model: route.realModelId };
         const targetUrl = `${upstreamUrl}/v1/messages`;
-        const isOAuth = routeAuthType === 'oauth';
-
-        let effectiveBeta = inboundBeta;
+        let effectiveBeta = disableExperimentalBetas ? undefined : inboundBeta;
         let claudeCodeSessionId: string | undefined;
-        if (isOAuth) {
+        if (nativeClaudeCodeOAuth) {
           // Identity injection and beta selection for Claude Code OAuth.
           const seed = route.providerId ?? route.realModelId;
           const identity = injectClaudeIdentity(forwardBody, route.providerData, seed);
@@ -538,7 +545,9 @@ export async function startProxyCatalog(
         try {
           await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, clientWantsStream, {
             inboundBeta: effectiveBeta,
+            disableExperimentalBetas,
             authType: routeAuthType,
+            nativeClaudeCodeOAuth,
             log: message => plog(message),
             claudeCodeSessionId,
             extraHeaders: route.headers,
@@ -841,6 +850,7 @@ export function startProxy(
     upstreamModelId?: string;
     providerId?: string;
     authType?: 'api' | 'oauth' | 'none';
+    anthropicBetaProvenance?: AnthropicBetaProvenance;
     oauthAccountId?: string;
     providerData?: Record<string, unknown>;
     modelFormat?: 'anthropic' | 'openai';
@@ -868,6 +878,7 @@ export function startProxy(
     baseURL: sdk?.baseURL,
     providerId: sdk?.providerId,
     authType: sdk?.authType,
+    anthropicBetaProvenance: sdk?.anthropicBetaProvenance,
     oauthAccountId: sdk?.oauthAccountId,
     providerData: sdk?.providerData,
     supportedParameters: sdk?.supportedParameters,

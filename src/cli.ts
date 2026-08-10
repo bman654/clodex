@@ -61,32 +61,47 @@ import {
 } from './http-proxy/index.js';
 import { runPatchCommand, runLaunchPatchCheck } from './patcher.js';
 import { installOutboundProxyDispatcher } from './outbound-proxy.js';
+import {
+  resolveAnthropicBetaProvenance,
+  shouldDisableExperimentalAnthropicBetas as shouldDisableExperimentalAnthropicBetasForRoute,
+} from './anthropic-beta-policy.js';
 const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--trace', '--endpoint', '--proxy', '--save-mode', '--help', '-h', '--version', '-v']);
 const CLODEX_LAUNCH_FLAGS = new Set(['--provider', '--model']);
 
 export function requiresAnthropicProxy(
   model: Pick<LocalProviderModel, 'modelFormat' | 'compatibility'>,
-  provider: Pick<LocalProvider, 'authType'>,
+  provider: Pick<LocalProvider, 'authType' | 'headers'>,
 ): boolean {
   return model.modelFormat === 'anthropic' && (
     provider.authType === 'oauth'
     || provider.authType === 'none'
     || model.compatibility?.supportsCountTokens === false
+    || Object.keys(provider.headers ?? {}).length > 0
   );
 }
 
 export function shouldDisableExperimentalAnthropicBetas(
-  model: Pick<LocalProviderModel, 'modelFormat'>,
-  provider: Pick<LocalProvider, 'authType'>,
+  model: Pick<LocalProviderModel, 'modelFormat' | 'baseUrl'>,
+  provider: Pick<LocalProvider, 'id' | 'authType'>,
 ): boolean {
-  return model.modelFormat === 'anthropic'
-    && provider.authType !== 'oauth'
-    && provider.authType !== 'none';
+  return shouldDisableExperimentalAnthropicBetasForRoute({
+    modelFormat: model.modelFormat,
+    authType: provider.authType,
+    anthropicBetaProvenance: resolveAnthropicBetaProvenance(model, provider),
+  });
+}
+
+export function shouldDisableExperimentalAnthropicBetasInChild(
+  model: Pick<LocalProviderModel, 'modelFormat' | 'baseUrl' | 'compatibility'>,
+  provider: Pick<LocalProvider, 'id' | 'authType' | 'headers'>,
+): boolean {
+  return !requiresAnthropicProxy(model, provider)
+    && shouldDisableExperimentalAnthropicBetas(model, provider);
 }
 
 export function describeSingleModelTransport(
   model: Pick<LocalProviderModel, 'modelFormat' | 'compatibility' | 'baseUrl' | 'npm'>,
-  provider: Pick<LocalProvider, 'authType'>,
+  provider: Pick<LocalProvider, 'authType' | 'headers'>,
 ): { formatDescription: string; endpointLabel: string; endpoint: string } {
   if (model.modelFormat !== 'anthropic') {
     return {
@@ -665,6 +680,9 @@ async function launchClaudeViaCatalog(
   reportInactiveCatalogAliases(modelAliases);
   let proxyHandle: ProxyHandle;
   try {
+    // A catalog may mix API-key and OAuth Anthropic routes, so one child-wide
+    // CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS value cannot be correct after a
+    // /model switch. The catalog proxy applies the shared policy per route.
     proxyHandle = await startProxyCatalog(
       catalogRoutes,
       startingRoute.aliasId,
@@ -1393,6 +1411,10 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
           oauthAccountId: activeProvider.oauthAccountId,
           providerData: activeProvider.providerData,
           modelFormat: 'anthropic',
+          anthropicBetaProvenance: resolveAnthropicBetaProvenance(
+            selectedModel,
+            activeProvider,
+          ),
           upstreamModelId: selectedModel.upstreamModelId,
           compatibility: selectedModel.compatibility,
           headers: activeProvider.headers,
@@ -1462,7 +1484,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     );
   }
 
-  if (shouldDisableExperimentalAnthropicBetas(selectedModel, activeProvider)) {
+  if (shouldDisableExperimentalAnthropicBetasInChild(selectedModel, activeProvider)) {
     childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
   }
 

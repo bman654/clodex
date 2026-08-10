@@ -19,6 +19,7 @@ import type {
   LocalProvider,
   LocalProviderModel,
 } from './types.js';
+import { resolveAnthropicBetaProvenance } from './anthropic-beta-policy.js';
 
 export function localModelToRoute(lp: LocalProvider, model: LocalProviderModel): ProxyRoute | null {
   if (model.modelFormat === 'anthropic' && !model.baseUrl) return null;
@@ -36,6 +37,7 @@ export function localModelToRoute(lp: LocalProvider, model: LocalProviderModel):
     baseURL: model.apiBaseUrl,
     providerId: lp.id,
     authType: lp.authType,
+    anthropicBetaProvenance: resolveAnthropicBetaProvenance(model, lp),
     refreshToken: lp.authType === 'oauth' && lp.authRef
       ? rejectedAccessToken => rejectedAccessToken === undefined
         ? resolveProviderCredential(lp.id, lp.authRef!)

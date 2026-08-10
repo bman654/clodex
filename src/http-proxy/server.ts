@@ -15,6 +15,7 @@ import { routeUnavailableMessage } from '../route-unavailable.js';
 import { HTTP_PROXY_MODEL_PREFIX, type ResolvedHttpProxyAlias } from './routes.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
+import { normalizeAnthropicBetaHeader } from '../anthropic-beta-policy.js';
 import {
   getLatestMessagePreview,
   INFERENCE_PROGRESS_INTERVAL_MS,
@@ -467,6 +468,7 @@ function forwardToAdapter(
   isLocalShutdown: () => boolean = () => false,
 ): Promise<void> {
   return new Promise(resolve => {
+    const inboundBeta = normalizeAnthropicBetaHeader(req.headers['anthropic-beta']);
     const startedAt = Date.now();
     let lastActivityAt = startedAt;
     let headersReceived = false;
@@ -593,6 +595,7 @@ function forwardToAdapter(
         ...(typeof req.headers['x-claude-code-session-id'] === 'string'
           ? { 'x-claude-code-session-id': req.headers['x-claude-code-session-id'] }
           : {}),
+        ...(inboundBeta ? { 'anthropic-beta': inboundBeta } : {}),
         ...(lifecycle ? { 'x-relay-request-id': lifecycle.requestId } : {}),
       },
     }, upstreamRes => {

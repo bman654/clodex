@@ -12,6 +12,8 @@ export function anthropicUpstreamHeaders(
   authType?: 'api' | 'oauth' | 'none',
   claudeCodeSessionId?: string,
   extraHeaders?: Record<string, string>,
+  disableExperimentalBetas = false,
+  nativeClaudeCodeOAuth = false,
 ): Record<string, string> {
   const key = sanitizeCredential(apiKey) ?? apiKey.trim();
   const resolvedAuthType = authType ?? 'api';
@@ -33,11 +35,15 @@ export function anthropicUpstreamHeaders(
           Authorization: `Bearer ${key}`,
           ...(isOAuth ? {} : { 'x-api-key': key }),
         }),
-    ...(isOAuth ? { 'User-Agent': CLAUDE_CODE_USER_AGENT, 'x-app': 'cli' } : {}),
-    ...(isOAuth && claudeCodeSessionId ? { 'X-Claude-Code-Session-Id': claudeCodeSessionId } : {}),
+    ...(nativeClaudeCodeOAuth
+      ? { 'User-Agent': CLAUDE_CODE_USER_AGENT, 'x-app': 'cli' }
+      : {}),
+    ...(nativeClaudeCodeOAuth && claudeCodeSessionId
+      ? { 'X-Claude-Code-Session-Id': claudeCodeSessionId }
+      : {}),
     ...(stream ? { Accept: 'text/event-stream' } : {}),
   };
-  if (inboundBeta) {
+  if (inboundBeta && !disableExperimentalBetas) {
     headers['anthropic-beta'] = inboundBeta;
   }
   return headers;
@@ -98,7 +104,11 @@ export async function fetchWithOAuthRetry<TResponse extends {
 /** Relay an Anthropic /v1/messages response (JSON or SSE) to the client. */
 export interface RelayAnthropicOptions {
   inboundBeta?: string;
+  /** Ignore the client-supplied anthropic-beta header at the upstream boundary. */
+  disableExperimentalBetas?: boolean;
   authType?: 'api' | 'oauth' | 'none';
+  /** Positive provenance proof; never infer native Claude identity from authType. */
+  nativeClaudeCodeOAuth?: boolean;
   log?: (message: string) => void;
   claudeCodeSessionId?: string;
   extraHeaders?: Record<string, string>;
@@ -180,6 +190,8 @@ export async function relayAnthropicMessages(
       options.authType,
       options.claudeCodeSessionId,
       options.extraHeaders,
+      options.disableExperimentalBetas,
+      options.nativeClaudeCodeOAuth,
     ),
     body: JSON.stringify(body),
     signal: options.signal,

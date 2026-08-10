@@ -1,5 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import {
+  isNativeClaudeCodeOAuthBetaRoute,
+  normalizeAnthropicBetaHeader,
+  shouldDisableExperimentalAnthropicBetas,
+} from '../anthropic-beta-policy.js';
 import { isAuthorized } from './auth.js';
 import {
   formatGatewayAnthropicModels,
@@ -309,9 +314,10 @@ async function handleAnthropicCountTokens(
     return;
   }
 
-  const betaHeaderRaw = req.headers['anthropic-beta'];
-  const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
+  const inboundBeta = normalizeAnthropicBetaHeader(req.headers['anthropic-beta']);
   const authType = model.authType ?? 'api';
+  const disableExperimentalBetas = shouldDisableExperimentalAnthropicBetas(model);
+  const nativeClaudeCodeOAuth = isNativeClaudeCodeOAuthBetaRoute(model);
   const refreshToken = authType === 'oauth' && model.providerId && model.authRef
     ? (rejectedAccessToken: string) => resolveModelApiKey(
         model,
@@ -325,7 +331,9 @@ async function handleAnthropicCountTokens(
   try {
     await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, false, {
       inboundBeta,
+      disableExperimentalBetas,
       authType,
+      nativeClaudeCodeOAuth,
       log: message => plog(message),
       extraHeaders: model.headers,
       refreshToken,
@@ -393,12 +401,11 @@ async function handleAnthropicMessages(
       });
       return;
     }
-    const betaHeaderRaw = req.headers['anthropic-beta'];
-    const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
+    const inboundBeta = normalizeAnthropicBetaHeader(req.headers['anthropic-beta']);
     const clientWantsStream = Boolean(body.stream);
     const forwardBody: Record<string, unknown> = { ...body, model: upstreamModelId(model) };
     const authType = model.authType ?? 'api';
-    const isOAuth = authType === 'oauth';
+    const nativeClaudeCodeOAuth = isNativeClaudeCodeOAuthBetaRoute(model);
 
     auditInference(options, {
       requestId,
@@ -410,9 +417,10 @@ async function handleAnthropicMessages(
       requestPreview: getLatestMessagePreview(body.messages, body.system),
     });
 
-    let effectiveBeta = inboundBeta;
+    const disableExperimentalBetas = shouldDisableExperimentalAnthropicBetas(model);
+    let effectiveBeta = disableExperimentalBetas ? undefined : inboundBeta;
     let claudeCodeSessionId: string | undefined;
-    if (isOAuth) {
+    if (nativeClaudeCodeOAuth) {
       const seed = model.providerId ?? upstreamModelId(model);
       const identity = injectClaudeIdentity(forwardBody, model.providerData, seed);
       if (model.providerId === 'claude-code') injectClaudeCodeBillingSystemLine(forwardBody);
@@ -420,7 +428,7 @@ async function handleAnthropicMessages(
       effectiveBeta = selectBetaFlags(forwardBody, upstreamModelId(model), inboundBeta);
     }
 
-    const refreshToken = isOAuth && model.providerId && model.authRef
+    const refreshToken = authType === 'oauth' && model.providerId && model.authRef
       ? (rejectedAccessToken: string) => resolveModelApiKey(
           model,
           options.apiKey,
@@ -428,10 +436,12 @@ async function handleAnthropicMessages(
         )
       : undefined;
 
-    plog(() => `anthropic-passthrough → ${messagesUrl} oauth=${isOAuth} stream=${clientWantsStream}`);
+    plog(() => `anthropic-passthrough → ${messagesUrl} oauth=${authType === 'oauth'} stream=${clientWantsStream}`);
     await relayAnthropicMessages(res, messagesUrl, forwardBody, apiKey, clientWantsStream, {
       inboundBeta: effectiveBeta,
+      disableExperimentalBetas,
       authType,
+      nativeClaudeCodeOAuth,
       log: message => plog(message),
       claudeCodeSessionId,
       extraHeaders: model.headers,

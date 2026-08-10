@@ -9,6 +9,8 @@ import { makeRouteResolver, resolveCatalogModelAliases } from '../src/catalog.js
 import { getProxyDebugLogPath } from '../src/trace-log.js';
 import { anthropicMessagesEndpoint, estimateAnthropicInputTokens } from '../src/anthropic-endpoints.js';
 import type { LocalProvider, ModelAlias } from '../src/types.js';
+import { buildOpenCodeGoModels } from '../src/data/opencode-go-models.js';
+import { NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE } from '../src/anthropic-beta-policy.js';
 
 /** POST JSON to a local proxy via node:http (avoids vi.stubGlobal('fetch') interception). */
 function postToProxy(
@@ -18,6 +20,7 @@ function postToProxy(
   relayRequestId?: string,
   path = '/v1/messages',
   claudeSessionId?: string,
+  anthropicBeta?: string,
 ): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(body);
@@ -34,6 +37,7 @@ function postToProxy(
           'Content-Length': Buffer.byteLength(payload),
           ...(relayRequestId ? { 'x-relay-request-id': relayRequestId } : {}),
           ...(claudeSessionId ? { 'x-claude-code-session-id': claudeSessionId } : {}),
+          ...(anthropicBeta ? { 'anthropic-beta': anthropicBeta } : {}),
         },
       },
       (res) => {
@@ -635,6 +639,173 @@ describe('catalog model aliases', () => {
 });
 
 describe('token counting', () => {
+  it('applies the beta policy per catalog route for messages and count_tokens', async () => {
+    const opencodeMessagesModel = buildOpenCodeGoModels().find(
+      model => model.id === 'qwen3.6-plus',
+    );
+    if (!opencodeMessagesModel) throw new Error('missing qwen3.6-plus fixture');
+    if (opencodeMessagesModel.modelFormat !== 'anthropic' || !opencodeMessagesModel.apiUrl) {
+      throw new Error('qwen3.6-plus is not a Messages route');
+    }
+    const opencodeLocalModel: LocalProvider['models'][number] = {
+      id: opencodeMessagesModel.id,
+      name: opencodeMessagesModel.name,
+      family: opencodeMessagesModel.family ?? opencodeMessagesModel.id,
+      brand: 'Qwen',
+      modelFormat: 'anthropic',
+      upstreamModelId: opencodeMessagesModel.upstreamModelId ?? opencodeMessagesModel.id,
+      baseUrl: opencodeMessagesModel.apiUrl,
+      contextWindow: opencodeMessagesModel.contextWindow,
+      reasoning: opencodeMessagesModel.reasoning,
+      compatibility: opencodeMessagesModel.compatibility,
+    };
+
+    const providers: LocalProvider[] = [
+      {
+        id: 'opencode-go',
+        name: 'OpenCode Go',
+        apiKey: 'go-key',
+        authType: 'api',
+        models: [opencodeLocalModel],
+      },
+      {
+        id: 'custom-messages',
+        name: 'Custom Messages',
+        apiKey: 'custom-key',
+        authType: 'api',
+        headers: { 'Anthropic-Beta': 'configured-beta-2026-01-01' },
+        models: [{
+          id: 'custom-native',
+          name: 'Custom Native',
+          family: 'custom',
+          brand: 'Other',
+          modelFormat: 'anthropic',
+          upstreamModelId: 'custom-native-wire',
+          baseUrl: 'https://custom-messages.example',
+        }],
+      },
+      {
+        id: 'oauth-messages',
+        name: 'OAuth Messages',
+        apiKey: 'oauth-token',
+        authType: 'oauth',
+        models: [{
+          id: 'oauth-native',
+          name: 'OAuth Native',
+          family: 'claude',
+          brand: 'Anthropic',
+          modelFormat: 'anthropic',
+          upstreamModelId: 'claude-sonnet-4-6',
+          baseUrl: 'https://api.anthropic.com',
+        }],
+      },
+      {
+        id: 'anonymous-messages',
+        name: 'Anonymous Messages',
+        apiKey: '',
+        authType: 'none',
+        models: [{
+          id: 'anonymous-native',
+          name: 'Anonymous Native',
+          family: 'custom',
+          brand: 'Other',
+          modelFormat: 'anthropic',
+          upstreamModelId: 'anonymous-native',
+          baseUrl: 'https://anonymous-messages.example',
+        }],
+      },
+      {
+        id: 'claude-code',
+        name: 'Claude Code',
+        apiKey: 'native-oauth-token',
+        authType: 'oauth',
+        models: [{
+          id: 'claude-sonnet-4-6',
+          name: 'Claude Sonnet 4.6',
+          family: 'claude',
+          brand: 'Anthropic',
+          modelFormat: 'anthropic',
+          upstreamModelId: 'claude-sonnet-4-6',
+          baseUrl: 'https://api.anthropic.com',
+        }],
+      },
+    ];
+    const resolveRoute = makeRouteResolver(providers);
+    const opencodeRoute = resolveRoute('opencode-go', opencodeLocalModel.id);
+    const countRoute = resolveRoute('custom-messages', 'custom-native');
+    const oauthRoute = resolveRoute('oauth-messages', 'oauth-native');
+    const anonymousRoute = resolveRoute('anonymous-messages', 'anonymous-native');
+    const nativeRoute = resolveRoute('claude-code', 'claude-sonnet-4-6');
+    if (!opencodeRoute || !countRoute || !oauthRoute || !anonymousRoute || !nativeRoute) {
+      throw new Error('missing catalog route');
+    }
+    expect(oauthRoute.anthropicBetaProvenance).toBeUndefined();
+    expect(nativeRoute.anthropicBetaProvenance).toBe(
+      NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE,
+    );
+
+    const fetchMock = vi.fn(async (url: string | URL | Request) => {
+      const isCount = String(url).includes('/count_tokens');
+      return new Response(JSON.stringify(isCount
+        ? { input_tokens: 17 }
+        : {
+            id: 'msg_1',
+            type: 'message',
+            role: 'assistant',
+            model: 'upstream-model',
+            content: [],
+            usage: { input_tokens: 1, output_tokens: 1 },
+          }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const handle = await startProxyCatalog(
+      [opencodeRoute, countRoute, oauthRoute, anonymousRoute, nativeRoute],
+      opencodeRoute.aliasId,
+      false,
+    );
+
+    try {
+      for (const [route, path, expectedBeta] of [
+        [opencodeRoute, '/v1/messages', null],
+        [countRoute, '/v1/messages/count_tokens', 'configured-beta-2026-01-01'],
+        [oauthRoute, '/v1/messages/count_tokens', null],
+        [anonymousRoute, '/v1/messages/count_tokens', null],
+      ] as const) {
+        const response = await postToProxy(handle.port, handle.token, {
+          model: route.aliasId,
+          max_tokens: 100,
+          messages: [{ role: 'user', content: 'hi' }],
+          stream: false,
+        }, undefined, path, undefined, 'client-beta-2026-01-01');
+
+        expect(response.status).toBe(200);
+        const [, init] = fetchMock.mock.calls.at(-1)! as unknown as [string, RequestInit];
+        expect(new Headers(init.headers).get('anthropic-beta')).toBe(expectedBeta);
+      }
+
+      const nativeResponse = await postToProxy(handle.port, handle.token, {
+        model: nativeRoute.aliasId,
+        messages: [{ role: 'user', content: 'count this upstream' }],
+      }, undefined, '/v1/messages/count_tokens', undefined,
+      ' client-beta-2026-01-01, other-beta-2026-01-02,client-beta-2026-01-01 ');
+
+      expect(nativeResponse.status).toBe(200);
+      const [, nativeInit] = fetchMock.mock.calls.at(-1)! as unknown as [string, RequestInit];
+      const nativeHeaders = new Headers(nativeInit.headers);
+      expect(nativeHeaders.get('anthropic-beta')).toBe(
+        'client-beta-2026-01-01,other-beta-2026-01-02',
+      );
+      expect(nativeHeaders.get('user-agent')).toContain('claude-cli/');
+      expect(nativeHeaders.get('x-app')).toBe('cli');
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('returns a local estimate for translated OAuth routes before resolving credentials', async () => {
     const refreshToken = vi.fn(async () => {
       throw new Error('credential resolution must not run for local token counts');
@@ -1355,6 +1526,7 @@ describe('anthropic passthrough debug logging', () => {
       modelFormat: 'anthropic',
       providerId: 'claude-code',
       authType: 'oauth',
+      anthropicBetaProvenance: NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE,
       providerData: {},
     };
 
@@ -1390,6 +1562,7 @@ describe('anthropic passthrough debug logging', () => {
       modelFormat: 'anthropic',
       providerId: 'claude-code',
       authType: 'oauth',
+      anthropicBetaProvenance: NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE,
       providerData: {
         cliUserID: 'a'.repeat(64),
         accountUUID: '11111111-1111-4111-8111-111111111111',
@@ -1417,6 +1590,9 @@ describe('anthropic passthrough debug logging', () => {
     const body = JSON.parse(String(init?.body)) as { metadata?: { user_id?: string } };
     const userId = JSON.parse(body.metadata!.user_id!) as { session_id: string };
     expect(headers['X-Claude-Code-Session-Id']).toBe(userId.session_id);
+    expect(headers['anthropic-beta']).toContain('oauth-2025-04-20');
+    expect(headers['User-Agent']).toContain('claude-cli/');
+    expect(headers['x-app']).toBe('cli');
   });
 
   it('prepends Claude Code OAuth billing line to upstream system prompt', async () => {
@@ -1429,6 +1605,7 @@ describe('anthropic passthrough debug logging', () => {
       modelFormat: 'anthropic',
       providerId: 'claude-code',
       authType: 'oauth',
+      anthropicBetaProvenance: NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE,
       providerData: {
         cliUserID: 'a'.repeat(64),
         accountUUID: '11111111-1111-4111-8111-111111111111',
@@ -1497,7 +1674,7 @@ describe('OAuth route credential resolution', () => {
         max_tokens: 100,
         messages: [{ role: 'user', content: 'hi' }],
         stream: false,
-      });
+      }, undefined, '/v1/messages', undefined, 'client-beta-2026-01-01');
 
       expect(response.status).toBe(200);
       expect(refreshToken).toHaveBeenCalledTimes(1);
@@ -1506,6 +1683,11 @@ describe('OAuth route credential resolution', () => {
       expect((init?.headers as Record<string, string>).Authorization).toBe(
         'Bearer fresh-oauth-token',
       );
+      expect(new Headers(init?.headers).get('anthropic-beta')).toBeNull();
+      expect(new Headers(init?.headers).get('user-agent')).toBeNull();
+      expect(new Headers(init?.headers).get('x-app')).toBeNull();
+      expect(new Headers(init?.headers).get('x-claude-code-session-id')).toBeNull();
+      expect(JSON.parse(String(init?.body))).not.toHaveProperty('metadata');
     } finally {
       handle.close();
     }

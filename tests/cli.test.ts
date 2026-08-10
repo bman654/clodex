@@ -10,6 +10,7 @@ import {
   main,
   requiresAnthropicProxy,
   shouldDisableExperimentalAnthropicBetas,
+  shouldDisableExperimentalAnthropicBetasInChild,
   describeSingleModelTransport,
 } from '../src/cli.js';
 import { VERSION } from '../src/constants.js';
@@ -208,17 +209,49 @@ describe('Anthropic endpoint routing', () => {
     const qwen = buildOpenCodeGoModels().find(model => model.id === 'qwen3.6-plus');
     if (!qwen) throw new Error('missing qwen3.6-plus fixture');
 
-    expect(requiresAnthropicProxy(qwen, { authType: 'api' })).toBe(true);
-    expect(shouldDisableExperimentalAnthropicBetas(qwen, { authType: 'api' })).toBe(true);
-    expect(describeSingleModelTransport(qwen, { authType: 'api' })).toMatchObject({
+    const apiProvider = { id: 'opencode-go', authType: 'api' as const };
+    expect(requiresAnthropicProxy(qwen, apiProvider)).toBe(true);
+    expect(shouldDisableExperimentalAnthropicBetas(qwen, apiProvider)).toBe(true);
+    expect(shouldDisableExperimentalAnthropicBetasInChild(qwen, apiProvider)).toBe(false);
+    expect(describeSingleModelTransport(qwen, apiProvider)).toMatchObject({
       formatDescription: 'via local Anthropic proxy with count_tokens shim',
       endpointLabel: 'Upstream:',
     });
-    expect(requiresAnthropicProxy(
-      { modelFormat: 'anthropic', compatibility: undefined },
-      { authType: 'api' },
+    const directModel = {
+      modelFormat: 'anthropic' as const,
+      baseUrl: 'https://messages.example',
+      compatibility: undefined,
+    };
+    const directProvider = { id: 'custom', authType: 'api' as const };
+    expect(requiresAnthropicProxy(directModel, directProvider)).toBe(false);
+    expect(shouldDisableExperimentalAnthropicBetasInChild(directModel, directProvider)).toBe(true);
+
+    const headerProvider = {
+      ...directProvider,
+      headers: { 'X-Plan': 'coding' },
+    };
+    expect(requiresAnthropicProxy(directModel, headerProvider)).toBe(true);
+    expect(shouldDisableExperimentalAnthropicBetasInChild(directModel, headerProvider)).toBe(false);
+    expect(describeSingleModelTransport(directModel, headerProvider)).toMatchObject({
+      formatDescription: 'via local Anthropic proxy',
+      endpointLabel: 'Upstream:',
+    });
+
+    const genericOAuth = { id: 'custom-oauth', authType: 'oauth' as const };
+    expect(shouldDisableExperimentalAnthropicBetas(qwen, genericOAuth)).toBe(true);
+    expect(shouldDisableExperimentalAnthropicBetasInChild(qwen, genericOAuth)).toBe(false);
+    expect(shouldDisableExperimentalAnthropicBetas(
+      { ...qwen, baseUrl: 'https://api.anthropic.com' },
+      { id: 'claude-code', authType: 'oauth' },
     )).toBe(false);
-    expect(shouldDisableExperimentalAnthropicBetas(qwen, { authType: 'oauth' })).toBe(false);
+    expect(shouldDisableExperimentalAnthropicBetas(
+      qwen,
+      { id: 'anonymous', authType: 'none' },
+    )).toBe(true);
+    expect(shouldDisableExperimentalAnthropicBetas(
+      { modelFormat: 'openai' },
+      { id: 'openai', authType: 'api' },
+    )).toBe(false);
   });
 });
 

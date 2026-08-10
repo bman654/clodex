@@ -648,6 +648,7 @@ describe('selective HTTP proxy', () => {
     let adapterAuth: string | undefined;
     let adapterApiKey: string | undefined;
     let adapterClaudeSessionId: string | undefined;
+    let adapterBeta: string | undefined;
     let adapterBody = '';
     let anthropicRequests = 0;
     let fallbackAuth: string | undefined;
@@ -673,6 +674,7 @@ describe('selective HTTP proxy', () => {
       adapterAuth = req.headers.authorization;
       adapterApiKey = req.headers['x-api-key'] as string | undefined;
       adapterClaudeSessionId = req.headers['x-claude-code-session-id'] as string | undefined;
+      adapterBeta = req.headers['anthropic-beta'] as string | undefined;
       adapterBody = Buffer.concat(chunks).toString();
       await new Promise(resolve => setTimeout(resolve, 35));
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Connection': 'close' });
@@ -734,6 +736,8 @@ describe('selective HTTP proxy', () => {
         'Host: api.anthropic.com',
         'Authorization: Bearer subscription-oauth-token',
         'X-Claude-Code-Session-Id: 11111111-1111-4111-8111-111111111111',
+        'Anthropic-Beta: beta-a, beta-b',
+        'Anthropic-Beta: beta-a',
         'Content-Type: application/json',
         `Content-Length: ${Buffer.byteLength(body)}`,
         'Connection: close',
@@ -747,6 +751,7 @@ describe('selective HTTP proxy', () => {
       expect(adapterAuth).toBeUndefined();
       expect(adapterApiKey).toBe('adapter-local-token');
       expect(adapterClaudeSessionId).toBe('11111111-1111-4111-8111-111111111111');
+      expect(adapterBeta).toBe('beta-a,beta-b');
       expect(adapterBody).toBe(body);
       const relayEntries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       const requestEntry = relayEntries.find(entry => !entry.event);
@@ -920,6 +925,7 @@ describe('selective HTTP proxy', () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'count-tokens-inference.jsonl');
     let adapterPath: string | undefined;
+    let adapterBeta: string | undefined;
     let anthropicRequests = 0;
 
     const origin = https.createServer({
@@ -933,6 +939,7 @@ describe('selective HTTP proxy', () => {
     const originPort = await listen(origin);
     const adapterServer = http.createServer(async (req, res) => {
       adapterPath = req.url;
+      adapterBeta = req.headers['anthropic-beta'] as string | undefined;
       const ended = once(req, 'end');
       req.resume();
       await ended;
@@ -976,6 +983,8 @@ describe('selective HTTP proxy', () => {
       secure.write([
         'POST /v1/messages/count_tokens?beta=true HTTP/1.1',
         'Host: api.anthropic.com',
+        'Anthropic-Beta: beta-count-a, beta-count-b',
+        'Anthropic-Beta: beta-count-a',
         'Content-Type: application/json',
         `Content-Length: ${Buffer.byteLength(body)}`,
         'Connection: close',
@@ -987,6 +996,7 @@ describe('selective HTTP proxy', () => {
       expect(response).toContain('200 OK');
       expect(response).toContain('{"input_tokens":42}');
       expect(adapterPath).toBe('/v1/messages/count_tokens?beta=true');
+      expect(adapterBeta).toBe('beta-count-a,beta-count-b');
       expect(anthropicRequests).toBe(0);
       expect(existsSync(inferenceLogPath)).toBe(false);
     } finally {

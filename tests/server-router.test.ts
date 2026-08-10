@@ -11,6 +11,7 @@ import { generateAnthropicResponse, streamAnthropicResponse } from '../src/sdk-a
 import { generateOpenAiResponse, streamOpenAiResponse } from '../src/openai-adapter.js';
 import { resolveProviderCredential } from '../src/env.js';
 import { buildOpenCodeGoModels } from '../src/data/opencode-go-models.js';
+import { NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE } from '../src/anthropic-beta-policy.js';
 
 const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:oauth-provider`;
 
@@ -67,6 +68,10 @@ interface UpstreamRequest {
   url: string;
   authorization: string | undefined;
   xApiKey: string | undefined;
+  anthropicBeta?: string;
+  userAgent?: string;
+  xApp?: string;
+  claudeCodeSessionId?: string;
   xPlan?: string;
   body: any;
 }
@@ -90,6 +95,12 @@ async function startUpstream(responseBody: any): Promise<{ baseUrl: string; requ
       xApiKey: Array.isArray(req.headers['x-api-key'])
         ? req.headers['x-api-key'][0]
         : req.headers['x-api-key'],
+      anthropicBeta: Array.isArray(req.headers['anthropic-beta'])
+        ? req.headers['anthropic-beta'][0]
+        : req.headers['anthropic-beta'],
+      userAgent: req.headers['user-agent'],
+      xApp: req.headers['x-app'],
+      claudeCodeSessionId: req.headers['x-claude-code-session-id'],
       xPlan: Array.isArray(req.headers['x-plan'])
         ? req.headers['x-plan'][0]
         : req.headers['x-plan'],
@@ -122,6 +133,15 @@ async function startSequencedUpstream(
       authorization: Array.isArray(req.headers.authorization)
         ? req.headers.authorization[0]
         : req.headers.authorization,
+      xApiKey: Array.isArray(req.headers['x-api-key'])
+        ? req.headers['x-api-key'][0]
+        : req.headers['x-api-key'],
+      anthropicBeta: Array.isArray(req.headers['anthropic-beta'])
+        ? req.headers['anthropic-beta'][0]
+        : req.headers['anthropic-beta'],
+      userAgent: req.headers['user-agent'],
+      xApp: req.headers['x-app'],
+      claudeCodeSessionId: req.headers['x-claude-code-session-id'],
       body: await readRequestBody(req),
     });
     const response = responses[Math.min(requests.length - 1, responses.length - 1)]!;
@@ -269,6 +289,153 @@ describe('server router', () => {
         body: expect.objectContaining({ model: 'custom-anthropic' }),
       }),
     ]);
+  });
+
+  it.each([
+    [
+      'messages',
+      '/anthropic/v1/messages',
+      {
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        model: 'custom-anthropic',
+        content: [],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    ],
+    ['count_tokens', '/anthropic/v1/messages/count_tokens', { input_tokens: 17 }],
+  ])('suppresses experimental betas on API-key Anthropic %s passthrough', async (
+    _endpoint,
+    path,
+    upstreamBody,
+  ) => {
+    const upstream = await startUpstream(upstreamBody);
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('custom-anthropic', 'anthropic', 'custom', { baseUrl: upstream.baseUrl }),
+        apiKey: 'custom-key',
+        authType: 'api',
+      }]),
+    });
+
+    const response = await fetch(`${server.url}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-beta': 'client-beta-2026-01-01',
+      },
+      body: JSON.stringify({
+        model: 'custom-anthropic',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0]?.anthropicBeta).toBeUndefined();
+  });
+
+  it.each([
+    ['generic OAuth', 'oauth', 'oauth-token'],
+    ['anonymous', 'none', ''],
+  ] as const)('defaults %s Anthropic routes to stripping client betas', async (
+    _label,
+    authType,
+    apiKey,
+  ) => {
+    const upstream = await startUpstream({ input_tokens: 17 });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('custom-anthropic', 'anthropic', 'custom', { baseUrl: upstream.baseUrl }),
+        providerId: 'custom-oauth',
+        apiKey,
+        authType,
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-beta': ' client-beta-a, client-beta-b,client-beta-a ',
+      },
+      body: JSON.stringify({
+        model: 'custom-anthropic',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests[0]?.anthropicBeta).toBeUndefined();
+    expect(upstream.requests[0]?.userAgent).not.toContain('claude-cli/');
+    expect(upstream.requests[0]?.xApp).toBeUndefined();
+    expect(upstream.requests[0]?.claudeCodeSessionId).toBeUndefined();
+  });
+
+  it('allows and synthesizes betas only for proven native Claude Code OAuth routes', async () => {
+    const upstream = await startUpstream({
+      id: 'msg_1',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-sonnet-4-6',
+      content: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('claude-sonnet-4-6', 'anthropic', 'claude-code', { baseUrl: upstream.baseUrl }),
+        providerId: 'claude-code',
+        apiKey: 'oauth-token',
+        authType: 'oauth',
+        anthropicBetaProvenance: NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE,
+        providerData: {
+          cliUserID: 'a'.repeat(64),
+          accountUUID: '11111111-1111-4111-8111-111111111111',
+        },
+      }]),
+    });
+
+    const messagesResponse = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-beta': 'interleaved-thinking-2025-05-14',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    const countResponse = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-beta': ' client-beta-a, client-beta-b,client-beta-a ',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        messages: [{ role: 'user', content: 'count this' }],
+      }),
+    });
+
+    expect(messagesResponse.status).toBe(200);
+    expect(countResponse.status).toBe(200);
+    expect(upstream.requests[0]?.anthropicBeta).toContain('oauth-2025-04-20');
+    expect(upstream.requests[0]?.body).toHaveProperty('metadata.user_id');
+    expect(upstream.requests[0]?.userAgent).toContain('claude-cli/');
+    expect(upstream.requests[0]?.xApp).toBe('cli');
+    expect(upstream.requests[0]?.claudeCodeSessionId).toEqual(expect.any(String));
+    expect(upstream.requests[1]?.anthropicBeta).toBe('client-beta-a,client-beta-b');
+    expect(upstream.requests[1]?.userAgent).toContain('claude-cli/');
+    expect(upstream.requests[1]?.xApp).toBe('cli');
+    expect(upstream.requests[1]?.claudeCodeSessionId).toBeUndefined();
   });
 
   it('logs inference routing metadata without request content', async () => {
@@ -589,6 +756,10 @@ describe('server router', () => {
       TEST_HELPER_REF,
     );
     expect(upstream.requests[0]?.authorization).toBe('Bearer current-oauth-token');
+    expect(upstream.requests[0]?.userAgent).not.toContain('claude-cli/');
+    expect(upstream.requests[0]?.xApp).toBeUndefined();
+    expect(upstream.requests[0]?.claudeCodeSessionId).toBeUndefined();
+    expect(upstream.requests[0]?.body).not.toHaveProperty('metadata');
   });
 
   it('retries native Anthropic passthrough once with the replacement credential', async () => {

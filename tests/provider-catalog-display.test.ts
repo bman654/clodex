@@ -12,6 +12,7 @@ import {
 } from '../src/provider-catalog.js';
 import { emptyRegistry, saveRegistry } from '../src/registry/io.js';
 import { withRegistryWriteLockSync } from '../src/registry/lock.js';
+import { NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE } from '../src/anthropic-beta-policy.js';
 
 const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:openai-oauth`;
 
@@ -134,6 +135,39 @@ describe('provider-catalog-display', () => {
     }]);
 
     expect(models[0]?.authRef).toBe(TEST_HELPER_REF);
+  });
+
+  it('carries only proven native Claude Code beta provenance into server routes', () => {
+    const model = {
+      id: 'claude-sonnet-4-6',
+      name: 'Claude Sonnet 4.6',
+      family: 'claude',
+      brand: 'Anthropic',
+      modelFormat: 'anthropic' as const,
+      upstreamModelId: 'claude-sonnet-4-6',
+      baseUrl: 'https://api.anthropic.com',
+    };
+    const models = localProvidersToServerModels([
+      {
+        id: 'claude-code',
+        name: 'Claude Code',
+        apiKey: 'oauth-token',
+        authType: 'oauth',
+        models: [model],
+      },
+      {
+        id: 'generic-oauth',
+        name: 'Generic OAuth',
+        apiKey: 'oauth-token',
+        authType: 'oauth',
+        models: [{ ...model, id: 'generic-sonnet' }],
+      },
+    ]);
+
+    expect(models[0]?.anthropicBetaProvenance).toBe(
+      NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE,
+    );
+    expect(models[1]?.anthropicBetaProvenance).toBeUndefined();
   });
 
   describe('formatRegistryAuthLabel', () => {

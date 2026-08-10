@@ -21,13 +21,30 @@ describe('anthropicUpstreamHeaders', () => {
     expect(anthropicUpstreamHeaders('secret-key', true).Accept).toBe('text/event-stream');
   });
 
-  it('adds Claude Code session header for OAuth requests', () => {
+  it('adds Claude Code identity headers only with explicit native provenance', () => {
+    const genericOAuthHeaders = anthropicUpstreamHeaders(
+      'oauth-token',
+      true,
+      'oauth-2025-04-20',
+      'oauth',
+      'session-123',
+    );
+    expect(genericOAuthHeaders).toMatchObject({
+      Authorization: 'Bearer oauth-token',
+    });
+    expect(genericOAuthHeaders).not.toHaveProperty('User-Agent');
+    expect(genericOAuthHeaders).not.toHaveProperty('x-app');
+    expect(genericOAuthHeaders).not.toHaveProperty('X-Claude-Code-Session-Id');
+
     expect(anthropicUpstreamHeaders(
       'oauth-token',
       true,
       'oauth-2025-04-20',
       'oauth',
       'session-123',
+      undefined,
+      false,
+      true,
     )).toMatchObject({
       Authorization: 'Bearer oauth-token',
       'User-Agent': 'claude-cli/2.1.195 (external, cli)',
@@ -80,6 +97,25 @@ describe('anthropicUpstreamHeaders', () => {
       Authorization: 'Bearer oauth-token',
       'X-Plan': 'coding',
     });
+  });
+
+  it('drops client beta input but preserves explicit provider headers when betas are disabled', () => {
+    const headers = anthropicUpstreamHeaders(
+      'api-key',
+      false,
+      'client-beta-2026-01-01',
+      'api',
+      undefined,
+      {
+        'Anthropic-Beta': 'configured-beta-2026-01-01',
+        'X-Plan': 'coding',
+      },
+      true,
+    );
+
+    expect(headers).not.toHaveProperty('anthropic-beta');
+    expect(headers['Anthropic-Beta']).toBe('configured-beta-2026-01-01');
+    expect(headers['X-Plan']).toBe('coding');
   });
 });
 

@@ -8,6 +8,7 @@ import { getTemplateById } from './provider-templates.js';
 import type { LocalProvider } from './types.js';
 import type { ServerModelInfo } from './server/models.js';
 import { effectiveProviderCachedModels } from './data/opencode-go-models.js';
+import { resolveAnthropicBetaProvenance } from './anthropic-beta-policy.js';
 
 export async function fetchProviderCatalog(
   opts?: { agent?: CompatibilityAgent },
@@ -116,6 +117,7 @@ export function localProvidersToServerModels(localProviders: LocalProvider[]): S
       apiKey: provider.apiKey,
       authRef: provider.authRef,
       authType: provider.authType,
+      anthropicBetaProvenance: resolveAnthropicBetaProvenance(model, provider),
       oauthAccountId: provider.oauthAccountId,
       contextWindow: model.contextWindow,
       supportedParameters: model.supportedParameters,
