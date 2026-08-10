@@ -60,6 +60,100 @@ export function applyClaudeCodeThirdPartyCompat(env: NodeJS.ProcessEnv): void {
   env['CLAUDE_CODE_SIMPLE_SYSTEM_PROMPT'] = '0';
 }
 
+/** Loopback spellings the child must reach directly even behind a proxy. */
+const LOOPBACK_NO_PROXY_ENTRIES = ['localhost', '127.0.0.1', '::1'] as const;
+
+/** Hostname of a base URL, with IPv6 brackets stripped; '' when unparseable. */
+function gatewayHostname(gatewayUrl: string): string {
+  try {
+    return new URL(gatewayUrl).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+/** Loopback per RFC 5735/4291: `localhost`, all of 127.0.0.0/8, and `::1`. */
+function isLoopbackHost(host: string): boolean {
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '::1' || host === '0:0:0:0:0:0:0:1') return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!v4) return false;
+  const octets = v4.slice(1).map(Number);
+  if (octets.some(o => o > 255)) return false;
+  return octets[0] === 127;
+}
+
+/**
+ * The NO_PROXY value the child actually consults. Claude Code reads
+ * `no_proxy || NO_PROXY`, so a non-empty lowercase value wins OUTRIGHT and the
+ * uppercase one is never seen. Unioning the two would hand back proxy-free
+ * routing for hosts the user had bypassed in only the losing variable.
+ */
+function effectiveNoProxyValue(env: NodeJS.ProcessEnv): string {
+  return env['no_proxy'] || env['NO_PROXY'] || '';
+}
+
+function normalizedNoProxyEntries(env: NodeJS.ProcessEnv): string[] {
+  return effectiveNoProxyValue(env)
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Endpoint mode points the child at a local gateway but deliberately leaves the
+ * user's HTTP(S)_PROXY in place — Claude Code still needs it for its OWN outbound
+ * traffic (WebFetch, MCP servers, telemetry). Claude Code honours NO_PROXY but has
+ * no implicit loopback bypass, so without this it asks the corporate proxy to fetch
+ * the loopback gateway and a proxy that refuses returns a bodyless 503 (issue #95,
+ * confirmed fixed by the reporter with a manual `no_proxy`).
+ *
+ * Deliberately additive: entries already present are preserved, and the child's
+ * proxy is left usable for everything that is not the gateway. This is why we do
+ * NOT simply delete the proxy vars the way the wrapper's endpoint branch does.
+ */
+export function addGatewayNoProxyBypass(env: NodeJS.ProcessEnv, gatewayUrl: string): void {
+  const hasProxy = Boolean(
+    env['HTTPS_PROXY']?.trim() || env['https_proxy']?.trim()
+    || env['HTTP_PROXY']?.trim() || env['http_proxy']?.trim(),
+  );
+  // Nothing to bypass without a proxy — do not add noise to a clean env.
+  if (!hasProxy) return;
+
+  // ONLY loopback gateways. `buildChildEnv` is also called with a REMOTE
+  // Anthropic-passthrough baseUrl (`cli.ts`, the modelFormat === 'anthropic'
+  // branch), and that host must keep using the proxy — bypassing it there would
+  // point the child straight at a host the proxy may be the only route to.
+  const host = gatewayHostname(gatewayUrl);
+  if (!isLoopbackHost(host)) return;
+
+  // `*` bypasses everything ONLY as the entire value — Claude Code's matcher
+  // tests `value === "*"` before splitting, and a `*` appearing as one entry in
+  // a list matches nothing. Bailing on a list-member `*` would make this a
+  // silent no-op and reproduce #95 for anyone with e.g. `NO_PROXY=internal,*`.
+  if (effectiveNoProxyValue(env) === '*') return;
+  const existing = normalizedNoProxyEntries(env);
+
+  // The gateway's OWN address has to be in the list: NO_PROXY matches host by
+  // host, so the canonical spellings do not cover a gateway bound elsewhere in
+  // 127.0.0.0/8 (all of which is loopback). Without this, `http://127.1.2.3:…`
+  // is recognised as local and still routed to the proxy — the original bug.
+  const additions: string[] = [...LOOPBACK_NO_PROXY_ENTRIES, host];
+  const seen = new Set(existing.map(entry => entry.toLowerCase()));
+  const merged = [...existing];
+  for (const entry of additions) {
+    const key = entry.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(entry);
+  }
+
+  const value = merged.join(',');
+  // Claude Code reads `no_proxy` before `NO_PROXY`; set both so neither wins stale.
+  env['NO_PROXY'] = value;
+  env['no_proxy'] = value;
+}
+
 export function buildChildEnv(
   baseUrl: string,
   model: string,
@@ -76,6 +170,7 @@ export function buildChildEnv(
     ? `http://127.0.0.1:${proxyPort}`
     : baseUrl;
   env['ANTHROPIC_API_KEY'] = apiKey;
+  addGatewayNoProxyBypass(env, env['ANTHROPIC_BASE_URL']);
   const bareModel = stripOneMContextSuffix(model);
   env['ANTHROPIC_MODEL'] = claudeCodeClientModelId(model, contextWindow);
   // Claude Code defaults to 200K for non-api.anthropic.com base URLs; override with

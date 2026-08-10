@@ -2,6 +2,7 @@
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
 import {
   detectConflicts,
+  addGatewayNoProxyBypass,
   buildChildEnv,
   buildHttpProxyChildEnv,
   classifyKeyringError,
@@ -285,5 +286,255 @@ describe('child-env builders never mutate clodex process.env', () => {
     expect(process.env['HTTPS_PROXY']).toBe(before['HTTPS_PROXY']);
     expect(process.env['HTTP_PROXY']).toBe(before['HTTP_PROXY']);
     expect(process.env['ANTHROPIC_BASE_URL']).toBe(before['ANTHROPIC_BASE_URL']);
+  });
+});
+
+// Issue #95: endpoint mode leaves the user's HTTP(S)_PROXY in the child env while
+// pointing ANTHROPIC_BASE_URL at a loopback gateway. Claude Code honours NO_PROXY
+// but has no implicit loopback bypass, so the child asked the corporate proxy to
+// fetch 127.0.0.1 and a refusing proxy answered with a bodyless 503.
+describe('addGatewayNoProxyBypass', () => {
+  const GATEWAY = 'http://127.0.0.1:17645';
+
+  it('does nothing when no proxy is configured', () => {
+    const env: NodeJS.ProcessEnv = {};
+    addGatewayNoProxyBypass(env, GATEWAY);
+    expect(env['NO_PROXY']).toBeUndefined();
+    expect(env['no_proxy']).toBeUndefined();
+  });
+
+  it('bypasses every loopback spelling when a proxy is configured', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128' };
+    addGatewayNoProxyBypass(env, GATEWAY);
+    const entries = env['NO_PROXY']!.split(',');
+    expect(entries).toContain('localhost');
+    expect(entries).toContain('127.0.0.1');
+    expect(entries).toContain('::1');
+  });
+
+  it('sets both casings, because Claude Code reads no_proxy first', () => {
+    const env: NodeJS.ProcessEnv = { HTTPS_PROXY: 'http://corp:3128' };
+    addGatewayNoProxyBypass(env, GATEWAY);
+    expect(env['no_proxy']).toBe(env['NO_PROXY']);
+    expect(env['no_proxy']).toBeTruthy();
+  });
+
+  it('is triggered by any of the four proxy spellings', () => {
+    for (const name of ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']) {
+      const env: NodeJS.ProcessEnv = { [name]: 'http://corp:3128' };
+      addGatewayNoProxyBypass(env, GATEWAY);
+      expect(env['NO_PROXY'], `expected ${name} to trigger the bypass`).toContain('127.0.0.1');
+    }
+  });
+
+  it('preserves the user existing NO_PROXY entries', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128', NO_PROXY: 'internal.corp,.example.com' };
+    addGatewayNoProxyBypass(env, GATEWAY);
+    const entries = env['NO_PROXY']!.split(',');
+    expect(entries).toContain('internal.corp');
+    expect(entries).toContain('.example.com');
+    expect(entries).toContain('127.0.0.1');
+  });
+
+  it('does not duplicate an entry the user already had, case-insensitively', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128', NO_PROXY: 'LocalHost,127.0.0.1' };
+    addGatewayNoProxyBypass(env, GATEWAY);
+    const entries = env['NO_PROXY']!.split(',');
+    expect(entries.filter(e => e.toLowerCase() === 'localhost')).toHaveLength(1);
+    expect(entries.filter(e => e === '127.0.0.1')).toHaveLength(1);
+  });
+
+  it('leaves a wildcard NO_PROXY untouched rather than narrowing it', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128', NO_PROXY: '*' };
+    addGatewayNoProxyBypass(env, GATEWAY);
+    expect(env['NO_PROXY']).toBe('*');
+  });
+
+  // Claude Code's matcher tests `value === "*"` BEFORE splitting, so a `*` that is
+  // merely one entry in a list bypasses nothing. Treating it as bypass-everything
+  // would make this a silent no-op and reproduce #95 for that user.
+  it('still bypasses when * is only one entry in a list', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128', NO_PROXY: 'internal.corp,*' };
+    addGatewayNoProxyBypass(env, GATEWAY);
+    const entries = env['NO_PROXY']!.split(',');
+    expect(entries).toContain('127.0.0.1');
+    expect(entries).toContain('internal.corp');
+  });
+
+  // Claude Code reads `no_proxy || NO_PROXY`: a non-empty lowercase value wins
+  // outright, so the uppercase one must not be merged back in.
+  it('follows lowercase precedence instead of unioning divergent casings', () => {
+    const env: NodeJS.ProcessEnv = {
+      HTTP_PROXY: 'http://corp:3128',
+      no_proxy: 'lower.internal',
+      NO_PROXY: 'upper.internal',
+    };
+    addGatewayNoProxyBypass(env, GATEWAY);
+    const entries = env['no_proxy']!.split(',');
+    expect(entries).toContain('lower.internal');
+    expect(entries).not.toContain('upper.internal');
+    expect(env['NO_PROXY']).toBe(env['no_proxy']);
+  });
+
+  it('falls through to NO_PROXY when no_proxy is set but empty', () => {
+    const env: NodeJS.ProcessEnv = {
+      HTTP_PROXY: 'http://corp:3128',
+      no_proxy: '',
+      NO_PROXY: 'upper.internal',
+    };
+    addGatewayNoProxyBypass(env, GATEWAY);
+    expect(env['NO_PROXY']!.split(',')).toContain('upper.internal');
+  });
+
+  // The dangerous direction: buildChildEnv is ALSO called with a remote
+  // Anthropic-passthrough baseUrl. Bypassing the proxy for a remote host could
+  // point the child at a host the proxy is the only route to.
+  it('does NOT touch NO_PROXY for a remote gateway', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128' };
+    addGatewayNoProxyBypass(env, 'https://api.anthropic.com');
+    expect(env['NO_PROXY']).toBeUndefined();
+    expect(env['no_proxy']).toBeUndefined();
+  });
+
+  it('does NOT bypass a non-loopback LAN gateway', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128' };
+    addGatewayNoProxyBypass(env, 'http://gateway.lan:17645');
+    expect(env['NO_PROXY']).toBeUndefined();
+  });
+
+  // NO_PROXY matches host-by-host, so classifying an address as loopback is
+  // worthless unless that exact address lands in the list.
+  it('emits the gateway address itself across the whole 127.0.0.0/8 range', () => {
+    for (const host of ['127.0.0.1', '127.0.0.53', '127.1.2.3']) {
+      const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128' };
+      addGatewayNoProxyBypass(env, `http://${host}:17645`);
+      expect(env['NO_PROXY']!.split(','), `expected ${host} to be bypassed`).toContain(host);
+    }
+  });
+
+  it('does not repeat the gateway address when it is already a canonical entry', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128' };
+    addGatewayNoProxyBypass(env, 'http://127.0.0.1:17645');
+    const entries = env['NO_PROXY']!.split(',');
+    expect(entries.filter(e => e === '127.0.0.1')).toHaveLength(1);
+  });
+
+  // Regression guard: reading only the uppercase variable silently discards a
+  // user who set just `no_proxy`, sending their internal hosts to the proxy.
+  it('preserves entries the user set in lowercase no_proxy only', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128', no_proxy: 'git.internal' };
+    addGatewayNoProxyBypass(env, GATEWAY);
+    expect(env['NO_PROXY']!.split(',')).toContain('git.internal');
+    expect(env['no_proxy']!.split(',')).toContain('git.internal');
+  });
+
+  it('honours a wildcard set only in lowercase no_proxy', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128', no_proxy: '*' };
+    addGatewayNoProxyBypass(env, GATEWAY);
+    expect(env['no_proxy']).toBe('*');
+    expect(env['NO_PROXY']).toBeUndefined();
+  });
+
+  it('treats RFC 6761 .localhost names as loopback', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128' };
+    addGatewayNoProxyBypass(env, 'http://gateway.localhost:17645');
+    expect(env['NO_PROXY']!.split(',')).toContain('gateway.localhost');
+  });
+
+  it('recognises a bracketed IPv6 loopback gateway', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128' };
+    addGatewayNoProxyBypass(env, 'http://[::1]:17645');
+    const entries = env['NO_PROXY']!.split(',');
+    expect(entries).toContain('::1');
+    expect(entries.some(e => e.includes('['))).toBe(false);
+  });
+
+  it('does NOT bypass a non-loopback IPv6 gateway', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128' };
+    addGatewayNoProxyBypass(env, 'http://[fd00::1]:17645');
+    expect(env['NO_PROXY']).toBeUndefined();
+  });
+
+  it('does nothing when the gateway URL is malformed', () => {
+    const env: NodeJS.ProcessEnv = { HTTP_PROXY: 'http://corp:3128' };
+    addGatewayNoProxyBypass(env, 'not a url');
+    expect(env['NO_PROXY']).toBeUndefined();
+  });
+});
+
+describe('buildChildEnv proxy bypass (issue #95)', () => {
+  const PROXY_NAMES = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy'];
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const name of PROXY_NAMES) {
+      saved[name] = process.env[name];
+      delete process.env[name];
+    }
+  });
+
+  afterEach(() => {
+    for (const name of PROXY_NAMES) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  });
+
+  it('bypasses the loopback gateway the child was pointed at', () => {
+    process.env['HTTP_PROXY'] = 'http://corp:3128';
+    const env = buildChildEnv(UPSTREAM_URL, 'claude-sonnet-4-6', 'my-key', 17645);
+    expect(env['ANTHROPIC_BASE_URL']).toBe('http://127.0.0.1:17645');
+    expect(env['NO_PROXY']!.split(',')).toContain('127.0.0.1');
+    expect(env['no_proxy']).toBe(env['NO_PROXY']);
+  });
+
+  it('keeps the proxy itself in the child env — the child still needs it', () => {
+    process.env['HTTP_PROXY'] = 'http://corp:3128';
+    const env = buildChildEnv(UPSTREAM_URL, 'claude-sonnet-4-6', 'my-key', 17645);
+    expect(env['HTTP_PROXY']).toBe('http://corp:3128');
+  });
+
+  it('adds nothing when the user has no proxy configured', () => {
+    const env = buildChildEnv(UPSTREAM_URL, 'claude-sonnet-4-6', 'my-key', 17645);
+    expect(env['NO_PROXY']).toBeUndefined();
+    expect(env['no_proxy']).toBeUndefined();
+  });
+
+  it('never mutates the parent process env', () => {
+    process.env['HTTP_PROXY'] = 'http://corp:3128';
+    const before = { ...process.env };
+    buildChildEnv(UPSTREAM_URL, 'claude-sonnet-4-6', 'my-key', 17645);
+    expect({ ...process.env }).toEqual(before);
+    expect(process.env['NO_PROXY']).toBeUndefined();
+  });
+});
+
+describe('buildChildEnv remote passthrough keeps the proxy (issue #95 regression guard)', () => {
+  const PROXY_NAMES = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy'];
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const name of PROXY_NAMES) {
+      saved[name] = process.env[name];
+      delete process.env[name];
+    }
+  });
+
+  afterEach(() => {
+    for (const name of PROXY_NAMES) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  });
+
+  // An Anthropic-format passthrough model launches with a REMOTE baseUrl and no
+  // local proxy port. That host must keep going through the user's proxy.
+  it('leaves NO_PROXY alone when the child points at a remote baseUrl', () => {
+    process.env['HTTPS_PROXY'] = 'http://corp:3128';
+    const env = buildChildEnv('https://api.example.com', 'claude-sonnet-4-6', 'my-key');
+    expect(env['ANTHROPIC_BASE_URL']).toBe('https://api.example.com');
+    expect(env['NO_PROXY']).toBeUndefined();
+    expect(env['no_proxy']).toBeUndefined();
+    expect(env['HTTPS_PROXY']).toBe('http://corp:3128');
   });
 });
