@@ -22,6 +22,17 @@ export interface ModelRuntimeCompatibility {
   maxTokensField?: 'max_tokens' | 'max_completion_tokens';
   /** Whether the upstream accepts long prompt-cache retention controls. */
   supportsLongCacheRetention?: boolean;
+  /**
+   * Whether an anthropic-format upstream implements
+   * `POST /v1/messages/count_tokens`. Speaking the Messages API does not imply
+   * it — OpenCode Zen documents `/v1/responses`, `/v1/chat/completions` and
+   * `/v1/messages` and no token-counting endpoint — and forwarding a count to
+   * an upstream without it answers the client's token accounting with a 404
+   * instead of a number. Only an explicit `false` diverts to the local
+   * estimate; unset keeps forwarding, so a custom Anthropic-compatible
+   * endpoint that does implement it is unaffected.
+   */
+  supportsCountTokens?: boolean;
 }
 
 export type OpenAiCompatibleRequestBody = Record<string, unknown>;

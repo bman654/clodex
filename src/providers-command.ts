@@ -138,7 +138,7 @@ export function parseProvidersArgs(args: string[]): {
 }
 
 export function providersHelpText(): string {
-  return `${pc.bold('clodex providers')} — manage your OpenAI providers
+  return `${pc.bold('clodex providers')} — manage model providers
 
 ${pc.bold('Usage:')}
   clodex providers
@@ -150,7 +150,7 @@ ${pc.bold('Usage:')}
 
 ${pc.bold('Subcommands:')}
   (none)      Provider hub wizard
-  add         Add OpenAI with an API key
+  add         Add a built-in provider or sign in with ChatGPT
   auth        Sign in with ChatGPT/Codex-plan OAuth (device code)
   list        Show configured providers
   remove      Remove a provider by id
@@ -278,15 +278,18 @@ export async function runProvidersList(): Promise<number> {
   return 0;
 }
 
-/** Add the OpenAI API-key provider (the only addable template in clodex). */
-async function runTemplateAddFlow(cleanupState?: ProviderCommandCleanupState): Promise<number> {
+/** Add one API-key provider from a built-in template. */
+async function runTemplateAddFlow(
+  templateId: string,
+  cleanupState?: ProviderCommandCleanupState,
+): Promise<number> {
   const registry = loadRegistry();
-  const configuredIds = registry.providers.map(p => p.id);
-  const template = listAddableTemplates(configuredIds).find(t => t.id === 'openai')
-    ?? getTemplateById('openai');
-  if (!template || configuredIds.includes('openai')) {
-    p.log.info('OpenAI is already configured. Use clodex providers auth openai for ChatGPT OAuth.');
-    return 0;
+  const configuredIds = registry.providers.map(provider => provider.id);
+  const template = listAddableTemplates(configuredIds).find(candidate => candidate.id === templateId);
+  if (!template) {
+    const known = getTemplateById(templateId);
+    p.log.info(known ? `${known.name} is already configured.` : `Unknown provider template: ${templateId}`);
+    return known ? 0 : 1;
   }
 
   if (template.signupUrl) {
@@ -329,20 +332,34 @@ async function runTemplateAddFlow(cleanupState?: ProviderCommandCleanupState): P
 async function runProvidersAddWithCleanupState(
   cleanupState?: ProviderCommandCleanupState,
 ): Promise<number> {
+  const configuredIds = loadRegistry().providers.map(provider => provider.id);
+  const options: Array<{ value: string; label: string; hint: string }> = [];
+
+  if (!configuredIds.includes('openai-oauth')) {
+    options.push({
+      value: 'oauth',
+      label: 'Sign in with ChatGPT (Plus/Pro plan)',
+      hint: 'OAuth device code — no API key needed',
+    });
+  }
+  for (const template of listAddableTemplates(configuredIds)) {
+    options.push({
+      value: `api:${template.id}`,
+      label: `${template.name} API key`,
+      hint: template.id === 'openai'
+        ? 'platform.openai.com key (usage-billed)'
+        : 'provider API key (usage-billed)',
+    });
+  }
+
+  if (options.length === 0) {
+    p.log.info('All built-in providers are already configured.');
+    return 0;
+  }
+
   const choice = await p.select({
     message: 'Add a provider',
-    options: [
-      {
-        value: 'oauth',
-        label: 'Sign in with ChatGPT (Plus/Pro plan)',
-        hint: 'OAuth device code — no API key needed',
-      },
-      {
-        value: 'apikey',
-        label: 'OpenAI API key',
-        hint: 'platform.openai.com key (usage-billed)',
-      },
-    ],
+    options,
   });
   if (p.isCancel(choice)) {
     p.cancel('Cancelled.');
@@ -352,7 +369,9 @@ async function runProvidersAddWithCleanupState(
   if (choice === 'oauth') {
     return runProvidersAuthWithCleanupState('openai', undefined, cleanupState);
   }
-  if (choice === 'apikey') return runTemplateAddFlow(cleanupState);
+  if (typeof choice === 'string' && choice.startsWith('api:')) {
+    return runTemplateAddFlow(choice.slice('api:'.length), cleanupState);
+  }
   return 0;
 }
 
@@ -524,7 +543,7 @@ export async function runProvidersHub(): Promise<number> {
     options.push({ value: 'done', label: 'Done', hint: '' });
 
     const choice = await p.select({
-      message: entries.length > 0 ? 'Your OpenAI providers' : 'Get started',
+      message: entries.length > 0 ? 'Your providers' : 'Get started',
       options,
     });
     if (p.isCancel(choice) || choice === 'done') {
@@ -592,6 +611,6 @@ export async function runProvidersCommand(args: string[]): Promise<number> {
       runProvidersAuthWithCleanupState(parsed.removeId!, parsed.authMethod, state));
   }
 
-  relayIntro('Your OpenAI providers');
+  relayIntro('Your providers');
   return runProvidersHub();
 }

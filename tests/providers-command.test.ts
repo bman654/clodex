@@ -135,7 +135,7 @@ describe('parseProvidersArgs', () => {
     expect(help).toContain('refresh-models');
     expect(help).toContain('auth openai');
     expect(help).not.toContain('import');
-    expect(help).not.toContain('OpenCode');
+    expect(help).toContain('built-in provider');
   });
 
   it('mentions only openai in auth help', () => {
@@ -385,7 +385,7 @@ describe('provider command cleanup reconciliation', () => {
     const authRef = helperRef('provider:retired');
     await queueCredentialDelete(authRef);
     const deleteSpy = vi.spyOn(env, 'deleteProviderCredential').mockResolvedValue(true);
-    selectMock.mockResolvedValue('apikey');
+    selectMock.mockResolvedValue('api:openai');
     passwordMock.mockResolvedValue('test-key');
     addTemplateMock.mockResolvedValue({
       added: false,
@@ -448,7 +448,7 @@ describe('provider command cleanup reconciliation', () => {
     const authRef = helperRef('provider:replaced');
     selectMock
       .mockResolvedValueOnce('add')
-      .mockResolvedValueOnce('apikey');
+      .mockResolvedValueOnce('api:openai');
     passwordMock.mockResolvedValue('test-key');
     addTemplateMock.mockImplementation(async () => {
       await queueCredentialDelete(authRef);
@@ -517,17 +517,33 @@ describe('providers add menu', () => {
     vi.restoreAllMocks();
   });
 
-  it('offers ChatGPT OAuth first and API key second', async () => {
+  it('offers ChatGPT OAuth followed by OpenAI and OpenCode Go API keys', async () => {
     selectMock.mockResolvedValue('noop');
 
     await runProvidersAdd();
 
     const options = selectMock.mock.calls[0]?.[0].options.map((option: { value: string }) => option.value);
-    expect(options).toEqual(['oauth', 'apikey']);
+    expect(options).toEqual(['oauth', 'api:openai', 'api:opencode-go']);
+  });
+
+  it('adds OpenCode Go through the shared API-key flow', async () => {
+    selectMock.mockResolvedValue('api:opencode-go');
+    passwordMock.mockResolvedValue('go-key');
+    addTemplateMock.mockResolvedValue({ added: true, modelCount: 17 });
+
+    await expect(runProvidersAdd()).resolves.toBe(0);
+
+    expect(addTemplateMock).toHaveBeenCalledOnce();
+    expect(addTemplateMock.mock.calls[0]?.[0]).toMatchObject({
+      id: 'opencode-go',
+      name: 'OpenCode Go',
+      staticModelPolicy: 'allowlist',
+    });
+    expect(addTemplateMock.mock.calls[0]?.[1]).toBe('go-key');
   });
 
   it('reports pending cleanup after an API-key provider is committed', async () => {
-    selectMock.mockResolvedValue('apikey');
+    selectMock.mockResolvedValue('api:openai');
     passwordMock.mockResolvedValue('api-key');
     addTemplateMock.mockResolvedValue({
       added: true,

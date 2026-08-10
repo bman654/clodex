@@ -343,7 +343,7 @@ export function parseArgs(args: string[]): ParsedArgs {
 
 export function rootHelpText(): string {
   return `${pc.bold('clodex')} v${VERSION}
-Bridge Claude Code to OpenAI models — OpenAI API key or ChatGPT/Codex-plan OAuth.
+Bridge Claude Code to OpenAI and OpenCode Go models.
 
 ${pc.bold('Usage:')}
   clodex claude [options] [claude-flags]
@@ -360,18 +360,18 @@ ${pc.bold('Root options:')}
   -v, --version    Show version
 
 ${pc.bold('Commands:')}
-  claude      Launch Claude Code bridged to OpenAI models
+  claude      Launch Claude Code bridged to configured model providers
   server      Run a foreground gateway (endpoint or proxy mode)
   patch       Patch the Claude Code binary so clodex models are first-class
   models      Manage favorite models and aliases (max ${MAX_MODEL_CATALOG})
   favorites   Alias for models
-  providers   Add or sign in to your OpenAI providers
+  providers   Add or sign in to model providers
 
 ${pc.bold('Bridge modes (claude and server):')}
   --endpoint   Local Anthropic-format gateway; Claude Code launches with
                ANTHROPIC_BASE_URL pointed at it
   --proxy      Selective MITM of api.anthropic.com; Claude Code keeps its
-               normal Anthropic auth, clodex: models route to OpenAI
+               normal Anthropic auth, clodex: models route to configured providers
                (default when nothing is saved)
   --save-mode  Persist the mode given by --endpoint/--proxy as that
                command's default. Without --save-mode a mode flag applies
@@ -389,7 +389,7 @@ ${pc.bold('Examples:')}
 
 export function claudeHelpText(): string {
   return `${pc.bold('clodex claude')} v${VERSION}
-Launch Claude Code bridged to OpenAI models.
+Launch Claude Code bridged to configured model providers.
 
 ${pc.bold('Usage:')}
   clodex claude [options] [claude-flags]
@@ -399,7 +399,7 @@ ${pc.bold('Usage:')}
 ${pc.bold('Options:')}
   --endpoint   Endpoint bridge mode for this run: local gateway + ANTHROPIC_BASE_URL
   --proxy      Proxy bridge mode for this run: keep Claude Code's Anthropic auth;
-               route clodex: models to OpenAI (default when nothing is saved)
+               route clodex: models to configured providers (default when nothing is saved)
   --save-mode  With --endpoint/--proxy: save that mode as the claude default
   --dry-run    Run the wizard but show a preview instead of launching Claude Code
   --trace      Write debug logs to ~/.clodex/logs/ and show errors on exit
@@ -411,6 +411,7 @@ ${pc.bold('Options:')}
 ${pc.bold('Providers:')}
   openai         OpenAI API key (platform.openai.com)
   openai-oauth   ChatGPT/Codex plan OAuth — sign in with clodex providers auth openai
+  opencode-go    OpenCode Go API key — add with clodex providers add
 
 ${pc.bold('Model switching:')}
   Run clodex models to save favorites (max ${MAX_MODEL_CATALOG}).
@@ -420,7 +421,7 @@ ${pc.bold('Model switching:')}
 
 ${pc.bold('Proxy mode:')}
   clodex claude --proxy leaves ANTHROPIC_BASE_URL unset and launches
-  Claude Code with its normal Anthropic login. Favorite OpenAI models are
+  Claude Code with its normal Anthropic login. Favorite clodex models are
   available by typing /model clodex:<provider-id>:<model-id>.
   Save short names with clodex models --alias, and run --list to print them.
   Run clodex patch to make those names first-class inside Claude Code.
@@ -444,10 +445,10 @@ ${pc.bold('Examples:')}
 
 export function serverHelpText(): string {
   return `${pc.bold('clodex server')} v${VERSION}
-Run a foreground gateway bridging Anthropic-format requests to OpenAI models.
+Run a foreground gateway bridging Anthropic-format requests to configured providers.
 Two modes: ${pc.bold('endpoint')} (an Anthropic-format HTTP gateway you point clients at) and
 ${pc.bold('proxy')} (a selective api.anthropic.com MITM proxy; clients keep their Anthropic
-auth while clodex: models route to OpenAI).
+auth while clodex: models route to configured providers).
 
 ${pc.bold('Usage:')}
   clodex server [--endpoint | --proxy] [options]

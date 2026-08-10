@@ -18,6 +18,7 @@ import {
   enrichPricingAsync,
   loadPricingCache,
   pricingPlatformForProvider,
+  providerPreservesModelPricing,
 } from './pricing.js';
 import { cachedModelCount, isLikelyPlaceholderKey, resolveRefreshCredential, skipWithCachedModels } from './refresh-credentials.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js';
@@ -421,7 +422,7 @@ export async function refreshProviderModels(
 
     const pricingCache = loadPricingCache();
     const platform = pricingPlatformForProvider(provider.templateId, provider.id);
-    const enriched = provider.preserveModelPricing
+    const enriched = providerPreservesModelPricing(provider)
       ? models
       : enrichModelsWithPricing(models, buildPricingIndex(pricingCache), platform);
 

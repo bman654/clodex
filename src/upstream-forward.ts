@@ -127,12 +127,22 @@ export function anthropicSseModelRewrite(override: string): Transform {
   const decoder = new StringDecoder('utf8');
   let tail = '';
   const rewriteLine = (line: string): string => {
-    if (!line.startsWith('data:') || !line.includes('"message_start"')) return line;
+    // Splitting on \n leaves the \r of a CRLF stream on the end of every line.
+    // JSON.parse tolerates it, so without stripping and restoring it a
+    // rewritten line would quietly lose its \r while every neighbouring line
+    // kept one — a stream with mixed endings. Anthropic sends LF, so this is
+    // insurance rather than an observed case.
+    const cr = line.endsWith('\r') ? '\r' : '';
+    const bare = cr ? line.slice(0, -1) : line;
+    if (!bare.startsWith('data:') || !bare.includes('"message_start"')) return line;
     try {
-      const parsed = JSON.parse(line.slice(5)) as { type?: string; message?: { model?: unknown } };
+      // A multi-line `data:` payload (legal SSE, never emitted by Anthropic)
+      // fails to parse here and relays untouched — fail-open, so the worst
+      // case is an un-rewritten model id rather than a corrupted stream.
+      const parsed = JSON.parse(bare.slice(5)) as { type?: string; message?: { model?: unknown } };
       if (parsed.type === 'message_start' && parsed.message && typeof parsed.message.model === 'string') {
         parsed.message.model = override;
-        return 'data: ' + JSON.stringify(parsed);
+        return 'data: ' + JSON.stringify(parsed) + cr;
       }
     } catch {
       // Not a single-line JSON payload; relay it untouched.

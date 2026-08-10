@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fetchTemplateModels } from '../src/registry/fetch-template-models.js';
-import type { ProviderTemplate } from '../src/provider-templates.js';
+import { getTemplateById, type ProviderTemplate } from '../src/provider-templates.js';
 import { clearTraceSecrets, getProviderDebugLogPath } from '../src/trace-log.js';
 
 function template(partial: Partial<ProviderTemplate> & Pick<ProviderTemplate, 'id' | 'name' | 'npm'>): ProviderTemplate {
@@ -194,6 +194,40 @@ describe('fetchTemplateModels', () => {
         headers: expect.not.objectContaining({
           Authorization: expect.any(String),
         }),
+      }),
+    );
+  });
+
+  it('accepts a bare model array for OpenCode Go discovery and applies its allowlist', async () => {
+    const openCodeGo = getTemplateById('opencode-go')!;
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([
+        { id: 'qwen3.8-max', name: 'live qwen' },
+        { id: 'deepseek-v4-pro', name: 'live deepseek' },
+        { id: 'grok-4.5', name: 'responses only' },
+      ]),
+    } as Response);
+
+    const result = await fetchTemplateModels(openCodeGo, 'go-key');
+
+    expect(result.error).toBeUndefined();
+    expect(result.models.map(model => model.id)).toEqual(['qwen3.8-max', 'deepseek-v4-pro']);
+    expect(result.models[0]).toMatchObject({
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      apiUrl: 'https://opencode.ai/zen/go',
+    });
+    expect(result.models[1]).toMatchObject({
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      apiUrl: 'https://opencode.ai/zen/go/v1',
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      'https://opencode.ai/zen/go/v1/models',
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: 'Bearer go-key' }),
       }),
     );
   });

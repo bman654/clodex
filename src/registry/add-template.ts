@@ -3,6 +3,7 @@
 import { provisionProviderCredential, saveProviderCredential } from '../env.js';
 import { credentialInstanceAuthRef } from '../credential-helper.js';
 import { isSdkMigratedNpm } from '../provider-factory.js';
+import { registerTraceSecret } from '../trace-log.js';
 import type { ProviderTemplate } from '../provider-templates.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 import {
@@ -94,6 +95,21 @@ export async function addProviderFromTemplate(
     return { authRef: existing?.authRef ?? null, error: null };
   });
   if (existingState.error) return existingState.error;
+
+  // Registered before the first authenticated request rather than inside
+  // fetchTemplateModels, which runs after the probe: nothing leaks today (the
+  // probe logs nothing and its error string is a fixed literal), but the
+  // invariant worth holding is "registered before first use", not "registered
+  // before the first call that happens to log".
+  if (trimmedKey) registerTraceSecret(trimmedKey);
+
+  if (trimmedKey && template.verifyCredential) {
+    const probeBaseUrl = opts?.baseUrl?.trim() || template.defaultBaseUrl || '';
+    const credentialError = await template.verifyCredential(trimmedKey, probeBaseUrl);
+    if (credentialError) {
+      return { added: false, error: credentialError };
+    }
+  }
 
   const fetched = await fetchTemplateModels(template, trimmedKey, opts?.baseUrl);
   if (fetched.error || fetched.models.length === 0) {
