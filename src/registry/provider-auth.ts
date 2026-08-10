@@ -7,8 +7,10 @@ import open from 'open';
 import {
   probeProviderCredentialStore,
   provisionProviderCredential,
+  resolveProviderCredentialWithSource,
   saveProviderCredential,
 } from '../env.js';
+import { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
 import { credentialInstanceAuthRef } from '../credential-helper.js';
 import { runOpenAiDeviceCodeFlow } from '../oauth/openai.js';
 import {
@@ -32,8 +34,13 @@ import {
   withProviderMutationLock,
   withRegistryWriteLock,
 } from './lock.js';
-import { refreshProviderModels } from './refresh-models.js';
-import type { RegistryProvider } from './types.js';
+import { refreshProviderModelsWithCredential } from './refresh-models.js';
+import { OAUTH_ACCOUNT_NAME_RE, type RegistryProvider } from './types.js';
+import {
+  getOAuthAccountSlot,
+  providerDefaultAuthRef,
+  storeActiveOAuthAccount,
+} from './oauth-account-storage.js';
 
 export type { StoredOAuthCredential } from '../oauth/types.js';
 
@@ -41,6 +48,19 @@ export type ProviderAuthMethod = 'native';
 
 export interface ProviderAuthOptions {
   method?: ProviderAuthMethod;
+  /** Named account slot; stores a disjoint credential without touching the default. */
+  account?: string;
+}
+
+/** Validate a named-account slot; the name lands in credential-store scopes and env values. */
+export function validateOAuthAccountName(name: string): string {
+  const trimmed = name.trim().toLowerCase();
+  if (!OAUTH_ACCOUNT_NAME_RE.test(trimmed)) {
+    throw new Error(
+      `Invalid account name "${name}" — use 1-32 characters: lowercase letters, digits, "-" or "_", starting with a letter or digit.`,
+    );
+  }
+  return trimmed;
 }
 
 export interface ProviderAuthResult {
@@ -83,6 +103,59 @@ async function runNativeDeviceCode(providerId: NativeOAuthProviderId): Promise<S
   }
 }
 
+async function upsertOAuthAccountSlot(
+  registryId: string,
+  account: string,
+  authRef: string,
+  expectedAuthRef: string | undefined,
+  oauthAccountId?: string,
+): Promise<RegistryProvider> {
+  return withRegistryWriteLock(async () => {
+    const registry = loadRegistryStrict();
+    const entry = registry.providers.find(pr => pr.id === registryId);
+    if (!entry) {
+      throw new Error(
+        `Provider "${registryId}" is not configured yet — run the default sign-in first: clodex providers auth openai`,
+      );
+    }
+    const previousAuthRef = getOAuthAccountSlot(entry, account)?.authRef;
+    if (previousAuthRef !== expectedAuthRef) {
+      throw new Error(`Account "${account}" of "${registryId}" changed while its credential was being saved`);
+    }
+    const updated: RegistryProvider = {
+      ...entry,
+      authAccounts: {
+        ...entry.authAccounts,
+        [account]: {
+          authRef,
+          addedAt: new Date().toISOString(),
+          ...(oauthAccountId ? { oauthAccountId } : {}),
+        },
+      },
+    };
+    if (entry.activeAuthAccount === account) {
+      // The selected slot is also the downgrade-visible top-level reference.
+      // This additionally repairs a legacy broken selector when reauth creates
+      // its missing slot: the old top-level ref is still the proven default.
+      storeActiveOAuthAccount(updated, account, authRef);
+      delete updated.modelsCache;
+      delete updated.refreshedAt;
+    }
+    const idx = registry.providers.findIndex(provider => provider.id === registryId);
+    registry.providers[idx] = updated;
+    if (previousAuthRef && previousAuthRef !== authRef) {
+      await queueCredentialDelete(previousAuthRef);
+    }
+    saveRegistry(registry);
+    try {
+      await cancelCredentialDelete(authRef);
+    } catch {
+      // Reconciliation below reports and retries the committed marker.
+    }
+    return updated;
+  });
+}
+
 export async function saveNativeOAuthCredential(
   providerId: string,
   tokens: import('../oauth/types.js').OAuthTokenResponse,
@@ -113,7 +186,7 @@ async function upsertOAuthProvider(
     const registry = loadRegistryStrict();
     const template = getTemplateById(templateId);
     let entry: RegistryProvider | undefined = registry.providers.find(pr => pr.id === registryId);
-    if (entry?.authRef !== expectedAuthRef) {
+    if ((entry ? providerDefaultAuthRef(entry) : undefined) !== expectedAuthRef) {
       throw new Error(`Provider "${registryId}" changed while its credential was being saved`);
     }
 
@@ -123,7 +196,7 @@ async function upsertOAuthProvider(
       }
     }
 
-    const previousAuthRef = entry?.authRef;
+    const previousAuthRef = entry ? providerDefaultAuthRef(entry) : undefined;
     if (!entry) {
       if (!template) throw new Error(`Provider "${providerId}" has no template`);
       const displayName = oauthDisplayName(registryId, template.name);
@@ -141,8 +214,38 @@ async function upsertOAuthProvider(
         },
         addedAt: new Date().toISOString(),
       };
+    } else if (entry.activeAuthAccount) {
+      const selected = getOAuthAccountSlot(entry, entry.activeAuthAccount);
+      if (!selected) {
+        throw new Error(
+          `Provider "${registryId}" is set to use account "${entry.activeAuthAccount}", which no longer exists`,
+        );
+      }
+      // Reauthenticating the inactive provider default must not replace the
+      // selected slot published in authRef or invalidate its entitlement cache.
+      entry = {
+        ...entry,
+        authType: 'oauth',
+        authRef: selected.authRef,
+        defaultAuthRef: authRef,
+        templateId,
+      };
+      // A dormant non-OAuth selector may carry a top-level catalog owned by
+      // its prior API credential. Once OAuth is restored, the top-level cache
+      // must describe the selected slot for both current and downgraded
+      // readers. Never pair the selected credential with that prior cache.
+      if (selected.modelsCache) {
+        entry.modelsCache = selected.modelsCache;
+        entry.refreshedAt = selected.modelsCache.fetchedAt;
+      } else {
+        delete entry.modelsCache;
+        delete entry.refreshedAt;
+      }
     } else {
       entry = { ...entry, authType: 'oauth', authRef, templateId };
+      delete entry.defaultAuthRef;
+      delete entry.modelsCache;
+      delete entry.refreshedAt;
     }
 
     const idx = registry.providers.findIndex(provider => provider.id === registryId);
@@ -164,9 +267,12 @@ async function upsertOAuthProvider(
 async function persistNativeOAuthCredential(
   providerId: string,
   cred: StoredOAuthCredential,
+  accountName?: string,
 ): Promise<{ registryProvider: RegistryProvider; credentialCleanupPending: boolean }> {
   const registryId = toOAuthRegistryId(providerId);
-  const account = `oauth:provider:${registryId}`;
+  const account = accountName
+    ? `oauth:provider:${registryId}:account:${accountName}`
+    : `oauth:provider:${registryId}`;
   const registryProvider = await withProviderMutationLock(registryId, async () => {
     const existingAuthRef = await withRegistryWriteLock(
       () => {
@@ -176,7 +282,20 @@ async function persistNativeOAuthCredential(
         if (!existing && !getTemplateById(templateId)) {
           throw new Error(`Provider "${providerId}" is not in your registry and has no template`);
         }
-        return existing?.authRef;
+        if (accountName && !existing) {
+          throw new Error(
+            `Provider "${registryId}" is not configured yet — run the default sign-in first: clodex providers auth openai`,
+          );
+        }
+        if (accountName && existing?.authType !== 'oauth') {
+          throw new Error(
+            `Provider "${registryId}" does not currently have a default OAuth sign-in — `
+            + 'run clodex providers auth openai without --account first.',
+          );
+        }
+        return accountName
+          ? existing ? getOAuthAccountSlot(existing, accountName)?.authRef : undefined
+          : existing ? providerDefaultAuthRef(existing) : undefined;
       },
     );
     const authRef = credentialInstanceAuthRef(account);
@@ -198,7 +317,9 @@ async function persistNativeOAuthCredential(
           }`,
         );
       }
-      return upsertOAuthProvider(providerId, authRef, existingAuthRef);
+      return accountName
+        ? upsertOAuthAccountSlot(registryId, accountName, authRef, existingAuthRef, cred.accountId)
+        : upsertOAuthProvider(providerId, authRef, existingAuthRef);
     });
   });
 
@@ -218,12 +339,32 @@ async function persistNativeOAuthCredential(
 
 export async function authenticateProvider(
   providerId: string,
-  _options: ProviderAuthOptions = {},
+  options: ProviderAuthOptions = {},
 ): Promise<ProviderAuthResult> {
   const registryId = toOAuthRegistryId(providerId);
+  const accountName = options.account === undefined ? undefined : validateOAuthAccountName(options.account);
 
   if (!supportsNativeOAuth(providerId)) {
     throw new Error('OAuth sign-in is only available for openai (ChatGPT Plus/Pro).');
+  }
+
+  if (accountName) {
+    // Fail before probing (which writes/deletes a disposable credential) or
+    // starting the interactive device-code ceremony. The locked check inside
+    // persistNativeOAuthCredential remains authoritative against concurrent
+    // provider replacements during the ceremony.
+    const existing = loadRegistryStrict().providers.find(provider => provider.id === registryId);
+    if (!existing) {
+      throw new Error(
+        `Provider "${registryId}" is not configured yet — run the default sign-in first: clodex providers auth openai`,
+      );
+    }
+    if (existing.authType !== 'oauth') {
+      throw new Error(
+        `Provider "${registryId}" does not currently have a default OAuth sign-in — `
+        + 'run clodex providers auth openai without --account first.',
+      );
+    }
   }
 
   let storeDiagMsg = '';
@@ -238,13 +379,39 @@ export async function authenticateProvider(
   }
 
   const cred = await runNativeDeviceCode(providerId);
-  const persisted = await persistNativeOAuthCredential(providerId, cred);
+  const persisted = await persistNativeOAuthCredential(providerId, cred, accountName);
 
   const refreshSpinner = p.spinner();
   refreshSpinner.start('Refreshing model list...');
   try {
-    await refreshProviderModels(registryId, cred.access);
-    refreshSpinner.stop('Models refreshed');
+    // A named sign-in invalidates that slot's account-specific cache, so
+    // rebuild that exact slot even when another account currently wins. A
+    // default sign-in with no stored slot likewise invalidates the top-level
+    // cache and must ignore a one-process account selection. When a stored
+    // slot remains active, its top-level cache is still valid and the normal
+    // per-process selection can be refreshed instead.
+    const accountOverride = accountName
+      ?? (persisted.registryProvider.activeAuthAccount === undefined
+        ? null
+        : process.env[OAUTH_ACCOUNT_ENV] ?? null);
+    const refreshResult = await refreshProviderModelsWithCredential(
+      registryId,
+      async provider => resolveProviderCredentialWithSource(
+        provider.id,
+        provider.authRef,
+        undefined,
+        { ignoreProviderOverride: true },
+      ),
+      accountOverride,
+      { ignoreProviderOverride: true },
+    );
+    if (refreshResult.skipped) {
+      refreshSpinner.stop(`Models not refreshed${refreshResult.reason ? ` — ${refreshResult.reason}` : ''}`);
+    } else if (refreshResult.ok) {
+      refreshSpinner.stop('Models refreshed');
+    } else {
+      refreshSpinner.stop(`Could not refresh models${refreshResult.reason ? ` — ${refreshResult.reason}` : ''}`);
+    }
   } catch {
     refreshSpinner.stop('Could not refresh models — run clodex providers refresh-models later');
   }
@@ -262,7 +429,13 @@ export function providerAuthHelpText(): string {
 
 ${pc.bold('Usage:')}
   clodex providers auth openai
+  clodex providers auth openai --account work
 
 ${pc.bold('Device code (works on SSH/VPS):')}
-  openai   ChatGPT Plus/Pro (device code at auth.openai.com/codex/device)`;
+  openai   ChatGPT Plus/Pro (device code at auth.openai.com/codex/device)
+
+${pc.bold('Named accounts:')}
+  --account <name>   store an additional ChatGPT account under a named slot
+                     (the default sign-in is untouched). Select one at launch:
+                     CLODEX_OAUTH_ACCOUNT=work clodex claude`;
 }

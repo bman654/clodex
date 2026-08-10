@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { isLikelyPlaceholderKey, isPlaceholderProviderKey, resolveRefreshCredential } from '../src/registry/refresh-credentials.js';
+import { createHash } from 'node:crypto';
+import {
+  isLikelyPlaceholderKey,
+  isPlaceholderProviderKey,
+  refreshCredentialSnapshot,
+  resolveRefreshCredential,
+  resolveRefreshCredentialWithSource,
+} from '../src/registry/refresh-credentials.js';
 import type { RegistryProvider } from '../src/registry/types.js';
 
 function makeProvider(overrides: Partial<RegistryProvider> = {}): RegistryProvider {
@@ -40,6 +47,62 @@ describe('isPlaceholderProviderKey', () => {
 });
 
 describe('resolveRefreshCredential', () => {
+  it('captures only redaction-safe provider override provenance in the snapshot', () => {
+    const previous = process.env.CLODEX_KEY_OPENAI;
+    const credential = 'snapshot-provider-override-secret';
+    process.env.CLODEX_KEY_OPENAI = credential;
+    try {
+      const snapshot = refreshCredentialSnapshot(makeProvider(), null);
+      expect(snapshot.credentialOverride).toEqual({
+        variable: 'CLODEX_KEY_OPENAI',
+        fingerprint: createHash('sha256').update(credential).digest('hex'),
+      });
+      expect(JSON.stringify(snapshot)).not.toContain(credential);
+    } finally {
+      if (previous === undefined) delete process.env.CLODEX_KEY_OPENAI;
+      else process.env.CLODEX_KEY_OPENAI = previous;
+    }
+  });
+
+  it('can deliberately resolve the persisted store without attributing CLODEX_KEY_*', async () => {
+    const previous = process.env.CLODEX_KEY_OPENAI;
+    process.env.CLODEX_KEY_OPENAI = 'temporary-provider-key';
+    try {
+      const provider = makeProvider();
+      expect(refreshCredentialSnapshot(provider, null, { ignoreProviderOverride: true }))
+        .toMatchObject({ ignoreProviderOverride: true });
+      expect(refreshCredentialSnapshot(provider, null, { ignoreProviderOverride: true }).credentialOverride)
+        .toBeUndefined();
+      await expect(resolveRefreshCredentialWithSource(
+        provider,
+        async () => 'persisted-oauth-token',
+        null,
+        { ignoreProviderOverride: true },
+      )).resolves.toEqual({ credential: 'persisted-oauth-token' });
+    } finally {
+      if (previous === undefined) delete process.env.CLODEX_KEY_OPENAI;
+      else process.env.CLODEX_KEY_OPENAI = previous;
+    }
+  });
+
+  it('does not capture or resolve an override when either no-auth marker is authoritative', async () => {
+    const previous = process.env.CLODEX_KEY_OPENAI;
+    process.env.CLODEX_KEY_OPENAI = 'stale-provider-override';
+    try {
+      for (const provider of [
+        makeProvider({ authRef: 'none:anonymous' }),
+        makeProvider({ authType: 'none' }),
+      ]) {
+        expect(refreshCredentialSnapshot(provider, null).credentialOverride).toBeUndefined();
+        const resolveKey = async () => 'must-not-resolve';
+        await expect(resolveRefreshCredential(provider, resolveKey, null)).resolves.toBeNull();
+      }
+    } finally {
+      if (previous === undefined) delete process.env.CLODEX_KEY_OPENAI;
+      else process.env.CLODEX_KEY_OPENAI = previous;
+    }
+  });
+
   it('returns the resolved key when it looks real', async () => {
     const key = await resolveRefreshCredential(makeProvider(), async () => 'sk-real-key-123456');
     expect(key).toBe('sk-real-key-123456');
@@ -91,5 +154,145 @@ describe('resolveRefreshCredential', () => {
       if (previous === undefined) delete process.env['OPENAI_API_KEY'];
       else process.env['OPENAI_API_KEY'] = previous;
     }
+  });
+
+  it('resolves the stored OAuth account slot instead of the provider default', async () => {
+    const provider = makeProvider({
+      id: 'openai-oauth',
+      activeAuthAccount: 'work',
+      authAccounts: {
+        work: { authRef: 'keyring:oauth:work', addedAt: '2026-08-09T00:00:00.000Z' },
+        alt: { authRef: 'keyring:oauth:alt', addedAt: '2026-08-09T00:00:00.000Z' },
+      },
+    });
+    const seen: string[] = [];
+    await resolveRefreshCredential(provider, async selected => {
+      seen.push(selected.authRef);
+      return 'selected-work-token';
+    }, undefined);
+    expect(seen).toEqual(['keyring:oauth:work']);
+    expect(refreshCredentialSnapshot(provider, null)).toMatchObject({
+      authRef: 'keyring:oauth:work',
+      activeAuthAccount: 'work',
+      selectedAccount: {
+        name: 'work',
+        authRef: 'keyring:oauth:work',
+        addedAt: '2026-08-09T00:00:00.000Z',
+      },
+    });
+  });
+
+  it('lets the environment account override the stored slot for refresh', async () => {
+    const provider = makeProvider({
+      id: 'openai-oauth',
+      activeAuthAccount: 'work',
+      authAccounts: {
+        work: { authRef: 'keyring:oauth:work', addedAt: '2026-08-09T00:00:00.000Z' },
+        alt: { authRef: 'keyring:oauth:alt', addedAt: '2026-08-09T00:00:00.000Z' },
+      },
+    });
+    const seen: string[] = [];
+    await resolveRefreshCredential(provider, async selected => {
+      seen.push(selected.authRef);
+      return 'selected-alt-token';
+    }, 'alt');
+    expect(seen).toEqual(['keyring:oauth:alt']);
+    expect(refreshCredentialSnapshot(provider, 'alt')).toMatchObject({
+      authRef: 'keyring:oauth:alt',
+      activeAuthAccount: 'work',
+      environmentAccount: 'alt',
+      selectedAccount: {
+        name: 'alt',
+        authRef: 'keyring:oauth:alt',
+        addedAt: '2026-08-09T00:00:00.000Z',
+      },
+    });
+  });
+
+  it('projects a disabled provider through its stored OAuth account', async () => {
+    const provider = makeProvider({
+      id: 'openai-oauth',
+      enabled: false,
+      activeAuthAccount: 'work',
+      authAccounts: {
+        work: { authRef: 'keyring:oauth:work', addedAt: '2026-08-09T00:00:00.000Z' },
+        alt: { authRef: 'keyring:oauth:alt', addedAt: '2026-08-09T00:00:00.000Z' },
+      },
+    });
+    const seen: string[] = [];
+
+    await resolveRefreshCredential(provider, async selected => {
+      seen.push(selected.authRef);
+      return 'selected-work-token';
+    }, null);
+
+    expect(seen).toEqual(['keyring:oauth:work']);
+    expect(refreshCredentialSnapshot(provider, null)).toMatchObject({
+      authRef: 'keyring:oauth:work',
+      activeAuthAccount: 'work',
+      provider: { enabled: false },
+      selectedAccount: { name: 'work', authRef: 'keyring:oauth:work' },
+    });
+  });
+
+  it('projects an environment override for a disabled provider and fails closed when missing', async () => {
+    const provider = makeProvider({
+      id: 'openai-oauth',
+      enabled: false,
+      activeAuthAccount: 'work',
+      authAccounts: {
+        work: { authRef: 'keyring:oauth:work', addedAt: '2026-08-09T00:00:00.000Z' },
+        alt: { authRef: 'keyring:oauth:alt', addedAt: '2026-08-09T00:00:00.000Z' },
+      },
+    });
+    const seen: string[] = [];
+
+    await resolveRefreshCredential(provider, async selected => {
+      seen.push(selected.authRef);
+      return 'selected-alt-token';
+    }, 'alt');
+
+    expect(seen).toEqual(['keyring:oauth:alt']);
+    await expect(resolveRefreshCredential(provider, async () => 'default-token', 'ghost'))
+      .rejects.toThrow(/no account named "ghost"/);
+  });
+
+  it('keeps an explicitly captured absent override stable if process.env later changes', async () => {
+    const provider = makeProvider({
+      id: 'openai-oauth',
+      activeAuthAccount: 'work',
+      authAccounts: {
+        work: { authRef: 'keyring:oauth:work', addedAt: '2026-08-09T00:00:00.000Z' },
+      },
+    });
+    const previous = process.env['CLODEX_OAUTH_ACCOUNT'];
+    process.env['CLODEX_OAUTH_ACCOUNT'] = 'ghost';
+    try {
+      expect(refreshCredentialSnapshot(provider, null)).toMatchObject({
+        authRef: 'keyring:oauth:work',
+        activeAuthAccount: 'work',
+      });
+      const seen: string[] = [];
+      await resolveRefreshCredential(provider, async selected => {
+        seen.push(selected.authRef);
+        return 'selected-work-token';
+      }, null);
+      expect(seen).toEqual(['keyring:oauth:work']);
+    } finally {
+      if (previous === undefined) delete process.env['CLODEX_OAUTH_ACCOUNT'];
+      else process.env['CLODEX_OAUTH_ACCOUNT'] = previous;
+    }
+  });
+
+  it('fails closed when the selected OAuth account no longer exists', async () => {
+    const provider = makeProvider({
+      id: 'openai-oauth',
+      activeAuthAccount: 'ghost',
+      authAccounts: {
+        work: { authRef: 'keyring:oauth:work', addedAt: '2026-08-09T00:00:00.000Z' },
+      },
+    });
+    await expect(resolveRefreshCredential(provider, async () => 'default-token', undefined))
+      .rejects.toThrow(/no longer exists/);
   });
 });

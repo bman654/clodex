@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   cancelCredentialDelete,
+  isStoredCredentialRef,
   loadPendingCredentialDeletes,
   queueCredentialDelete,
 } from '../src/registry/credential-cleanup-journal.js';
@@ -21,6 +22,18 @@ import { getCredentialCleanupPath, getProvidersPath } from '../src/paths.js';
 
 const TEST_HELPER_ID = 'a'.repeat(64);
 const helperRef = (account: string): string => `helper:v1:${TEST_HELPER_ID}:${account}`;
+
+describe('isStoredCredentialRef named account slots', () => {
+  it('accepts slot credential refs and rejects malformed slot names', () => {
+    const instance = '::credential::v1:0f4a2f6e6c1e4f9f9d3a1b2c3d4e5f60';
+    expect(isStoredCredentialRef(`keyring:oauth:provider:openai-oauth:account:work${instance}`)).toBe(true);
+    // Rejecting the slot shape made journalCredentialWrite throw "not managed
+    // by Clodex" and the whole named-account sign-in fail after the ceremony.
+    expect(isStoredCredentialRef(`keyring:oauth:provider:openai-oauth${instance}`)).toBe(true);
+    expect(isStoredCredentialRef(`keyring:oauth:provider:openai-oauth:account:Bad Name${instance}`)).toBe(false);
+    expect(isStoredCredentialRef(`keyring:oauth:provider:bad id:account:work${instance}`)).toBe(false);
+  });
+});
 
 describe('credential cleanup journal', () => {
   const previousHome = process.env.CLODEX_HOME;

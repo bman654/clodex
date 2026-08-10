@@ -10,6 +10,15 @@ import {
   withRegistryWriteLock,
   withRegistryWriteLockSync,
 } from './lock.js';
+import {
+  REGISTRY_SCHEMA_VERSION_WITH_MATERIALIZED_ACTIVE_ACCOUNT,
+  type RegistryProvider,
+} from './types.js';
+import {
+  clearActiveOAuthAccount,
+  getOAuthAccountSlot,
+  storeActiveOAuthAccount,
+} from './oauth-account-storage.js';
 
 export interface RemoveProviderResult {
   removed: boolean;
@@ -23,7 +32,8 @@ export interface RemoveProviderResult {
 
 interface PendingProviderRemoval {
   result: RemoveProviderResult;
-  authRef: string | null;
+  /** Every unique selected, parked-default, and named-slot ref queued for cleanup. */
+  queuedRefs: string[];
 }
 
 /** Remove a provider from the registry; delete its stored credential when safe. */
@@ -42,14 +52,25 @@ async function removeProviderWithinLifecycle(
           credentialDeleted: false,
           error: `Provider not found: ${id}`,
         },
-        authRef: null,
+        queuedRefs: [],
       };
     }
 
     const [removedProvider] = registry.providers.splice(index, 1);
-    const cleanupQueued = opts?.deleteCredential !== false
-      ? await queueCredentialDelete(removedProvider.authRef)
-      : false;
+    const queuedRefs: string[] = [];
+    if (opts?.deleteCredential !== false) {
+      // `authRef` can equal the selected slot while `defaultAuthRef` parks the
+      // provider credential. Queue every UNIQUE lineage so neither one can be
+      // orphaned or spuriously counted twice during cleanup.
+      const credentialRefs = new Set<string>([
+        removedProvider.authRef,
+        ...(removedProvider.defaultAuthRef ? [removedProvider.defaultAuthRef] : []),
+        ...Object.values(removedProvider.authAccounts ?? {}).map(slot => slot.authRef),
+      ]);
+      for (const authRef of credentialRefs) {
+        if (await queueCredentialDelete(authRef)) queuedRefs.push(authRef);
+      }
+    }
     saveRegistry(registry);
 
     return {
@@ -59,16 +80,22 @@ async function removeProviderWithinLifecycle(
         name: removedProvider.name,
         credentialDeleted: false,
       },
-      authRef: cleanupQueued ? removedProvider.authRef : null,
+      queuedRefs,
     };
   });
 
-  if (removal.authRef) {
+  if (removal.queuedRefs.length > 0) {
+    // Deletion and pending status derive from the COMPLETE queued set: a
+    // failed slot deletion must surface as pending even when the default
+    // credential deleted cleanly, or the pending-cleanup warning is
+    // suppressed while credentials remain queued in the store.
     try {
       const cleanup = await reconcilePendingCredentialDeletes();
-      removal.result.credentialDeleted = cleanup.deleted.includes(removal.authRef);
+      removal.result.credentialDeleted =
+        removal.queuedRefs.every(ref => cleanup.deleted.includes(ref));
       removal.result.credentialCleanupPending =
-        cleanup.pending.includes(removal.authRef) || cleanup.persistenceError !== undefined;
+        removal.queuedRefs.some(ref => cleanup.pending.includes(ref))
+        || cleanup.persistenceError !== undefined;
     } catch {
       removal.result.credentialCleanupPending = true;
     }
@@ -82,6 +109,88 @@ export async function removeProviderFromRegistry(
   opts?: { deleteCredential?: boolean },
 ): Promise<RemoveProviderResult> {
   return withProviderMutationLock(id, () => removeProviderWithinLifecycle(id, opts));
+}
+
+/**
+ * Persist which OAuth account slot the provider launches as. `undefined`
+ * restores the provider's own default credential.
+ *
+ * Membership is checked here, under the write lock, so the registry can never
+ * be left pointing at a slot that does not exist — the one state
+ * `applySelectedOAuthAccount` has to refuse to launch on.
+ */
+export async function setActiveOAuthAccount(
+  id: string,
+  account: string | undefined,
+): Promise<{ updated: boolean; changed?: boolean; account?: string; provider?: RegistryProvider; error?: string }> {
+  // Account cache ownership and OAuth credential replacement are one provider
+  // mutation domain. Without this outer lock, a concurrent reauthentication
+  // can replace a deterministic slot credential while this switch parks that
+  // slot's old catalog, leaving new credentials paired with stale entitlements.
+  return withProviderMutationLock(id, () => withRegistryWriteLock(() => {
+    const registry = loadRegistryStrict();
+    const provider = registry.providers.find(p => p.id === id);
+    if (!provider) return { updated: false, error: `Provider not found: ${id}` };
+    const name = account?.trim();
+    const previous = provider.activeAuthAccount?.trim() || undefined;
+    const selectedSlot = name ? getOAuthAccountSlot(provider, name) : undefined;
+    let selectionChanged = previous !== name;
+    let storageChanged = false;
+    if (name && !selectedSlot) {
+      const slots = provider.authAccounts ?? {};
+      const available = Object.keys(slots).sort().join(', ') || 'none';
+      return {
+        updated: false,
+        error: `${provider.name} has no account named "${name}" (available: ${available}).`,
+      };
+    }
+    if (selectionChanged && provider.authType === 'oauth') {
+      // Model availability is credential/account-specific. Park a named
+      // account's current cache, then expose only the selected account's known
+      // cache under the same lock. A cache miss fails closed until the
+      // interactive command's targeted refresh completes.
+      const previousSlot = previous ? getOAuthAccountSlot(provider, previous) : undefined;
+      if (previous && previousSlot && provider.modelsCache && provider.authAccounts) {
+        provider.authAccounts[previous] = {
+          ...previousSlot,
+          modelsCache: provider.modelsCache,
+        };
+      }
+      const selectedCache = selectedSlot?.modelsCache;
+      if (selectedCache) {
+        provider.modelsCache = selectedCache;
+        provider.refreshedAt = selectedCache.fetchedAt;
+      } else {
+        delete provider.modelsCache;
+        delete provider.refreshedAt;
+      }
+    }
+    if (name && provider.authType === 'oauth') {
+      storageChanged = storeActiveOAuthAccount(provider, name, selectedSlot!.authRef);
+    } else if (name) {
+      // Preserve PR #17's repairable dormant-selector state without routing a
+      // non-OAuth provider through an OAuth slot credential.
+      storageChanged = clearActiveOAuthAccount(provider) || storageChanged;
+      if (provider.activeAuthAccount !== name) {
+        provider.activeAuthAccount = name;
+        storageChanged = true;
+      }
+    } else if (previous !== undefined || provider.defaultAuthRef !== undefined) {
+      storageChanged = clearActiveOAuthAccount(provider);
+    } else {
+      selectionChanged = false;
+    }
+    // A strict legacy load migrates in memory without changing schemaVersion.
+    // Persist that storage upgrade even when the user selected the same slot.
+    const migrationNeedsPersistence = registry.schemaVersion
+      < REGISTRY_SCHEMA_VERSION_WITH_MATERIALIZED_ACTIVE_ACCOUNT
+      && provider.defaultAuthRef !== undefined;
+    if (selectionChanged || storageChanged || migrationNeedsPersistence) saveRegistry(registry);
+    // Return the state that actually won the write lock. The provider may have
+    // been disabled, retyped, or otherwise changed while the picker was open;
+    // post-switch messages must not be derived from the stale pre-prompt copy.
+    return { updated: true, changed: selectionChanged, ...(name ? { account: name } : {}), provider };
+  }));
 }
 
 export function toggleProviderEnabled(id: string): { toggled: boolean; enabled?: boolean; error?: string } {

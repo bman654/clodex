@@ -20,7 +20,7 @@ import {
 import { dirname, join } from 'node:path';
 import bundledPricing from '../data/pricing-cache.json';
 import { getAppHome } from '../paths.js';
-import type { CachedModel } from './types.js';
+import type { CachedModel, RegistryModelsCache } from './types.js';
 import { loadRegistryStrict, saveRegistry } from './io.js';
 import { withRegistryWriteLock, withRegistryWriteLockSync } from './lock.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
@@ -229,12 +229,22 @@ export function applyPricingToRegistryProviders(
   let changed = false;
   for (const provider of registry.providers) {
     if (provider.preserveModelPricing) continue;
-    if (!provider.modelsCache?.models.length) continue;
     const platform = TEMPLATE_TO_PRICING_PLATFORM[provider.templateId] ?? TEMPLATE_TO_PRICING_PLATFORM[provider.id];
-    const enriched = enrichModelsWithPricing(provider.modelsCache.models, index, platform);
-    if (JSON.stringify(enriched) !== JSON.stringify(provider.modelsCache.models)) {
-      provider.modelsCache = { ...provider.modelsCache, models: enriched };
+    const enrichCache = (modelsCache: RegistryModelsCache | undefined) => {
+      if (!modelsCache?.models.length) return modelsCache;
+      const enriched = enrichModelsWithPricing(modelsCache.models, index, platform);
+      if (JSON.stringify(enriched) === JSON.stringify(modelsCache.models)) return modelsCache;
       changed = true;
+      return { ...modelsCache, models: enriched };
+    };
+
+    const topLevelCache = enrichCache(provider.modelsCache);
+    if (topLevelCache !== provider.modelsCache) provider.modelsCache = topLevelCache;
+    for (const [name, account] of Object.entries(provider.authAccounts ?? {})) {
+      const accountCache = enrichCache(account.modelsCache);
+      if (accountCache !== account.modelsCache) {
+        provider.authAccounts![name] = { ...account, modelsCache: accountCache };
+      }
     }
   }
   if (changed) {

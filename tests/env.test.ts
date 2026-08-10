@@ -10,7 +10,9 @@ import {
   providerKeyringAccount,
   clodexKeyEnvVar,
   resolveProviderCredential,
+  resolveProviderCredentialOverrideState,
 } from '../src/env.js';
+import { createHash } from 'node:crypto';
 
 const TEST_HELPER_ID = 'a'.repeat(64);
 import { CONFLICTING_ENV_VARS } from '../src/constants.js';
@@ -112,6 +114,66 @@ describe('provider credentials', () => {
     const key = await resolveProviderCredential('openai', 'keyring:provider:openai');
     expect(key).toBe('env-openai-key');
     delete process.env[clodexKeyEnvVar('openai')];
+  });
+
+  it('can resolve the configured credential while bypassing CLODEX_KEY_*', async () => {
+    const variable = clodexKeyEnvVar('openai');
+    const previousOverride = process.env[variable];
+    const previousStored = process.env.CLODEX_STORED_OPENAI_KEY;
+    process.env[variable] = 'temporary-provider-key';
+    process.env.CLODEX_STORED_OPENAI_KEY = 'stored-openai-key';
+    try {
+      await expect(resolveProviderCredential(
+        'openai',
+        'env:CLODEX_STORED_OPENAI_KEY',
+        undefined,
+        { ignoreProviderOverride: true },
+      )).resolves.toBe('stored-openai-key');
+      expect(resolveProviderCredentialOverrideState(
+        'openai',
+        process.env,
+        { ignoreProviderOverride: true },
+      )).toBeNull();
+    } finally {
+      if (previousOverride === undefined) delete process.env[variable];
+      else process.env[variable] = previousOverride;
+      if (previousStored === undefined) delete process.env.CLODEX_STORED_OPENAI_KEY;
+      else process.env.CLODEX_STORED_OPENAI_KEY = previousStored;
+    }
+  });
+
+  it('exposes only redaction-safe state for the usable provider override', async () => {
+    const providerId = 'source-state-test';
+    const variable = clodexKeyEnvVar(providerId);
+    const credential = 'super-secret-provider-override';
+    process.env[variable] = credential;
+    process.env.CLODEX_SOURCE_STATE_FALLBACK = 'stored-fallback';
+    try {
+      const state = resolveProviderCredentialOverrideState(providerId);
+      expect(state).toEqual({
+        variable,
+        fingerprint: createHash('sha256').update(credential).digest('hex'),
+      });
+      expect(JSON.stringify(state)).not.toContain(credential);
+
+      // The state inspector and credential resolver share the exact remembered
+      // rejection semantics: the same value remains unusable until it changes.
+      await expect(resolveProviderCredential(
+        providerId,
+        'env:CLODEX_SOURCE_STATE_FALLBACK',
+        undefined,
+        { rejectedAccessToken: credential },
+      )).resolves.toBe('stored-fallback');
+      expect(resolveProviderCredentialOverrideState(providerId)).toBeNull();
+
+      process.env[variable] = 'rotated-provider-override';
+      expect(resolveProviderCredentialOverrideState(providerId)).toMatchObject({ variable });
+    } finally {
+      delete process.env[variable];
+      delete process.env.CLODEX_SOURCE_STATE_FALLBACK;
+      // An absent value clears any remembered rejection for this test-only id.
+      resolveProviderCredentialOverrideState(providerId);
+    }
   });
 
   it('keeps explicit anonymous access authoritative over provider environment keys', async () => {

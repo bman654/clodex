@@ -52,47 +52,78 @@ describe('pricing enrich', () => {
     expect(enriched[0]?.cost?.input).toBe(0.59);
   });
 
-  it('preserves provider-owned pricing when the registry opts out of enrichment', () => {
+  it('composes provider-owned pricing with account-cache enrichment', () => {
+    const fetchedAt = '2026-08-09T00:00:00.000Z';
+    const model = {
+      id: 'llama-3.3-70b-versatile',
+      name: 'Llama 3.3 70B',
+      upstreamModelId: 'llama-3.3-70b-versatile',
+      modelFormat: 'openai' as const,
+    };
+    const ordinaryCache = () => ({ fetchedAt, models: [{ ...model }] });
+    const curatedCache = () => ({
+      fetchedAt,
+      models: [{ ...model, cost: { input: 7, output: 11 } }],
+    });
     const registry = {
-      schemaVersion: 1 as const,
+      schemaVersion: 4,
       providers: [{
-        id: 'mixed-provider',
-        templateId: 'mixed-provider',
-        name: 'Mixed Provider',
+        id: 'curated-groq',
+        templateId: 'groq',
+        name: 'Curated Groq',
         enabled: true,
-        authRef: 'keyring:provider:mixed-provider',
-        preserveModelPricing: true,
-        api: { npm: '@ai-sdk/openai-compatible' },
-        addedAt: '2026-08-07T00:00:00.000Z',
-        modelsCache: {
-          fetchedAt: '2026-08-07T00:00:00.000Z',
-          models: [{
-            id: 'kimi-k2.7-code',
-            name: 'Kimi K2.7 Code',
-            upstreamModelId: 'kimi-k2.7-code',
-            modelFormat: 'openai' as const,
-            cost: { input: 0.95, output: 4 },
-          }],
+        authRef: 'keyring:provider:curated-default',
+        authType: 'oauth' as const,
+        activeAuthAccount: 'work',
+        authAccounts: {
+          work: {
+            authRef: 'keyring:provider:curated-work',
+            addedAt: fetchedAt,
+            modelsCache: curatedCache(),
+          },
+          alt: {
+            authRef: 'keyring:provider:curated-alt',
+            addedAt: fetchedAt,
+            modelsCache: curatedCache(),
+          },
         },
+        preserveModelPricing: true,
+        api: { npm: '@ai-sdk/groq' },
+        addedAt: fetchedAt,
+        modelsCache: curatedCache(),
+      }, {
+        id: 'ordinary-groq',
+        templateId: 'groq',
+        name: 'Ordinary Groq',
+        enabled: true,
+        authRef: 'keyring:provider:ordinary-default',
+        authType: 'oauth' as const,
+        activeAuthAccount: 'work',
+        authAccounts: {
+          work: {
+            authRef: 'keyring:provider:ordinary-work',
+            addedAt: fetchedAt,
+            modelsCache: ordinaryCache(),
+          },
+          alt: {
+            authRef: 'keyring:provider:ordinary-alt',
+            addedAt: fetchedAt,
+            modelsCache: ordinaryCache(),
+          },
+        },
+        api: { npm: '@ai-sdk/groq' },
+        addedAt: fetchedAt,
+        modelsCache: ordinaryCache(),
       }],
     };
-    const changed = applyPricingToRegistryProviders(registry, {
-      models: [{
-        model_id: 'kimi-k2.7-code',
-        pricing: [{
-          platform: 'openrouter',
-          tier: 'standard',
-          input_per_1m_tokens: 99,
-          output_per_1m_tokens: 199,
-        }],
-      }],
-    });
 
-    expect(changed).toBe(false);
-    expect(registry.providers[0]?.modelsCache?.models[0]?.cost).toEqual({
-      input: 0.95,
-      output: 4,
-    });
+    expect(applyPricingToRegistryProviders(registry, loadBundledPricingCache())).toBe(true);
+    expect(registry.providers[0]?.modelsCache.models[0]?.cost).toEqual({ input: 7, output: 11 });
+    expect(registry.providers[0]?.authAccounts.work.modelsCache.models[0]?.cost).toEqual({ input: 7, output: 11 });
+    expect(registry.providers[0]?.authAccounts.alt.modelsCache.models[0]?.cost).toEqual({ input: 7, output: 11 });
+    expect(registry.providers[1]?.modelsCache.models[0]?.cost?.input).toBe(0.59);
+    expect(registry.providers[1]?.authAccounts.work.modelsCache.models[0]?.cost?.input).toBe(0.59);
+    expect(registry.providers[1]?.authAccounts.alt.modelsCache.models[0]?.cost?.input).toBe(0.59);
   });
 
   it('marks enriched zero-cost models as verified free', () => {
