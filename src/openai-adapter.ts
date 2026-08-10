@@ -2,6 +2,7 @@ import { tool, jsonSchema, streamText, generateText } from 'ai';
 import type { LanguageModel, ModelMessage } from 'ai';
 import { parseToolArguments } from './proxy-shared.js';
 import type { SdkCallParams } from './sdk-adapter.js';
+import { oauthServiceTier } from './sdk-adapter.js';
 import { upstreamMaxRetries } from './upstream-retry.js';
 
 // ── OpenAI request shapes ───────────────────────────────────────────────────
@@ -128,6 +129,7 @@ export function translateOpenAiRequest(
     // limit (an explicit max_output_tokens yields an empty finish:'other'
     // response), and expects store:false.
     const instructions = system?.trim() || 'You are a coding assistant.';
+    const serviceTier = oauthServiceTier();
     return {
       messages,
       tools,
@@ -138,6 +140,7 @@ export function translateOpenAiRequest(
           store: false,
           include: ['reasoning.encrypted_content'],
           instructions,
+          ...(serviceTier ? { serviceTier } : {}),
         },
       },
     };

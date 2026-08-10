@@ -119,6 +119,28 @@ describe('translateOpenAiRequest OAuth shaping', () => {
     });
   });
 
+  it('applies CLODEX_SERVICE_TIER on the OAuth route of the OpenAI-format endpoint too', async () => {
+    const prior = process.env.CLODEX_SERVICE_TIER;
+    try {
+      process.env.CLODEX_SERVICE_TIER = 'fast';
+      const oauth = translateOpenAiRequest({
+        model: 'gpt-test',
+        messages: [{ role: 'user', content: 'hi' }],
+      }, { openAiOAuth: true });
+      expect((oauth.providerOptions?.openai as Record<string, unknown>)?.serviceTier).toBe('priority');
+
+      // Non-OAuth requests through this endpoint stay untouched.
+      const apiKey = translateOpenAiRequest({
+        model: 'gpt-test',
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+      expect(apiKey.providerOptions).toBeUndefined();
+    } finally {
+      if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
+      else process.env.CLODEX_SERVICE_TIER = prior;
+    }
+  });
+
   it('defaults OAuth instructions when the request has no system prompt', async () => {
     const params = translateOpenAiRequest({
       model: 'gpt-test',

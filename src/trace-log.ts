@@ -189,6 +189,14 @@ export interface InferenceRequestLogEntry {
   modelId: string;
   provider: string;
   effort?: string;
+  /**
+   * Resolved Codex service tier, when the route carries one. Recorded because
+   * nothing else made it observable: `--fast` sets CLODEX_SERVICE_TIER, the
+   * adapter turns that into a providerOption deep inside translateRequest, and
+   * no log carried it — so "did fast mode actually apply" could only be
+   * answered by reading source. Absent means no tier was sent.
+   */
+  serviceTier?: string;
   route: 'passthrough' | 'translated';
   stream?: boolean;
   requestPreview?: string;
@@ -413,6 +421,7 @@ export function writeInferenceRequestLog(
     ...(claudeSessionId ? { claudeSessionId } : {}),
     modelId: compactLogValue(entry.modelId),
     ...(entry.effort ? { effort: compactLogValue(entry.effort, 100) } : {}),
+    ...(entry.serviceTier ? { serviceTier: compactLogValue(entry.serviceTier, 40) } : {}),
     provider: compactLogValue(entry.provider, 200),
     route: entry.route,
     ...(entry.stream !== undefined ? { stream: entry.stream } : {}),

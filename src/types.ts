@@ -111,6 +111,8 @@ export interface ParsedArgs {
   launchProvider?: string;
   /** clodex boot model (claude); not passed to child CLI */
   launchModel?: string;
+  /** --fast (claude): Codex fast mode — sets CLODEX_SERVICE_TIER=fast for this launch. */
+  fast?: boolean;
   /** Explicit bridge mode from --endpoint / --proxy — applies to this run only. */
   bridgeMode?: BridgeMode;
   /** --save-mode: persist the explicit bridge mode as this command's default. */

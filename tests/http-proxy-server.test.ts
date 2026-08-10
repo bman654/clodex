@@ -109,6 +109,54 @@ function adapterRequestWithResponseEvents(
   }) as unknown as typeof http.request;
 }
 
+/**
+ * Start the proxy with `route`, send one /v1/messages, and return the parsed
+ * inference-log records. Used to assert what the DIAGNOSTIC records, at the
+ * real call site — a helper that recomputes the call site's condition would
+ * pass just as happily with the condition deleted.
+ */
+async function requestLogEntriesForRoute(
+  logName: string,
+  route: Record<string, unknown>,
+): Promise<Array<Record<string, unknown>>> {
+  const certificates = ensureHttpProxyCertificates();
+  const inferenceLogPath = join(testHome, logName);
+  const proxy = await startHttpProxy({
+    routes: [route as never],
+    adapterHandle: { port: 1, token: 'adapter-local-token', close: () => {} },
+    inferenceLogPath,
+  });
+  try {
+    const body = JSON.stringify({
+      model: route.aliasId,
+      messages: [{ role: 'user', content: 'tier probe' }],
+    });
+    const secure = await connectMitm(proxy.port, certificates.caCert);
+    secure.resume();
+    secure.write([
+      'POST /v1/messages HTTP/1.1',
+      'Host: api.anthropic.com',
+      'Content-Type: application/json',
+      `Content-Length: ${Buffer.byteLength(body)}`,
+      'Connection: close',
+      '',
+      '',
+    ].join('\r\n') + body);
+    await new Promise<void>(resolve => {
+      secure.once('close', () => resolve());
+      secure.once('error', () => resolve());
+    });
+    await new Promise(resolve => setImmediate(resolve));
+    return readFileSync(inferenceLogPath, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map(line => JSON.parse(line) as Record<string, unknown>);
+  } finally {
+    await proxy.close();
+  }
+}
+
 async function adapterResponseFailureEntries(
   logName: string,
   emitEvents: (response: http.IncomingMessage) => void,
@@ -1494,4 +1542,61 @@ describe('selective HTTP proxy', () => {
       }),
     ]);
   }, 20_000);
+
+  it('records the resolved service tier for the route that carries one', async () => {
+    // The diagnostic exists to answer "did --fast actually put a tier on the
+    // wire", which previously could only be answered by reading source.
+    const previous = process.env['CLODEX_SERVICE_TIER'];
+    process.env['CLODEX_SERVICE_TIER'] = 'fast';
+    try {
+      const entries = await requestLogEntriesForRoute('tier-oauth-inference.jsonl', {
+        aliasId: 'clodex:openai-oauth:gpt-5.6-sol',
+        realModelId: 'gpt-5.6-sol',
+        displayName: 'Sol',
+        upstreamUrl: '',
+        apiKey: 'oauth-token',
+        modelFormat: 'openai' as const,
+        npm: '@ai-sdk/openai',
+        authType: 'oauth',
+        providerId: 'openai-oauth',
+      });
+      const request = entries.find(entry => entry.route === 'translated');
+      expect(request).toBeTruthy();
+      // The WIRE value, not the configured spelling: `fast` is the Codex CLI's
+      // word and `priority` is what is sent, so logging the input would answer
+      // the question in the wrong vocabulary.
+      expect(request!.serviceTier).toBe('priority');
+    } finally {
+      if (previous === undefined) delete process.env['CLODEX_SERVICE_TIER'];
+      else process.env['CLODEX_SERVICE_TIER'] = previous;
+    }
+  });
+
+  it('records no service tier on a route that cannot carry one', async () => {
+    // OAuth-only: API-key OpenAI is excluded because `priority` there is a
+    // billable surcharge, and other providers never see it. A log claiming a
+    // tier on those routes would be inventing one.
+    const previous = process.env['CLODEX_SERVICE_TIER'];
+    process.env['CLODEX_SERVICE_TIER'] = 'fast';
+    try {
+      const entries = await requestLogEntriesForRoute('tier-compatible-inference.jsonl', {
+        aliasId: 'clodex:opencode-go:kimi-k3',
+        realModelId: 'kimi-k3',
+        displayName: 'Kimi K3',
+        upstreamUrl: '',
+        apiKey: 'go-key',
+        modelFormat: 'openai' as const,
+        npm: '@ai-sdk/openai-compatible',
+        authType: 'api',
+        providerId: 'opencode-go',
+      });
+      const request = entries.find(entry => entry.route === 'translated');
+      expect(request).toBeTruthy();
+      expect(request!.serviceTier).toBeUndefined();
+    } finally {
+      if (previous === undefined) delete process.env['CLODEX_SERVICE_TIER'];
+      else process.env['CLODEX_SERVICE_TIER'] = previous;
+    }
+  });
+
 });

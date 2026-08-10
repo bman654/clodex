@@ -56,6 +56,8 @@ import {
   silenceSdkWarnings,
   anthropicEffortFromRequest,
   extractClaudeSessionId,
+  isOpenAiOAuthRoute,
+  oauthServiceTier,
   type AnthropicRequest,
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
@@ -392,6 +394,10 @@ async function handleAnthropicMessages(
       modelId: body.model,
       effort: anthropicEffortFromRequest(body as AnthropicRequest) ?? model.defaultEffort,
       claudeSessionId,
+      // Same predicate and resolver the adapter applies, so a gateway record
+      // answers the same question a proxy record does. Omitting it here made
+      // absence ambiguous — "no tier sent" or "this path forgot to log it".
+      serviceTier: isOpenAiOAuthRoute(model) ? oauthServiceTier() : undefined,
       provider: inferenceProvider(model),
       route: 'translated',
       requestPreview: getLatestMessagePreview(body.messages, body.system),
@@ -613,12 +619,13 @@ async function handleOpenAIChatCompletions(
   auditInference(options, {
     modelId: body.model,
     effort: openAiEffort(body),
+    serviceTier: isOpenAiOAuthRoute(model) ? oauthServiceTier() : undefined,
     provider: inferenceProvider(model),
     route: 'translated',
     requestPreview: getLatestMessagePreview(body.messages, body.system),
   });
   const baseURL = model.modelFormat === 'anthropic' ? model.baseUrl : model.apiBaseUrl;
-  const openAiOAuth = npm === '@ai-sdk/openai' && model.authType === 'oauth';
+  const openAiOAuth = isOpenAiOAuthRoute(model);
   const params = translateOpenAiRequest(body as unknown as OpenAiRequest, { openAiOAuth });
   const clientWantsStream = Boolean(body.stream);
   const responseModelId = getResponseModelId(body.model, model, options);

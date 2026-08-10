@@ -107,6 +107,12 @@ describe('parseArgs', () => {
       command: 'claude',
       claudeArgs: ['--print', 'hello'],
     });
+    // --fast is a clodex launch flag (Codex fast mode), never forwarded to the child CLI.
+    expect(parseArgs(['claude', '--fast', '-c'])).toMatchObject({
+      command: 'claude',
+      fast: true,
+      claudeArgs: ['-c'],
+    });
   });
 
   it('parses claude boot provider/model flags', () => {

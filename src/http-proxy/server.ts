@@ -15,6 +15,7 @@ import { routeUnavailableMessage } from '../route-unavailable.js';
 import { HTTP_PROXY_MODEL_PREFIX, type ResolvedHttpProxyAlias } from './routes.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
+import { isOpenAiOAuthRoute, oauthServiceTier } from '../sdk-adapter.js';
 import {
   getLatestMessagePreview,
   INFERENCE_PROGRESS_INTERVAL_MS,
@@ -821,6 +822,9 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
           claudeSessionId,
           modelId: typeof parsed?.model === 'string' ? parsed.model : 'unknown',
           effort: parsed ? anthropicEffortFromRequest(parsed) : undefined,
+          // Only for the route that actually carries one, using the same
+          // predicate and the same resolver the adapter applies.
+          serviceTier: isOpenAiOAuthRoute(route) ? oauthServiceTier() : undefined,
           provider,
           route: route ? 'translated' : 'passthrough',
           stream: Boolean(parsed?.stream),
