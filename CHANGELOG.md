@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.4.0](https://github.com/bman654/clodex/compare/v2.3.0...v2.4.0) (2026-08-10)
+
+
+### Features
+
+* **providers:** support mixed-protocol metadata ([067492f](https://github.com/bman654/clodex/commit/067492ff28d7d3166212754b53d24d406043a8fd))
+* **providers:** support mixed-protocol metadata ([f2126c3](https://github.com/bman654/clodex/commit/f2126c3048161bf8c4da8e1693704c6cbf07b2ae))
+
+
+### Bug Fixes
+
+* **env:** bypass the proxy for the loopback gateway in endpoint mode ([#106](https://github.com/bman654/clodex/issues/106)) ([69f61ff](https://github.com/bman654/clodex/commit/69f61ffd01a50ab1d52bd371109ba013580ec22b))
+* **transport:** classify usage-limit terminals ([#96](https://github.com/bman654/clodex/issues/96)) ([0b0018a](https://github.com/bman654/clodex/commit/0b0018a6c1799028d31b7462ca39a4fc379ed955))
+
 ## [2.3.0](https://github.com/bman654/clodex/compare/v2.2.2...v2.3.0) (2026-08-09)
 
 
