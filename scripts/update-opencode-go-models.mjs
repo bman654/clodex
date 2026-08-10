@@ -19,6 +19,12 @@ const MESSAGES_NPM = '@ai-sdk/anthropic';
 const RESPONSES_NPM = '@ai-sdk/openai';
 const KNOWN_NPMS = new Set([COMPLETIONS_NPM, MESSAGES_NPM, RESPONSES_NPM]);
 const CANONICAL_EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const REVIEWED_ANTHROPIC_THINKING_BUDGETS = new Map([
+  ['qwen3.6-plus', { high: 16_000, max: 31_999 }],
+  ['qwen3.7-max', { high: 16_000, max: 31_999 }],
+  ['qwen3.7-plus', { high: 16_000, max: 31_999 }],
+  ['qwen3.8-max', { high: 16_000, max: 31_999 }],
+]);
 const OFFICIAL_API_URL = 'https://opencode.ai/zen/go/v1';
 const SAFE_ID = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
 const SAFE_VARIANT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -419,6 +425,43 @@ function reasoningEffortMap(model) {
   );
 }
 
+function anthropicThinkingBudgetMap(model) {
+  const mapped = new Map();
+  let sawNonBudgetVariant = false;
+  for (const [variantName, variant] of Object.entries(model.variants)) {
+    if (!isRecord(variant?.thinking)) continue;
+    if (variant.thinking.type !== 'enabled') {
+      sawNonBudgetVariant = true;
+      continue;
+    }
+    if (!CANONICAL_EFFORT_LEVELS.includes(variantName)) {
+      throw new Error(`${model.id}: cannot map OpenCode thinking variant ${variantName}`);
+    }
+    mapped.set(variantName, variant.thinking.budgetTokens);
+  }
+
+  const reviewed = REVIEWED_ANTHROPIC_THINKING_BUDGETS.get(model.id);
+  if (mapped.size === 0) {
+    if (reviewed) throw new Error(`${model.id}: reviewed Anthropic thinking budgets are missing`);
+    return null;
+  }
+  if (sawNonBudgetVariant) {
+    throw new Error(`${model.id}: cannot partially map mixed Anthropic thinking variants`);
+  }
+  if (!reviewed) {
+    throw new Error(`${model.id}: enabled Anthropic thinking budgets require an explicit reviewed mapping`);
+  }
+  const result = Object.fromEntries(
+    CANONICAL_EFFORT_LEVELS
+      .filter(level => mapped.has(level))
+      .map(level => [level, mapped.get(level)]),
+  );
+  if (JSON.stringify(result) !== JSON.stringify(reviewed)) {
+    throw new Error(`${model.id}: Anthropic thinking budgets changed from the reviewed mapping`);
+  }
+  return result;
+}
+
 function messagesBaseUrl(url) {
   return url.replace(/\/v1\/?$/, '').replace(/\/$/, '');
 }
@@ -428,6 +471,7 @@ export function convertResolvedModels(models) {
   const validatedModels = validateResolvedModels(models);
   const supported = [];
   const omittedResponses = [];
+  const seenReviewedAnthropicBudgets = new Set();
 
   for (const model of [...validatedModels].sort((a, b) => compareAscii(a.id, b.id))) {
     const npm = model.api.npm;
@@ -446,8 +490,20 @@ export function convertResolvedModels(models) {
 
     const anthropic = npm === MESSAGES_NPM;
     const efforts = anthropic ? null : reasoningEffortMap(model);
+    const thinkingBudgets = anthropic ? anthropicThinkingBudgetMap(model) : null;
+    if (anthropic && REVIEWED_ANTHROPIC_THINKING_BUDGETS.has(model.id)) {
+      seenReviewedAnthropicBudgets.add(model.id);
+    }
     const compatibility = anthropic
-      ? { supportsReasoningEffort: false, supportsCountTokens: false }
+      ? {
+          ...(thinkingBudgets
+            ? {
+                anthropicThinkingBudgetMap: thinkingBudgets,
+                reasoningEffortDefault: null,
+              }
+            : { supportsReasoningEffort: false }),
+          supportsCountTokens: false,
+        }
       : {
           ...(efforts
             ? { reasoningEffortMap: efforts, reasoningEffortDefault: null }
@@ -478,6 +534,14 @@ export function convertResolvedModels(models) {
       upstreamModelId: model.api.id,
       family: model.family ?? (model.id.split('-')[0] || model.id),
     });
+  }
+
+  const missingReviewedBudgets = [...REVIEWED_ANTHROPIC_THINKING_BUDGETS.keys()]
+    .filter(id => !seenReviewedAnthropicBudgets.has(id));
+  if (missingReviewedBudgets.length > 0) {
+    throw new Error(
+      `Reviewed Anthropic thinking-budget models are missing or changed transport: ${missingReviewedBudgets.join(', ')}`,
+    );
   }
 
   if (supported.length === 0) throw new Error('OpenCode CLI produced no supported Messages/Chat models');

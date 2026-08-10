@@ -117,6 +117,7 @@ export function localProvidersToServerModels(localProviders: LocalProvider[]): S
       apiKey: provider.apiKey,
       authRef: provider.authRef,
       authType: provider.authType,
+      anthropicAuthMode: provider.anthropicAuthMode,
       anthropicBetaProvenance: resolveAnthropicBetaProvenance(model, provider),
       oauthAccountId: provider.oauthAccountId,
       contextWindow: model.contextWindow,

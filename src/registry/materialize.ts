@@ -13,6 +13,7 @@ import {
   effectiveProviderCachedModels,
   ignoresModelsDevForOpenCodeGoProvider,
 } from '../data/opencode-go-models.js';
+import { resolveAnthropicAuthMode } from '../anthropic-auth-mode.js';
 
 export type CredentialResolver = (provider: RegistryProvider) => string | null;
 
@@ -128,6 +129,7 @@ function materializeOne(
   if (provider.authType === undefined && credential === 'local' && !legacyAnonymous) return null;
   const anonymous = explicitAnonymous || legacyAnonymous;
   const apiKey = anonymous ? '' : credential ?? '';
+  const anthropicAuthMode = resolveAnthropicAuthMode(provider);
   const models: LocalProviderModel[] = [];
   const cachedModels = effectiveProviderCachedModels(provider);
   for (const cached of cachedModels) {
@@ -158,6 +160,7 @@ function materializeOne(
     apiKey,
     authRef: anonymous ? 'none:anonymous' : provider.authRef,
     authType: anonymous ? 'none' : provider.authType,
+    ...(anthropicAuthMode ? { anthropicAuthMode } : {}),
     headers: provider.api.headers,
     models,
   };

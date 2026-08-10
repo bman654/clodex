@@ -62,6 +62,12 @@ import {
 import { runPatchCommand, runLaunchPatchCheck } from './patcher.js';
 import { installOutboundProxyDispatcher } from './outbound-proxy.js';
 import {
+  DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+  UNSUPPORTED_EFFORT_POLICIES,
+  isUnsupportedEffortPolicy,
+  type UnsupportedEffortPolicy,
+} from './effort-policy.js';
+import {
   resolveAnthropicBetaProvenance,
   shouldDisableExperimentalAnthropicBetas as shouldDisableExperimentalAnthropicBetasForRoute,
 } from './anthropic-beta-policy.js';
@@ -72,12 +78,11 @@ export function requiresAnthropicProxy(
   model: Pick<LocalProviderModel, 'modelFormat' | 'compatibility'>,
   provider: Pick<LocalProvider, 'authType' | 'headers'>,
 ): boolean {
-  return model.modelFormat === 'anthropic' && (
-    provider.authType === 'oauth'
-    || provider.authType === 'none'
-    || model.compatibility?.supportsCountTokens === false
-    || Object.keys(provider.headers ?? {}).length > 0
-  );
+  // Request-time effort policy, static headers, beta filtering, OAuth refresh,
+  // and count_tokens fallbacks all require a local boundary. Keeping every
+  // Anthropic-format launch behind that boundary prevents a direct-launch
+  // escape hatch when Claude Code assigns effort to a worker.
+  return model.modelFormat === 'anthropic';
 }
 
 export function shouldDisableExperimentalAnthropicBetas(
@@ -317,7 +322,22 @@ export function parseArgs(args: string[]): ParsedArgs {
         parsed.favoritesUnalias = consumed.value;
         i = consumed.next;
       }
+      else if (arg === '--effort-policy' || arg.startsWith('--effort-policy=')) {
+        const consumed = consumeServerOptionValue(arg, rest, i, '--effort-policy', parsed);
+        if (!consumed) return parsed;
+        if (!isUnsupportedEffortPolicy(consumed.value)) {
+          parsed.error = `--effort-policy must be one of: ${UNSUPPORTED_EFFORT_POLICIES.join(', ')}`;
+          return parsed;
+        }
+        parsed.effortPolicy = consumed.value;
+        i = consumed.next;
+      }
       else if (!parsed.error) parsed.error = `Unknown models option: ${arg}`;
+    }
+    const effortPolicyConflict = parsed.effortPolicy !== undefined
+      && (parsed.favoritesList || parsed.favoritesAlias !== undefined || parsed.favoritesUnalias !== undefined);
+    if (effortPolicyConflict && !parsed.error) {
+      parsed.error = '--effort-policy cannot be combined with --list, --alias, or --unalias';
     }
     return parsed;
   }
@@ -586,6 +606,7 @@ ${pc.bold('Usage:')}
   clodex models --list
   clodex models --alias sol=clodex:openai-oauth:gpt-5.6-sol
   clodex models --unalias sol
+  clodex models --effort-policy provider-default
   clodex models
   clodex favorites --help
   clodex favorites --version
@@ -600,6 +621,10 @@ ${pc.bold('Behavior:')}
   target is clodex:<provider-id>:<model-id> (the clodex: prefix is optional).
   Alias names are stored lowercase and cannot use client-reserved model names.
   --unalias <name> removes a saved short name.
+  --effort-policy <provider-default|up|down|exact> saves the global behavior
+  for an explicit effort that the target model does not support. The default,
+  provider-default, omits that effort and lets the provider choose. Running
+  clodex processes keep their startup snapshot; restart them after changing it.
 
 ${pc.bold('How it works:')}
   claude and server use the global favorites list.
@@ -676,6 +701,7 @@ async function launchClaudeViaCatalog(
   contextWindow: number | undefined,
   trace: boolean,
   claudeArgs: string[],
+  unsupportedEffortPolicy: UnsupportedEffortPolicy,
 ): Promise<number> {
   reportInactiveCatalogAliases(modelAliases);
   let proxyHandle: ProxyHandle;
@@ -691,6 +717,7 @@ async function launchClaudeViaCatalog(
       undefined,
       undefined,
       modelAliases,
+      unsupportedEffortPolicy,
     );
     p.log.info(
       `Switch menu active — proxy on port ${proxyHandle.port} ` +
@@ -728,13 +755,24 @@ interface FavoritesCommandOptions {
   list?: boolean;
   alias?: string;
   unalias?: string;
+  effortPolicy?: UnsupportedEffortPolicy;
 }
 
 export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Promise<number> {
   const changesAlias = opts.alias !== undefined || opts.unalias !== undefined;
+  if (opts.effortPolicy !== undefined && (opts.list || changesAlias)) {
+    p.log.error('--effort-policy cannot be combined with --list, --alias, or --unalias.');
+    return 1;
+  }
   if (changesAlias && (opts.list || (opts.alias !== undefined && opts.unalias !== undefined))) {
     p.log.error('--alias/--unalias apply one at a time to proxy-mode favorites.');
     return 1;
+  }
+  if (opts.effortPolicy !== undefined) {
+    savePreferences({ effortPolicy: opts.effortPolicy });
+    p.log.success(`Current global unsupported-effort policy: ${opts.effortPolicy} (saved).`);
+    p.log.info('Running clodex processes keep their startup policy snapshot; restart them to apply this change.');
+    return 0;
   }
   if (opts.alias !== undefined) {
     const parsed = parseModelAliasAssignment(opts.alias);
@@ -1033,6 +1071,7 @@ async function runClaudeHttpProxyCommand(
       console.log('  ANTHROPIC_BASE_URL is not set by clodex.');
       console.log('  HTTPS_PROXY/HTTP_PROXY=http://127.0.0.1:<random-port>');
       console.log('  NODE_EXTRA_CA_CERTS=~/.clodex/http-proxy/clodex-ca.pem');
+      console.log(`  Effort policy: ${loaded.effortPolicy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY}`);
       console.log('');
       printHttpProxyModels(loaded.routes, loaded.aliases);
       reportSkippedHttpProxyFavorites(loaded);
@@ -1159,7 +1198,9 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     return runClaudeHttpProxyCommand(parsed, claudeArgs, agentStdout);
   }
 
-  const prefs = dryRun ? {} as ReturnType<typeof loadPreferences> : loadPreferences();
+  const startupPrefs = loadPreferences();
+  const unsupportedEffortPolicy = startupPrefs.effortPolicy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY;
+  const prefs = dryRun ? {} as ReturnType<typeof loadPreferences> : startupPrefs;
   const conflicts = detectConflicts();
 
   const favorites = dryRun ? [] : (prefs.favoriteModels ?? []);
@@ -1358,6 +1399,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
       selectedModel.contextWindow,
       trace,
       claudeArgs,
+      unsupportedEffortPolicy,
     );
   }
 
@@ -1373,6 +1415,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     console.log(`  ${pc.bold('Format:')}    ${selectedModel.modelFormat} (${transport.formatDescription})`);
     console.log(`  ${pc.bold(transport.endpointLabel)} ${transport.endpoint}`);
     console.log(`  ${pc.bold('Key:')}       ${activeProvider.name} provider key`);
+    console.log(`  ${pc.bold('Effort policy:')} ${unsupportedEffortPolicy}`);
     console.log('');
     console.log(pc.dim('  (dry run complete — Claude Code was NOT launched)'));
     console.log('');
@@ -1408,6 +1451,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
         {
           providerId: activeProvider.id,
           authType: activeProvider.authType,
+          anthropicAuthMode: activeProvider.anthropicAuthMode,
           oauthAccountId: activeProvider.oauthAccountId,
           providerData: activeProvider.providerData,
           modelFormat: 'anthropic',
@@ -1417,6 +1461,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
           ),
           upstreamModelId: selectedModel.upstreamModelId,
           compatibility: selectedModel.compatibility,
+          unsupportedEffortPolicy,
           headers: activeProvider.headers,
         },
         launchApiKey ?? '',
@@ -1433,14 +1478,6 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
       proxyHandle.port,
       selectedModel.contextWindow,
     );
-  } else if (selectedModel.modelFormat === 'anthropic') {
-    childEnv = buildChildEnv(
-      selectedModel.baseUrl!,
-      selectedModel.id,
-      launchApiKey ?? '',
-      undefined,
-      selectedModel.contextWindow,
-    );
   } else {
     try {
       proxyHandle = await startProxy(
@@ -1454,6 +1491,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
           upstreamModelId: selectedModel.upstreamModelId,
           providerId: activeProvider.id,
           authType: activeProvider.authType,
+          anthropicAuthMode: activeProvider.anthropicAuthMode,
           oauthAccountId: activeProvider.oauthAccountId,
           supportedParameters: selectedModel.supportedParameters,
           reasoning: selectedModel.reasoning,
@@ -1461,6 +1499,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
           useResponsesLite: selectedModel.useResponsesLite,
           preferWebSockets: selectedModel.preferWebSockets,
           compatibility: selectedModel.compatibility,
+          unsupportedEffortPolicy,
           headers: activeProvider.headers,
         },
         launchApiKey ?? '',
@@ -1567,6 +1606,7 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       list: parsed.favoritesList,
       alias: parsed.favoritesAlias,
       unalias: parsed.favoritesUnalias,
+      effortPolicy: parsed.effortPolicy,
     });
   }
 

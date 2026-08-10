@@ -37,6 +37,7 @@ export function localModelToRoute(lp: LocalProvider, model: LocalProviderModel):
     baseURL: model.apiBaseUrl,
     providerId: lp.id,
     authType: lp.authType,
+    anthropicAuthMode: lp.anthropicAuthMode,
     anthropicBetaProvenance: resolveAnthropicBetaProvenance(model, lp),
     refreshToken: lp.authType === 'oauth' && lp.authRef
       ? rejectedAccessToken => rejectedAccessToken === undefined

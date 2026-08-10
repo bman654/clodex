@@ -20,9 +20,14 @@ import {
   describeModelAliasRejection,
   normalizeModelAliases,
 } from '../model-aliases.js';
+import {
+  DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+  type UnsupportedEffortPolicy,
+} from '../effort-policy.js';
 
 export interface LoadedHttpProxyRoutes extends HttpProxyRouteResult {
   favoriteCount: number;
+  effortPolicy?: UnsupportedEffortPolicy;
 }
 
 export async function loadHttpProxyRoutes(): Promise<LoadedHttpProxyRoutes> {
@@ -40,6 +45,7 @@ export async function loadHttpProxyRoutes(): Promise<LoadedHttpProxyRoutes> {
         ...normalizedAliases.accepted.flatMap(({ sources }) => sources),
       ],
       favoriteCount: 0,
+      effortPolicy: prefs.effortPolicy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY,
     };
   }
   const rawCatalog = providersForTarget(await fetchProviderCatalog({ agent: 'claude' }), 'claude');
@@ -50,6 +56,7 @@ export async function loadHttpProxyRoutes(): Promise<LoadedHttpProxyRoutes> {
   return {
     ...buildHttpProxyRoutes(catalog, favorites, prefs.modelAliases),
     favoriteCount: favorites.length,
+    effortPolicy: prefs.effortPolicy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY,
   };
 }
 
@@ -138,6 +145,7 @@ export function buildConfiguredHttpProxyOptions(
     debugLogPath,
     inferenceLogPath,
     webSocketDiagnosticsLogPath,
+    unsupportedEffortPolicy: loaded.effortPolicy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY,
   };
 }
 

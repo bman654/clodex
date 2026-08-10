@@ -58,11 +58,17 @@ const PRISTINE_BUNDLE = [
   'function rz(x){switch(x){case"best":{return "opus"}default:return null}}',
   'function opts(e,t,r){let n=cur(),o=(n==="opus")?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}',
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
-  // PATCH 8a/8b/8c/9 anchors — these sites are REQUIRED (applyPatch throws when
+  // PATCH 8a–8f/9 anchors — these sites are REQUIRED (applyPatch throws when
   // any of them FAILs), so the fixture has to carry them or every patch aborts.
+  'var PM=["low","medium","high","xhigh","max"];',
+  'function iJe(e,t){return!0}',
+  'function a3e(e){return PM.filter((t)=>iJe(t,e))}',
   'function OI(e){if(SNr(e))return!1;let t=Ede(e,"effort");if(t!==void 0)return t;return!1}',
   'function I_e(e){if(SNr(e))return!1;let t=Ede(e,"xhigh_effort");if(t!==void 0)return t;return!1}',
   'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return!1}',
+  'var EM1={...o&&{supportsEffort:!0,supportedEffortLevels:PM.filter((l)=>{if(l==="max"&&!eqe(n))return!1;if(l==="xhigh"&&!I_e(n))return!1;return!0})}};',
+  'var EM2={...To&&{supportsEffort:!0,supportedEffortLevels:PM.filter((Fo)=>{if(Fo==="max"&&!eqe(Et))return!1;if(Fo==="xhigh"&&!I_e(Et))return!1;return!0})}};',
+  'function nEu(e,t){let r=e;if(typeof r==="string"&&a_e(r))r=IDe(r,t);if(r==="max"&&!eqe(t))r="high";if(r==="xhigh"&&!I_e(t))r="high";return r}',
   'function ait(e){return ww(lo(e))?.default_effort??"high"}',
 ].join('\n');
 

@@ -1,13 +1,23 @@
 /**
  * Provider-neutral per-model compatibility hints.
  *
- * These describe Chat Completions wire quirks that cannot be inferred safely
- * from a provider or model family. Runtime adapters consume only the fields
+ * These describe provider wire quirks that cannot be inferred safely from a
+ * provider or model family. Runtime adapters consume only the fields
  * they understand; unknown fields remain inert metadata.
  */
+import {
+  DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+  EffortResolutionError,
+  resolveEffort,
+  type EffortResolution,
+  type UnsupportedEffortPolicy,
+} from './effort-policy.js';
+
 export interface ModelRuntimeCompatibility {
   /** Claude/Codex effort -> upstream reasoning_effort map. null disables that level. */
   reasoningEffortMap?: Record<string, string | null>;
+  /** Claude/Codex effort -> Anthropic Messages enabled-thinking budget. */
+  anthropicThinkingBudgetMap?: Record<string, number>;
   /** Default effort for omitted client controls. null means variants are opt-in and no effort is injected. */
   reasoningEffortDefault?: string | null;
   /** Explicitly enable or disable reasoning_effort for this model. */
@@ -40,6 +50,7 @@ export interface ModelRuntimeCompatibility {
 }
 
 export type OpenAiCompatibleRequestBody = Record<string, unknown>;
+export type AnthropicMessagesRequestBody = Record<string, unknown>;
 
 type ChatMessage = Record<string, unknown> & { role?: unknown };
 
@@ -121,6 +132,93 @@ export function transformOpenAiCompatibleRequestBody(
     if (transformed.thinking === undefined) transformed.thinking = { type: 'enabled' };
   } else if (hasReasoningEffort && compatibility.thinkingFormat === 'qwen') {
     if (transformed.enable_thinking === undefined) transformed.enable_thinking = true;
+  }
+
+  return transformed;
+}
+
+/**
+ * Apply exact Anthropic Messages thinking-budget variants to an explicit
+ * Claude-format effort. Omitted effort is deliberately inert: OpenCode CLI
+ * variants are opt-in request overlays, not provider defaults.
+ */
+export function transformAnthropicMessagesRequestBody(
+  body: AnthropicMessagesRequestBody,
+  compatibility: ModelRuntimeCompatibility,
+  policy: UnsupportedEffortPolicy = DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+  onResolution?: (resolution: EffortResolution) => void,
+): AnthropicMessagesRequestBody {
+  const budgetMap = compatibility.anthropicThinkingBudgetMap;
+  if (!budgetMap) return body;
+
+  for (const [level, budget] of Object.entries(budgetMap)) {
+    if (!Number.isInteger(budget) || budget <= 0) {
+      throw new EffortResolutionError({
+        code: 'invalid-supported-effort',
+        message: `Model effort capability ${JSON.stringify(level)} has an invalid thinking budget.`,
+        statusCode: 500,
+      });
+    }
+  }
+
+  const outputConfig = body.output_config;
+  if (!outputConfig || typeof outputConfig !== 'object' || Array.isArray(outputConfig)) return body;
+  const requested = (outputConfig as Record<string, unknown>).effort;
+  if (typeof requested !== 'string') return body;
+
+  const resolution = resolveEffort(requested, Object.keys(budgetMap), policy);
+  onResolution?.(resolution);
+
+  return applyAnthropicEffortResolution(body, compatibility, resolution);
+}
+
+/** Apply one already-resolved request effort without consulting policy again. */
+export function applyAnthropicEffortResolution(
+  body: AnthropicMessagesRequestBody,
+  compatibility: ModelRuntimeCompatibility | undefined,
+  resolution: EffortResolution,
+): AnthropicMessagesRequestBody {
+  for (const [level, budget] of Object.entries(
+    compatibility?.anthropicThinkingBudgetMap ?? {},
+  )) {
+    if (!Number.isInteger(budget) || budget <= 0) {
+      throw new EffortResolutionError({
+        code: 'invalid-supported-effort',
+        message: `Model effort capability ${JSON.stringify(level)} has an invalid thinking budget.`,
+        statusCode: 500,
+      });
+    }
+  }
+  if (resolution.kind === 'exact' && !compatibility?.anthropicThinkingBudgetMap) {
+    return body;
+  }
+
+  const existingOutputConfig = body.output_config;
+  const nextOutputConfig = existingOutputConfig
+    && typeof existingOutputConfig === 'object'
+    && !Array.isArray(existingOutputConfig)
+    ? { ...(existingOutputConfig as Record<string, unknown>) }
+    : {};
+  if (resolution.resolvedEffort === undefined || compatibility?.anthropicThinkingBudgetMap) {
+    delete nextOutputConfig.effort;
+  } else {
+    nextOutputConfig.effort = resolution.resolvedEffort;
+  }
+  const transformed: AnthropicMessagesRequestBody = { ...body };
+  if (Object.keys(nextOutputConfig).length > 0) transformed.output_config = nextOutputConfig;
+  else delete transformed.output_config;
+
+  const budgetMap = compatibility?.anthropicThinkingBudgetMap;
+  if (budgetMap && resolution.resolvedEffort !== undefined) {
+    const budgetTokens = budgetMap[resolution.resolvedEffort];
+    if (!Number.isInteger(budgetTokens) || budgetTokens! <= 0) {
+      throw new EffortResolutionError({
+        code: 'invalid-supported-effort',
+        message: 'Resolved model effort has no valid Anthropic thinking budget.',
+        statusCode: 500,
+      });
+    }
+    transformed.thinking = { type: 'enabled', budget_tokens: budgetTokens };
   }
 
   return transformed;

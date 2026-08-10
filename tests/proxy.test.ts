@@ -11,6 +11,8 @@ import { anthropicMessagesEndpoint, estimateAnthropicInputTokens } from '../src/
 import type { LocalProvider, ModelAlias } from '../src/types.js';
 import { buildOpenCodeGoModels } from '../src/data/opencode-go-models.js';
 import { NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE } from '../src/anthropic-beta-policy.js';
+import { MAX_EFFORT_RESOLUTION_WARNINGS } from '../src/effort-policy.js';
+import { resolveAnthropicAuthMode } from '../src/anthropic-auth-mode.js';
 
 /** POST JSON to a local proxy via node:http (avoids vi.stubGlobal('fetch') interception). */
 function postToProxy(
@@ -255,6 +257,68 @@ describe('SDK anonymous route handling', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it.each(['custom-anthropic', 'anthropic'])(
+    'keeps %s single-route inference x-api-key-only for messages and token counts',
+    async templateId => {
+      const fetchMock = vi.fn(async (input: string | URL | Request) => {
+        const url = String(input);
+        return new Response(
+          url.endsWith('/v1/messages/count_tokens')
+            ? '{"input_tokens":17}'
+            : JSON.stringify({
+                id: 'msg_custom',
+                type: 'message',
+                role: 'assistant',
+                model: 'custom-model',
+                content: [],
+                usage: { input_tokens: 1, output_tokens: 1 },
+              }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        );
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const handle = await startProxy(
+        'https://custom.example',
+        'custom-model',
+        false,
+        undefined,
+        {
+          providerId: 'custom-endpoint',
+          authType: 'api',
+          anthropicAuthMode: resolveAnthropicAuthMode({ templateId }),
+          modelFormat: 'anthropic',
+        },
+        'custom-key',
+      );
+
+      try {
+        const messages = await postToProxy(handle.port, handle.token, {
+          model: 'custom-model',
+          max_tokens: 100,
+          messages: [{ role: 'user', content: 'hi' }],
+          stream: false,
+        });
+        const tokens = await postToProxy(handle.port, handle.token, {
+          model: 'custom-model',
+          messages: [{ role: 'user', content: 'count this' }],
+        }, undefined, '/v1/messages/count_tokens');
+
+        expect(messages.status).toBe(200);
+        expect(tokens.status).toBe(200);
+        expect(fetchMock).toHaveBeenCalledTimes(2);
+        for (const [, init] of fetchMock.mock.calls as unknown as Array<[string, RequestInit]>) {
+          const headers = new Headers(init.headers);
+          expect(headers.get('x-api-key')).toBe('custom-key');
+          expect(headers.has('authorization')).toBe(false);
+        }
+      } finally {
+        handle.close();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 
   it('answers count_tokens locally when the route declares no upstream support', async () => {
     // Speaking the Messages API does not imply implementing count_tokens.
@@ -822,11 +886,14 @@ describe('token counting', () => {
       authType: 'oauth',
       refreshToken,
     };
-    const handle = await startProxyCatalog([route], route.aliasId, false);
+    const handle = await startProxyCatalog(
+      [route], route.aliasId, false, undefined, undefined, undefined, undefined, 'exact',
+    );
 
     try {
       const res = await postToProxy(handle.port, handle.token, {
         model: route.aliasId,
+        output_config: { effort: 'turbo' },
         messages: [{ role: 'user', content: 'count this context locally' }],
       }, undefined, '/v1/messages/count_tokens?beta=true');
 
@@ -854,15 +921,19 @@ describe('token counting', () => {
       modelFormat: 'anthropic',
       providerId: 'anthropic',
     };
-    const handle = await startProxyCatalog([route], route.aliasId, false);
+    const handle = await startProxyCatalog(
+      [route], route.aliasId, false, undefined, undefined, undefined, undefined, 'exact',
+    );
 
     try {
       const res = await postToProxy(handle.port, handle.token, {
         model: route.aliasId,
+        output_config: { effort: 123 },
         messages: [{ role: 'user', content: 'count upstream' }],
       }, undefined, '/v1/messages/count_tokens');
 
       expect(res.status).toBe(200);
+      expect(res.headers['x-clodex-effort-resolution']).toBeUndefined();
       expect(JSON.parse(res.body)).toEqual({ input_tokens: 17 });
       expect(fetchMock).toHaveBeenCalledWith(
         'https://api.anthropic.com/v1/messages/count_tokens',
@@ -870,6 +941,7 @@ describe('token counting', () => {
           body: expect.stringContaining('"model":"claude-sonnet-4-6"'),
         }),
       );
+      expect(fetchMock.mock.calls[0]?.[1]?.body).toContain('"effort":123');
     } finally {
       handle.close();
       vi.unstubAllGlobals();
@@ -1634,6 +1706,376 @@ describe('anthropic passthrough debug logging', () => {
     const body = JSON.parse(String(init?.body)) as { system?: Array<{ type: string; text: string }> };
     expect(body.system?.[0]?.text).toBe('x-anthropic-billing-header: cc_version=2.1.195.0; cc_entrypoint=cli;');
     expect(body.system?.[1]?.text).toBe('You are helpful.');
+  });
+});
+
+describe('global unsupported effort policy', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('rejects exact policy before OAuth resolution or upstream dispatch', async () => {
+    const refreshToken = vi.fn(async () => 'secret-token');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const route: ProxyRoute = {
+      aliasId: 'anthropic-opencode-go__qwen3.6-plus',
+      realModelId: 'qwen3.6-plus',
+      displayName: 'Qwen 3.6 Plus',
+      upstreamUrl: 'https://opencode.example',
+      apiKey: 'stale-token',
+      authType: 'oauth',
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      providerId: 'opencode-go',
+      compatibility: { anthropicThinkingBudgetMap: { high: 16_000, max: 31_999 } },
+      refreshToken,
+    };
+    const handle = await startProxyCatalog(
+      [route],
+      route.aliasId,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'exact',
+    );
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        output_config: { effort: 'xhigh' },
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+      expect(response.status).toBe(400);
+      expect(JSON.parse(response.body)).toMatchObject({
+        error: { type: 'invalid_request_error', message: expect.stringContaining('unsupported') },
+      });
+      expect(refreshToken).not.toHaveBeenCalled();
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      handle.close();
+    }
+  });
+
+  it.each([
+    ['claude-opus-4-6', 'max'],
+    ['claude-opus-4-5', 'medium'],
+  ] as const)('accepts native %s effort %s exactly and relays it unchanged', async (modelId, effort) => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => new Response(
+      JSON.stringify({ id: 'msg_effort', type: 'message', model: modelId, content: [] }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    const route: ProxyRoute = {
+      aliasId: modelId,
+      realModelId: modelId,
+      displayName: modelId,
+      upstreamUrl: 'https://api.anthropic.example',
+      apiKey: 'provider-key',
+      authType: 'api',
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      providerId: 'anthropic',
+    };
+    const handle = await startProxyCatalog(
+      [route],
+      route.aliasId,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'exact',
+    );
+
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        output_config: { effort },
+        messages: [{ role: 'user', content: 'use assigned effort' }],
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers['x-clodex-effort-resolution']).toBeUndefined();
+      const [, init] = fetchMock.mock.calls[0]!;
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        model: modelId,
+        output_config: { effort },
+      });
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('applies every global policy to a Luna alias targeting DeepSeek on the real SDK wire', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const upstreamBodies: Array<Record<string, unknown>> = [];
+    const upstream = http.createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      upstreamBodies.push(JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Connection': 'close' });
+      res.end(JSON.stringify({
+        id: 'chatcmpl-effort',
+        object: 'chat.completion',
+        created: 1,
+        model: 'deepseek-v4-flash',
+        choices: [{
+          index: 0,
+          message: { role: 'assistant', content: 'ok' },
+          finish_reason: 'stop',
+        }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstream.once('error', reject);
+      upstream.listen(0, '127.0.0.1', resolve);
+    });
+    const address = upstream.address();
+    if (!address || typeof address === 'string') throw new Error('test upstream did not bind');
+    const route: ProxyRoute = {
+      aliasId: 'clodex:opencode-go:deepseek-v4-flash',
+      realModelId: 'deepseek-v4-flash',
+      displayName: 'DeepSeek V4 Flash',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      authType: 'api',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      baseURL: `http://127.0.0.1:${address.port}/v1`,
+      providerId: 'opencode-go',
+      compatibility: { reasoningEffortMap: { high: 'high', max: 'max' } },
+    };
+
+    try {
+      for (const testCase of [
+        { policy: 'up' as const, status: 200, resolved: 'max', wire: 'max' },
+        { policy: 'down' as const, status: 200, resolved: 'high', wire: 'high' },
+        { policy: 'provider-default' as const, status: 200, resolved: 'provider-default', wire: undefined },
+        { policy: 'exact' as const, status: 400, resolved: undefined, wire: undefined },
+      ]) {
+        upstreamBodies.length = 0;
+        const handle = await startProxyCatalog(
+          [route],
+          route.aliasId,
+          false,
+          undefined,
+          undefined,
+          undefined,
+          [{ name: 'luna', routeId: route.aliasId }],
+          testCase.policy,
+        );
+        try {
+          const response = await postToProxy(handle.port, handle.token, {
+            model: 'luna',
+            output_config: { effort: 'xhigh' },
+            messages: [{ role: 'user', content: 'exercise the aliased SDK route' }],
+          });
+          expect(response.status).toBe(testCase.status);
+          if (testCase.resolved) {
+            expect(response.headers['x-clodex-effort-resolution']).toContain(
+              `resolved=${testCase.resolved}`,
+            );
+          } else {
+            expect(response.headers['x-clodex-effort-resolution']).toBeUndefined();
+          }
+          if (testCase.status === 400) {
+            expect(upstreamBodies).toHaveLength(0);
+          } else {
+            expect(upstreamBodies).toHaveLength(1);
+            expect(upstreamBodies[0]!.model).toBe('deepseek-v4-flash');
+            expect(upstreamBodies[0]!.reasoning_effort).toBe(testCase.wire);
+          }
+        } finally {
+          handle.close();
+        }
+      }
+      expect(stderr).toHaveBeenCalledTimes(3);
+    } finally {
+      stderr.mockRestore();
+      await new Promise<void>(resolve => upstream.close(() => resolve()));
+    }
+  }, 20_000);
+
+  it.each([' high ', '', '   ', 123, null])(
+    'rejects non-canonical effort %j before OAuth resolution or upstream dispatch',
+    async invalidEffort => {
+      const refreshToken = vi.fn(async () => 'secret-token');
+      const fetchMock = vi.fn();
+      vi.stubGlobal('fetch', fetchMock);
+      const route: ProxyRoute = {
+        aliasId: 'anthropic-opencode-go__qwen3.6-plus',
+        realModelId: 'qwen3.6-plus',
+        displayName: 'Qwen 3.6 Plus',
+        upstreamUrl: 'https://must-not-fetch.example',
+        apiKey: 'stale-token',
+        authType: 'oauth',
+        modelFormat: 'anthropic',
+        npm: '@ai-sdk/anthropic',
+        providerId: 'opencode-go',
+        compatibility: { anthropicThinkingBudgetMap: { high: 16_000, max: 31_999 } },
+        refreshToken,
+      };
+      const handle = await startProxyCatalog([route], route.aliasId, false);
+      try {
+        const response = await postToProxy(handle.port, handle.token, {
+          model: route.aliasId,
+          output_config: { effort: invalidEffort },
+          messages: [{ role: 'user', content: 'do not dispatch' }],
+        });
+        expect(response.status).toBe(400);
+        expect(JSON.parse(response.body)).toMatchObject({
+          error: { type: 'invalid_request_error', message: expect.stringContaining('effort') },
+        });
+        expect(refreshToken).not.toHaveBeenCalled();
+        expect(fetchMock).not.toHaveBeenCalled();
+      } finally {
+        handle.close();
+      }
+    },
+  );
+
+  it('rounds an alias request upward and converts the Qwen effort to its exact budget', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        model: 'qwen3.6-plus',
+        output_config: { format: { type: 'json_schema' } },
+        thinking: { type: 'enabled', budget_tokens: 31_999 },
+      });
+      return new Response(JSON.stringify({
+        id: 'msg_qwen',
+        type: 'message',
+        role: 'assistant',
+        model: 'qwen3.6-plus',
+        content: [],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const route: ProxyRoute = {
+      aliasId: 'anthropic-opencode-go__qwen3.6-plus',
+      realModelId: 'qwen3.6-plus',
+      displayName: 'Qwen 3.6 Plus',
+      upstreamUrl: 'https://opencode.example',
+      apiKey: '',
+      authType: 'none',
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      providerId: 'opencode-go',
+      compatibility: { anthropicThinkingBudgetMap: { high: 16_000, max: 31_999 } },
+    };
+    const handle = await startProxyCatalog(
+      [route],
+      route.aliasId,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      [{ name: 'luna-xhigh', routeId: route.aliasId }],
+      'up',
+    );
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: 'luna-xhigh',
+        output_config: { effort: 'xhigh', format: { type: 'json_schema' } },
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers['x-clodex-effort-resolution']).toContain('resolved=max');
+      expect(response.headers['x-clodex-effort-resolution']).toContain('target=qwen3.6-plus');
+      const repeated = await postToProxy(handle.port, handle.token, {
+        model: 'luna-xhigh',
+        output_config: { effort: 'xhigh', format: { type: 'json_schema' } },
+        messages: [{ role: 'user', content: 'same decision again' }],
+      });
+      expect(repeated.status).toBe(200);
+      expect(repeated.headers['x-clodex-effort-resolution']).toContain('resolved=max');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(stderr).toHaveBeenCalledTimes(1);
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('bounds unique effort warnings while retaining a diagnostic response header', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: 'msg_qwen', type: 'message', role: 'assistant', model: 'qwen',
+      content: [], usage: { input_tokens: 1, output_tokens: 1 },
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const routes: ProxyRoute[] = Array.from(
+      { length: MAX_EFFORT_RESOLUTION_WARNINGS + 1 },
+      (_, index) => ({
+        aliasId: `anthropic-opencode-go__qwen-${index}`,
+        realModelId: `qwen-${index}`,
+        displayName: `Qwen ${index}`,
+        upstreamUrl: 'https://opencode.example',
+        apiKey: '',
+        authType: 'none',
+        modelFormat: 'anthropic',
+        npm: '@ai-sdk/anthropic',
+        providerId: 'opencode-go',
+        compatibility: { anthropicThinkingBudgetMap: { high: 16_000, max: 31_999 } },
+      }),
+    );
+    const handle = await startProxyCatalog(routes, routes[0]!.aliasId, false, undefined,
+      undefined, undefined, undefined, 'up');
+    try {
+      let finalHeader: string | string[] | undefined;
+      for (const route of routes) {
+        const response = await postToProxy(handle.port, handle.token, {
+          model: route.aliasId,
+          output_config: { effort: 'xhigh' },
+          messages: [{ role: 'user', content: 'bounded warning' }],
+        });
+        expect(response.status).toBe(200);
+        finalHeader = response.headers['x-clodex-effort-resolution'];
+      }
+      expect(stderr).toHaveBeenCalledTimes(MAX_EFFORT_RESOLUTION_WARNINGS);
+      expect(finalHeader).toContain(`target=qwen-${MAX_EFFORT_RESOLUTION_WARNINGS}`);
+      expect(fetchMock).toHaveBeenCalledTimes(routes.length);
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('omits an unsupported request under provider-default without replacing independent thinking', async () => {
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const fetchMock = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        model: 'qwen3.6-plus',
+        thinking: { type: 'enabled', budget_tokens: 4_096 },
+      });
+      expect(JSON.parse(String(init?.body)).output_config).toBeUndefined();
+      return new Response(JSON.stringify({
+        id: 'msg_qwen_default', type: 'message', role: 'assistant',
+        model: 'qwen3.6-plus', content: [], usage: { input_tokens: 1, output_tokens: 1 },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const route: ProxyRoute = {
+      aliasId: 'anthropic-opencode-go__qwen3.6-plus', realModelId: 'qwen3.6-plus',
+      displayName: 'Qwen 3.6 Plus', upstreamUrl: 'https://opencode.example', apiKey: '',
+      authType: 'none', modelFormat: 'anthropic', npm: '@ai-sdk/anthropic',
+      compatibility: { anthropicThinkingBudgetMap: { high: 16_000, max: 31_999 } },
+    };
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        output_config: { effort: 'medium' },
+        thinking: { type: 'enabled', budget_tokens: 4_096 },
+        messages: [{ role: 'user', content: 'hi' }],
+      });
+      expect(response.status).toBe(200);
+      expect(response.headers['x-clodex-effort-resolution']).toContain('resolved=provider-default');
+    } finally {
+      handle.close();
+    }
   });
 });
 

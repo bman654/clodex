@@ -253,6 +253,21 @@ describe('custom endpoint credential lifecycle', () => {
     expect(new Headers(requestInit.headers).has('x-api-key')).toBe(false);
   });
 
+  it('uses the x-api-key-only envelope for authenticated Anthropic discovery', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: [{ id: 'local-model', name: 'Local Model' }],
+    }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await fetchAnthropicModels('https://local.example/v1', 'custom-key');
+
+    expect(result.models).toHaveLength(1);
+    const requestInit = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    const headers = new Headers(requestInit.headers);
+    expect(headers.get('x-api-key')).toBe('custom-key');
+    expect(headers.has('authorization')).toBe(false);
+  });
+
   it('allocates the provider id from state reloaded after discovery', async () => {
     vi.mocked(fetchTemplateModels).mockImplementation(async () => {
       registryState.current.providers.push({

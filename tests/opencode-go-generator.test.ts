@@ -43,6 +43,19 @@ function resolvedModel(
   };
 }
 
+function reviewedQwenModels(): Record<string, unknown>[] {
+  return ['qwen3.6-plus', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.8-max'].map(id =>
+    resolvedModel(id, '@ai-sdk/anthropic', {
+      high: { thinking: { type: 'enabled', budgetTokens: 16_000 } },
+      max: { thinking: { type: 'enabled', budgetTokens: 31_999 } },
+    }));
+}
+
+function withReviewedQwenModels(models: Record<string, unknown>[]): Record<string, unknown>[] {
+  const ids = new Set(models.map(model => model.id));
+  return [...models, ...reviewedQwenModels().filter(model => !ids.has(model.id))];
+}
+
 describe('OpenCode Go CLI catalog generator', () => {
   it('canonicalizes ASCII ids by code unit without host locale/ICU ordering', () => {
     const rows = [
@@ -71,8 +84,9 @@ describe('OpenCode Go CLI catalog generator', () => {
       none: { reasoningEffort: 'none' },
       high: { reasoningEffort: 'high' },
     });
-    const messages = resolvedModel('messages', '@ai-sdk/anthropic', {
+    const messages = resolvedModel('qwen3.6-plus', '@ai-sdk/anthropic', {
       high: { thinking: { type: 'enabled', budgetTokens: 16_000 } },
+      max: { thinking: { type: 'enabled', budgetTokens: 31_999 } },
     });
     const responses = resolvedModel('responses', '@ai-sdk/openai', {
       max: {
@@ -82,9 +96,9 @@ describe('OpenCode Go CLI catalog generator', () => {
       },
     });
 
-    const result = convertResolvedModels([responses, messages, compatible]);
+    const result = convertResolvedModels(withReviewedQwenModels([responses, messages, compatible]));
     expect(result.omittedResponses).toEqual(['responses']);
-    expect(result.supported).toHaveLength(2);
+    expect(result.supported).toHaveLength(5);
     expect(result.supported.find((model: { id: string }) => model.id === 'chat')).toMatchObject({
       modelFormat: 'openai',
       npm: '@ai-sdk/openai-compatible',
@@ -94,12 +108,66 @@ describe('OpenCode Go CLI catalog generator', () => {
         reasoningEffortDefault: null,
       },
     });
-    expect(result.supported.find((model: { id: string }) => model.id === 'messages')).toMatchObject({
+    expect(result.supported.find((model: { id: string }) => model.id === 'qwen3.6-plus')).toMatchObject({
       modelFormat: 'anthropic',
       npm: '@ai-sdk/anthropic',
       apiUrl: 'https://opencode.ai/zen/go',
-      compatibility: { supportsReasoningEffort: false, supportsCountTokens: false },
+      compatibility: {
+        anthropicThinkingBudgetMap: { high: 16_000, max: 31_999 },
+        reasoningEffortDefault: null,
+        supportsCountTokens: false,
+      },
     });
+  });
+
+  it('keeps non-budget Anthropic thinking variants as provenance only', () => {
+    const messages = resolvedModel('messages', '@ai-sdk/anthropic', {
+      none: { thinking: { type: 'disabled' } },
+      thinking: { thinking: { type: 'adaptive' } },
+    });
+    expect(convertResolvedModels(withReviewedQwenModels([messages])).supported[0]).toMatchObject({
+      compatibility: {
+        supportsReasoningEffort: false,
+        supportsCountTokens: false,
+      },
+    });
+    expect(convertResolvedModels(withReviewedQwenModels([messages])).supported[0]?.compatibility)
+      .not.toHaveProperty('anthropicThinkingBudgetMap');
+  });
+
+  it('fails closed instead of partially mapping mixed Anthropic thinking shapes', () => {
+    const messages = resolvedModel('messages', '@ai-sdk/anthropic', {
+      high: { thinking: { type: 'enabled', budgetTokens: 16_000 } },
+      thinking: { thinking: { type: 'adaptive' } },
+    });
+    expect(() => convertResolvedModels([messages])).toThrow(/cannot partially map mixed/);
+  });
+
+  it('requires explicit review for new or changed Anthropic thinking budgets', () => {
+    expect(() => convertResolvedModels([resolvedModel('new-messages-model', '@ai-sdk/anthropic', {
+      high: { thinking: { type: 'enabled', budgetTokens: 16_000 } },
+    })])).toThrow(/explicit reviewed mapping/);
+    expect(() => convertResolvedModels([resolvedModel('qwen3.6-plus', '@ai-sdk/anthropic', {
+      high: { thinking: { type: 'enabled', budgetTokens: 16_001 } },
+      max: { thinking: { type: 'enabled', budgetTokens: 31_999 } },
+    })])).toThrow(/changed from the reviewed mapping/);
+  });
+
+  it('requires every reviewed budget model to remain in the Anthropic Messages catalog', () => {
+    expect(() => convertResolvedModels(
+      snapshot.models.filter(model => model.id !== 'qwen3.6-plus'),
+    )).toThrow(/missing or changed transport: qwen3\.6-plus/);
+
+    const changedTransport = structuredClone(snapshot.models);
+    const qwen = changedTransport.find(model => model.id === 'qwen3.6-plus');
+    if (!qwen) throw new Error('missing qwen3.6-plus fixture');
+    qwen.api.npm = '@ai-sdk/openai-compatible';
+    qwen.variants = {
+      high: { reasoningEffort: 'high' },
+      max: { reasoningEffort: 'max' },
+    };
+    expect(() => convertResolvedModels(changedTransport))
+      .toThrow(/missing or changed transport: qwen3\.6-plus/);
   });
 
   it('fails closed for an SDK transport the converter does not know', () => {

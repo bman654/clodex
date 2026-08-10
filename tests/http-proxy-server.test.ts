@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -268,6 +268,7 @@ describe('selective HTTP proxy', () => {
     const originPort = await listen(origin);
     const proxy = await startHttpProxy({
       routes: [],
+      unsupportedEffortPolicy: 'exact',
       inferenceLogPath,
       webSocketDiagnosticsLogPath,
       anthropicOrigin: `https://127.0.0.1:${originPort}`,
@@ -275,7 +276,7 @@ describe('selective HTTP proxy', () => {
     });
 
     try {
-      const body = Buffer.from('{\n  "model" : "claude-sonnet-4-6",\n  "output_config":{"effort":"high"},\n  "messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"private-image-data"}},{"type":"text","text":"identify this Sonnet request"}]}],\n  "stream":true\n}\n');
+      const body = Buffer.from('{\n  "model" : "claude-sonnet-4-6",\n  "output_config":{"effort":" high "},\n  "messages":[{"role":"user","content":[{"type":"image","source":{"type":"base64","data":"private-image-data"}},{"type":"text","text":"identify this Sonnet request"}]}],\n  "stream":true\n}\n');
       const secure = await connectMitm(proxy.port, certificates.caCert);
       let response = '';
       secure.on('data', chunk => { response += chunk.toString(); });
@@ -293,6 +294,7 @@ describe('selective HTTP proxy', () => {
       await once(secure, 'close');
 
       expect(response).toContain('200 OK');
+      expect(response.toLowerCase()).not.toContain('x-clodex-effort-resolution');
       expect(receivedPath).toBe('/v1/messages?beta=true');
       expect(receivedAuth).toBe('Bearer subscription-oauth-token');
       expect(receivedBody.equals(body)).toBe(true);
@@ -639,6 +641,123 @@ describe('selective HTTP proxy', () => {
       }));
     } finally {
       await proxy.close();
+    }
+  }, 20_000);
+
+  it('applies the configured effort policy through the real MITM inner adapter', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let upstreamBody: Record<string, unknown> | undefined;
+    const upstream = http.createServer(async (req, res) => {
+      const chunks: Buffer[] = [];
+      req.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      await once(req, 'end');
+      upstreamBody = JSON.parse(Buffer.concat(chunks).toString()) as Record<string, unknown>;
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Connection': 'close' });
+      res.end(JSON.stringify({
+        id: 'msg_qwen',
+        type: 'message',
+        role: 'assistant',
+        model: 'qwen3.6-plus',
+        content: [],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }));
+    });
+    const upstreamPort = await listen(upstream);
+    const route = {
+      aliasId: 'clodex:opencode-go:qwen3.6-plus',
+      realModelId: 'qwen3.6-plus',
+      displayName: 'Qwen 3.6 Plus (OpenCode Go)',
+      upstreamUrl: `http://127.0.0.1:${upstreamPort}`,
+      apiKey: '',
+      authType: 'none' as const,
+      modelFormat: 'anthropic' as const,
+      npm: '@ai-sdk/anthropic',
+      providerId: 'opencode-go',
+      compatibility: {
+        anthropicThinkingBudgetMap: { high: 16_000, max: 31_999 },
+      },
+    };
+    const proxy = await startHttpProxy({
+      routes: [route],
+      unsupportedEffortPolicy: 'up',
+    });
+
+    try {
+      const response = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/v1/messages',
+        JSON.stringify({
+          model: route.aliasId,
+          output_config: { effort: 'xhigh', extra: true },
+          messages: [{ role: 'user', content: 'round through both proxy layers' }],
+        }),
+      );
+
+      expect(response).toContain('200 OK');
+      expect(response.toLowerCase()).toContain('x-clodex-effort-resolution:');
+      expect(response).toContain('resolved=max');
+      expect(upstreamBody).toMatchObject({
+        model: 'qwen3.6-plus',
+        output_config: { extra: true },
+        thinking: { type: 'enabled', budget_tokens: 31_999 },
+      });
+      expect(stderr).toHaveBeenCalledTimes(1);
+    } finally {
+      stderr.mockRestore();
+      await proxy.close();
+      await new Promise<void>(resolve => upstream.close(() => resolve()));
+    }
+  }, 20_000);
+
+  it('returns an exact-policy 400 through the real MITM inner adapter without dispatch', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    let upstreamRequests = 0;
+    const upstream = http.createServer((req, res) => {
+      upstreamRequests += 1;
+      req.resume();
+      res.end('{"unexpected":true}');
+    });
+    const upstreamPort = await listen(upstream);
+    const route = {
+      aliasId: 'clodex:opencode-go:qwen3.6-plus',
+      realModelId: 'qwen3.6-plus',
+      displayName: 'Qwen 3.6 Plus (OpenCode Go)',
+      upstreamUrl: `http://127.0.0.1:${upstreamPort}`,
+      apiKey: '',
+      authType: 'none' as const,
+      modelFormat: 'anthropic' as const,
+      npm: '@ai-sdk/anthropic',
+      providerId: 'opencode-go',
+      compatibility: {
+        anthropicThinkingBudgetMap: { high: 16_000, max: 31_999 },
+      },
+    };
+    const proxy = await startHttpProxy({
+      routes: [route],
+      unsupportedEffortPolicy: 'exact',
+    });
+
+    try {
+      const response = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/v1/messages',
+        JSON.stringify({
+          model: route.aliasId,
+          output_config: { effort: 'xhigh' },
+          messages: [{ role: 'user', content: 'reject before dispatch' }],
+        }),
+      );
+
+      expect(response).toContain('400 Bad Request');
+      expect(response).toContain('unsupported');
+      expect(upstreamRequests).toBe(0);
+    } finally {
+      await proxy.close();
+      await new Promise<void>(resolve => upstream.close(() => resolve()));
     }
   }, 20_000);
 

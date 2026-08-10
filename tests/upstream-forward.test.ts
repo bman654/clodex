@@ -7,6 +7,7 @@ import {
   anthropicSseModelRewrite,
   relayAnthropicMessages,
 } from '../src/upstream-forward.js';
+import { ANTHROPIC_X_API_KEY_ONLY_AUTH_MODE } from '../src/anthropic-auth-mode.js';
 
 describe('anthropicUpstreamHeaders', () => {
   it('includes bearer and x-api-key', () => {
@@ -15,6 +16,29 @@ describe('anthropicUpstreamHeaders', () => {
       'x-api-key': 'secret-key',
       'anthropic-version': '2023-06-01',
     });
+  });
+
+  it('applies x-api-key-only mode to API keys without changing OAuth or anonymous auth', () => {
+    const apiHeaders = anthropicUpstreamHeaders(
+      'secret-key', false, undefined, 'api', undefined, undefined, false, false,
+      ANTHROPIC_X_API_KEY_ONLY_AUTH_MODE,
+    );
+    expect(apiHeaders['x-api-key']).toBe('secret-key');
+    expect(apiHeaders).not.toHaveProperty('Authorization');
+
+    const oauthHeaders = anthropicUpstreamHeaders(
+      'oauth-token', false, undefined, 'oauth', undefined, undefined, false, false,
+      ANTHROPIC_X_API_KEY_ONLY_AUTH_MODE,
+    );
+    expect(oauthHeaders.Authorization).toBe('Bearer oauth-token');
+    expect(oauthHeaders).not.toHaveProperty('x-api-key');
+
+    const anonymousHeaders = anthropicUpstreamHeaders(
+      '', false, undefined, 'none', undefined, undefined, false, false,
+      ANTHROPIC_X_API_KEY_ONLY_AUTH_MODE,
+    );
+    expect(anonymousHeaders).not.toHaveProperty('Authorization');
+    expect(anonymousHeaders).not.toHaveProperty('x-api-key');
   });
 
   it('adds stream accept header when requested', () => {
@@ -274,6 +298,40 @@ describe('relayAnthropicMessages responseModelOverride', () => {
       {},
     );
     expect(res.body()).toBe(raw);
+  });
+
+  it('preserves bounded retry and safe Anthropic diagnostics on upstream errors', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ type: 'error', error: { type: 'rate_limit_error' } }),
+      {
+        status: 429,
+        headers: {
+          'Content-Type': 'application/json',
+          'Retry-After': '17',
+          'Request-Id': 'req_upstream_1',
+          'Anthropic-Ratelimit-Tokens-Remaining': '0',
+          'X-Ratelimit-Limit-Requests': '10',
+          'Set-Cookie': 'must-not-relay=secret',
+        },
+      },
+    )));
+    const res = makeRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'claude-opus-4-6' },
+      'key',
+      false,
+    );
+
+    expect(res.status()).toBe(429);
+    expect(res.headers()).toMatchObject({
+      'retry-after': '17',
+      'request-id': 'req_upstream_1',
+      'anthropic-ratelimit-tokens-remaining': '0',
+      'x-ratelimit-limit-requests': '10',
+    });
+    expect(res.headers()).not.toHaveProperty('set-cookie');
   });
 });
 

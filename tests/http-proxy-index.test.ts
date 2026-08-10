@@ -123,6 +123,7 @@ describe('HTTP proxy startup model list', () => {
       routes: [],
       modelAliases: [],
       inferenceLogPath: '/tmp/inference.jsonl',
+      unsupportedEffortPolicy: 'provider-default',
     });
     expect(options.reservedModelIds).toHaveLength(4);
     expect(new Set(options.reservedModelIds)).toEqual(
@@ -143,6 +144,7 @@ describe('HTTP proxy startup model list', () => {
       unsupported: [],
       unavailableAliases: [],
       favoriteCount: 1,
+      effortPolicy: 'down',
     };
 
     const options = buildConfiguredHttpProxyOptions(
@@ -155,6 +157,7 @@ describe('HTTP proxy startup model list', () => {
     expect(new Set(options.reservedModelIds)).toEqual(
       new Set(['luna', 'LuNa', 'LUNA']),
     );
+    expect(options.unsupportedEffortPolicy).toBe('down');
   });
 
   it('preserves every exact source spelling when no favorites remain', async () => {

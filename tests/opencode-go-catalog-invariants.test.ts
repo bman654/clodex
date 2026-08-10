@@ -49,16 +49,38 @@ describe('opencode-go catalog invariants', () => {
     }
   });
 
-  it('no anthropic-format entry advertises an effort ladder it cannot send', () => {
-    // Effort reaches an upstream through effortProviderOptions and the
-    // thinkingFormat transform, both of which act on an
-    // OpenAiCompatibleRequestBody. A passthrough Messages body is forwarded
-    // untouched, so a graded effort on this route can never reach the wire.
+  it('Anthropic-format effort ladders are backed by exact positive Messages budgets', () => {
     for (const model of models.filter(entry => entry.modelFormat === 'anthropic')) {
-      expect(model.compatibility?.supportsReasoningEffort, model.id).toBe(false);
+      const budgets = model.compatibility?.anthropicThinkingBudgetMap ?? {};
+      if (Object.keys(budgets).length === 0) {
+        expect(model.compatibility?.supportsReasoningEffort, model.id).toBe(false);
+      } else {
+        expect(model.compatibility?.supportsReasoningEffort, model.id).toBeUndefined();
+      }
+      for (const [level, budget] of Object.entries(
+        budgets,
+      )) {
+        expect(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'], model.id)
+          .toContain(level);
+        expect(Number.isInteger(budget), `${model.id}.${level}`).toBe(true);
+        expect(budget, `${model.id}.${level}`).toBeGreaterThan(0);
+      }
       // The same route cannot answer count_tokens upstream either.
       expect(model.compatibility?.supportsCountTokens, model.id).toBe(false);
     }
+  });
+
+  it('pins the reviewed Qwen Messages budget ladders exactly', () => {
+    const expected = new Map([
+      ['qwen3.6-plus', { high: 16_000, max: 31_999 }],
+      ['qwen3.7-max', { high: 16_000, max: 31_999 }],
+      ['qwen3.7-plus', { high: 16_000, max: 31_999 }],
+      ['qwen3.8-max', { high: 16_000, max: 31_999 }],
+    ]);
+    const actual = new Map(models
+      .filter(model => model.compatibility?.anthropicThinkingBudgetMap !== undefined)
+      .map(model => [model.id, model.compatibility!.anthropicThinkingBudgetMap!]));
+    expect(actual).toEqual(expected);
   });
 
   it('no entry maps an effort level to a value outside its own ladder', () => {

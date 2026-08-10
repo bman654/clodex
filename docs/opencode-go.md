@@ -17,6 +17,20 @@ The provider uses one credential with two upstream wire protocols:
 - Anthropic Messages models are passed through to `https://opencode.ai/zen/go/v1/messages`.
 - OpenAI Chat Completions models are translated through the OpenAI-compatible SDK at `https://opencode.ai/zen/go/v1/chat/completions`.
 
+OpenCode CLI variants are exact, opt-in request overlays. Clodex exposes those
+exact ladders in a patched Claude picker and applies the global setting from
+`clodex models --effort-policy <provider-default|up|down|exact>` when a worker
+requests a level the target lacks. Aliases inherit the resolved target's ladder.
+The default policy omits an unsupported effort; omitted client effort is never
+turned into a variant.
+
+Four Messages models have a reviewed thinking-budget mapping derived from the
+committed CLI snapshot: `qwen3.6-plus`, `qwen3.7-max`, `qwen3.7-plus`, and
+`qwen3.8-max`. Each maps `high` to 16,000 tokens and `max` to 31,999 tokens.
+Clodex emits that `thinking` object only for an explicit exact/rounded effort;
+it does not inject one when effort is omitted. A new or changed enabled-budget
+variant makes catalog generation fail until the mapping is reviewed.
+
 The selective proxy diverts only explicit `clodex:opencode-go:...` model ids or saved aliases. Ordinary Claude model traffic remains on Claude Code's native Anthropic connection.
 
 ## Supported transport scope
@@ -134,4 +148,4 @@ pnpm update:opencode-go --check
 
 The canonical resolved-model digest is computed as a compact JSON array with models sorted by id, object keys recursively sorted, and one trailing newline. The v1.18.15 CLI stream was already id-sorted, so its exact equivalent was `jq -s -cS . objects.jsonstream`; for an unordered future stream, use `jq -s -cS 'sort_by(.id)' objects.jsonstream`.
 
-Review the source snapshot and generated catalog together before committing. The importer accepts only the explicit non-secret resolver schema, requires empty `headers` and `options`, and fails on unknown fields, unsafe URLs, inactive models, malformed numeric data, or unsupported variant shapes. In particular, a model changing among Anthropic Messages, Chat Completions, and Responses is a routing change rather than a cosmetic refresh. OpenCode variants whose request shape Clodex cannot faithfully express remain preserved in the source snapshot; the generator does not invent a runtime transform for them. CLI variants are opt-in overlays, so their presence never becomes a default effort when the client omitted an effort control.
+Review the source snapshot and generated catalog together before committing. The importer accepts only the explicit non-secret resolver schema, requires empty `headers` and `options`, and fails on unknown fields, unsafe URLs, inactive models, malformed numeric data, or unsupported variant shapes. In particular, a model changing among Anthropic Messages, Chat Completions, and Responses is a routing change rather than a cosmetic refresh. The generator maps exact `reasoningEffort` variants and the four reviewed Qwen Messages budget ladders above. Other request shapes remain provenance-only rather than becoming guessed transforms. CLI variants are opt-in overlays, so their presence never becomes a default effort when the client omitted an effort control.

@@ -53,6 +53,11 @@ describe('app paths', () => {
 });
 
 describe('dotfolder config', () => {
+  it('defaults the global unsupported-effort policy without writing config', () => {
+    expect(loadPreferences().effortPolicy).toBe('provider-default');
+    expect(existsSync(getConfigPath())).toBe(false);
+  });
+
   it('writes preferences to config.json in the app home', () => {
     savePreferences({ lastProvider: 'openai-oauth', lastModel: 'gpt-5.6-sol' });
 
@@ -87,6 +92,27 @@ describe('dotfolder config', () => {
 
     savePreferences({ localPatchesEnabled: false });
     expect(loadPreferences().localPatchesEnabled).toBe(false);
+  });
+
+  it('persists the global unsupported-effort policy', () => {
+    savePreferences({ effortPolicy: 'up' });
+
+    expect(loadPreferences().effortPolicy).toBe('up');
+    expect(JSON.parse(readFileSync(getConfigPath(), 'utf8')).effortPolicy).toBe('up');
+
+    savePreferences({ effortPolicy: 'exact' });
+    expect(loadPreferences().effortPolicy).toBe('exact');
+  });
+
+  it('falls back safely when the persisted unsupported-effort policy is malformed', () => {
+    savePreferences({ lastProvider: 'openai' });
+    for (const effortPolicy of ['nearest', 42, null, { direction: 'up' }]) {
+      const payload = JSON.stringify({ effortPolicy });
+      writeFileSync(getConfigPath(), payload);
+
+      expect(loadPreferences().effortPolicy).toBe('provider-default');
+      expect(readFileSync(getConfigPath(), 'utf8')).toBe(payload);
+    }
   });
 
   it('loads legacy aliases without mutating or filtering their stored form', () => {

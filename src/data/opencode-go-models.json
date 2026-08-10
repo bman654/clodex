@@ -376,7 +376,11 @@
       "image"
     ],
     "compatibility": {
-      "supportsReasoningEffort": false,
+      "anthropicThinkingBudgetMap": {
+        "high": 16000,
+        "max": 31999
+      },
+      "reasoningEffortDefault": null,
       "supportsCountTokens": false
     },
     "upstreamModelId": "qwen3.6-plus",
@@ -401,7 +405,11 @@
       "text"
     ],
     "compatibility": {
-      "supportsReasoningEffort": false,
+      "anthropicThinkingBudgetMap": {
+        "high": 16000,
+        "max": 31999
+      },
+      "reasoningEffortDefault": null,
       "supportsCountTokens": false
     },
     "upstreamModelId": "qwen3.7-max",
@@ -427,7 +435,11 @@
       "image"
     ],
     "compatibility": {
-      "supportsReasoningEffort": false,
+      "anthropicThinkingBudgetMap": {
+        "high": 16000,
+        "max": 31999
+      },
+      "reasoningEffortDefault": null,
       "supportsCountTokens": false
     },
     "upstreamModelId": "qwen3.7-plus",
@@ -453,7 +465,11 @@
       "image"
     ],
     "compatibility": {
-      "supportsReasoningEffort": false,
+      "anthropicThinkingBudgetMap": {
+        "high": 16000,
+        "max": 31999
+      },
+      "reasoningEffortDefault": null,
       "supportsCountTokens": false
     },
     "upstreamModelId": "qwen3.8-max",

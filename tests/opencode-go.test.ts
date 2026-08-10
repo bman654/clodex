@@ -94,13 +94,42 @@ describe('OpenCode Go catalog', () => {
     expect(byId.get('qwen3.6-plus')).toMatchObject({
       modelFormat: 'anthropic',
       npm: '@ai-sdk/anthropic',
-      compatibility: { supportsReasoningEffort: false, supportsCountTokens: false },
+      compatibility: {
+        anthropicThinkingBudgetMap: { high: 16_000, max: 31_999 },
+        reasoningEffortDefault: null,
+        supportsCountTokens: false,
+      },
     });
     expect(byId.get('minimax-m2.7')?.modelFormat).toBe('anthropic');
     expect(byId.get('kimi-k2.6')?.compatibility?.supportsReasoningEffort).toBe(false);
     expect(byId.get('kimi-k2.7-code')?.compatibility?.supportsTemperature).toBe(false);
     expect(byId.get('kimi-k3')?.compatibility?.supportsTemperature).toBe(false);
     expect(byId.get('deepseek-v4-pro')?.compatibility?.supportsTemperature).toBeUndefined();
+  });
+
+  it('advertises exact opt-in Qwen Messages budgets without inventing a default', () => {
+    const byId = new Map(buildOpenCodeGoModels().map(model => [model.id, model]));
+    for (const id of ['qwen3.6-plus', 'qwen3.7-max', 'qwen3.7-plus', 'qwen3.8-max']) {
+      const model = byId.get(id)!;
+      const metadata = {
+        providerId: 'opencode-go',
+        reasoning: model.reasoning,
+        compatibility: model.compatibility,
+      };
+      expect(getReasoningCapabilities(model.npm!, id, metadata)).toMatchObject({
+        levels: ['high', 'max'],
+        defaultLevel: '',
+        mode: 'controllable',
+        wireFormat: { kind: 'anthropic-thinking' },
+      });
+      expect(effortProviderOptions(model.npm!, 'high', id, metadata)).toEqual({
+        anthropic: { thinking: { type: 'enabled', budgetTokens: 16_000 } },
+      });
+      expect(effortProviderOptions(model.npm!, 'max', id, metadata)).toEqual({
+        anthropic: { thinking: { type: 'enabled', budgetTokens: 31_999 } },
+      });
+      expect(effortProviderOptions(model.npm!, undefined, id, metadata)).toBeUndefined();
+    }
   });
 
   it('keeps CLI effort variants opt-in instead of inventing sparse defaults', () => {

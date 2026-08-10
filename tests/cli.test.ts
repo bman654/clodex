@@ -165,7 +165,31 @@ describe('parseArgs', () => {
       favoritesAlias: 'sol=clodex:openai-oauth:gpt-5.6-sol',
     });
     expect(parseArgs(['models', '--unalias', 'sol'])).toMatchObject({ favoritesUnalias: 'sol' });
+    for (const effortPolicy of ['provider-default', 'up', 'down', 'exact'] as const) {
+      expect(parseArgs(['models', '--effort-policy', effortPolicy])).toMatchObject({ effortPolicy });
+      expect(parseArgs(['favorites', `--effort-policy=${effortPolicy}`])).toMatchObject({ effortPolicy });
+    }
+    expect(parseArgs(['models', '--effort-policy'])).toMatchObject({
+      error: 'Missing value for --effort-policy',
+    });
+    expect(parseArgs(['models', '--effort-policy', 'nearest'])).toMatchObject({
+      error: '--effort-policy must be one of: provider-default, up, down, exact',
+    });
     expect(parseArgs(['models', '--agy'])).toMatchObject({ error: 'Unknown models option: --agy' });
+  });
+
+  it('keeps an effort-policy change separate from other models operations', () => {
+    const conflict = '--effort-policy cannot be combined with --list, --alias, or --unalias';
+    expect(parseArgs(['models', '--effort-policy', 'up', '--list'])).toMatchObject({ error: conflict });
+    expect(parseArgs(['models', '--list', '--effort-policy=down'])).toMatchObject({ error: conflict });
+    expect(parseArgs([
+      'models',
+      '--alias',
+      'sol=clodex:openai-oauth:gpt-5.6-sol',
+      '--effort-policy',
+      'exact',
+    ])).toMatchObject({ error: conflict });
+    expect(parseArgs(['models', '--effort-policy=up', '--unalias', 'sol'])).toMatchObject({ error: conflict });
   });
 
   it('parses the patch command', () => {
@@ -205,7 +229,7 @@ describe('parseArgs', () => {
 });
 
 describe('Anthropic endpoint routing', () => {
-  it('proxies a generated OpenCode Go Messages row that requires local token counting', () => {
+  it('keeps every Messages row behind the local effort-policy boundary', () => {
     const qwen = buildOpenCodeGoModels().find(model => model.id === 'qwen3.6-plus');
     if (!qwen) throw new Error('missing qwen3.6-plus fixture');
 
@@ -223,8 +247,12 @@ describe('Anthropic endpoint routing', () => {
       compatibility: undefined,
     };
     const directProvider = { id: 'custom', authType: 'api' as const };
-    expect(requiresAnthropicProxy(directModel, directProvider)).toBe(false);
-    expect(shouldDisableExperimentalAnthropicBetasInChild(directModel, directProvider)).toBe(true);
+    expect(requiresAnthropicProxy(directModel, directProvider)).toBe(true);
+    expect(shouldDisableExperimentalAnthropicBetasInChild(directModel, directProvider)).toBe(false);
+    expect(describeSingleModelTransport(directModel, directProvider)).toMatchObject({
+      formatDescription: 'via local Anthropic proxy',
+      endpointLabel: 'Upstream:',
+    });
 
     const headerProvider = {
       ...directProvider,
@@ -298,6 +326,9 @@ describe('help text', () => {
     expect(patchHelpText()).toContain('--disable-local-patches');
     expect(patchHelpText()).toContain('local-patches.mjs');
     expect(patchHelpText()).toContain('executes trusted JavaScript');
+    expect(modelsHelpText()).toContain('--effort-policy <provider-default|up|down|exact>');
+    expect(modelsHelpText()).toContain('startup snapshot');
+    expect(modelsHelpText()).toContain('restart');
   });
 
   it('no longer mentions the removed --http-proxy alias', () => {

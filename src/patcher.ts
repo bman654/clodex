@@ -164,7 +164,7 @@ export interface PatchModelMeta {
   displayName?: string;
   effort?: {
     levels: string[];
-    defaultLevel: string;
+    defaultLevel: string | null;
   };
 }
 
@@ -332,7 +332,7 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
         // Same label `clodex server` prints at startup and `models --list` shows.
         displayName: httpProxyDisplayName(model, provider.name),
         effort: effort.mode === 'controllable'
-          ? { levels: effort.levels, defaultLevel: effort.defaultLevel }
+          ? { levels: effort.levels, defaultLevel: effort.defaultLevel || null }
           : undefined,
       });
     }
@@ -604,6 +604,9 @@ function requiredEffortPatchFailures(results: PatchSiteResult[]): PatchSiteResul
       result.name.startsWith('PATCH 8a:')
       || result.name.startsWith('PATCH 8b:')
       || result.name.startsWith('PATCH 8c:')
+      || result.name.startsWith('PATCH 8d:')
+      || result.name.startsWith('PATCH 8e:')
+      || result.name.startsWith('PATCH 8f:')
       || result.name.startsWith('PATCH 9:')
     ),
   );
