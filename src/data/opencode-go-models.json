@@ -6,31 +6,31 @@
     "cost": {
       "input": 0.07,
       "output": 0.14,
-      "cache_read": 0.0014
+      "cache_read": 0.0014,
+      "cache_write": 0
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",
     "apiUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
+    "interleavedReasoningField": "reasoning_content",
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text"
     ],
     "compatibility": {
       "reasoningEffortMap": {
-        "minimal": null,
-        "low": null,
-        "medium": null,
+        "low": "low",
         "high": "high",
         "max": "max"
       },
+      "reasoningEffortDefault": null,
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens",
-      "requiresReasoningContentOnAssistantMessages": true,
-      "thinkingFormat": "deepseek"
+      "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "deepseek-v4-flash",
-    "family": "deepseek"
+    "family": "deepseek-flash"
   },
   {
     "id": "deepseek-v4-pro",
@@ -39,31 +39,30 @@
     "cost": {
       "input": 0.435,
       "output": 0.87,
-      "cache_read": 0.003625
+      "cache_read": 0.003625,
+      "cache_write": 0
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",
     "apiUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
+    "interleavedReasoningField": "reasoning_content",
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text"
     ],
     "compatibility": {
       "reasoningEffortMap": {
-        "minimal": null,
-        "low": null,
-        "medium": null,
         "high": "high",
         "max": "max"
       },
+      "reasoningEffortDefault": null,
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens",
-      "requiresReasoningContentOnAssistantMessages": true,
-      "thinkingFormat": "deepseek"
+      "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "deepseek-v4-pro",
-    "family": "deepseek"
+    "family": "deepseek-thinking"
   },
   {
     "id": "glm-5.1",
@@ -72,20 +71,23 @@
     "cost": {
       "input": 1.4,
       "output": 4.4,
-      "cache_read": 0.26
+      "cache_read": 0.26,
+      "cache_write": 0
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",
     "apiUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
+    "interleavedReasoningField": "reasoning_content",
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text"
     ],
     "compatibility": {
+      "supportsReasoningEffort": false,
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens",
-      "supportsReasoningEffort": false
+      "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "glm-5.1",
     "family": "glm"
@@ -97,25 +99,24 @@
     "cost": {
       "input": 1.4,
       "output": 4.4,
-      "cache_read": 0.26
+      "cache_read": 0.26,
+      "cache_write": 0
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",
     "apiUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
+    "interleavedReasoningField": "reasoning_content",
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text"
     ],
     "compatibility": {
       "reasoningEffortMap": {
-        "off": null,
-        "minimal": null,
-        "low": null,
-        "medium": null,
         "high": "high",
-        "xhigh": null,
         "max": "max"
       },
+      "reasoningEffortDefault": null,
       "supportsStore": false,
       "supportsDeveloperRole": false,
       "maxTokensField": "max_tokens"
@@ -124,72 +125,36 @@
     "family": "glm"
   },
   {
-    "id": "gpt-5.6-luna",
-    "name": "GPT-5.6 Luna (2x usage)",
-    "contextWindow": 1050000,
-    "cost": {
-      "input": 0.1,
-      "output": 0.6,
-      "cache_read": 0.01,
-      "cache_write": 0.125
-    },
-    "modelFormat": "openai",
-    "npm": "@ai-sdk/openai-compatible",
-    "apiUrl": "https://opencode.ai/zen/go/v1",
-    "reasoning": true,
-    "modalities": [
-      "text",
-      "image"
-    ],
-    "upstreamModelId": "gpt-5.6-luna",
-    "family": "gpt",
-    "compatibility": {
-      "reasoningEffortMap": {
-        "off": "none",
-        "minimal": null,
-        "low": "low",
-        "medium": "medium",
-        "high": "high",
-        "xhigh": "xhigh",
-        "max": "max"
-      },
-      "supportsStore": false,
-      "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens"
-    }
-  },
-  {
     "id": "hy3",
     "name": "Hy3",
     "contextWindow": 256000,
     "cost": {
       "input": 0.14,
       "output": 0.58,
-      "cache_read": 0.035
+      "cache_read": 0.035,
+      "cache_write": 0
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",
     "apiUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text"
     ],
     "compatibility": {
       "reasoningEffortMap": {
         "off": "none",
-        "minimal": null,
         "low": "low",
-        "medium": null,
-        "high": "high",
-        "xhigh": null,
-        "max": null
+        "high": "high"
       },
+      "reasoningEffortDefault": null,
       "supportsStore": false,
       "supportsDeveloperRole": false,
       "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "hy3",
-    "family": "hy3"
+    "family": "Hy"
   },
   {
     "id": "kimi-k2.6",
@@ -198,31 +163,27 @@
     "cost": {
       "input": 0.95,
       "output": 4,
-      "cache_read": 0.16
+      "cache_read": 0.16,
+      "cache_write": 0
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",
     "apiUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
+    "interleavedReasoningField": "reasoning_content",
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text",
       "image"
     ],
     "compatibility": {
-      "reasoningEffortMap": {
-        "minimal": null,
-        "low": null,
-        "medium": null
-      },
+      "supportsReasoningEffort": false,
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "thinkingFormat": "deepseek",
-      "supportsReasoningEffort": false,
-      "maxTokensField": "max_tokens",
-      "supportsLongCacheRetention": false
+      "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "kimi-k2.6",
-    "family": "kimi"
+    "family": "kimi-k2"
   },
   {
     "id": "kimi-k2.7-code",
@@ -231,24 +192,28 @@
     "cost": {
       "input": 0.95,
       "output": 4,
-      "cache_read": 0.19
+      "cache_read": 0.19,
+      "cache_write": 0
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",
     "apiUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
+    "interleavedReasoningField": "reasoning_content",
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text",
       "image"
     ],
     "compatibility": {
+      "supportsReasoningEffort": false,
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens",
-      "supportsReasoningEffort": false
+      "supportsTemperature": false,
+      "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "kimi-k2.7-code",
-    "family": "kimi"
+    "family": "kimi-k2"
   },
   {
     "id": "kimi-k3",
@@ -257,32 +222,31 @@
     "cost": {
       "input": 3,
       "output": 15,
-      "cache_read": 0.3
+      "cache_read": 0.3,
+      "cache_write": 0
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",
     "apiUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
+    "interleavedReasoningField": "reasoning_content",
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text",
       "image"
     ],
     "compatibility": {
       "reasoningEffortMap": {
-        "off": null,
-        "minimal": null,
-        "low": null,
-        "medium": null,
-        "high": null,
-        "xhigh": null,
         "max": "max"
       },
+      "reasoningEffortDefault": null,
       "supportsStore": false,
       "supportsDeveloperRole": false,
+      "supportsTemperature": false,
       "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "kimi-k3",
-    "family": "kimi"
+    "family": "kimi-k3"
   },
   {
     "id": "mimo-v2.5",
@@ -291,24 +255,27 @@
     "cost": {
       "input": 0.14,
       "output": 0.28,
-      "cache_read": 0.0028
+      "cache_read": 0.0028,
+      "cache_write": 0
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",
     "apiUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
+    "interleavedReasoningField": "reasoning_content",
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text",
       "image"
     ],
     "compatibility": {
+      "supportsReasoningEffort": false,
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens",
-      "supportsReasoningEffort": false
+      "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "mimo-v2.5",
-    "family": "mimo"
+    "family": "mimo-v2.5"
   },
   {
     "id": "mimo-v2.5-pro",
@@ -317,23 +284,26 @@
     "cost": {
       "input": 0.435,
       "output": 0.87,
-      "cache_read": 0.003625
+      "cache_read": 0.003625,
+      "cache_write": 0
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",
     "apiUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
+    "interleavedReasoningField": "reasoning_content",
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text"
     ],
     "compatibility": {
+      "supportsReasoningEffort": false,
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens",
-      "supportsReasoningEffort": false
+      "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "mimo-v2.5-pro",
-    "family": "mimo"
+    "family": "mimo-v2.5-pro"
   },
   {
     "id": "minimax-m2.7",
@@ -342,23 +312,23 @@
     "cost": {
       "input": 0.3,
       "output": 1.2,
-      "cache_read": 0.06
+      "cache_read": 0.06,
+      "cache_write": 0
     },
-    "modelFormat": "openai",
-    "npm": "@ai-sdk/openai-compatible",
-    "apiUrl": "https://opencode.ai/zen/go/v1",
+    "modelFormat": "anthropic",
+    "npm": "@ai-sdk/anthropic",
+    "apiUrl": "https://opencode.ai/zen/go",
     "reasoning": true,
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text"
     ],
     "compatibility": {
-      "supportsStore": false,
-      "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens",
-      "supportsReasoningEffort": false
+      "supportsReasoningEffort": false,
+      "supportsCountTokens": false
     },
     "upstreamModelId": "minimax-m2.7",
-    "family": "minimax"
+    "family": "minimax-m2.7"
   },
   {
     "id": "minimax-m3",
@@ -367,22 +337,24 @@
     "cost": {
       "input": 0.3,
       "output": 1.2,
-      "cache_read": 0.06
+      "cache_read": 0.06,
+      "cache_write": 0
     },
     "modelFormat": "anthropic",
     "npm": "@ai-sdk/anthropic",
     "apiUrl": "https://opencode.ai/zen/go",
     "reasoning": true,
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text",
       "image"
     ],
-    "upstreamModelId": "minimax-m3",
-    "family": "minimax",
     "compatibility": {
-      "supportsCountTokens": false,
-      "supportsReasoningEffort": false
-    }
+      "supportsReasoningEffort": false,
+      "supportsCountTokens": false
+    },
+    "upstreamModelId": "minimax-m3",
+    "family": "minimax-m3"
   },
   {
     "id": "qwen3.6-plus",
@@ -394,28 +366,18 @@
       "cache_read": 0.05,
       "cache_write": 0.625
     },
-    "modelFormat": "openai",
-    "npm": "@ai-sdk/openai-compatible",
-    "apiUrl": "https://opencode.ai/zen/go/v1",
+    "modelFormat": "anthropic",
+    "npm": "@ai-sdk/anthropic",
+    "apiUrl": "https://opencode.ai/zen/go",
     "reasoning": true,
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text",
       "image"
     ],
     "compatibility": {
-      "supportsStore": false,
-      "supportsDeveloperRole": false,
-      "thinkingFormat": "qwen",
-      "maxTokensField": "max_tokens",
-      "reasoningEffortMap": {
-        "low": "low",
-        "medium": "medium",
-        "high": "high",
-        "xhigh": "xhigh",
-        "max": "max",
-        "minimal": null,
-        "off": null
-      }
+      "supportsReasoningEffort": false,
+      "supportsCountTokens": false
     },
     "upstreamModelId": "qwen3.6-plus",
     "family": "qwen3.6"
@@ -434,15 +396,16 @@
     "npm": "@ai-sdk/anthropic",
     "apiUrl": "https://opencode.ai/zen/go",
     "reasoning": true,
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text"
     ],
-    "upstreamModelId": "qwen3.7-max",
-    "family": "qwen3.7",
     "compatibility": {
-      "supportsCountTokens": false,
-      "supportsReasoningEffort": false
-    }
+      "supportsReasoningEffort": false,
+      "supportsCountTokens": false
+    },
+    "upstreamModelId": "qwen3.7-max",
+    "family": "qwen3.7-max"
   },
   {
     "id": "qwen3.7-plus",
@@ -458,16 +421,17 @@
     "npm": "@ai-sdk/anthropic",
     "apiUrl": "https://opencode.ai/zen/go",
     "reasoning": true,
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text",
       "image"
     ],
-    "upstreamModelId": "qwen3.7-plus",
-    "family": "qwen3.7",
     "compatibility": {
-      "supportsCountTokens": false,
-      "supportsReasoningEffort": false
-    }
+      "supportsReasoningEffort": false,
+      "supportsCountTokens": false
+    },
+    "upstreamModelId": "qwen3.7-plus",
+    "family": "qwen3.7-plus"
   },
   {
     "id": "qwen3.8-max",
@@ -483,15 +447,16 @@
     "npm": "@ai-sdk/anthropic",
     "apiUrl": "https://opencode.ai/zen/go",
     "reasoning": true,
+    "codingCapabilitiesAuthoritative": true,
     "modalities": [
       "text",
       "image"
     ],
-    "upstreamModelId": "qwen3.8-max",
-    "family": "qwen3.8",
     "compatibility": {
-      "supportsCountTokens": false,
-      "supportsReasoningEffort": false
-    }
+      "supportsReasoningEffort": false,
+      "supportsCountTokens": false
+    },
+    "upstreamModelId": "qwen3.8-max",
+    "family": "qwen3.8-max"
   }
 ]

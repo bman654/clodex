@@ -184,5 +184,49 @@ describe('provider-catalog-display', () => {
       expect(entries[0]?.name).toBe('Groq');
       expect(entries[0]?.inRegistry).toBe(true);
     });
+
+    it('counts only effective committed OpenCode Go cache membership', async () => {
+      const registry = emptyRegistry();
+      registry.providers.push({
+        id: 'opencode-go',
+        templateId: 'opencode-go',
+        name: 'OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:opencode-go',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+        addedAt: new Date().toISOString(),
+        modelsCache: {
+          fetchedAt: new Date().toISOString(),
+          models: [
+            { id: 'qwen3.6-plus', name: 'Qwen', upstreamModelId: 'qwen3.6-plus', modelFormat: 'openai' },
+            { id: 'gpt-5.6-luna', name: 'Luna', upstreamModelId: 'gpt-5.6-luna', modelFormat: 'openai' },
+            { id: 'unknown', name: 'Unknown', upstreamModelId: 'unknown', modelFormat: 'openai' },
+          ],
+        },
+      }, {
+        id: 'custom-go',
+        templateId: 'custom-openai',
+        name: 'Custom Go',
+        enabled: true,
+        authRef: 'keyring:provider:custom-go',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://example.test/v1' },
+        addedAt: new Date().toISOString(),
+        modelsCache: {
+          fetchedAt: new Date().toISOString(),
+          models: [
+            { id: 'qwen3.6-plus', name: 'Qwen', upstreamModelId: 'qwen3.6-plus', modelFormat: 'openai' },
+            { id: 'gpt-5.6-luna', name: 'Luna', upstreamModelId: 'gpt-5.6-luna', modelFormat: 'openai' },
+            { id: 'unknown', name: 'Unknown', upstreamModelId: 'unknown', modelFormat: 'openai' },
+          ],
+        },
+      });
+      withRegistryWriteLockSync(() => saveRegistry(registry));
+
+      const entries = await resolveProvidersForDisplay();
+      expect(entries.map(entry => [entry.id, entry.modelCount])).toEqual([
+        ['custom-go', 3],
+        ['opencode-go', 1],
+      ]);
+    });
   });
 });

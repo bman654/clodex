@@ -1,7 +1,19 @@
 // tests/cli.test.ts
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { parseArgs, rootHelpText, claudeHelpText, serverHelpText, modelsHelpText, patchHelpText, main } from '../src/cli.js';
+import {
+  parseArgs,
+  rootHelpText,
+  claudeHelpText,
+  serverHelpText,
+  modelsHelpText,
+  patchHelpText,
+  main,
+  requiresAnthropicProxy,
+  shouldDisableExperimentalAnthropicBetas,
+  describeSingleModelTransport,
+} from '../src/cli.js';
 import { VERSION } from '../src/constants.js';
+import { buildOpenCodeGoModels } from '../src/data/opencode-go-models.js';
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -188,6 +200,25 @@ describe('parseArgs', () => {
 
   it('rejects unknown root options', () => {
     expect(parseArgs(['--ai']).error).toBe('Unknown root option: --ai');
+  });
+});
+
+describe('Anthropic endpoint routing', () => {
+  it('proxies a generated OpenCode Go Messages row that requires local token counting', () => {
+    const qwen = buildOpenCodeGoModels().find(model => model.id === 'qwen3.6-plus');
+    if (!qwen) throw new Error('missing qwen3.6-plus fixture');
+
+    expect(requiresAnthropicProxy(qwen, { authType: 'api' })).toBe(true);
+    expect(shouldDisableExperimentalAnthropicBetas(qwen, { authType: 'api' })).toBe(true);
+    expect(describeSingleModelTransport(qwen, { authType: 'api' })).toMatchObject({
+      formatDescription: 'via local Anthropic proxy with count_tokens shim',
+      endpointLabel: 'Upstream:',
+    });
+    expect(requiresAnthropicProxy(
+      { modelFormat: 'anthropic', compatibility: undefined },
+      { authType: 'api' },
+    )).toBe(false);
+    expect(shouldDisableExperimentalAnthropicBetas(qwen, { authType: 'oauth' })).toBe(false);
   });
 });
 

@@ -74,4 +74,26 @@ describe('transformOpenAiCompatibleRequestBody', () => {
       { maxTokensField: 'max_completion_tokens' },
     )).toEqual({ max_completion_tokens: 2048 });
   });
+
+  it('strips temperature only when authoritative compatibility says it is unsupported', () => {
+    expect(transformOpenAiCompatibleRequestBody(
+      { temperature: 0.7, messages: [] },
+      { supportsTemperature: false },
+    )).toEqual({ messages: [] });
+    expect(transformOpenAiCompatibleRequestBody(
+      { temperature: 0.7, messages: [] },
+      {},
+    )).toEqual({ temperature: 0.7, messages: [] });
+  });
+
+  it('strips reasoning_effort when authoritative compatibility says it is unsupported', () => {
+    expect(transformOpenAiCompatibleRequestBody(
+      { reasoning_effort: 'max', messages: [] },
+      { supportsReasoningEffort: false },
+    )).toEqual({ messages: [] });
+    expect(transformOpenAiCompatibleRequestBody(
+      { reasoning_effort: 'max', messages: [] },
+      {},
+    )).toEqual({ reasoning_effort: 'max', messages: [] });
+  });
 });

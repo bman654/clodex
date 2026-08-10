@@ -139,7 +139,7 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     // api-list validation cannot catch a bad key; probe before persisting.
     verifyCredential: verifyOpenCodeGoCredential,
     // A getter, not a value: PROVIDER_TEMPLATES is a module-level literal, so
-    // an eager call would deep-clone 17 catalog entries on every single CLI
+    // an eager call would deep-clone the whole catalog on every single CLI
     // invocation — `clodex --help` included — for a list most commands never
     // read. Still returns an isolated copy per access, as callers expect.
     get staticModels() { return buildOpenCodeGoModels(); },

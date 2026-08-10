@@ -7,6 +7,7 @@ import { isAnonymousProvider } from './registry/materialize.js';
 import { getTemplateById } from './provider-templates.js';
 import type { LocalProvider } from './types.js';
 import type { ServerModelInfo } from './server/models.js';
+import { effectiveProviderCachedModels } from './data/opencode-go-models.js';
 
 export async function fetchProviderCatalog(
   opts?: { agent?: CompatibilityAgent },
@@ -84,7 +85,7 @@ export async function resolveProvidersForDisplay(): Promise<ProviderDisplayEntry
     entries.push({
       id: provider.id,
       name: provider.name,
-      modelCount: provider.modelsCache?.models.length ?? 0,
+      modelCount: effectiveProviderCachedModels(provider).length,
       enabled: provider.enabled,
       authLabel: formatRegistryAuthLabel(provider),
       inRegistry: true,
@@ -119,6 +120,7 @@ export function localProvidersToServerModels(localProviders: LocalProvider[]): S
       contextWindow: model.contextWindow,
       supportedParameters: model.supportedParameters,
       reasoning: model.reasoning,
+      codingCapabilitiesAuthoritative: model.codingCapabilitiesAuthoritative,
       interleavedReasoningField: model.interleavedReasoningField,
       useResponsesLite: model.useResponsesLite,
       preferWebSockets: model.preferWebSockets,

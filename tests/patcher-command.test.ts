@@ -112,6 +112,70 @@ function saveFavorites(): void {
   }));
 }
 
+function saveDroppedOpenCodeFavorite(): void {
+  mkdirSync(clodexHome, { recursive: true });
+  writeFileSync(join(clodexHome, 'config.json'), JSON.stringify({
+    favoriteModels: [{ providerId: 'opencode-go', modelId: 'gpt-5.6-luna' }],
+    modelAliases: [{ name: 'luna', providerId: 'opencode-go', modelId: 'gpt-5.6-luna' }],
+  }));
+  writeFileSync(join(clodexHome, 'providers.json'), JSON.stringify({
+    schemaVersion: 1,
+    providers: [{
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      enabled: true,
+      authRef: 'keyring:provider:opencode-go',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+      modelsCache: {
+        fetchedAt: '2026-08-09T00:00:00.000Z',
+        models: [{
+          id: 'gpt-5.6-luna',
+          upstreamModelId: 'gpt-5.6-luna',
+          name: 'GPT-5.6 Luna',
+          modelFormat: 'openai',
+        }],
+      },
+      addedAt: '2026-08-09T00:00:00.000Z',
+    }],
+  }));
+}
+
+function saveValidAndDroppedFavorites(): void {
+  mkdirSync(clodexHome, { recursive: true });
+  writeFileSync(join(clodexHome, 'config.json'), JSON.stringify({
+    favoriteModels: [
+      { providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+      { providerId: 'opencode-go', modelId: 'gpt-5.6-luna' },
+    ],
+    modelAliases: [
+      { name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+      { name: 'luna', providerId: 'opencode-go', modelId: 'gpt-5.6-luna' },
+    ],
+  }));
+  writeFileSync(join(clodexHome, 'providers.json'), JSON.stringify({
+    schemaVersion: 1,
+    providers: [{
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      enabled: true,
+      authRef: 'keyring:provider:opencode-go',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+      modelsCache: {
+        fetchedAt: '2026-08-09T00:00:00.000Z',
+        models: [{
+          id: 'gpt-5.6-luna',
+          upstreamModelId: 'gpt-5.6-luna',
+          name: 'GPT-5.6 Luna',
+          modelFormat: 'openai',
+        }],
+      },
+      addedAt: '2026-08-09T00:00:00.000Z',
+    }],
+  }));
+}
+
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'clodex-patch-e2e-'));
   clodexHome = join(home, '.clodex');
@@ -211,6 +275,69 @@ describe('runPatchCommand version resolution', () => {
 
     expect(stderr.mock.calls.join('\n')).toMatch(/Could not determine the version/);
     expect(readPatchManifest()).toBeNull();
+  });
+
+  it('names dropped favorites and aliases and directs explicit patch users to restore', async () => {
+    installClaude('2.1.220');
+    saveDroppedOpenCodeFavorite();
+
+    expect(await runPatchCommand({})).toBe(1);
+
+    expect(logs.join('\n')).toContain('Saved model alias "luna" was not patched');
+    expect(logs.join('\n')).toContain('saved favorite target is no longer exposed');
+    expect(logs.join('\n')).toContain('clodex:opencode-go:gpt-5.6-luna');
+    expect(logs.join('\n')).toContain('clodex patch --restore');
+    expect(readPatchManifest()).toBeNull();
+  });
+
+  it('warns launch users to restore when only removed favorites remain in an old patch', async () => {
+    const real = installClaude('2.1.220');
+    expect(await runPatchCommand({})).toBe(0);
+    expect(readPatchManifest()).not.toBeNull();
+    const patchedBytes = readFileSync(real);
+    saveDroppedOpenCodeFavorite();
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(runLaunchPatchCheck({})).resolves.toBeUndefined();
+
+    const output = stderr.mock.calls.join('\n');
+    expect(output).toContain('clodex:opencode-go:gpt-5.6-luna');
+    expect(output).toContain('a previous clodex patch is recorded');
+    expect(output).toContain('if Claude Code still shows an old removed entry');
+    expect(output).toContain('clodex patch --restore');
+    expect(output).not.toContain('is still installed');
+    expect(readFileSync(real)).toEqual(patchedBytes);
+    expect(readPatchManifest()).not.toBeNull();
+  });
+
+  it('keeps agent stdout mode silent when only removed favorites remain in an old patch', async () => {
+    installClaude('2.1.220');
+    expect(await runPatchCommand({})).toBe(0);
+    saveDroppedOpenCodeFavorite();
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(runLaunchPatchCheck({ agentStdout: true })).resolves.toBeUndefined();
+
+    expect(stderr).not.toHaveBeenCalled();
+    expect(readPatchManifest()).not.toBeNull();
+  });
+
+  it('reports a newly dropped favorite even when the existing valid patch is current', async () => {
+    const real = installClaude('2.1.220');
+    expect(await runPatchCommand({})).toBe(0);
+    const patchedBytes = readFileSync(real);
+    const priorHash = readPatchManifest()?.configHash;
+    saveValidAndDroppedFavorites();
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(runLaunchPatchCheck({})).resolves.toBeUndefined();
+
+    const output = stderr.mock.calls.join('\n');
+    expect(output).toContain('clodex:opencode-go:gpt-5.6-luna');
+    expect(output).toContain('not included in the current patch configuration');
+    expect(output).not.toContain('remains in the old Claude Code patch');
+    expect(readFileSync(real)).toEqual(patchedBytes);
+    expect(readPatchManifest()?.configHash).toBe(priorHash);
   });
 });
 

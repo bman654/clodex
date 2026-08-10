@@ -8,6 +8,8 @@
 export interface ModelRuntimeCompatibility {
   /** Claude/Codex effort -> upstream reasoning_effort map. null disables that level. */
   reasoningEffortMap?: Record<string, string | null>;
+  /** Default effort for omitted client controls. null means variants are opt-in and no effort is injected. */
+  reasoningEffortDefault?: string | null;
   /** Explicitly enable or disable reasoning_effort for this model. */
   supportsReasoningEffort?: boolean;
   /** Additional request shape required when reasoning is enabled. */
@@ -18,6 +20,8 @@ export interface ModelRuntimeCompatibility {
   supportsStore?: boolean;
   /** Whether the upstream accepts Chat Completions `developer` messages. */
   supportsDeveloperRole?: boolean;
+  /** Whether the upstream accepts the sampling `temperature` field. */
+  supportsTemperature?: boolean;
   /** Output-token field accepted by the upstream Chat Completions endpoint. */
   maxTokensField?: 'max_tokens' | 'max_completion_tokens';
   /** Whether the upstream accepts long prompt-cache retention controls. */
@@ -100,6 +104,8 @@ export function transformOpenAiCompatibleRequestBody(
   const transformed = { ...body };
 
   if (compatibility.supportsStore === false) delete transformed.store;
+  if (compatibility.supportsTemperature === false) delete transformed.temperature;
+  if (compatibility.supportsReasoningEffort === false) delete transformed.reasoning_effort;
   if (compatibility.supportsLongCacheRetention === false) {
     delete transformed.prompt_cache_retention;
     delete transformed.promptCacheRetention;

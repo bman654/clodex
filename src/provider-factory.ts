@@ -655,6 +655,7 @@ function compatibilityExpressesReasoningIntent(
 ): boolean {
   return compatibility.supportsReasoningEffort !== undefined
     || compatibility.reasoningEffortMap !== undefined
+    || compatibility.reasoningEffortDefault !== undefined
     || compatibility.thinkingFormat !== undefined;
 }
 
@@ -695,9 +696,15 @@ function compatibilityReasoningCapabilities(
     }
 
     const preferredDefault = ['medium', 'high', 'max', 'low'].find(level => levels.includes(level));
+    const configuredDefault = compatibility.reasoningEffortDefault;
+    const defaultLevel = configuredDefault === null
+      ? ''
+      : configuredDefault !== undefined && levels.includes(configuredDefault)
+        ? configuredDefault
+        : preferredDefault ?? levels[0]!;
     return {
       levels,
-      defaultLevel: preferredDefault ?? levels[0]!,
+      defaultLevel,
       supportsSummaries: false,
       mode: 'controllable',
       source: 'provider-metadata',

@@ -33,6 +33,10 @@ export interface LocalProviderModel {
   supportedParameters?: string[];
   /** Broad model metadata: model can produce reasoning/thinking output. */
   reasoning?: boolean;
+  /** Provider-resolved coding capabilities are authoritative; do not replace or veto them with models.dev. */
+  codingCapabilitiesAuthoritative?: boolean;
+  /** This provider identity does not correspond to models.dev; skip its capability fallback/filter. */
+  ignoreModelsDevCapabilities?: boolean;
   /** Streaming/interleaved reasoning field name from metadata, e.g. reasoning_content. */
   interleavedReasoningField?: string;
   /** Backend capability: model requires the Responses-Lite request shape (x-openai-internal-codex-responses-lite). */

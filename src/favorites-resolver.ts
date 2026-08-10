@@ -45,7 +45,13 @@ export async function resolveFavorite(
   if (ctx.findLocalModel) {
     const found = ctx.findLocalModel(fav.providerId, fav.modelId);
     if (!found) return undefined;
-    if (ctx.agent && shouldHideModel({ providerId: fav.providerId, modelId: fav.modelId, agent: ctx.agent })) {
+    if (ctx.agent && shouldHideModel({
+      providerId: fav.providerId,
+      modelId: fav.modelId,
+      agent: ctx.agent,
+      codingCapabilitiesAuthoritative: found.model.codingCapabilitiesAuthoritative,
+      ignoreModelsDevCapabilities: found.model.ignoreModelsDevCapabilities,
+    })) {
       return undefined;
     }
     return {

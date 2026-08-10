@@ -18,7 +18,11 @@ import {
   type OpenAiRequest,
 } from '../openai-adapter.js';
 import { sendJson, readBody } from '../http-utils.js';
-import { relayAnthropicMessages, resolveOAuthRetryReplacement } from '../upstream-forward.js';
+import {
+  relayAnthropicMessages,
+  resolveOAuthRetryReplacement,
+  UpstreamUnreachableError,
+} from '../upstream-forward.js';
 import {
   anthropicPromptTooLongMessage,
   estimateAnthropicInputTokens,
@@ -60,6 +64,7 @@ import {
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
 import { listenTcpServer, tcpListenerUrlHost } from '../listener-ready.js';
+import { transformOpenAiCompatibleRequestBody } from '../model-runtime-compatibility.js';
 
 export interface ServerOptions {
   host: string;
@@ -243,6 +248,11 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse, options: 
       return;
     }
 
+    if (req.method === 'POST' && pathname === '/anthropic/v1/messages/count_tokens') {
+      await handleAnthropicCountTokens(req, res, options, plog);
+      return;
+    }
+
     if (req.method === 'POST' && pathname === '/openai/v1/chat/completions') {
       await handleOpenAIChatCompletions(req, res, options, modelCache, plog);
       return;
@@ -251,6 +261,80 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse, options: 
     sendJson(res, 404, { error: { message: 'Not found' } });
   } catch (err) {
     sendJson(res, 500, { error: { message: err instanceof Error ? err.message : String(err) } });
+  }
+}
+
+async function handleAnthropicCountTokens(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: ServerOptions,
+  plog: PLog,
+): Promise<void> {
+  const body = await readJson(req);
+  if (!body) {
+    sendJson(res, 400, { error: { message: 'Invalid JSON body' } });
+    return;
+  }
+
+  const model = lookupModel(res, options.catalog, body.model);
+  if (!model) return;
+
+  if (
+    model.modelFormat !== 'anthropic'
+    || model.compatibility?.supportsCountTokens === false
+  ) {
+    const inputTokens = estimateAnthropicInputTokens(body);
+    plog(() => `token-count: local estimate model=${body.model} input_tokens=${inputTokens}`);
+    res.setHeader('x-relay-token-count-source', 'local-estimate');
+    sendJson(res, 200, { input_tokens: inputTokens });
+    return;
+  }
+
+  if (model.baseUrl && !/^https?:\/\//i.test(model.baseUrl)) {
+    sendJson(res, 400, { error: { message: 'Invalid provider baseUrl: must be http:// or https://' } });
+    return;
+  }
+  if (!model.baseUrl) {
+    sendJson(res, 400, { error: { message: `Model ${model.id} has no Anthropic baseUrl configured` } });
+    return;
+  }
+
+  let apiKey: string;
+  try {
+    apiKey = await resolveModelApiKey(model, options.apiKey);
+  } catch (err) {
+    sendJson(res, 401, {
+      error: { message: err instanceof Error ? err.message : String(err) },
+    });
+    return;
+  }
+
+  const betaHeaderRaw = req.headers['anthropic-beta'];
+  const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
+  const authType = model.authType ?? 'api';
+  const refreshToken = authType === 'oauth' && model.providerId && model.authRef
+    ? (rejectedAccessToken: string) => resolveModelApiKey(
+        model,
+        options.apiKey,
+        rejectedAccessToken,
+      )
+    : undefined;
+  const targetUrl = `${model.baseUrl}/v1/messages/count_tokens`;
+  const forwardBody = { ...body, model: upstreamModelId(model) };
+
+  try {
+    await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, false, {
+      inboundBeta,
+      authType,
+      log: message => plog(message),
+      extraHeaders: model.headers,
+      refreshToken,
+      onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
+    });
+  } catch (err) {
+    const message = err instanceof UpstreamUnreachableError ? err.message : String(err);
+    plog(() => `anthropic token-count error: ${message}`);
+    sendJson(res, 502, { error: { message } });
   }
 }
 
@@ -558,9 +642,14 @@ async function handleOpenAIChatCompletions(
       });
       return;
     }
+    const compatibleBody = model.compatibility
+      ? transformOpenAiCompatibleRequestBody(body, model.compatibility)
+      : body;
     // The client may have addressed the model via a gateway alias or saved
     // short alias — the upstream API only knows its own wire id.
-    const forwardBody = body.model === upstreamModelId(model) ? body : { ...body, model: upstreamModelId(model) };
+    const forwardBody = compatibleBody.model === upstreamModelId(model)
+      ? compatibleBody
+      : { ...compatibleBody, model: upstreamModelId(model) };
     auditInference(options, {
       modelId: body.model,
       effort: openAiEffort(body),

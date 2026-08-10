@@ -10,6 +10,7 @@ import { createLanguageModel } from '../src/provider-factory.js';
 import { generateAnthropicResponse, streamAnthropicResponse } from '../src/sdk-adapter.js';
 import { generateOpenAiResponse, streamOpenAiResponse } from '../src/openai-adapter.js';
 import { resolveProviderCredential } from '../src/env.js';
+import { buildOpenCodeGoModels } from '../src/data/opencode-go-models.js';
 
 const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:oauth-provider`;
 
@@ -204,6 +205,72 @@ afterEach(async () => {
 });
 
 describe('server router', () => {
+  it('answers count_tokens locally for a generated OpenCode Go Messages row', async () => {
+    const qwen = buildOpenCodeGoModels().find(entry => entry.id === 'qwen3.6-plus');
+    if (!qwen) throw new Error('missing qwen3.6-plus fixture');
+    const upstream = await startUpstream({ input_tokens: 999 });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        id: qwen.id,
+        name: qwen.name,
+        isFree: false,
+        brand: 'Qwen',
+        providerId: 'opencode-go',
+        sourceBackend: 'opencode-go',
+        modelFormat: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: 'go-key',
+        compatibility: qwen.compatibility,
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: qwen.id,
+        messages: [{ role: 'user', content: 'count this locally' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-relay-token-count-source')).toBe('local-estimate');
+    expect(await response.json()).toMatchObject({ input_tokens: expect.any(Number) });
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it('forwards count_tokens for Anthropic routes without an explicit local-fallback capability', async () => {
+    const upstream = await startUpstream({ input_tokens: 17 });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('custom-anthropic', 'anthropic', 'custom', { baseUrl: upstream.baseUrl }),
+        apiKey: 'custom-key',
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'custom-anthropic',
+        messages: [{ role: 'user', content: 'count upstream' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ input_tokens: 17 });
+    expect(upstream.requests).toEqual([
+      expect.objectContaining({
+        method: 'POST',
+        url: '/v1/messages/count_tokens',
+        authorization: 'Bearer custom-key',
+        body: expect.objectContaining({ model: 'custom-anthropic' }),
+      }),
+    ]);
+  });
+
   it('logs inference routing metadata without request content', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-server-audit-'));
     const inferenceLogPath = join(dir, 'requests.jsonl');
@@ -439,6 +506,50 @@ describe('server router', () => {
       authorization: undefined,
       xApiKey: undefined,
       xPlan: 'free',
+    });
+  });
+
+  it('applies generated OpenCode Go compatibility on direct OpenAI chat ingress', async () => {
+    const kimi = buildOpenCodeGoModels().find(entry => entry.id === 'kimi-k2.7-code');
+    if (!kimi) throw new Error('missing kimi-k2.7-code fixture');
+    const upstream = await startUpstream({
+      id: 'chatcmpl-kimi',
+      choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        id: kimi.id,
+        name: kimi.name,
+        isFree: false,
+        brand: 'Kimi',
+        providerId: 'opencode-go',
+        sourceBackend: 'opencode-go',
+        modelFormat: 'openai',
+        completionsUrl: `${upstream.baseUrl}/v1/chat/completions`,
+        apiKey: 'go-key',
+        compatibility: kimi.compatibility,
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: kimi.id,
+        reasoning_effort: 'max',
+        temperature: 0.2,
+        store: false,
+        max_completion_tokens: 4096,
+        messages: [{ role: 'developer', content: 'instructions' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests[0]?.body).toEqual({
+      model: kimi.id,
+      max_tokens: 4096,
+      messages: [{ role: 'system', content: 'instructions' }],
     });
   });
 

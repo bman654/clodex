@@ -45,6 +45,7 @@ describe('opencode-go catalog invariants', () => {
       expect(model.name?.trim(), model.id).toBeTruthy();
       // eslint-disable-next-line no-control-regex
       expect(/[\x00-\x1f\x7f]/.test(model.name ?? ''), model.id).toBe(false);
+      expect(model.codingCapabilitiesAuthoritative, model.id).toBe(true);
     }
   });
 

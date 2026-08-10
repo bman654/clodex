@@ -42,6 +42,7 @@ export interface ServerModelInfo {
   oauthAccountId?: string;
   supportedParameters?: string[];
   reasoning?: boolean;
+  codingCapabilitiesAuthoritative?: boolean;
   interleavedReasoningField?: string;
   /** Backend capability: model requires the Responses-Lite request shape (x-openai-internal-codex-responses-lite). */
   useResponsesLite?: boolean;

@@ -34,6 +34,7 @@ const authenticateProviderMock = vi.hoisted(() => vi.fn());
 const logErrorMock = vi.hoisted(() => vi.fn());
 const logSuccessMock = vi.hoisted(() => vi.fn());
 const warnMock = vi.hoisted(() => vi.fn());
+const browseAllModelsMock = vi.hoisted(() => vi.fn());
 const TEST_HELPER_ID = 'a'.repeat(64);
 const helperRef = (account: string): string => `helper:v1:${TEST_HELPER_ID}:${account}`;
 
@@ -69,6 +70,14 @@ vi.mock('../src/registry/add-template.js', async importOriginal => {
   return {
     ...actual,
     addProviderFromTemplate: addTemplateMock,
+  };
+});
+
+vi.mock('../src/prompts.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/prompts.js')>();
+  return {
+    ...actual,
+    browseAllModels: browseAllModelsMock,
   };
 });
 
@@ -183,6 +192,44 @@ describe('registry crud', () => {
 
     expect(toggleProviderEnabled('openai')).toEqual({ toggled: true, enabled: false });
     expect(loadRegistry().providers[0]?.enabled).toBe(false);
+  });
+
+  it('uses effective OpenCode Go membership in hub counts, detail, and browse', async () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      enabled: true,
+      authRef: 'keyring:provider:opencode-go',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+      addedAt: new Date().toISOString(),
+      modelsCache: {
+        fetchedAt: new Date().toISOString(),
+        models: [
+          { id: 'qwen3.6-plus', name: 'Qwen', upstreamModelId: 'qwen3.6-plus', modelFormat: 'openai' },
+          { id: 'gpt-5.6-luna', name: 'Luna', upstreamModelId: 'gpt-5.6-luna', modelFormat: 'openai' },
+          { id: 'unknown', name: 'Unknown', upstreamModelId: 'unknown', modelFormat: 'openai' },
+        ],
+      },
+    });
+    withRegistryWriteLockSync(() => saveRegistry(registry));
+    selectMock.mockReset();
+    browseAllModelsMock.mockReset();
+    selectMock
+      .mockResolvedValueOnce('provider:opencode-go')
+      .mockResolvedValueOnce('browse')
+      .mockResolvedValueOnce('done');
+
+    await expect(runProvidersCommand([])).resolves.toBe(0);
+
+    const hubOptions = selectMock.mock.calls[0]?.[0].options as Array<{ value: string; label: string }>;
+    expect(hubOptions.find(option => option.value === 'provider:opencode-go')?.label).toContain('(1 model)');
+    const detailOptions = selectMock.mock.calls[1]?.[0].options as Array<{ value: string; hint?: string }>;
+    expect(detailOptions.find(option => option.value === 'browse')?.hint).toContain('1 model');
+    expect(browseAllModelsMock).toHaveBeenCalledOnce();
+    expect(browseAllModelsMock.mock.calls[0]?.[0].models.map((model: { id: string }) => model.id))
+      .toEqual(['qwen3.6-plus']);
   });
 
   it('removes provider and deletes its credential', async () => {

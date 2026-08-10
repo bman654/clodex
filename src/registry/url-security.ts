@@ -76,6 +76,21 @@ export async function validateCustomEndpointUrl(
     return { ok: false, error: 'Invalid URL.', hint: 'Include https:// and the full base path.' };
   }
 
+  if (parsed.username || parsed.password) {
+    return {
+      ok: false,
+      error: 'Base URLs must not include embedded credentials.',
+      hint: 'Enter credentials through the provider authentication prompt instead.',
+    };
+  }
+  if (parsed.search || parsed.hash) {
+    return {
+      ok: false,
+      error: 'Base URLs must not include a query string or fragment.',
+      hint: 'Enter only the provider API base path.',
+    };
+  }
+
   const allowLocal = opts.allowInsecureLocal === true;
 
   if (parsed.protocol === 'http:' && !allowLocal) {

@@ -64,6 +64,48 @@ import { installOutboundProxyDispatcher } from './outbound-proxy.js';
 const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--trace', '--endpoint', '--proxy', '--save-mode', '--help', '-h', '--version', '-v']);
 const CLODEX_LAUNCH_FLAGS = new Set(['--provider', '--model']);
 
+export function requiresAnthropicProxy(
+  model: Pick<LocalProviderModel, 'modelFormat' | 'compatibility'>,
+  provider: Pick<LocalProvider, 'authType'>,
+): boolean {
+  return model.modelFormat === 'anthropic' && (
+    provider.authType === 'oauth'
+    || provider.authType === 'none'
+    || model.compatibility?.supportsCountTokens === false
+  );
+}
+
+export function shouldDisableExperimentalAnthropicBetas(
+  model: Pick<LocalProviderModel, 'modelFormat'>,
+  provider: Pick<LocalProvider, 'authType'>,
+): boolean {
+  return model.modelFormat === 'anthropic'
+    && provider.authType !== 'oauth'
+    && provider.authType !== 'none';
+}
+
+export function describeSingleModelTransport(
+  model: Pick<LocalProviderModel, 'modelFormat' | 'compatibility' | 'baseUrl' | 'npm'>,
+  provider: Pick<LocalProvider, 'authType'>,
+): { formatDescription: string; endpointLabel: string; endpoint: string } {
+  if (model.modelFormat !== 'anthropic') {
+    return {
+      formatDescription: 'via SDK adapter proxy',
+      endpointLabel: 'SDK npm:',
+      endpoint: model.npm ?? 'SDK',
+    };
+  }
+  const proxied = requiresAnthropicProxy(model, provider);
+  const countShim = model.compatibility?.supportsCountTokens === false;
+  return {
+    formatDescription: proxied
+      ? `via local Anthropic proxy${countShim ? ' with count_tokens shim' : ''}`
+      : 'direct passthrough',
+    endpointLabel: proxied ? 'Upstream:' : 'Endpoint:',
+    endpoint: model.baseUrl ?? '(unknown)',
+  };
+}
+
 function parseClodexLaunchFlag(
   arg: string,
   rest: string[],
@@ -1304,19 +1346,14 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   // ── Single-model path ──
 
   if (dryRun) {
-    const formatDesc = selectedModel.modelFormat === 'anthropic'
-      ? 'direct passthrough'
-      : 'via SDK adapter proxy';
-    const endpoint = selectedModel.modelFormat === 'anthropic'
-      ? (selectedModel.baseUrl ?? '(unknown)')
-      : (selectedModel.npm ?? 'SDK');
+    const transport = describeSingleModelTransport(selectedModel, activeProvider);
     console.log('');
     console.log(pc.bold(pc.cyan('  DRY RUN — would execute:')));
     console.log('');
     console.log(`  ${pc.bold('Provider:')}  ${activeProvider.name}`);
     console.log(`  ${pc.bold('Model:')}     ${selectedModel.id}`);
-    console.log(`  ${pc.bold('Format:')}    ${selectedModel.modelFormat} (${formatDesc})`);
-    console.log(`  ${pc.bold(selectedModel.modelFormat === 'anthropic' ? 'Endpoint:' : 'SDK npm:')} ${endpoint}`);
+    console.log(`  ${pc.bold('Format:')}    ${selectedModel.modelFormat} (${transport.formatDescription})`);
+    console.log(`  ${pc.bold(transport.endpointLabel)} ${transport.endpoint}`);
     console.log(`  ${pc.bold('Key:')}       ${activeProvider.name} provider key`);
     console.log('');
     console.log(pc.dim('  (dry run complete — Claude Code was NOT launched)'));
@@ -1336,9 +1373,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   let proxyHandle: ProxyHandle | null = null;
   let childEnv: NodeJS.ProcessEnv;
 
-  const isOAuthAnthropic = selectedModel.modelFormat === 'anthropic' && activeProvider.authType === 'oauth';
-  const usesAnthropicProxy = selectedModel.modelFormat === 'anthropic' &&
-    (isOAuthAnthropic || anonymousProvider);
+  const usesAnthropicProxy = requiresAnthropicProxy(selectedModel, activeProvider);
 
   // Static provider headers remain part of the proxied endpoint contract,
   // including OAuth routes. Anonymous dispatch filters credential-bearing
@@ -1358,6 +1393,8 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
           oauthAccountId: activeProvider.oauthAccountId,
           providerData: activeProvider.providerData,
           modelFormat: 'anthropic',
+          upstreamModelId: selectedModel.upstreamModelId,
+          compatibility: selectedModel.compatibility,
           headers: activeProvider.headers,
         },
         launchApiKey ?? '',
@@ -1425,7 +1462,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     );
   }
 
-  if (selectedModel.modelFormat === 'anthropic' && !usesAnthropicProxy) {
+  if (shouldDisableExperimentalAnthropicBetas(selectedModel, activeProvider)) {
     childEnv['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
   }
 

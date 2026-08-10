@@ -1,442 +1,716 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-// OpenCode's own catalog service (the opencode CLI consumes the same feed).
-// Supplies per-model metadata: name, context window, cost, modalities.
-//
-// WHAT THE FEED CAN AND CANNOT CONTROL — the property that keeps this script's
-// supply-chain surface narrow, and which is not obvious from reading it:
-//
-//   Feed-controlled: name, contextWindow, cost, modalities, reasoning.
-//   Local-only:      apiUrl, npm, modelFormat, the whole compatibility block,
-//                    and which ids exist at all (TRANSPORTS below).
-//
-// `toClodexModel` hardcodes every routing constant locally and filters ids
-// against TRANSPORTS, so a hostile or simply wrong feed cannot produce a bad
-// base URL, a bad SDK package, or any code-execution path — the worst it can
-// do is a wrong display name, price, or context window, and the ingest
-// validation in main() catches the last of those. Keep it that way: never move
-// a routing or compatibility field into the feed-derived half.
-const MODELS_DEV_URL = 'https://models.dev/api.json';
+const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
+const REPO_ROOT = resolve(SCRIPT_DIR, '..');
+const SNAPSHOT_PATH = resolve(REPO_ROOT, 'src/data/opencode-go-cli-snapshot.json');
+const MODELS_PATH = resolve(REPO_ROOT, 'src/data/opencode-go-models.json');
+
 const PROVIDER_ID = 'opencode-go';
-const MODELS_PATH = resolve('src/data/opencode-go-models.json');
-const CONSTANTS_PATH = resolve('src/data/opencode-go-models.ts');
+const RELEASE_REPOSITORY = 'https://github.com/anomalyco/opencode';
+const SOURCE_COMMAND = 'opencode --pure models opencode-go --verbose';
+const REFRESH_COMMAND = 'opencode --pure models opencode-go --refresh';
+const COMPLETIONS_NPM = '@ai-sdk/openai-compatible';
+const MESSAGES_NPM = '@ai-sdk/anthropic';
+const RESPONSES_NPM = '@ai-sdk/openai';
+const KNOWN_NPMS = new Set([COMPLETIONS_NPM, MESSAGES_NPM, RESPONSES_NPM]);
+const CANONICAL_EFFORT_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const OFFICIAL_API_URL = 'https://opencode.ai/zen/go/v1';
+const SAFE_ID = /^[a-z0-9][a-z0-9._:-]{0,127}$/;
+const SAFE_VARIANT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const SENSITIVE_KEY = /(?:^|[_-])(authorization|auth|api[_-]?key|cookie|credential|password|secret|token)(?:$|[_-])/i;
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
-const COMPLETIONS_BASE_URL = 'https://opencode.ai/zen/go/v1';
-const ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go';
-
-// models.dev does not publish per-model wire transport, and the family-level
-// summary in the Zen docs is not reliable per model (minimax-m3 is
-// Anthropic-format while minimax-m2.x are Chat Completions; gpt-5.6-luna rides
-// Chat Completions, not Responses). This map is clodex's live-validated
-// routing knowledge: catalog entries only exist for ids mapped here. A new
-// model on models.dev surfaces in the updater's "unmapped" report and is added
-// once its transport is verified against the live endpoint. Responses-only
-// models (grok, mainline gpt) are deliberately absent.
-const TRANSPORTS = {
-  'deepseek-v4-flash': 'openai-completions',
-  'deepseek-v4-pro': 'openai-completions',
-  'glm-5.1': 'openai-completions',
-  'glm-5.2': 'openai-completions',
-  'gpt-5.6-luna': 'openai-completions',
-  'hy3': 'openai-completions',
-  'kimi-k2.6': 'openai-completions',
-  'kimi-k2.7-code': 'openai-completions',
-  'kimi-k3': 'openai-completions',
-  'mimo-v2.5': 'openai-completions',
-  'mimo-v2.5-pro': 'openai-completions',
-  'minimax-m2.7': 'openai-completions',
-  'minimax-m3': 'anthropic-messages',
-  'qwen3.6-plus': 'openai-completions',
-  'qwen3.7-max': 'anthropic-messages',
-  'qwen3.7-plus': 'anthropic-messages',
-  'qwen3.8-max': 'anthropic-messages',
-};
-
-// Clodex-side compatibility behavior per model, validated against the live
-// endpoint. It travels with the transport map rather than being read from the
-// feed, so a hostile or wrong feed cannot change what clodex puts on the wire.
-//
-// models.dev DOES publish a per-model `reasoning_options` (an effort ladder, a
-// bare toggle, or nothing), and it is the closest thing to an authority on
-// what OpenCode's GATEWAY accepts — which is not the same set the upstream
-// vendor documents for its own endpoint. Treat it as the cross-check these
-// entries are validated against, never as their source: `assertEffortLadders`
-// below fails this updater if a map would send an effort value the feed does
-// not publish, and reports the safe direction rather than failing on it.
-const PATCHES = {
-  'deepseek-v4-flash': {
-    reasoningEffortMap: { minimal: null, low: null, medium: null, high: 'high', max: 'max' },
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
-    requiresReasoningContentOnAssistantMessages: true,
-    thinkingFormat: 'deepseek',
-  },
-  'deepseek-v4-pro': {
-    reasoningEffortMap: { minimal: null, low: null, medium: null, high: 'high', max: 'max' },
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
-    requiresReasoningContentOnAssistantMessages: true,
-    thinkingFormat: 'deepseek',
-  },
-  'glm-5.1': {
-    // Z.ai: reasoning_effort is "Only supported by GLM-5.2". 5.1 thinks by
-    // default and is controlled by the binary `thinking` field, so it reasons
-    // but has no effort control to advertise.
-    supportsReasoningEffort: false,
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
-  },
-  'glm-5.2': {
-    // Z.ai's own API documents the full ladder ("max, xhigh, high, medium,
-    // low, minimal, none"), but that describes Z.ai's endpoint, not OpenCode's
-    // gateway in front of it: models.dev — the feed OpenCode itself routes
-    // from — publishes effort=high/max for this model. The gateway is what we
-    // actually talk to, so its narrower set wins until the wider one is
-    // validated live.
-    reasoningEffortMap: { off: null, minimal: null, low: null, medium: null, high: 'high', xhigh: null, max: 'max' },
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
-  },
-  'gpt-5.6-luna': {
-    // models.dev publishes effort=none/low/medium/high/xhigh/max for OpenCode's
-    // Luna — note: no `minimal`. Distinct from the ChatGPT-OAuth Luna, which is
-    // a different deployment on the Responses transport and says nothing about
-    // what this gateway accepts.
-    reasoningEffortMap: { off: 'none', minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
-  },
-  'hy3': {
-    reasoningEffortMap: { off: 'none', minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: null },
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
-  },
-  'kimi-k2.6': {
-    reasoningEffortMap: { minimal: null, low: null, medium: null },
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    thinkingFormat: 'deepseek',
-    supportsReasoningEffort: false,
-    maxTokensField: 'max_tokens',
-    supportsLongCacheRetention: false,
-  },
-  'kimi-k2.7-code': {
-    // Moonshot: "thinking is always on and cannot be disabled", driven by the
-    // `thinking` field and NOT `reasoning_effort`, which this model does not
-    // accept. Stated explicitly so the model-name Kimi rule cannot claim it:
-    // reasoning genuinely happens, it just isn't effort-controllable, which is
-    // exactly what `supportsReasoningEffort: false` reports (internal-only).
-    supportsReasoningEffort: false,
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
-  },
-  'kimi-k3': {
-    // Moonshot's own API documents low/high/max (default max), but models.dev
-    // publishes effort=max for OpenCode's deployment. Same reasoning as
-    // glm-5.2: the gateway's set is the one that reaches the wire.
-    reasoningEffortMap: { off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, max: 'max' },
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
-  },
-  'mimo-v2.5': {
-    // Xiaomi's OpenAI-compatible reference documents no reasoning_effort; the
-    // request shape carries a `thinking` object ("type": "disabled") like the
-    // GLM and Kimi families. Reasoning happens, it is not graded.
-    supportsReasoningEffort: false,
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
-  },
-  'mimo-v2.5-pro': {
-    // Same reference, same `thinking` object, no reasoning_effort.
-    supportsReasoningEffort: false,
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
-  },
-  'minimax-m2.7': {
-    // MiniMax's Chat Completions reference accepts no reasoning_effort at all;
-    // reasoning is the `thinking` object, and "for M2.x models, thinking
-    // cannot be disabled". Always-on and not effort-controllable.
-    supportsReasoningEffort: false,
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
-  },
-  'minimax-m3': {
-    // Same reference as M2.7: no reasoning_effort. M3's thinking is
-    // "adaptive" by default and can be disabled, but never graded, so there is
-    // no effort ladder to advertise. (Anthropic-format, so the generator also
-    // stamps supportsCountTokens: false below.)
-    supportsReasoningEffort: false,
-  },
-  'qwen3.6-plus': {
-    // Qwen has no reasoning_effort: models.dev publishes a toggle plus a token
-    // budget, and DashScope's control is the boolean `enable_thinking`. But
-    // `thinkingFormat: 'qwen'` only injects that boolean when a
-    // reasoning_effort is PRESENT, so the effort value is load-bearing as an
-    // internal signal even though the upstream ignores its value.
-    //
-    // Without a map, mapCodexEffortToOpenAI dropped `off`, `minimal` and also
-    // `max` — so choosing MAX silently disabled thinking while `low` enabled
-    // it. Every level except `off` now maps to something, which is what fixes
-    // that: any level thinks, `off` does not.
-    //
-    // DISTINCT values, not one repeated. Collapsing them to a single value is
-    // tempting — the grades are cosmetic while the upstream control is a
-    // boolean — but getPatchReasoningCapabilities dedups identical provider
-    // options, and `projectNativeEffort` in patch-transforms.ts discards any
-    // capability missing low/medium/high. A one-level capability therefore
-    // leaves a patched client with NO effort control at all, which is worse
-    // than cosmetic grades. The upstream ignores the string either way.
-    //
-    // Grading this for real means sending enable_thinking + thinking_budget
-    // and dropping reasoning_effort. That changes the wire and needs a live
-    // key to validate, so it is tracked separately rather than guessed here.
-    reasoningEffortMap: { low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max', minimal: null, off: null },
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    thinkingFormat: 'qwen',
-    maxTokensField: 'max_tokens',
-  },
-};
-
-/**
- * Cross-check every local effort map against what the feed publishes.
- *
- * The invariant is a SUBSET, not equality, and the asymmetry is the point.
- * Sending a value the gateway does not publish risks a rejected request, so it
- * fails the update. Sending fewer than it publishes is merely conservative —
- * `deepseek-v4-flash` omits a `low` the feed lists — so that is reported and
- * left to a human, because widening a ladder is exactly the change that wants
- * live validation rather than a script's confidence.
- *
- * This exists because the vendor's own API and OpenCode's gateway disagree:
- * Z.ai documents seven effort levels for GLM-5.2 and Moonshot documents three
- * for K3, while the feed publishes `high/max` and `max`. Two entries were
- * briefly widened to the vendor ladders before that was understood.
- */
-function assertEffortLadders(supported, devModels) {
-  const errors = [];
-  const notes = [];
-  for (const model of supported) {
-    const options = devModels[model.id]?.reasoning_options;
-    const published = new Set(
-      (Array.isArray(options) ? options : [])
-        .filter(option => option?.type === 'effort')
-        .flatMap(option => option.values ?? []),
-    );
-    const compatibility = model.compatibility ?? {};
-    if (compatibility.supportsReasoningEffort === false) {
-      if (published.size > 0) {
-        notes.push(`${model.id}: suppressed locally, feed publishes ${[...published].sort().join('/')}`);
-      }
-      continue;
-    }
-    const map = compatibility.reasoningEffortMap;
-    if (!map) {
-      notes.push(`${model.id}: no local map — falls back to generic rules, cannot be cross-checked`);
-      continue;
-    }
-    const sent = new Set(Object.values(map).filter(value => value !== null));
-    // A model the feed describes as a bare TOGGLE, mapped locally with a
-    // thinkingFormat, is the one legitimate way to send an effort the feed does
-    // not publish: the value is an internal signal that makes the transform
-    // inject the upstream's real control (`enable_thinking`), and the upstream
-    // ignores the effort string itself. Recognised by shape rather than by id,
-    // so any future toggle-only model gets the same treatment — and still
-    // reported, because the honest fix is to send the vendor's own field.
-    const togglesOnly = published.size === 0
-      && (Array.isArray(options) ? options : []).some(option => option?.type === 'toggle')
-      && compatibility.thinkingFormat !== undefined;
-    if (togglesOnly) {
-      notes.push(
-        `${model.id}: effort is a toggle proxy (feed publishes a toggle, not a ladder) — `
-        + 'the value is an internal signal for the thinkingFormat transform',
-      );
-      continue;
-    }
-    const unpublished = [...sent].filter(value => !published.has(value)).sort();
-    if (unpublished.length > 0) {
-      errors.push(
-        `${model.id}: maps to ${unpublished.join('/')}, which models.dev does not publish `
-        + `(feed: ${[...published].sort().join('/') || 'no effort ladder'})`,
-      );
-      continue;
-    }
-    const unused = [...published].filter(value => !sent.has(value)).sort();
-    if (unused.length > 0) {
-      notes.push(`${model.id}: feed also publishes ${unused.join('/')}, not sent locally`);
-    }
-  }
-  return { errors, notes };
+function isRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url, {
-    headers: { 'User-Agent': 'clodex-opencode-go-catalog-updater' },
-  });
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status} fetching ${url}`);
+function assertString(value, field) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`${field} must be a non-empty string`);
   }
-  return response.json();
+  return value;
 }
 
-function toClodexModel(id, devModel) {
-  const transport = TRANSPORTS[id];
-  const anthropic = transport === 'anthropic-messages';
-  const devCost = devModel.cost ?? {};
-  const cost = {
-    input: devCost.input ?? 0,
-    output: devCost.output ?? 0,
-    ...(devCost.cache_read ? { cache_read: devCost.cache_read } : {}),
-    ...(devCost.cache_write ? { cache_write: devCost.cache_write } : {}),
-  };
-  // OpenCode Zen documents /v1/responses, /v1/chat/completions and
-  // /v1/messages, and no token-counting endpoint. Marked on the anthropic-
-  // format entries so the proxy answers count_tokens from its local estimate
-  // instead of forwarding to a path that 404s into the client's token
-  // accounting. Hardcoded here, like every other routing constant, so the
-  // upstream feed cannot influence it.
-  // Defaults every anthropic-format entry carries, overridable per model.
-  //
-  // supportsCountTokens: OpenCode Zen documents /v1/responses,
-  // /v1/chat/completions and /v1/messages, and no token-counting endpoint, so
-  // the proxy answers count_tokens from its local estimate instead of
-  // forwarding to a path that 404s into the client's token accounting.
-  //
-  // supportsReasoningEffort: structural, not a vendor claim. Effort reaches an
-  // upstream through `effortProviderOptions` and the `thinkingFormat`
-  // transform, both of which act on an OpenAiCompatibleRequestBody. A
-  // passthrough Messages body is forwarded untouched, so there is no way to
-  // send a graded effort on this route however the vendor spells it — these
-  // models still reason, via whatever `thinking` the client itself sends.
-  // Advertising a control clodex cannot operate is what this prevents.
-  const compatibility = anthropic
-    ? { supportsCountTokens: false, supportsReasoningEffort: false, ...(PATCHES[id] ?? {}) }
-    : PATCHES[id];
-  const modalities = (devModel.modalities?.input ?? ['text'])
-    .filter(value => value === 'text' || value === 'image');
-
-  return {
-    id,
-    name: devModel.name ?? id,
-    contextWindow: devModel.limit?.context,
-    cost,
-    modelFormat: anthropic ? 'anthropic' : 'openai',
-    npm: anthropic ? '@ai-sdk/anthropic' : '@ai-sdk/openai-compatible',
-    apiUrl: anthropic ? ANTHROPIC_BASE_URL : COMPLETIONS_BASE_URL,
-    reasoning: devModel.reasoning === true,
-    modalities,
-    ...(compatibility ? { compatibility } : {}),
-    upstreamModelId: id,
-    family: id.split('-')[0] ?? id,
-  };
+function assertSafeString(value, field) {
+  const string = assertString(value, field);
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(string) || /[\p{Cc}\p{Cf}]/u.test(string)) {
+    throw new Error(`${field} contains a control character`);
+  }
+  return string;
 }
 
-/**
- * Resolve the new constants file content WITHOUT writing it.
- *
- * Ordering alone cannot make two file writes atomic — whichever goes first, an
- * interruption leaves the other stale. What it can do is move the one failure
- * that is actually likely, the regex ceasing to match after an unrelated edit
- * to the constants file, ahead of every write. Both writes then fail only on
- * real I/O trouble, and the catalog goes first so the timestamp is a commit
- * marker for a catalog already on disk rather than a promise about one.
- */
-async function prepareSourceConstant(fetchedAt) {
-  const source = await readFile(CONSTANTS_PATH, 'utf8');
-  const pattern = /export const OPENCODE_GO_SOURCE_FETCHED_AT = '[^']*';/;
-  if (!pattern.test(source)) {
-    throw new Error('Could not find OPENCODE_GO_SOURCE_FETCHED_AT in opencode-go-models.ts');
+function assertExactKeys(value, field, allowed, required = allowed) {
+  if (!isRecord(value)) throw new Error(`${field} must be an object`);
+  const allowedSet = new Set(allowed);
+  for (const key of Object.keys(value)) {
+    if (!allowedSet.has(key)) throw new Error(`${field} contains unsupported key ${key}`);
   }
-  return source.replace(pattern, `export const OPENCODE_GO_SOURCE_FETCHED_AT = '${fetchedAt}';`);
-}
-
-async function main() {
-  const catalog = await fetchJson(MODELS_DEV_URL);
-  const provider = catalog?.[PROVIDER_ID];
-  const devModels = provider?.models;
-  if (!devModels || typeof devModels !== 'object') {
-    throw new Error(`models.dev catalog has no "${PROVIDER_ID}" provider models`);
-  }
-
-  const supported = [];
-  const unmapped = [];
-  for (const [id, devModel] of Object.entries(devModels).sort(([a], [b]) => a.localeCompare(b))) {
-    if (!TRANSPORTS[id]) {
-      unmapped.push(id);
-      continue;
+  for (const key of required) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) {
+      throw new Error(`${field} is missing required key ${key}`);
     }
-    supported.push(toClodexModel(id, devModel));
   }
+}
 
-  const missing = Object.keys(TRANSPORTS).filter(id => !devModels[id]);
-  if (missing.length > 0) {
-    throw new Error(`Transport-mapped models missing from models.dev: ${missing.join(', ')}`);
+function assertSafeTree(value, field) {
+  if (typeof value === 'string') {
+    assertSafeString(value, field);
+    return;
   }
-  if (supported.length === 0) {
-    throw new Error('models.dev catalog produced no supported models');
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => assertSafeTree(entry, `${field}[${index}]`));
+    return;
   }
-
-  // Validate at ingest, before anything is written. contextWindow flows into
-  // the patched client's context map, where a bad value breaks auto-compaction
-  // silently rather than failing here; a name with control characters or
-  // newlines corrupts every list that renders it.
-  const invalid = [];
-  for (const model of supported) {
-    if (!Number.isInteger(model.contextWindow) || model.contextWindow <= 0 || model.contextWindow > 10_000_000) {
-      invalid.push(`${model.id}: contextWindow=${JSON.stringify(model.contextWindow)}`);
+  if (!isRecord(value)) return;
+  for (const [key, entry] of Object.entries(value)) {
+    if (DANGEROUS_KEYS.has(key) || SENSITIVE_KEY.test(key)) {
+      throw new Error(`${field} contains forbidden key ${key}`);
     }
     // eslint-disable-next-line no-control-regex
-    if (typeof model.name !== 'string' || model.name.trim() === '' || /[\x00-\x1f\x7f]/.test(model.name)) {
-      invalid.push(`${model.id}: name=${JSON.stringify(model.name)}`);
+    if (/[\x00-\x1f\x7f]/.test(key)) throw new Error(`${field} contains a control-character key`);
+    assertSafeTree(entry, `${field}.${key}`);
+  }
+}
+
+function assertBoolean(value, field) {
+  if (typeof value !== 'boolean') throw new Error(`${field} must be a boolean`);
+  return value;
+}
+
+function assertFiniteNonNegative(value, field) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${field} must be a non-negative finite number`);
+  }
+  return value;
+}
+
+function assertPositiveInteger(value, field) {
+  if (!Number.isInteger(value) || value <= 0 || value > 10_000_000) {
+    throw new Error(`${field} must be a positive integer no greater than 10000000`);
+  }
+  return value;
+}
+
+function validateCacheCost(value, field) {
+  assertExactKeys(value, field, ['read', 'write']);
+  assertFiniteNonNegative(value.read, `${field}.read`);
+  assertFiniteNonNegative(value.write, `${field}.write`);
+}
+
+function validateCost(value, field) {
+  assertExactKeys(
+    value,
+    field,
+    ['input', 'output', 'cache', 'experimentalOver200K', 'tiers'],
+    ['input', 'output', 'cache'],
+  );
+  assertFiniteNonNegative(value.input, `${field}.input`);
+  assertFiniteNonNegative(value.output, `${field}.output`);
+  validateCacheCost(value.cache, `${field}.cache`);
+  if (value.experimentalOver200K !== undefined) {
+    assertExactKeys(value.experimentalOver200K, `${field}.experimentalOver200K`, ['input', 'output', 'cache']);
+    assertFiniteNonNegative(value.experimentalOver200K.input, `${field}.experimentalOver200K.input`);
+    assertFiniteNonNegative(value.experimentalOver200K.output, `${field}.experimentalOver200K.output`);
+    validateCacheCost(value.experimentalOver200K.cache, `${field}.experimentalOver200K.cache`);
+  }
+  if (value.tiers !== undefined) {
+    if (!Array.isArray(value.tiers)) throw new Error(`${field}.tiers must be an array`);
+    value.tiers.forEach((tier, index) => {
+      const tierField = `${field}.tiers[${index}]`;
+      assertExactKeys(tier, tierField, ['input', 'output', 'cache', 'tier']);
+      assertFiniteNonNegative(tier.input, `${tierField}.input`);
+      assertFiniteNonNegative(tier.output, `${tierField}.output`);
+      validateCacheCost(tier.cache, `${tierField}.cache`);
+      assertExactKeys(tier.tier, `${tierField}.tier`, ['size', 'type']);
+      assertPositiveInteger(tier.tier.size, `${tierField}.tier.size`);
+      if (tier.tier.type !== 'context') throw new Error(`${tierField}.tier.type must be context`);
+    });
+  }
+}
+
+function validateModalities(value, field) {
+  const keys = ['audio', 'image', 'pdf', 'text', 'video'];
+  assertExactKeys(value, field, keys);
+  for (const key of keys) assertBoolean(value[key], `${field}.${key}`);
+}
+
+function validateCapabilities(value, field) {
+  assertExactKeys(value, field, [
+    'attachment',
+    'input',
+    'interleaved',
+    'output',
+    'reasoning',
+    'temperature',
+    'toolcall',
+  ]);
+  assertBoolean(value.attachment, `${field}.attachment`);
+  assertBoolean(value.reasoning, `${field}.reasoning`);
+  assertBoolean(value.temperature, `${field}.temperature`);
+  assertBoolean(value.toolcall, `${field}.toolcall`);
+  validateModalities(value.input, `${field}.input`);
+  validateModalities(value.output, `${field}.output`);
+  if (value.interleaved !== false) {
+    assertExactKeys(value.interleaved, `${field}.interleaved`, ['field']);
+    if (assertSafeString(value.interleaved.field, `${field}.interleaved.field`) !== 'reasoning_content') {
+      throw new Error(`${field}.interleaved.field is unsupported`);
     }
   }
-  if (invalid.length > 0) {
-    throw new Error(`models.dev returned unusable metadata:\n  ${invalid.join('\n  ')}`);
+}
+
+function validateVariant(variant, field, npm) {
+  if (npm === COMPLETIONS_NPM) {
+    assertExactKeys(variant, field, ['reasoningEffort']);
+    const effort = assertSafeString(variant.reasoningEffort, `${field}.reasoningEffort`);
+    if (!['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) {
+      throw new Error(`${field}.reasoningEffort is unsupported`);
+    }
+    return;
+  }
+  if (npm === MESSAGES_NPM) {
+    assertExactKeys(variant, field, ['thinking']);
+    assertExactKeys(variant.thinking, `${field}.thinking`, ['type', 'budgetTokens'], ['type']);
+    if (!['adaptive', 'disabled', 'enabled'].includes(variant.thinking.type)) {
+      throw new Error(`${field}.thinking.type is unsupported`);
+    }
+    if (variant.thinking.type === 'enabled') {
+      assertPositiveInteger(variant.thinking.budgetTokens, `${field}.thinking.budgetTokens`);
+    } else if (variant.thinking.budgetTokens !== undefined) {
+      throw new Error(`${field}.thinking.budgetTokens is only valid for enabled thinking`);
+    }
+    return;
+  }
+  assertExactKeys(variant, field, ['include', 'reasoningEffort', 'reasoningSummary']);
+  if (!Array.isArray(variant.include) || variant.include.length === 0) {
+    throw new Error(`${field}.include must be a non-empty string array`);
+  }
+  variant.include.forEach((entry, index) => assertSafeString(entry, `${field}.include[${index}]`));
+  const effort = assertSafeString(variant.reasoningEffort, `${field}.reasoningEffort`);
+  if (!['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(effort)) {
+    throw new Error(`${field}.reasoningEffort is unsupported`);
+  }
+  if (assertSafeString(variant.reasoningSummary, `${field}.reasoningSummary`) !== 'auto') {
+    throw new Error(`${field}.reasoningSummary is unsupported`);
+  }
+}
+
+function validateResolvedModel(model) {
+  assertSafeTree(model, 'model');
+  assertExactKeys(model, 'model', [
+    'api',
+    'capabilities',
+    'cost',
+    'family',
+    'headers',
+    'id',
+    'limit',
+    'name',
+    'options',
+    'providerID',
+    'release_date',
+    'status',
+    'variants',
+  ]);
+  const id = assertSafeString(model.id, 'model.id');
+  if (!SAFE_ID.test(id)) throw new Error(`${id}: id contains unsafe characters`);
+  if (model.providerID !== PROVIDER_ID) throw new Error(`${id}: providerID must be ${PROVIDER_ID}`);
+  assertSafeString(model.name, `${id}.name`);
+  assertSafeString(model.family, `${id}.family`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(assertSafeString(model.release_date, `${id}.release_date`))) {
+    throw new Error(`${id}.release_date must be YYYY-MM-DD`);
+  }
+  if (model.status !== 'active') throw new Error(`${id}: status must be active`);
+  assertExactKeys(model.headers, `${id}.headers`, [], []);
+  assertExactKeys(model.options, `${id}.options`, [], []);
+
+  assertExactKeys(model.api, `${id}.api`, ['id', 'npm', 'url']);
+  if (model.api.id !== id) throw new Error(`${id}: api.id must match id`);
+  const npm = assertSafeString(model.api.npm, `${id}.api.npm`);
+  if (!KNOWN_NPMS.has(npm)) throw new Error(`${id}: unsupported SDK transport ${npm}`);
+  const rawApiUrl = assertSafeString(model.api.url, `${id}.api.url`);
+  const apiUrl = new URL(rawApiUrl);
+  if (
+    rawApiUrl !== OFFICIAL_API_URL
+    || apiUrl.protocol !== 'https:'
+    || apiUrl.hostname !== 'opencode.ai'
+    || apiUrl.pathname !== '/zen/go/v1'
+    || apiUrl.port
+    || apiUrl.username
+    || apiUrl.password
+    || apiUrl.search
+    || apiUrl.hash
+  ) {
+    throw new Error(`${id}: api.url must be exactly ${OFFICIAL_API_URL} without credentials, query, or fragment`);
   }
 
-  const ladders = assertEffortLadders(supported, devModels);
-  if (ladders.errors.length > 0) {
-    throw new Error(
-      'Local effort maps send values models.dev does not publish for the OpenCode gateway:\n  '
-      + ladders.errors.join('\n  '),
+  assertExactKeys(model.limit, `${id}.limit`, ['context', 'input', 'output'], ['context', 'output']);
+  assertPositiveInteger(model.limit.context, `${id}.limit.context`);
+  assertPositiveInteger(model.limit.output, `${id}.limit.output`);
+  if (model.limit.input !== undefined) assertPositiveInteger(model.limit.input, `${id}.limit.input`);
+  validateCost(model.cost, `${id}.cost`);
+  validateCapabilities(model.capabilities, `${id}.capabilities`);
+
+  assertExactKeys(model.variants, `${id}.variants`, Object.keys(model.variants), []);
+  for (const [variantName, variant] of Object.entries(model.variants)) {
+    if (!SAFE_VARIANT_NAME.test(variantName)) throw new Error(`${id}: unsafe variant name ${variantName}`);
+    validateVariant(variant, `${id}.variants.${variantName}`, npm);
+  }
+  return structuredClone(model);
+}
+
+function recursivelySortKeys(value) {
+  if (Array.isArray(value)) return value.map(recursivelySortKeys);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map(key => [key, recursivelySortKeys(value[key])]),
+  );
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function compareAscii(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/**
+ * Canonical resolved-model representation used for provenance hashing.
+ *
+ * This is byte-for-byte equivalent to:
+ *   jq -s -cS . objects.jsonstream
+ * for the CLI object stream: model order is normalized by id, every object key
+ * is sorted recursively, JSON is compact, and one trailing LF is included.
+ */
+export function canonicalizeResolvedModels(models) {
+  const ordered = [...models].sort((a, b) => compareAscii(String(a?.id), String(b?.id)));
+  return `${JSON.stringify(recursivelySortKeys(ordered))}\n`;
+}
+
+/** Parse either the verbose CLI output, its JSON-object stream, or a JSON array. */
+export function parseOpenCodeVerboseOutput(input) {
+  const trimmed = input.trim();
+  if (!trimmed) throw new Error('OpenCode CLI output is empty');
+
+  if (trimmed.startsWith('[')) {
+    const parsed = JSON.parse(trimmed);
+    if (!Array.isArray(parsed)) throw new Error('OpenCode CLI snapshot must be an array');
+    return parsed;
+  }
+
+  const labels = [...input.matchAll(/^([a-z0-9-]+)\/([^\r\n]+)\r?$/gm)]
+    .map(match => ({ provider: match[1], id: match[2] }));
+  const withoutLabels = input.replace(/^opencode-go\/[^\r\n]+\r?\n/gm, '');
+  const models = [];
+  let offset = 0;
+
+  while (offset < withoutLabels.length) {
+    while (/\s/.test(withoutLabels[offset] ?? '')) offset += 1;
+    if (offset >= withoutLabels.length) break;
+    if (withoutLabels[offset] !== '{') {
+      throw new Error(`Unexpected content at byte ${offset}; expected a JSON model object`);
+    }
+
+    const start = offset;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (; offset < withoutLabels.length; offset += 1) {
+      const char = withoutLabels[offset];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (char === '\\') escaped = true;
+        else if (char === '"') inString = false;
+        continue;
+      }
+      if (char === '"') inString = true;
+      else if (char === '{') depth += 1;
+      else if (char === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          offset += 1;
+          models.push(JSON.parse(withoutLabels.slice(start, offset)));
+          break;
+        }
+      }
+    }
+    if (depth !== 0 || inString) throw new Error('OpenCode CLI output ended inside a JSON object');
+  }
+
+  if (labels.length > 0) {
+    if (labels.length !== models.length) {
+      throw new Error(`OpenCode CLI emitted ${labels.length} labels but ${models.length} model objects`);
+    }
+    labels.forEach((label, index) => {
+      if (label.provider !== PROVIDER_ID) {
+        throw new Error(`Unexpected CLI provider label ${label.provider}/${label.id}`);
+      }
+      if (models[index]?.id !== label.id) {
+        throw new Error(`CLI label ${label.id} does not match object ${String(models[index]?.id)}`);
+      }
+    });
+  }
+
+  return models;
+}
+
+function validateResolvedModels(models) {
+  if (!Array.isArray(models) || models.length === 0) {
+    throw new Error('OpenCode CLI resolved no models');
+  }
+
+  const ids = new Set();
+  return models.map(model => {
+    if (!isRecord(model)) throw new Error('Every resolved model must be an object');
+    const validated = validateResolvedModel(model);
+    const id = validated.id;
+    if (ids.has(id)) throw new Error(`OpenCode CLI returned duplicate model ${id}`);
+    ids.add(id);
+    return validated;
+  });
+}
+
+function normalizeCost(model) {
+  const input = model.cost.input;
+  const output = model.cost.output;
+  const cost = { input, output };
+  const cacheRead = model.cost?.cache?.read;
+  const cacheWrite = model.cost?.cache?.write;
+  if (cacheRead !== undefined) {
+    if (!Number.isFinite(cacheRead) || cacheRead < 0) throw new Error(`${model.id}: invalid cache read cost`);
+    cost.cache_read = cacheRead;
+  }
+  if (cacheWrite !== undefined) {
+    if (!Number.isFinite(cacheWrite) || cacheWrite < 0) throw new Error(`${model.id}: invalid cache write cost`);
+    cost.cache_write = cacheWrite;
+  }
+  return cost;
+}
+
+function reasoningEffortMap(model) {
+  const mapped = new Map();
+  for (const [variantName, variant] of Object.entries(model.variants)) {
+    if (!isRecord(variant) || variant.reasoningEffort === undefined) continue;
+    const wireValue = assertString(
+      variant.reasoningEffort,
+      `${model.id}.variants.${variantName}.reasoningEffort`,
     );
+    const clodexLevel = variantName === 'none' ? 'off' : variantName;
+    if (!CANONICAL_EFFORT_LEVELS.includes(clodexLevel)) {
+      throw new Error(`${model.id}: cannot map OpenCode reasoning variant ${variantName}`);
+    }
+    if (mapped.has(clodexLevel)) throw new Error(`${model.id}: duplicate reasoning level ${clodexLevel}`);
+    mapped.set(clodexLevel, wireValue);
   }
 
-  // Resolve the constants content before either write, so the likely failure —
-  // the regex no longer matching — aborts with both files untouched rather
-  // than stranding one of them. Catalog first, timestamp second: the timestamp
-  // then marks a catalog that is already on disk.
-  const constantsContent = await prepareSourceConstant(new Date().toISOString());
-  await writeFile(MODELS_PATH, `${JSON.stringify(supported, null, 2)}\n`);
-  await writeFile(CONSTANTS_PATH, constantsContent);
+  if (mapped.size === 0) return null;
+  return Object.fromEntries(
+    CANONICAL_EFFORT_LEVELS
+      .filter(level => mapped.has(level))
+      .map(level => [level, mapped.get(level)]),
+  );
+}
 
-  console.log(`Updated ${supported.length} OpenCode Go models from ${MODELS_DEV_URL} (${PROVIDER_ID}).`);
-  for (const note of ladders.notes) {
-    console.log(`Effort ladder note — ${note}`);
+function messagesBaseUrl(url) {
+  return url.replace(/\/v1\/?$/, '').replace(/\/$/, '');
+}
+
+/** Convert the committed CLI resolver output into clodex's runtime catalog. */
+export function convertResolvedModels(models) {
+  const validatedModels = validateResolvedModels(models);
+  const supported = [];
+  const omittedResponses = [];
+
+  for (const model of [...validatedModels].sort((a, b) => compareAscii(a.id, b.id))) {
+    const npm = model.api.npm;
+    if (npm === RESPONSES_NPM) {
+      omittedResponses.push(model.id);
+      continue;
+    }
+
+    if (
+      model.capabilities.input.text !== true
+      || model.capabilities.output.text !== true
+      || model.capabilities.toolcall !== true
+    ) {
+      throw new Error(`${model.id}: supported runtime models must support text input, text output, and tool calls`);
+    }
+
+    const anthropic = npm === MESSAGES_NPM;
+    const efforts = anthropic ? null : reasoningEffortMap(model);
+    const compatibility = anthropic
+      ? { supportsReasoningEffort: false, supportsCountTokens: false }
+      : {
+          ...(efforts
+            ? { reasoningEffortMap: efforts, reasoningEffortDefault: null }
+            : { supportsReasoningEffort: false }),
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          ...(model.capabilities.temperature ? {} : { supportsTemperature: false }),
+          maxTokensField: 'max_tokens',
+        };
+    const modalities = ['text', 'image']
+      .filter(modality => model.capabilities?.input?.[modality] === true);
+
+    supported.push({
+      id: model.id,
+      name: model.name,
+      contextWindow: model.limit.context,
+      cost: normalizeCost(model),
+      modelFormat: anthropic ? 'anthropic' : 'openai',
+      npm,
+      apiUrl: anthropic ? messagesBaseUrl(model.api.url) : model.api.url.replace(/\/$/, ''),
+      reasoning: model.capabilities?.reasoning === true,
+      ...(isRecord(model.capabilities.interleaved)
+        ? { interleavedReasoningField: model.capabilities.interleaved.field }
+        : {}),
+      codingCapabilitiesAuthoritative: true,
+      modalities,
+      compatibility,
+      upstreamModelId: model.api.id,
+      family: model.family ?? (model.id.split('-')[0] || model.id),
+    });
   }
-  if (unmapped.length > 0) {
-    console.log(
-      'Present on models.dev but not transport-mapped (verify wire protocol '
-      + `against the live endpoint, then add to TRANSPORTS): ${unmapped.join(', ')}`,
+
+  if (supported.length === 0) throw new Error('OpenCode CLI produced no supported Messages/Chat models');
+  return { supported, omittedResponses };
+}
+
+function parseArgs(argv) {
+  const options = { check: false, input: undefined, provenance: {} };
+  const valueFlags = new Map([
+    ['--input', 'input'],
+    ['--opencode-version', 'openCodeVersion'],
+    ['--release-tag', 'releaseTag'],
+    ['--release-commit', 'releaseCommit'],
+    ['--release-asset-file', 'releaseAssetFile'],
+    ['--raw-catalog-file', 'rawCatalogFile'],
+    ['--captured-at', 'capturedAt'],
+  ]);
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index];
+    if (arg === '--check') {
+      options.check = true;
+      continue;
+    }
+    const key = valueFlags.get(arg);
+    if (!key) throw new Error(`Unknown argument: ${arg}`);
+    const value = argv[index + 1];
+    if (!value || value.startsWith('--')) throw new Error(`${arg} requires a value`);
+    index += 1;
+    if (key === 'input' || key.endsWith('File')) options[key] = resolve(value);
+    else options.provenance[key] = value;
+  }
+  if (options.check && options.input) throw new Error('--check cannot be combined with --input');
+  if (!options.input && (
+    options.releaseAssetFile
+    || options.rawCatalogFile
+    || Object.keys(options.provenance).length > 0
+  )) {
+    throw new Error('capture provenance flags require --input');
+  }
+  return options;
+}
+
+export function snapshotFrom(models, provenance) {
+  const required = [
+    'openCodeVersion',
+    'releaseTag',
+    'releaseCommit',
+    'releaseAsset',
+    'releaseAssetSha256',
+    'rawCatalogSha256',
+    'capturedAt',
+  ];
+  assertExactKeys(provenance, 'capture provenance', required);
+  assertSafeTree(provenance, 'capture provenance');
+  for (const key of required) assertSafeString(provenance[key], `--${key}`);
+  if (provenance.releaseTag !== `v${provenance.openCodeVersion}`) {
+    throw new Error('--release-tag must equal v followed by --opencode-version');
+  }
+  const validatedModels = validateResolvedModels(models);
+  const canonical = canonicalizeResolvedModels(validatedModels);
+  const orderedModels = JSON.parse(canonical);
+  const snapshot = {
+    _meta: {
+      schemaVersion: 1,
+      provider: PROVIDER_ID,
+      releaseRepository: RELEASE_REPOSITORY,
+      sourceCommand: SOURCE_COMMAND,
+      refreshCommand: REFRESH_COMMAND,
+      normalization: 'models sorted by id; object keys recursively sorted; compact JSON array plus LF',
+      openCodeVersion: provenance.openCodeVersion,
+      releaseTag: provenance.releaseTag,
+      releaseCommit: provenance.releaseCommit,
+      releaseAsset: provenance.releaseAsset,
+      releaseAssetSha256: provenance.releaseAssetSha256,
+      rawCatalogSha256: provenance.rawCatalogSha256,
+      capturedAt: provenance.capturedAt,
+      normalizedModelsSha256: sha256(canonical),
+    },
+    models: orderedModels,
+  };
+  validateSnapshot(snapshot);
+  return snapshot;
+}
+
+function validateSnapshot(snapshot) {
+  if (!isRecord(snapshot) || !isRecord(snapshot._meta) || !Array.isArray(snapshot.models)) {
+    throw new Error('Committed OpenCode CLI snapshot has an invalid shape');
+  }
+  assertSafeTree(snapshot, 'snapshot');
+  assertExactKeys(snapshot, 'snapshot', ['_meta', 'models']);
+  assertExactKeys(snapshot._meta, 'snapshot._meta', [
+    'capturedAt',
+    'normalization',
+    'normalizedModelsSha256',
+    'openCodeVersion',
+    'provider',
+    'rawCatalogSha256',
+    'refreshCommand',
+    'releaseAsset',
+    'releaseAssetSha256',
+    'releaseCommit',
+    'releaseRepository',
+    'releaseTag',
+    'schemaVersion',
+    'sourceCommand',
+  ]);
+  if (snapshot._meta.schemaVersion !== 1 || snapshot._meta.provider !== PROVIDER_ID) {
+    throw new Error('Committed OpenCode CLI snapshot has unsupported provenance');
+  }
+  if (
+    snapshot._meta.releaseRepository !== RELEASE_REPOSITORY
+    || snapshot._meta.sourceCommand !== SOURCE_COMMAND
+    || snapshot._meta.refreshCommand !== REFRESH_COMMAND
+  ) {
+    throw new Error('Committed OpenCode CLI snapshot does not identify the official resolver commands');
+  }
+  for (const field of ['openCodeVersion', 'releaseTag', 'releaseAsset']) {
+    assertString(snapshot._meta[field], `snapshot._meta.${field}`);
+  }
+  if (snapshot._meta.releaseTag !== `v${snapshot._meta.openCodeVersion}`) {
+    throw new Error('Committed OpenCode CLI snapshot release tag/version mismatch');
+  }
+  if (!/^\d+\.\d+\.\d+$/.test(snapshot._meta.openCodeVersion)) {
+    throw new Error('Committed OpenCode CLI snapshot openCodeVersion must be a semantic version');
+  }
+  if (!/^opencode-[a-z0-9-]+\.zip$/.test(snapshot._meta.releaseAsset)) {
+    throw new Error('Committed OpenCode CLI snapshot releaseAsset must be an official zip asset name');
+  }
+  if (basename(snapshot._meta.releaseAsset) !== snapshot._meta.releaseAsset) {
+    throw new Error('Committed OpenCode CLI snapshot releaseAsset must be a file name');
+  }
+  if (
+    snapshot._meta.normalization
+    !== 'models sorted by id; object keys recursively sorted; compact JSON array plus LF'
+  ) {
+    throw new Error('Committed OpenCode CLI snapshot has unsupported normalization');
+  }
+  for (const [field, length] of [
+    ['releaseCommit', 40],
+    ['releaseAssetSha256', 64],
+    ['rawCatalogSha256', 64],
+    ['normalizedModelsSha256', 64],
+  ]) {
+    const value = snapshot._meta[field];
+    if (typeof value !== 'string' || !new RegExp(`^[0-9a-f]{${length}}$`).test(value)) {
+      throw new Error(`Committed OpenCode CLI snapshot has an invalid ${field}`);
+    }
+  }
+  if (Number.isNaN(Date.parse(snapshot._meta.capturedAt))) {
+    throw new Error('Committed OpenCode CLI snapshot has an invalid capturedAt');
+  }
+  validateResolvedModels(snapshot.models);
+  const actualHash = sha256(canonicalizeResolvedModels(snapshot.models));
+  if (actualHash !== snapshot._meta.normalizedModelsSha256) {
+    throw new Error(
+      `Committed OpenCode CLI snapshot hash mismatch: expected ${snapshot._meta.normalizedModelsSha256}, got ${actualHash}`,
     );
   }
 }
 
-main().catch(error => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+async function readSnapshot() {
+  const snapshot = JSON.parse(await readFile(SNAPSHOT_PATH, 'utf8'));
+  validateSnapshot(snapshot);
+  return snapshot;
+}
+
+async function sha256File(path) {
+  return sha256(await readFile(path));
+}
+
+function prettyJson(value) {
+  return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+function normalizedSnapshotContent(snapshot) {
+  const normalized = {
+    _meta: recursivelySortKeys(snapshot._meta),
+    models: JSON.parse(canonicalizeResolvedModels(snapshot.models)),
+  };
+  return prettyJson(normalized);
+}
+
+async function assertCurrent(path, expected, label) {
+  const actual = await readFile(path, 'utf8').catch(() => '');
+  if (actual !== expected) {
+    throw new Error(`${label} is stale; run pnpm update:opencode-go`);
+  }
+}
+
+export async function run(argv = process.argv.slice(2)) {
+  const options = parseArgs(argv);
+  let snapshot;
+  if (options.input) {
+    const models = parseOpenCodeVerboseOutput(await readFile(options.input, 'utf8'));
+    if (!options.releaseAssetFile) throw new Error('--release-asset-file is required with --input');
+    if (!options.rawCatalogFile) throw new Error('--raw-catalog-file is required with --input');
+    snapshot = snapshotFrom(models, {
+      ...options.provenance,
+      releaseAsset: basename(options.releaseAssetFile),
+      releaseAssetSha256: await sha256File(options.releaseAssetFile),
+      rawCatalogSha256: await sha256File(options.rawCatalogFile),
+    });
+  } else {
+    snapshot = await readSnapshot();
+  }
+
+  validateSnapshot(snapshot);
+  const { supported, omittedResponses } = convertResolvedModels(snapshot.models);
+  const snapshotContent = normalizedSnapshotContent(snapshot);
+  const modelsContent = prettyJson(supported);
+
+  if (options.check) {
+    await assertCurrent(SNAPSHOT_PATH, snapshotContent, 'OpenCode CLI source snapshot');
+    await assertCurrent(MODELS_PATH, modelsContent, 'OpenCode Go runtime catalog');
+    console.log(
+      `OpenCode Go catalog is current: ${supported.length} supported, `
+      + `${omittedResponses.length} Responses-only omitted.`,
+    );
+    return;
+  }
+
+  await writeFile(SNAPSHOT_PATH, snapshotContent);
+  await writeFile(MODELS_PATH, modelsContent);
+  console.log(
+    `Updated ${supported.length} OpenCode Go models from committed OpenCode CLI metadata; `
+    + `omitted Responses-only: ${omittedResponses.join(', ') || 'none'}.`,
+  );
+}
+
+const invokedPath = process.argv[1] ? resolve(process.argv[1]) : '';
+if (invokedPath === fileURLToPath(import.meta.url)) {
+  run().catch(error => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

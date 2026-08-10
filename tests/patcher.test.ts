@@ -191,6 +191,23 @@ describe('buildPatchModelConfig', () => {
     expect(desired.rejectedAliasRejections).toEqual(rejectedAliasRejections);
   });
 
+  it('distinguishes aliases whose saved favorite was removed by a provider allowlist', () => {
+    const droppedTarget = 'opencode-go:gpt-5.6-luna';
+    const alias = { name: 'luna', providerId: 'opencode-go', modelId: 'gpt-5.6-luna' };
+    const desired = buildPatchModelConfig(
+      [],
+      [alias],
+      () => undefined,
+      { droppedFavoriteTargets: new Set([droppedTarget]) },
+    );
+
+    expect(desired.droppedFavoriteIds).toEqual(['clodex:opencode-go:gpt-5.6-luna']);
+    expect(desired.rejectedAliasRejections).toEqual([{
+      alias,
+      reason: 'target-not-exposed',
+    }]);
+  });
+
   it('reports each rejected alias with its exact stored name and reason', () => {
     const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
 
@@ -232,6 +249,7 @@ describe('buildDesiredPatchConfig', () => {
       templateId?: string;
       name?: string;
       npm?: string;
+      url?: string;
     } = {},
   ): void {
     const providerId = provider.id ?? 'openai';
@@ -251,7 +269,10 @@ describe('buildDesiredPatchConfig', () => {
           name: provider.name ?? 'OpenAI',
           enabled: true,
           authRef: 'env:OPENAI_API_KEY',
-          api: { npm: provider.npm ?? '@ai-sdk/openai' },
+          api: {
+            npm: provider.npm ?? '@ai-sdk/openai',
+            ...(provider.url ? { url: provider.url } : {}),
+          },
           modelsCache: {
             fetchedAt: '2026-07-27T00:00:00.000Z',
             models: [model],
@@ -312,6 +333,29 @@ describe('buildDesiredPatchConfig', () => {
     });
   });
 
+  it('keeps a no-cache custom-provider favorite patchable with unknown metadata', () => {
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId: 'custom', modelId: 'future-model' }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: 'custom',
+        templateId: 'custom-openai',
+        name: 'Custom',
+        enabled: true,
+        authRef: 'keyring:provider:custom',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://example.test/v1' },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({ 'clodex:custom:future-model': {} });
+    expect(desired.unknownWindows).toEqual(['clodex:custom:future-model']);
+    expect(desired.droppedFavoriteIds).toEqual([]);
+  });
+
   it('omits effort when enriched catalog metadata explicitly disables reasoning', () => {
     writeInputs({
       id: 'kimi-k2',
@@ -329,6 +373,454 @@ describe('buildDesiredPatchConfig', () => {
     const desired = buildDesiredPatchConfig();
 
     expect(desired.config['clodex:qiniu-ai:kimi-k2']?.effort).toBeUndefined();
+  });
+
+  it('corrects stale built-in OpenCode Go metadata before building patch config', () => {
+    writeInputs({
+      id: 'qwen3.6-plus',
+      upstreamModelId: 'qwen3.6-plus',
+      name: 'stale qwen',
+      contextWindow: 123_000,
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      apiUrl: 'https://example.test/v1',
+      codingCapabilitiesAuthoritative: true,
+      compatibility: {
+        reasoningEffortMap: { low: 'low', medium: 'medium', high: 'high' },
+        thinkingFormat: 'qwen',
+      },
+    }, {
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      npm: '@ai-sdk/openai-compatible',
+      url: 'https://opencode.ai/zen/go/v1',
+    });
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(desired.config['clodex:opencode-go:qwen3.6-plus']).toMatchObject({
+      context: 1_000_000,
+      display: 'Qwen3.6 Plus (OpenCode Go)',
+    });
+    expect(desired.config['clodex:opencode-go:qwen3.6-plus']?.effort).toBeUndefined();
+  });
+
+  it('does not patch a Responses-only model left in an existing built-in cache', () => {
+    writeInputs({
+      id: 'gpt-5.6-luna',
+      upstreamModelId: 'gpt-5.6-luna',
+      name: 'GPT-5.6 Luna',
+      contextWindow: 1_050_000,
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+    }, {
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      npm: '@ai-sdk/openai-compatible',
+      url: 'https://opencode.ai/zen/go/v1',
+    });
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual(['clodex:opencode-go:gpt-5.6-luna']);
+  });
+
+  it('patches valid favorites while naming every saved OpenCode favorite dropped by the allowlist', () => {
+    const providerId = 'opencode-go';
+    writeFileSync(
+      join(home, 'config.json'),
+      JSON.stringify({
+        favoriteModels: [
+          { providerId, modelId: 'qwen3.6-plus' },
+          { providerId, modelId: 'gpt-5.6-luna' },
+        ],
+        modelAliases: [
+          { name: 'luna', providerId, modelId: 'gpt-5.6-luna' },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(home, 'providers.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        providers: [{
+          id: providerId,
+          templateId: providerId,
+          name: 'OpenCode Go',
+          enabled: true,
+          authRef: 'keyring:provider:opencode-go',
+          api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+          modelsCache: {
+            fetchedAt: '2026-08-09T00:00:00.000Z',
+            models: [
+              {
+                id: 'qwen3.6-plus',
+                upstreamModelId: 'qwen3.6-plus',
+                name: 'Qwen',
+                modelFormat: 'openai',
+              },
+              {
+                id: 'gpt-5.6-luna',
+                upstreamModelId: 'gpt-5.6-luna',
+                name: 'Luna',
+                modelFormat: 'openai',
+              },
+            ],
+          },
+          addedAt: '2026-08-09T00:00:00.000Z',
+        }],
+      }),
+    );
+
+    const desired = buildDesiredPatchConfig();
+    expect(Object.keys(desired.config)).toEqual(['clodex:opencode-go:qwen3.6-plus']);
+    expect(desired.droppedFavoriteIds).toEqual(['clodex:opencode-go:gpt-5.6-luna']);
+    expect(desired.rejectedAliasRejections).toEqual([{
+      alias: { name: 'luna', providerId, modelId: 'gpt-5.6-luna' },
+      reason: 'target-not-exposed',
+    }]);
+  });
+
+  it('does not correct OpenCode-shaped metadata for a custom endpoint', () => {
+    writeInputs({
+      id: 'qwen3.6-plus',
+      upstreamModelId: 'qwen3.6-plus',
+      name: 'Custom Qwen',
+      contextWindow: 123_000,
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      apiUrl: 'https://example.test/v1',
+      codingCapabilitiesAuthoritative: true,
+    }, {
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'Custom endpoint',
+      npm: '@ai-sdk/openai-compatible',
+      url: 'https://example.test/v1',
+    });
+
+    expect(buildDesiredPatchConfig().config['clodex:opencode-go:qwen3.6-plus']?.context)
+      .toBe(123_000);
+  });
+
+  it('rejects only stale official favorites quarantined under a custom OpenCode URL', () => {
+    const providerId = 'opencode-go';
+    const modelId = 'qwen3.6-plus';
+    writeInputs({
+      id: modelId,
+      upstreamModelId: modelId,
+      name: 'Stale official Qwen',
+      contextWindow: 1_000_000,
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      apiUrl: 'https://opencode.ai/zen/go',
+      codingCapabilitiesAuthoritative: true,
+    }, {
+      id: providerId,
+      templateId: providerId,
+      name: 'Custom endpoint',
+      npm: '@ai-sdk/openai-compatible',
+      url: 'https://example.test/v1',
+    });
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+      modelAliases: [{ name: 'qwen', providerId, modelId }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+    expect(desired.rejectedAliasRejections).toEqual([{
+      alias: { name: 'qwen', providerId, modelId },
+      reason: 'target-not-exposed',
+    }]);
+  });
+
+  it.each([
+    ['uppercase official host', 'https://OPENCODE.AI/zen/go'],
+    ['default-port official host', 'https://opencode.ai:443/zen/go/v1'],
+    ['alternate official path', 'https://opencode.ai/some/older/resolver/path'],
+  ])('drops a non-canonical stale official favorite after a custom transition (%s)', (
+    _label,
+    staleApiUrl,
+  ) => {
+    const providerId = 'opencode-go';
+    const modelId = 'qwen3.6-plus';
+    writeInputs({
+      id: modelId,
+      upstreamModelId: modelId,
+      name: 'Stale official Qwen',
+      contextWindow: 1_000_000,
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      apiUrl: staleApiUrl,
+      codingCapabilitiesAuthoritative: true,
+    }, {
+      id: providerId,
+      templateId: providerId,
+      name: 'Custom endpoint',
+      npm: '@ai-sdk/openai-compatible',
+      url: 'https://example.test/v1',
+    });
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+  });
+
+  it('keeps a custom target patchable when a neutral live row supersedes a stale official duplicate', () => {
+    const providerId = 'opencode-go';
+    const modelId = 'qwen3.6-plus';
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+      modelAliases: [{ name: 'qwen', providerId, modelId }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: providerId,
+        templateId: providerId,
+        name: 'Custom endpoint',
+        enabled: true,
+        authRef: 'keyring:provider:custom',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://example.test/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-09T00:00:00.000Z',
+          models: [
+            {
+              id: modelId,
+              upstreamModelId: modelId,
+              name: 'Stale official Qwen',
+              contextWindow: 1_000_000,
+              modelFormat: 'anthropic',
+              npm: '@ai-sdk/anthropic',
+              apiUrl: 'https://opencode.ai/zen/go',
+            },
+            {
+              id: modelId,
+              upstreamModelId: modelId,
+              name: 'Current custom Qwen',
+              contextWindow: 123_000,
+              modelFormat: 'openai',
+              npm: '@ai-sdk/openai-compatible',
+              apiUrl: 'https://example.test/v1',
+            },
+          ],
+        },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config[`clodex:${providerId}:${modelId}`]).toMatchObject({
+      alias: 'qwen',
+      context: 123_000,
+    });
+    expect(desired.droppedFavoriteIds).toEqual([]);
+    expect(desired.rejectedAliasRejections).toEqual([]);
+  });
+
+  it('quarantines neutral rows when a partial OpenCode identity points at an official URL', () => {
+    const providerId = 'opencode-go';
+    const modelId = 'custom-model';
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: providerId,
+        templateId: 'legacy-unmapped-template',
+        name: 'Partial OpenCode identity',
+        enabled: true,
+        authRef: 'keyring:provider:custom',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-09T00:00:00.000Z',
+          models: [{
+            id: modelId,
+            upstreamModelId: modelId,
+            name: 'Neutral custom model',
+            modelFormat: 'openai',
+            npm: '@ai-sdk/openai-compatible',
+          }],
+        },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+  });
+
+  it.each([
+    ['uppercase host', 'https://OPENCODE.AI/zen/go/v1'],
+    ['default port', 'https://opencode.ai:443/zen/go/v1'],
+    ['dot segment', 'https://opencode.ai/zen/./go/v1'],
+    ['encoded path', 'https://opencode.ai/%7Aen/go/%76%31'],
+    ['encoded separator', 'https://opencode.ai/zen%2Fgo/v1'],
+    ['trailing-dot host and alternate path', 'https://opencode.ai./some/other/path'],
+    ['userinfo and query', 'https://user:secret@opencode.ai/zen/go/v1?source=custom#fragment'],
+    ['plaintext scheme', 'http://opencode.ai/zen/go/v1'],
+  ])('drops partial-identity favorites for official-equivalent URLs (%s)', (
+    _label,
+    url,
+  ) => {
+    const providerId = 'opencode-go';
+    const modelId = 'custom-model';
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: providerId,
+        templateId: 'groq',
+        name: 'Partial OpenCode identity',
+        enabled: true,
+        authRef: 'keyring:provider:partial',
+        api: { npm: '@ai-sdk/openai-compatible', url },
+        modelsCache: {
+          fetchedAt: '2026-08-09T00:00:00.000Z',
+          models: [{
+            id: modelId,
+            upstreamModelId: modelId,
+            name: 'Neutral custom model',
+            modelFormat: 'openai',
+            npm: '@ai-sdk/openai-compatible',
+          }],
+        },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+  });
+
+  it('drops every favorite for an ambiguous OpenCode provider with no URL or cache', () => {
+    const providerId = 'opencode-go';
+    const modelId = 'qwen3.6-plus';
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: providerId,
+        templateId: providerId,
+        name: 'Ambiguous OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:ambiguous',
+        api: { npm: '@ai-sdk/openai-compatible' },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+  });
+
+  it('drops absent favorites for a partial OpenCode identity on an official URL', () => {
+    const providerId = 'opencode-go';
+    const modelId = 'favorite-not-in-cache';
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: providerId,
+        templateId: 'groq',
+        name: 'Partial OpenCode identity',
+        enabled: true,
+        authRef: 'keyring:provider:partial',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-09T00:00:00.000Z',
+          models: [{
+            id: 'different-model',
+            upstreamModelId: 'different-model',
+            name: 'Different model',
+            modelFormat: 'openai',
+            npm: '@ai-sdk/openai-compatible',
+          }],
+        },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+  });
+
+  it.each([
+    {
+      label: 'official OpenCode provider',
+      providerId: 'opencode-go',
+      templateId: 'opencode-go',
+      url: 'https://opencode.ai/zen/go/v1',
+      modelId: 'qwen3.6-plus',
+      apiUrl: 'https://opencode.ai/zen/go',
+    },
+    {
+      label: 'generic custom provider',
+      providerId: 'custom-disabled',
+      templateId: 'custom-openai',
+      url: 'https://example.test/v1',
+      modelId: 'custom-model',
+      apiUrl: 'https://example.test/v1',
+    },
+  ])('drops favorites and aliases owned by a disabled $label', ({
+    providerId,
+    templateId,
+    url,
+    modelId,
+    apiUrl,
+  }) => {
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+      modelAliases: [{ name: 'disabled-alias', providerId, modelId }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: providerId,
+        templateId,
+        name: 'Disabled provider',
+        enabled: false,
+        authRef: `keyring:provider:${providerId}`,
+        api: { npm: '@ai-sdk/openai-compatible', url },
+        modelsCache: {
+          fetchedAt: '2026-08-09T00:00:00.000Z',
+          models: [{
+            id: modelId,
+            upstreamModelId: modelId,
+            name: 'Disabled model',
+            modelFormat: 'openai',
+            npm: '@ai-sdk/openai-compatible',
+            apiUrl,
+          }],
+        },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+    expect(desired.rejectedAliasRejections).toEqual([
+      expect.objectContaining({ reason: 'target-not-exposed' }),
+    ]);
   });
 });
 

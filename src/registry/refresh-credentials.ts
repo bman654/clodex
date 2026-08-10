@@ -2,6 +2,7 @@
 
 import { isAnonymousProvider } from './materialize.js';
 import type { RegistryProvider } from './types.js';
+import { effectiveProviderCachedModels } from '../data/opencode-go-models.js';
 
 /** OpenCode uses these when OAuth/env supplies the real credential at runtime. */
 const PLACEHOLDER_KEYS = new Set([
@@ -34,7 +35,7 @@ export function isLikelyPlaceholderKey(key: string | null | undefined): boolean 
 }
 
 export function cachedModelCount(provider: RegistryProvider): number {
-  return provider.modelsCache?.models.length ?? 0;
+  return effectiveProviderCachedModels(provider).length;
 }
 
 export function skipWithCachedModels(
