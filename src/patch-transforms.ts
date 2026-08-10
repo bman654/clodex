@@ -556,13 +556,28 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // existing filtering continues against the resulting copy.
   // ---------------------------------------------------------------------------
   {
+    const patchName = 'PATCH 10: child network environment';
     const marker = '/*ccpatch:child-network-env*/';
     const contractVar = q(NETWORK_ENV_CONTRACT_VAR);
     const networkVars = JSON.stringify(CHILD_NETWORK_ENV_VARS);
+    const requiredBodyLiterals = [
+      'CLAUDE_CODE_REMOTE',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'CLAUDE_CODE_SUBSCRIPTION_TYPE',
+      'CLAUDE_BG_PTY_AUTH',
+      '"OTEL_"',
+      'CLAUDE_CODE_OTEL_DIAG_STDERR',
+    ];
     applyOnce(
-      'PATCH 10: child network environment',
-      /(function [\w$]+\(\)\{)((?=[\s\S]{0,5000}?CLAUDE_CODE_REMOTE)(?=[\s\S]{0,7000}?CLAUDE_CODE_OAUTH_TOKEN)(?:(?!\}\s*function )[\s\S])*?)(\}\s*function [\w$]+\(\)\{let [\w$]+=process\.env\.CLAUDE_CODE_MCP_ALLOWLIST_ENV)/,
+      patchName,
+      /(function [\w$]+\(\)\{)(let [\w$]+=[\w$]+\(\),[\w$]+=Object\.keys\([\w$]+\)\.length>0,[\w$]+=Object\.keys\([\w$]+\)\.length>0,[\w$]+=[\w$]+\(process\.env\.CLAUDE_CODE_REMOTE\)\?(?:(?!\}\s*function )[\s\S])*?for\(let [\w$]+ of [\w$]+\)delete [\w$]+\[[\w$]+\],delete [\w$]+\[`INPUT_\$\{[\w$]+\}`\];return [\w$]+)(\})/,
       (_match, head, body, tail) => {
+        const targetIsValid = requiredBodyLiterals.every(literal => body!.includes(literal))
+          && !/\bfunction [\w$]*\(/.test(body!);
+        if (!targetIsValid) {
+          log('FAIL', patchName, 'target validation failed');
+          fail('clodex patch: child network environment target validation failed');
+        }
         const restoredBody = body!.replace(/process\.env/g, '_clodexChildEnv');
         const restore = marker
           + 'let _clodexChildEnv=process.env,_clodexNetworkRaw=_clodexChildEnv[' + contractVar + '];'

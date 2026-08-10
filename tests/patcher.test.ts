@@ -453,7 +453,7 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
       version: 4,
-      digest: 'f41ca3e2bc2d80cd8577ec9192c84f01b3202afd6965963fcac09b1f7be1418b',
+      digest: 'c0cf08dd5144edf1138e82b3f94872a294db238fc3a8f4f92be8c0451d260070',
     });
   });
 });
@@ -648,7 +648,7 @@ const CLAUDE_CORE_FIXTURE = [
   'function opts(e,t,r){let n=cur(),o=(n==="opus")?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}',
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
   'function cwdOf(){let p=process.env.PWD;return p}',
-  'function childEnv(){let e=extra(),t=Object.keys(e).length>0,n=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{},s=process.env.CLAUDE_CODE_OAUTH_TOKEN!==void 0;if(!t&&!s)return process.env;let u={...process.env,...e,...n};delete u.CLAUDE_CODE_OAUTH_TOKEN;return u}function mcpAllow(){let e=process.env.CLAUDE_CODE_MCP_ALLOWLIST_ENV;return e}',
+  'function childEnv(){let e=extra(),t=Object.keys(e).length>0,n=Object.keys(e).length>0,s=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};let o=[process.env.CLAUDE_CODE_OAUTH_TOKEN,process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE,process.env.CLAUDE_BG_PTY_AUTH,"OTEL_",process.env.CLAUDE_CODE_OTEL_DIAG_STDERR],u=["CLAUDE_CODE_OAUTH_TOKEN"];if(!t&&!n&&!o[0])return process.env;let v={...process.env,...e,...s};for(let k of u)delete v[k],delete v[`INPUT_${k}`];return v}function mcpAllow(){let e=process.env.CLAUDE_CODE_MCP_ALLOWLIST_ENV;return e}',
 ].join('\n');
 
 const digestOf = (text: string) => createHash('sha256').update(text).digest('hex');
@@ -1247,6 +1247,31 @@ describe('patch script identity naming', () => {
 
   it('falls through to the native default for an unconfigured identity', () => {
     expect(executeDefaultEffort(runPatchScript(config), 'unconfigured', 'medium')).toBe('medium');
+  });
+
+  it('targets the child builder when a token-bearing function follows it', () => {
+    const source = CLAUDE_FIXTURE.replace(
+      '}function mcpAllow(){',
+      '}function adjacent(){let e=process.env.CLAUDE_CODE_REMOTE;'
+      + 'return process.env.CLAUDE_CODE_OAUTH_TOKEN}function mcpAllow(){',
+    );
+    const out = runPatchScript(config, source);
+
+    expect(out.match(/\/\*ccpatch:child-network-env\*\//g)).toHaveLength(1);
+    expect(out).toContain('function childEnv(){/*ccpatch:child-network-env*/');
+    expect(out).toContain('function adjacent(){let e=process.env.CLAUDE_CODE_REMOTE;');
+    expect(out).not.toContain('function adjacent(){/*ccpatch:child-network-env*/');
+  });
+
+  it('rejects a nested function in the child-environment patch target', () => {
+    const source = CLAUDE_FIXTURE.replace(
+      's=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};let o=',
+      's=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};function nested(){}let o=',
+    );
+
+    expect(() => runPatchScript(config, source)).toThrow(
+      'clodex patch: child network environment target validation failed',
+    );
   });
 
   it('restores the original network environment for child commands', () => {
