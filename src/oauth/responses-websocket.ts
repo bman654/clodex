@@ -12,7 +12,7 @@ import type { FetchFunction } from '@ai-sdk/provider-utils';
 import type { RawData, WebSocket as WsWebSocket } from 'ws';
 import { CODEX_RESPONSES_WEBSOCKETS_BETA } from '../constants.js';
 import { outboundWsProxyAgent } from '../outbound-proxy.js';
-import { anthropicErrorType, clampRetryAfterSeconds } from '../upstream-error.js';
+import { anthropicErrorType, clampRetryAfterSeconds, frameStatusCode } from '../upstream-error.js';
 import { sanitizeToolInput } from '../tool-input-sanitize.js';
 
 const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite';
@@ -882,7 +882,7 @@ function boundedDiagnosticIdentifier(value: unknown): string | undefined {
 }
 
 function diagnosticTextFingerprint(
-  field: 'errorMessage' | 'closeReason',
+  field: 'errorMessage' | 'closeReason' | 'upstreamMessage',
   value: unknown,
 ): Record<string, unknown> {
   if (typeof value !== 'string' || value.length === 0) return {};
@@ -1598,10 +1598,30 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   const errorStatus = type === 'error' && !ctx.emittedModelData
     ? responseErrorStatus(event)
     : undefined;
+  // A failure terminal with no HTTP status to map (`response.failed`,
+  // `response.incomplete`, or a bare `error` frame that named no status) is the
+  // same defect one layer over: forwarded verbatim it ends the stream having
+  // emitted nothing, so downstream reads a SUCCESSFUL, EMPTY 200 and renders a
+  // turn in which the model said nothing. That is indistinguishable from a
+  // deliberately silent turn, so the actual reason — a usage limit, a rejected
+  // reconstruction, an aborted response — never reaches the operator and the
+  // session simply appears to stop answering, one prompt after another.
+  //
+  // Gated on `!emittedModelData` for the same reason as the branch above: once
+  // model data is downstream the stream is committed and the existing
+  // partial-output path must keep handling it.
+  const emptyFailureTerminal = FAILURE_EVENT_TYPES.has(type ?? '')
+    && errorStatus === undefined
+    && !willRetry
+    && !ctx.emittedModelData;
   // One rejection, one diagnostic record. Without this gate a rejected request
   // emits both this record and `failContext`'s, under different `source` values
   // with disjoint fields, reading as two failures of one request.
-  if (FAILURE_EVENT_TYPES.has(type ?? '') && (errorStatus === undefined || willRetry)) {
+  if (
+    FAILURE_EVENT_TYPES.has(type ?? '')
+    && (errorStatus === undefined || willRetry)
+    && !emptyFailureTerminal
+  ) {
     emitResponseErrorDiagnostic(entry, ctx, {
       source: 'response_event',
       upstreamEventType: type,
@@ -1653,6 +1673,94 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
         ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
       },
       errorStatus,
+      retryAfterSeconds,
+    );
+    return;
+  }
+
+  if (emptyFailureTerminal) {
+    const details = responseFailureDetails(event);
+    // The bounded identifiers are the whole diagnostic value here: they are what
+    // names `usage_limit_reached` (or whatever else) in the debug log the next
+    // time a session goes silent, without dumping upstream text.
+    const named = [details.errorType, details.errorCode, details.incompleteReason]
+      .filter((value): value is string => typeof value === 'string');
+    const summary = 'OpenAI ended the response with no output'
+      + (named.length ? ` (${named.join(' / ')})` : ` (${type})`);
+    // Classified by the SAME discriminator rules a status-carrying frame goes
+    // through, rather than a local whitelist that would drift from them.
+    //
+    // That matters beyond tidiness: `context_length_exceeded` has to land on
+    // 400. `isContextLengthExceededError` trusts a frame's structured
+    // discriminator over its prose, and the proxy handlers require a 400 before
+    // emitting Claude Code's prompt-too-long response — so as a 502 a
+    // long-context request is retried as a server fault AND loses the
+    // auto-compaction signal that would have made room for it.
+    //
+    // 502 stands in only where the shared classifier has no opinion (its 500
+    // default): an indeterminate failure genuinely is worth retrying, and 502
+    // is the honest "upstream gave us nothing usable" for an output-less
+    // terminal. Every class it does recognise — deterministic 400s, usage
+    // limits, auth, overload — keeps the status the rest of the stack expects.
+    const discriminator = [details.errorType, details.errorCode]
+      .filter((value): value is string => typeof value === 'string')
+      .join(' ')
+      .toLowerCase();
+    // `incomplete_details.reason` is a DIFFERENT vocabulary from a frame's
+    // code/type, so it is classified here rather than fed to frameStatusCode,
+    // which documents itself as reading the latter. These are the reasons that
+    // describe a settled outcome rather than a fault: retrying re-runs a
+    // request upstream has already answered.
+    const settledReason = details.incompleteReason === 'content_filter'
+      || details.incompleteReason === 'max_output_tokens';
+    // errorCode passed as the CODE argument, not folded into the discriminator:
+    // frameStatusCode recognises a numeric HTTP code only through that first
+    // parameter, and clodex's own synthetic frames set `code` to the
+    // stringified status. Fold it in as prose instead and a terminal carrying
+    // `code: '401'` matches no rule, lands on the 500 default, and gets
+    // rewritten as a retryable 502.
+    const numericOrNamed = typeof details.errorCode === 'string' ? details.errorCode : undefined;
+    const classified = numericOrNamed !== undefined || discriminator
+      ? frameStatusCode(numericOrNamed, discriminator)
+      : 500;
+    const statusCode = classified !== 500
+      ? classified
+      : settledReason ? 400 : 502;
+    const usageLimited = statusCode === 429;
+    // Only when upstream stated one, and only baked into the TEXT: the AI SDK's
+    // chunk schema is a closed zod object that strips `retry_after_seconds`, so
+    // a hint carried only in the frame field never reaches the client. This is
+    // the same reason the status-carrying branch above spells it out.
+    const retryAfterSeconds = usageLimited && responseRetryAfterSeconds(event) !== undefined
+      ? clampRetryAfterSeconds(responseRetryAfterSeconds(event))
+      : undefined;
+    // The BOUNDED summary is the message, upstream's prose is not used at all.
+    // A `response.failed` body can echo request content or backend detail, and
+    // it does not stay in one place: the synthetic error is rethrown by the SDK
+    // and `proxy.ts` writes both the formatted message and `errorContent` to the
+    // persistent proxy log, which `redactTraceLine` only scrubs of known
+    // credential shapes. Protecting the immediate `fail:` line while the same
+    // text reaches disk one frame later is not protection. The summary names
+    // the cause — the identifiers are what diagnose a silent session — and the
+    // raw message survives as a length+hash in the diagnostic.
+    failContext(
+      entry,
+      ctx,
+      retryAfterSeconds === undefined ? summary : `${summary}; retry after ${retryAfterSeconds}s`,
+      {
+        source: 'empty_failure_terminal',
+        upstreamEventType: type,
+        ...details,
+        // Under DISTINCT keys. `failContext` fingerprints the message it was
+        // given after spreading these, so an `errorMessage*` pair here is
+        // overwritten by the summary's — which would silently discard the only
+        // content-free evidence of what upstream actually said, and leave two
+        // failures with the same type and code indistinguishable. `errorMessage*`
+        // now means "what the client was told", `upstreamMessage*` means "what
+        // upstream said", and both survive.
+        ...diagnosticTextFingerprint('upstreamMessage', responseErrorMessage(event)),
+      },
+      statusCode,
       retryAfterSeconds,
     );
     return;

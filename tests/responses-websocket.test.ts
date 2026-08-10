@@ -1117,7 +1117,7 @@ describe('createResponsesWebSocketFetch', () => {
     // anyway, so only this shape can catch a future edit that starts consulting
     // that field and reports a lifecycle position as a status.
     ['a numeric response status', { type: 'error', error: { type: 'server_error', message: 'keep me' }, response: { status: 400 } }],
-  ])('leaves a frame carrying %s to the existing path', async (_label, frame) => {
+  ])('does not adopt %s as the mapped status', async (_label, frame) => {
     const wsFetch = createResponsesWebSocketFetch(WS_URL);
     const res = await wsFetch('https://x', {
       method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
@@ -1127,11 +1127,17 @@ describe('createResponsesWebSocketFetch', () => {
     socket.emit('message', Buffer.from(JSON.stringify(frame)));
 
     const body = await readAll(res);
-    expect(body).toContain('keep me');
-    // Not rewritten into a synthetic frame: no status was recovered, so the
-    // original is forwarded exactly as before this branch existed.
-    expect(body).not.toContain('"code":"200"');
-    expect(await classifyThroughSdk(body)).toBeUndefined();
+    // No status was recovered, so none of these shapes may be adopted as one.
+    // They fail as a generic 502 rather than being forwarded verbatim: an
+    // `error` frame ends the stream, and forwarding it with nothing emitted
+    // hands the client a successful, EMPTY 200 — the silent-no-response defect.
+    // Pinning 502 keeps the original guard intact too, since an edit that
+    // started reading these fields would surface as 200/400 here.
+    expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 502 });
+    // The cause is named from the bounded identifiers; upstream's own prose is
+    // deliberately not carried (see the log-safety test below).
+    expect(body).toContain('server_error');
+    expect(body).not.toContain('keep me');
   });
 
   // Each message source the helper consults, pinned separately — otherwise a
@@ -1190,6 +1196,231 @@ describe('createResponsesWebSocketFetch', () => {
     expect(body).toContain('late failure');
     expect(body).toContain('"status":500');
     expect(body).not.toContain('"code":"500"');
+  });
+
+  // The silent-no-response defect. A failure terminal that names no HTTP status
+  // used to be forwarded verbatim with nothing emitted, so the client received a
+  // successful, EMPTY 200 and rendered a turn where the model said nothing —
+  // indistinguishable from deliberate silence, and the reason never surfaced.
+  async function failWith(frame: unknown): Promise<string> {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', { method: 'POST', headers: {}, body: '{}' });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify(frame)));
+    return readAll(res);
+  }
+
+  it('fails an indeterminate output-less terminal as a retryable server fault', async () => {
+    const body = await failWith({
+      type: 'response.failed',
+      response: { id: 'resp_x', status: 'failed', error: { type: 'server_error', message: 'why it died' } },
+    });
+    expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 502, isRetryable: true });
+  });
+
+  // Deterministic outcomes must NOT be retryable. frameIsRetryable treats every
+  // status >= 500 as transient, so a blanket 502 would make the SDK repeat a
+  // request upstream has already settled and then report a server fault for
+  // something that was never one.
+  it.each([
+    ['content_filter', { type: 'response.incomplete', response: { id: 'r', status: 'incomplete', incomplete_details: { reason: 'content_filter' } } }],
+    ['max_output_tokens', { type: 'response.incomplete', response: { id: 'r', status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } } }],
+    ['invalid_request_error', { type: 'response.failed', response: { id: 'r', status: 'failed', error: { type: 'invalid_request_error', message: 'bad' } } }],
+  ])('does not make a deterministic %s outcome retryable', async (_label, frame) => {
+    const verdict = await classifyThroughSdk(await failWith(frame));
+    expect(verdict).toMatchObject({ statusCode: 400 });
+    expect(verdict?.isRetryable).toBe(false);
+  });
+
+  it('preserves a context-limit failure as 400 so auto-compaction still fires', async () => {
+    // isContextLengthExceededError trusts a frame's structured discriminator
+    // over its prose, and the proxy handlers require a 400 before emitting
+    // Claude Code's prompt-too-long response. As a 502 a long-context request
+    // is retried as a server fault AND loses the signal that would have made
+    // room for it — the worst of both.
+    for (const frame of [
+      { type: 'response.failed', response: { id: 'r', status: 'failed', error: { code: 'context_length_exceeded', message: 'too long' } } },
+      { type: 'error', error: { type: 'invalid_request_error', code: 'context_length_exceeded', message: 'too long' } },
+    ]) {
+      const verdict = await classifyThroughSdk(await failWith(frame));
+      expect(verdict, JSON.stringify(frame)).toMatchObject({ statusCode: 400 });
+      expect(verdict?.isRetryable, JSON.stringify(frame)).toBe(false);
+    }
+  });
+
+  it('classifies output-less terminals with the same rules as a status-carrying frame', async () => {
+    // Delegating to frameStatusCode rather than a local whitelist is what keeps
+    // these in step; 502 stands in only where that classifier has no opinion.
+    const auth = await classifyThroughSdk(await failWith({
+      type: 'response.failed',
+      response: { id: 'r', status: 'failed', error: { type: 'authentication_error', message: 'nope' } },
+    }));
+    expect(auth).toMatchObject({ statusCode: 401 });
+
+    const overload = await classifyThroughSdk(await failWith({
+      type: 'response.failed',
+      response: { id: 'r', status: 'failed', error: { type: 'overloaded_error', message: 'busy' } },
+    }));
+    expect(overload).toMatchObject({ statusCode: 503 });
+  });
+
+  it('routes a numeric error code through the classifier, not past it', async () => {
+    // frameStatusCode recognises a numeric HTTP code only via its `code`
+    // argument — clodex's own synthetic frames use that exact channel. Folded
+    // into the discriminator as prose instead, `code: '401'` matches no rule,
+    // lands on the 500 default, and is rewritten as a RETRYABLE 502.
+    for (const [code, expected] of [['401', 401], ['429', 429], ['503', 503]] as const) {
+      const verdict = await classifyThroughSdk(await failWith({
+        type: 'response.failed',
+        response: { id: 'r', status: 'failed', error: { code, message: 'x' } },
+      }));
+      expect(verdict, code).toMatchObject({ statusCode: expected });
+    }
+  });
+
+  it('carries an output-less usage-limit backoff in the message text', async () => {
+    // The AI SDK's chunk schema is a closed zod object that strips
+    // `retry_after_seconds`, so a hint carried only in the frame field never
+    // reaches the client — it has to be baked into the prose.
+    const body = await failWith({
+      type: 'response.failed',
+      response: {
+        id: 'r',
+        status: 'failed',
+        error: { type: 'usage_limit_reached', message: 'weekly limit reached', retry_after_seconds: 1800 },
+      },
+    });
+    // Clamped to MAX_RETRY_AFTER_SECONDS: a hint of hours must not park the
+    // client past the 120s no-event stream abort.
+    expect(body).toContain('retry after 60s');
+    expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429, retryAfterSeconds: 60 });
+  });
+
+  it('asserts no backoff upstream never stated', async () => {
+    const body = await failWith({
+      type: 'response.failed',
+      response: { id: 'r', status: 'failed', error: { type: 'usage_limit_reached', message: 'limit' } },
+    });
+    expect(body).not.toContain('retry after');
+    expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429 });
+  });
+
+  it('never carries upstream failure prose to the log OR the client', async () => {
+    // A response.failed body can echo request content, and it does not stay in
+    // one place: the synthetic error is rethrown by the SDK and proxy.ts writes
+    // both the formatted message and errorContent to the persistent proxy log,
+    // which redactTraceLine only scrubs of known credential shapes. Guarding
+    // the immediate `fail:` line while the same text reaches disk one frame
+    // later is not a guard — so the prose is not used at all. The bounded
+    // identifiers name the cause, and the raw text survives as a length+hash
+    // in the structured diagnostic.
+    const logged: string[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, line => logged.push(line));
+    const res = await wsFetch('https://x', { method: 'POST', headers: {}, body: '{}' });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.failed',
+      response: {
+        id: 'r',
+        status: 'failed',
+        error: { type: 'server_error', message: 'SECRET-ECHOED-PROMPT-CONTENT' },
+      },
+    })));
+    const body = await readAll(res);
+
+    expect(body).not.toContain('SECRET-ECHOED-PROMPT-CONTENT');
+    expect(body).toContain('server_error');
+    expect(logged.join('\n')).not.toContain('SECRET-ECHOED-PROMPT-CONTENT');
+    const failLines = logged.filter(line => line.includes('fail:'));
+    expect(failLines.length).toBeGreaterThan(0);
+    expect(failLines.join('\n')).toContain('server_error');
+  });
+
+  it('maps an output-less usage limit to 429 rather than a server fault', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', { method: 'POST', headers: {}, body: '{}' });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.failed',
+      response: {
+        id: 'resp_x',
+        status: 'failed',
+        error: { type: 'usage_limit_reached', message: 'plan limit reached' },
+      },
+    })));
+
+    // An exhausted account is not a server fault: 502 would spend the client's
+    // whole retry budget re-asking a question upstream has already answered.
+    expect(await classifyThroughSdk(await readAll(res))).toMatchObject({ statusCode: 429 });
+  });
+
+  it('keeps a content-free fingerprint of what upstream actually said', async () => {
+    // The prose never reaches the client or the log, so the fingerprint is the
+    // ONLY evidence distinguishing two failures with the same type and code.
+    // failContext fingerprints the message it is given after spreading the
+    // details, so an errorMessage* pair passed in is overwritten by the
+    // summary's — the upstream one has to travel under its own keys.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', { method: 'POST', headers: {}, body: '{}' });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.failed',
+      response: {
+        id: 'r',
+        status: 'failed',
+        error: { type: 'server_error', message: 'sensitive backend explanation' },
+      },
+    })));
+    await readAll(res);
+
+    const record = diagnostics.find(event => event.event === 'ws_response_error') as
+      Record<string, unknown> | undefined;
+    expect(record).toBeTruthy();
+    expect(record!.upstreamMessageBytes).toBe(29);
+    expect(record!.upstreamMessageHash).toMatch(/^[a-f0-9]{16}$/);
+    // ...alongside, not instead of, the fingerprint of what the client was told.
+    expect(record!.errorMessageBytes).not.toBe(29);
+    expect(JSON.stringify(record)).not.toContain('sensitive backend explanation');
+  });
+
+  it('names the upstream cause in the diagnostic when a terminal emitted nothing', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await withResponsesWebSocketDiagnosticContext(
+      { requestId: 'req-empty-terminal' },
+      () => wsFetch('https://x', { method: 'POST', headers: {}, body: '{}' }),
+    );
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.failed',
+      response: {
+        id: 'resp_x',
+        status: 'failed',
+        error: { type: 'usage_limit_reached', code: 'usage_limit_reached', message: 'plan limit reached' },
+      },
+    })));
+    await readAll(res);
+
+    // Exactly one record for one failure, carrying the bounded identifier that
+    // names the cause — this is what a silent session will be diagnosed from.
+    const records = diagnostics.filter(event => event.event === 'ws_response_error');
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      source: 'empty_failure_terminal',
+      upstreamEventType: 'response.failed',
+      errorType: 'usage_limit_reached',
+      emittedModelData: false,
+    });
   });
 
   it('logs sanitized upstream response failure details after partial output', async () => {

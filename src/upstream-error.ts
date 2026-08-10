@@ -146,7 +146,7 @@ function errorCodeValue(record: Record<string, unknown>): string | undefined {
  * clodex's own synthetic frames set `code` to the stringified status, so that
  * exact channel is preferred over any discriminator.
  */
-function frameStatusCode(code: string | undefined, discriminator: string): number {
+export function frameStatusCode(code: string | undefined, discriminator: string): number {
   if (code !== undefined && /^\d{3}$/.test(code)) {
     const numeric = Number(code);
     if (numeric >= 400 && numeric <= 599) return numeric;
@@ -155,7 +155,11 @@ function frameStatusCode(code: string | undefined, discriminator: string): numbe
   // before any auth check and so reports 400 here exactly as it does in the
   // SDK. Diverging would reintroduce the pre/post-output split this avoids,
   // and an auth failure cannot reach a mid-stream frame anyway.
-  if (/insufficient_quota|rate_limit/.test(discriminator)) return 429;
+  // `usage_limit` alongside the quota/rate classes: an exhausted plan is a real
+  // 429, and without it the discriminator falls through to the 500 default —
+  // which `frameIsRetryable` treats as transient, so the client spends its whole
+  // retry budget re-asking a question upstream has already answered.
+  if (/insufficient_quota|rate_limit|usage_limit/.test(discriminator)) return 429;
   if (discriminator.includes('authentication')) return 401;
   if (discriminator.includes('permission')) return 403;
   if (discriminator.includes('not_found')) return 404;
