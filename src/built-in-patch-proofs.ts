@@ -2,6 +2,7 @@ import type {
   PatchScriptModelConfig,
   PatchSiteResult,
 } from './patch-transforms.js';
+import { patchEntryAliases } from './patch-transforms.js';
 
 export interface BuiltInPatchProof {
   name: string;
@@ -92,12 +93,12 @@ function configuredAliases(config: PatchScriptModelConfig): Array<{
 }> {
   const aliases = new Map<string, { id: string; display?: string }>();
   for (const [id, entry] of Object.entries(config)) {
-    if (entry.alias === undefined) continue;
-    const alias = String(entry.alias).trim().toLowerCase();
-    aliases.set(alias, {
-      id,
-      ...(entry.display === undefined ? {} : { display: String(entry.display) }),
-    });
+    for (const alias of patchEntryAliases(entry)) {
+      aliases.set(alias, {
+        id,
+        ...(entry.display === undefined ? {} : { display: String(entry.display) }),
+      });
+    }
   }
   return [...aliases].map(([alias, entry]) => ({ alias, ...entry }));
 }

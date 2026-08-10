@@ -165,9 +165,13 @@ describe('HTTP proxy routes', () => {
     expect(result.unavailableAliases).toEqual([]);
   });
 
-  it('uses the same canonical alias for patch identity and proxy routing', () => {
+  it('uses every same-target alias for patch identity and proxy routing', () => {
     const favorite = { providerId: 'groq', modelId: 'llama-3.3-70b' };
-    const aliases = [{ name: 'LLaMa', ...favorite }];
+    const aliases = [
+      { name: 'LLaMa', ...favorite },
+      { name: 'fast', ...favorite },
+      { name: 'terra', ...favorite },
+    ];
     const routes = buildHttpProxyRoutes(providers, [favorite], aliases);
     const patch = buildPatchModelConfig(
       [favorite],
@@ -175,8 +179,8 @@ describe('HTTP proxy routes', () => {
       () => ({ contextWindow: 1_000_000, displayName: 'Llama 3.3 70B' }),
     );
 
-    expect(routes.aliases[0]?.name).toBe(
-      patch.config['clodex:groq:llama-3.3-70b']?.alias,
+    expect(routes.aliases.map(alias => alias.name)).toEqual(
+      patch.config['clodex:groq:llama-3.3-70b']?.aliases,
     );
     expect(routes.aliases[0]?.sourceNames).toEqual(['LLaMa']);
   });
