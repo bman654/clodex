@@ -12,10 +12,10 @@
 // not go through the undici dispatcher. outboundHttpProxyAgent() builds an
 // https-proxy-agent CONNECT tunnel for those paths from the same env vars.
 //
-// Self-loop guard: clodex never sets proxy vars in its OWN process.env — proxy
-// bridge mode sets HTTPS_PROXY only in the CHILD's env (buildHttpProxyChildEnv
-// works on a copy of process.env). The dispatcher therefore only ever points at
-// a proxy the user configured for clodex, never at clodex's own MITM listener.
+// Proxy bridge mode sets HTTPS_PROXY only in the CHILD's env, but a server can
+// still inherit a previously exported bridge URL from its shell. Raw
+// passthrough checks that resolved URL against its bound listener before it
+// creates an agent, preventing a CONNECT loop through the same MITM.
 
 import type { Agent as HttpAgent } from 'node:http';
 
@@ -67,6 +67,35 @@ export function outboundProxyUrlForTarget(
   return proxy.trim();
 }
 
+/** Whether a proxy URL addresses the listener that would consume its CONNECT request. */
+export function proxyUrlTargetsListener(
+  proxyUrl: string,
+  listenerHost: string,
+  listenerPort: number,
+): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(proxyUrl);
+  } catch {
+    return false;
+  }
+  const proxyPort = parsed.port
+    ? Number(parsed.port)
+    : parsed.protocol === 'https:' ? 443 : parsed.protocol === 'http:' ? 80 : undefined;
+  if (proxyPort !== listenerPort) return false;
+
+  const normalizeHost = (host: string): string => host.toLowerCase().replace(/^\[|\]$/g, '');
+  const proxyHost = normalizeHost(parsed.hostname);
+  const boundHost = normalizeHost(listenerHost);
+  if (proxyHost === boundHost) return true;
+
+  const isLoopback = (host: string): boolean => host === 'localhost'
+    || host === '::1'
+    || /^127(?:\.\d{1,3}){3}$/.test(host);
+  const isWildcard = (host: string): boolean => host === '0.0.0.0' || host === '::';
+  return isLoopback(proxyHost) && (isLoopback(boundHost) || isWildcard(boundHost));
+}
+
 let dispatcherInstalled = false;
 
 /** Reset the install-once latch (tests only). */
@@ -103,8 +132,20 @@ export async function outboundHttpProxyAgent(
 ): Promise<import('https-proxy-agent').HttpsProxyAgent<string> | undefined> {
   const proxyUrl = outboundProxyUrlForTarget(targetUrl, env);
   if (!proxyUrl) return undefined;
-  const { HttpsProxyAgent } = await import('https-proxy-agent');
-  return new HttpsProxyAgent(proxyUrl);
+  try {
+    const parsedProxy = new URL(proxyUrl);
+    if (!parsedProxy.hostname || !['http:', 'https:'].includes(parsedProxy.protocol)) {
+      throw new TypeError('Invalid proxy URL');
+    }
+    const { HttpsProxyAgent } = await import('https-proxy-agent');
+    return new HttpsProxyAgent(parsedProxy, { keepAlive: true });
+  } catch (err) {
+    console.error(
+      'clodex: HTTP(S)_PROXY cannot be used for a CONNECT tunnel; '
+      + `using a direct connection (${err instanceof Error ? err.message : String(err)})`,
+    );
+    return undefined;
+  }
 }
 
 /** CONNECT-tunnel agent for the `ws` OAuth WebSocket transport. */

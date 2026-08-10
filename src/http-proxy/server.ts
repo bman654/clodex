@@ -12,7 +12,11 @@ import { ensureHttpProxyCertificates } from './ca.js';
 import { normalizeRouteLookupId } from '../context-model-id.js';
 import { listenTcpServer } from '../listener-ready.js';
 import { routeUnavailableMessage } from '../route-unavailable.js';
-import { outboundHttpProxyAgent } from '../outbound-proxy.js';
+import {
+  outboundHttpProxyAgent,
+  outboundProxyUrlForTarget,
+  proxyUrlTargetsListener,
+} from '../outbound-proxy.js';
 import { HTTP_PROXY_MODEL_PREFIX, type ResolvedHttpProxyAlias } from './routes.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
@@ -727,23 +731,19 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     reservedModelIds.add(normalizeRouteLookupId(modelId));
   }
   const anthropicOrigin = new URL(options.anthropicOrigin ?? 'https://api.anthropic.com');
-  const anthropicAgent = await outboundHttpProxyAgent(anthropicOrigin.href);
+  const anthropicProxyUrl = outboundProxyUrlForTarget(anthropicOrigin.href);
+  let anthropicAgent: Awaited<ReturnType<typeof outboundHttpProxyAgent>>;
   let adapter: ProxyHandle | null = options.adapterHandle ?? null;
-  try {
-    if (options.routes.length > 0) {
-      adapter ??= await startProxyCatalog(
-        options.routes,
-        options.routes[0]!.aliasId,
-        options.debug,
-        options.inferenceLogPath,
-        options.debugLogPath,
-        options.webSocketDiagnosticsLogPath,
-        options.modelAliases,
-      );
-    }
-  } catch (err) {
-    anthropicAgent?.destroy();
-    throw err;
+  if (options.routes.length > 0) {
+    adapter ??= await startProxyCatalog(
+      options.routes,
+      options.routes[0]!.aliasId,
+      options.debug,
+      options.inferenceLogPath,
+      options.debugLogPath,
+      options.webSocketDiagnosticsLogPath,
+      options.modelAliases,
+    );
   }
   const adapterAgent = adapter ? new http.Agent({ keepAlive: true }) : undefined;
   let shuttingDown = false;
@@ -991,9 +991,20 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     );
   } catch (err) {
     adapterAgent?.destroy();
-    anthropicAgent?.destroy();
     adapter?.close();
     throw err;
+  }
+
+  if (anthropicProxyUrl && proxyUrlTargetsListener(
+    anthropicProxyUrl,
+    address.address,
+    address.port,
+  )) {
+    console.error(
+      'clodex: HTTP(S)_PROXY points at this proxy; sending Anthropic passthrough direct',
+    );
+  } else {
+    anthropicAgent = await outboundHttpProxyAgent(anthropicOrigin.href);
   }
 
   return {

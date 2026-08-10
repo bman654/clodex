@@ -1,10 +1,11 @@
 // tests/outbound-proxy.test.ts
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   hasOutboundProxyEnv,
   noProxyBypasses,
   outboundHttpProxyAgent,
   outboundProxyUrlForTarget,
+  proxyUrlTargetsListener,
 } from '../src/outbound-proxy.js';
 
 const PROXY = 'http://127.0.0.1:8888';
@@ -70,7 +71,41 @@ describe('outboundHttpProxyAgent', () => {
       HTTPS_PROXY: PROXY,
     });
     expect(proxied).toBeDefined();
+    expect(proxied?.keepAlive).toBe(true);
     proxied?.destroy();
+  });
+
+  it.each([
+    'localhost:3128',
+    'http://user:private-proxy-token@[invalid',
+  ])('warns and falls back to direct for malformed proxy URL %s', async proxyUrl => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const agent = await outboundHttpProxyAgent('https://api.example.test', {
+        HTTPS_PROXY: proxyUrl,
+      });
+
+      expect(agent).toBeUndefined();
+      expect(error).toHaveBeenCalledOnce();
+      expect(error.mock.calls.flat().join(' ')).toMatch(
+        /using a direct connection \(Invalid (?:proxy )?URL\)/,
+      );
+      expect(error.mock.calls.flat().join(' ')).not.toContain('private-proxy-token');
+    } finally {
+      error.mockRestore();
+    }
+  });
+});
+
+describe('proxyUrlTargetsListener', () => {
+  it('matches loopback aliases and wildcard listeners only on the bound port', () => {
+    expect(proxyUrlTargetsListener('http://127.0.0.1:17645', '127.0.0.1', 17645)).toBe(true);
+    expect(proxyUrlTargetsListener('http://localhost:17645', '127.0.0.1', 17645)).toBe(true);
+    expect(proxyUrlTargetsListener('http://127.0.0.2:17645', '0.0.0.0', 17645)).toBe(true);
+    expect(proxyUrlTargetsListener('http://127.0.0.1:17646', '127.0.0.1', 17645)).toBe(false);
+    expect(proxyUrlTargetsListener('http://proxy.example.test:17645', '127.0.0.1', 17645)).toBe(false);
+    expect(proxyUrlTargetsListener('not a URL', '127.0.0.1', 17645)).toBe(false);
   });
 });
 

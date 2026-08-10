@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,12 +23,12 @@ const outboundProxyEnvNames = [
   'no_proxy',
 ] as const;
 
-function replaceOutboundProxyEnv(httpsProxy: string): () => void {
+function replaceOutboundProxyEnv(httpsProxy?: string): () => void {
   const previous = Object.fromEntries(
     outboundProxyEnvNames.map(name => [name, process.env[name]]),
   ) as Record<typeof outboundProxyEnvNames[number], string | undefined>;
   for (const name of outboundProxyEnvNames) delete process.env[name];
-  process.env['HTTPS_PROXY'] = httpsProxy;
+  if (httpsProxy !== undefined) process.env['HTTPS_PROXY'] = httpsProxy;
   return () => {
     for (const name of outboundProxyEnvNames) {
       const value = previous[name];
@@ -547,6 +547,53 @@ describe('selective HTTP proxy', () => {
     }
   });
 
+  it('sends raw passthrough direct when proxy env names the bridge listener', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    let originRequests = 0;
+    const origin = https.createServer({
+      key: certificates.serverKey,
+      cert: certificates.serverCert,
+    }, (req, res) => {
+      originRequests += 1;
+      req.resume();
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Connection': 'close' });
+      res.end('{}');
+    });
+    const originPort = await listen(origin);
+    const reservation = http.createServer();
+    const proxyPort = await listen(reservation);
+    await new Promise<void>(resolve => reservation.close(() => resolve()));
+    const restoreProxyEnv = replaceOutboundProxyEnv(`http://127.0.0.1:${proxyPort}`);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let proxy: Awaited<ReturnType<typeof startHttpProxy>> | undefined;
+
+    try {
+      proxy = await startHttpProxy({
+        routes: [],
+        port: proxyPort,
+        anthropicOrigin: `https://127.0.0.1:${originPort}`,
+        anthropicRejectUnauthorized: false,
+      });
+      const response = await requestMitm(
+        proxy.port,
+        certificates.caCert,
+        '/v1/messages',
+        '{"model":"claude-test"}',
+      );
+
+      expect(response).toContain('200 OK');
+      expect(originRequests).toBe(1);
+      expect(error).toHaveBeenCalledWith(
+        'clodex: HTTP(S)_PROXY points at this proxy; sending Anthropic passthrough direct',
+      );
+    } finally {
+      restoreProxyEnv();
+      error.mockRestore();
+      await proxy?.close();
+      await new Promise<void>(resolve => origin.close(() => resolve()));
+    }
+  });
+
   it('logs Haiku passthrough status, error body, and system fallback preview', async () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'haiku-error-inference.jsonl');
@@ -706,14 +753,16 @@ describe('selective HTTP proxy', () => {
     });
     const unavailablePort = await listen(unavailableOrigin);
     await new Promise<void>(resolve => unavailableOrigin.close(() => resolve()));
-    const proxy = await startHttpProxy({
-      routes: [],
-      inferenceLogPath,
-      anthropicOrigin: `https://127.0.0.1:${unavailablePort}`,
-      anthropicRejectUnauthorized: false,
-    });
+    const restoreProxyEnv = replaceOutboundProxyEnv();
+    let proxy: Awaited<ReturnType<typeof startHttpProxy>> | undefined;
 
     try {
+      proxy = await startHttpProxy({
+        routes: [],
+        inferenceLogPath,
+        anthropicOrigin: `https://127.0.0.1:${unavailablePort}`,
+        anthropicRejectUnauthorized: false,
+      });
       const body = JSON.stringify({
         model: 'claude-opus-4-8',
         messages: [{ role: 'user', content: 'test refused origin' }],
@@ -751,7 +800,8 @@ describe('selective HTTP proxy', () => {
         statusCode: 502,
       }));
     } finally {
-      await proxy.close();
+      restoreProxyEnv();
+      await proxy?.close();
     }
   }, 20_000);
 
