@@ -79,6 +79,17 @@ describe('model aliases', () => {
     ]);
   });
 
+  it('preserves distinct names that intentionally share one target', () => {
+    const normalized = normalizeModelAliases([
+      { name: 'luna', providerId: 'opencode-go', modelId: 'deepseek-v4-flash' },
+      { name: 'terra', providerId: 'opencode-go', modelId: 'deepseek-v4-flash' },
+      { name: 'ds4', providerId: 'opencode-go', modelId: 'deepseek-v4-flash' },
+    ]);
+
+    expect(normalized.aliases.map(alias => alias.name)).toEqual(['luna', 'terra', 'ds4']);
+    expect(normalized.rejections).toEqual([]);
+  });
+
   it('rejects named malformed targets without rewriting their stored records', () => {
     const missingProvider = { name: 'MiSsInG', modelId: 'model-a' };
     const numericModel = { name: 'NuMeRiC', providerId: 'one', modelId: 42 };
