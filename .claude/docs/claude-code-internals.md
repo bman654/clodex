@@ -12,19 +12,20 @@ invariants are shaped the way they are.
 
 ## How to read the bundle
 
-Raw byte greps **do not work** — the JS is compressed inside the native binary. Use clodex's own
-tweakcc dependency:
+Raw byte greps **do not work** — the JS is compressed inside the native binary. Extract it:
 
-```js
-// must live INSIDE this repo so node_modules resolves; plain .mjs, run with `node`
-// (there is no tsx in node_modules/.bin)
-const { tryDetectInstallation, readContent } = await import('tweakcc')
-const install = await tryDetectInstallation({ path: '~/.tweakcc/claude-<ver>-<hash>.orig' })
-const source = await readContent(install)   // ~23 MB of JS, in seconds
+```bash
+node scripts/extract-cc-bundles.mjs           # → <tmpdir>/cc-bundles, or $REVIEW_BUNDLE_DIR
+export REVIEW_BUNDLE_DIR=<that directory>     # the real-bundle harnesses read this
 ```
 
-Extract from a **pristine** `.orig` backup, not a patched live binary. Extraction takes minutes per
-bundle, so cache the output rather than re-extracting.
+That script walks every pristine `*.orig` backup in `~/.tweakcc` (override with
+`TWEAKCC_CONFIG_DIR`) and writes one ~23 MB `.js` per version, skipping any it has already
+extracted. It uses clodex's own tweakcc dependency — `tryDetectInstallation({ path })` then
+`readContent` — which is why it has to run from inside this repo, where `node_modules` resolves.
+
+Extract from a **pristine** `.orig` backup, never a patched live binary: a patched claude reports
+its version perfectly well, so the only thing distinguishing them is the patch marker.
 
 Then **enumerate every branch of the function yourself.** Shipped bugs have come from reading the two
 gates that happened to be visible, and from grepping one syntactic form of a comparison — grep the

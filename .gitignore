@@ -22,6 +22,7 @@ vertex-models.json
 .claude/*
 !.claude/docs/
 !.claude/skills/
+!.claude/harnesses/
 .gemini/
 .planning/
 ANTIGRAVITY-DEBUG-SESSION.md
