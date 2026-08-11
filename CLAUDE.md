@@ -15,6 +15,8 @@ restructuring.
 | Load this | When |
 | --- | --- |
 | `.claude/skills/pr-verification/SKILL.md` | Before opening a PR, and when reviewing one. The bar a change must clear. |
+| `.claude/skills/pr-review/SKILL.md` | Conducting a review: panels, proof techniques, verdicts, merging. |
+| `.claude/docs/claude-code-internals.md` | Before asserting how Claude Code itself behaves, or re-deriving it. |
 | `.claude/docs/patcher.md` | Changing `clodex patch`, patch transforms, or backups. |
 | `.claude/docs/oauth-continuation.md` | Changing `src/oauth/`, head matching, upstream retries, WS diagnostics. |
 | `.claude/docs/translation.md` | Changing `sdk-adapter.ts`, `provider-factory.ts`, `openai-adapter.ts`. |
