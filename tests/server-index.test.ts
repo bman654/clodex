@@ -315,7 +315,9 @@ describe('runServerCommand', () => {
       await expect(result).resolves.toBe(0);
       expect(warn).toHaveBeenCalledWith(
         '2 saved favorites not exposed because clodex limits this Claude-facing catalog to 20 models. '
-        + 'The first saved favorites remain active; skipped entries were preserved:\n'
+        + 'Capacity is selected from saved order before availability and support checks; unavailable '
+        + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+        + 'entries reclaims positions. Skipped entries were preserved:\n'
         + '  clodex:missing:model-20\n'
         + '  clodex:missing:model-21',
       );
