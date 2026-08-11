@@ -118,47 +118,70 @@ export interface RelayAnthropicOptions {
 }
 
 /**
+ * An event-stream line ends with CRLF, LF, or a bare CR. Splitting on \n alone
+ * finds no boundary at all in a CR-framed stream: every byte accumulates in the
+ * tail buffer and the client sees nothing until the upstream closes, which
+ * stalls the relay rather than merely missing a rewrite. Capturing the
+ * separator lets each line be re-emitted with the exact ending it arrived with.
+ */
+const SSE_LINE_SPLIT = /(\r\n|\r|\n)/;
+
+/**
  * Line-preserving SSE transform that rewrites the `message_start` event's
  * `message.model` to the requested id. Buffers only up to one line; every
  * line that is not a parseable `message_start` data line passes through
- * byte-for-byte.
+ * byte-for-byte, with its original line ending.
  */
 export function anthropicSseModelRewrite(override: string): Transform {
   const decoder = new StringDecoder('utf8');
   let tail = '';
   const rewriteLine = (line: string): string => {
-    // Splitting on \n leaves the \r of a CRLF stream on the end of every line.
-    // JSON.parse tolerates it, so without stripping and restoring it a
-    // rewritten line would quietly lose its \r while every neighbouring line
-    // kept one — a stream with mixed endings. Anthropic sends LF, so this is
-    // insurance rather than an observed case.
-    const cr = line.endsWith('\r') ? '\r' : '';
-    const bare = cr ? line.slice(0, -1) : line;
-    if (!bare.startsWith('data:') || !bare.includes('"message_start"')) return line;
+    if (!line.startsWith('data:') || !line.includes('"message_start"')) return line;
     try {
       // A multi-line `data:` payload (legal SSE, never emitted by Anthropic)
       // fails to parse here and relays untouched — fail-open, so the worst
       // case is an un-rewritten model id rather than a corrupted stream.
-      const parsed = JSON.parse(bare.slice(5)) as { type?: string; message?: { model?: unknown } };
+      const parsed = JSON.parse(line.slice(5)) as { type?: string; message?: { model?: unknown } };
       if (parsed.type === 'message_start' && parsed.message && typeof parsed.message.model === 'string') {
         parsed.message.model = override;
-        return 'data: ' + JSON.stringify(parsed) + cr;
+        return 'data: ' + JSON.stringify(parsed);
       }
     } catch {
       // Not a single-line JSON payload; relay it untouched.
     }
     return line;
   };
+  // Split preserves separators at odd indices, so a line and its exact ending
+  // are re-joined unchanged; the final element is the unterminated remainder.
+  const rewriteTerminated = (parts: string[]): string => {
+    let out = '';
+    for (let i = 0; i + 1 < parts.length; i += 2) out += rewriteLine(parts[i]!) + parts[i + 1]!;
+    return out;
+  };
   return new Transform({
     transform(chunk: Buffer, _encoding, callback) {
-      const lines = (tail + decoder.write(chunk)).split('\n');
-      tail = lines.pop() ?? '';
-      const rewritten = lines.map(rewriteLine);
-      callback(null, rewritten.length ? rewritten.join('\n') + '\n' : '');
+      let buffered = tail + decoder.write(chunk);
+      // A trailing CR may be the first half of a CRLF whose LF is in the next
+      // chunk. Framing it as a bare-CR terminator now would split one line
+      // ending into two and insert a blank line, which in SSE ends the event.
+      let heldCr = '';
+      if (buffered.endsWith('\r')) {
+        heldCr = '\r';
+        buffered = buffered.slice(0, -1);
+      }
+      const parts = buffered.split(SSE_LINE_SPLIT);
+      tail = (parts.pop() ?? '') + heldCr;
+      callback(null, rewriteTerminated(parts));
     },
     flush(callback) {
       const rest = tail + decoder.end();
-      callback(null, rest ? rewriteLine(rest) : '');
+      if (!rest) {
+        callback(null, '');
+        return;
+      }
+      const parts = rest.split(SSE_LINE_SPLIT);
+      const remainder = parts.length % 2 === 1 ? parts.pop()! : '';
+      callback(null, rewriteTerminated(parts) + (remainder ? rewriteLine(remainder) : ''));
     },
   });
 }

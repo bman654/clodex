@@ -337,3 +337,100 @@ describe('fetchTemplateModels', () => {
     });
   });
 });
+
+describe('fetchTemplateModels fixed OpenCode Go destination', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    clearTraceSecrets();
+    vi.unstubAllGlobals();
+  });
+
+  const openCodeGo = () => getTemplateById('opencode-go')!;
+
+  it('refuses a caller-supplied base URL instead of sending the key to it', async () => {
+    // Discovery carries a live credential. `verifyCredential` is already
+    // structurally unredirectable (it takes no URL), but discovery took one,
+    // so the same credential still had a caller-reachable destination. The
+    // refusal has to happen before the request: an "ignored" override would
+    // leave a caller believing it had redirected discovery.
+    const result = await fetchTemplateModels(openCodeGo(), 'go-key', 'https://attacker.example/v1');
+
+    expect(result.models).toEqual([]);
+    expect(result.error).toContain('does not support a custom API base URL');
+    expect(fetch).not.toHaveBeenCalled();
+    // Nothing about the key or the address was put on the wire.
+    expect(JSON.stringify(vi.mocked(fetch).mock.calls)).not.toContain('attacker.example');
+  });
+
+  it('refuses a persisted base URL that drifted off the template literal', async () => {
+    // This is the reachable shape: `refreshApiListProvider` passes the
+    // provider record's stored `api.url` back in as the override, so a
+    // registry edited or imported with a different address would re-send the
+    // credential there on every refresh.
+    const result = await fetchTemplateModels(openCodeGo(), 'go-key', 'https://opencode.ai.evil.example/v1');
+
+    expect(result.error).toContain('does not support a custom API base URL');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('still discovers against the template literal, with or without a matching override', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([{ id: 'deepseek-v4-pro', name: 'live deepseek' }]),
+    } as Response);
+
+    for (const override of [undefined, 'https://opencode.ai/zen/go/v1', 'https://opencode.ai/zen/go/v1/']) {
+      vi.mocked(fetch).mockClear();
+      const result = await fetchTemplateModels(openCodeGo(), 'go-key', override);
+      expect(result.error, `override=${override}`).toBeUndefined();
+      expect(result.models.map(m => m.id)).toEqual(['deepseek-v4-pro']);
+      expect(fetch).toHaveBeenCalledWith(
+        'https://opencode.ai/zen/go/v1/models',
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: 'Bearer go-key' }),
+        }),
+      );
+    }
+  });
+
+  it('leaves every other template free to use a caller-supplied base URL', async () => {
+    // Conservation: the fixed destination is a property of this one named
+    // template, not a new rule for template providers in general.
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ data: [{ id: 'model-a', name: 'Model A' }] }),
+    } as Response);
+
+    const result = await fetchTemplateModels(openaiCompatTemplate, 'sk-test', 'https://self-hosted.example/v1');
+
+    expect(result.error).toBeUndefined();
+    expect(result.baseUrl).toBe('https://self-hosted.example/v1');
+    expect(fetch).toHaveBeenCalledWith(
+      'https://self-hosted.example/v1/models',
+      expect.anything(),
+    );
+  });
+
+  it('accepts a bare model array only for the named OpenCode Go template', async () => {
+    // The bare-array body is OpenCode Go's documented `/models` shape. Every
+    // other template keeps the object-envelope contract it was reviewed
+    // against, so an upstream that starts answering with a bare array of
+    // something else still reports "no models" rather than parsing rows
+    // nobody checked.
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([{ id: 'model-a', name: 'Model A' }]),
+    } as Response);
+
+    const result = await fetchTemplateModels(openaiCompatTemplate, 'sk-test');
+
+    expect(result.models).toEqual([]);
+    expect(result.error).toBe('Connected but no models were returned.');
+  });
+});

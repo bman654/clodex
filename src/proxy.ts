@@ -434,6 +434,17 @@ export async function startProxyCatalog(
         return;
       }
       const route = resolvedRoute ?? defaultRoute;
+      // The identity a translated response reports. A request that named a
+      // route we honoured keeps its public id — patched Claude Code preflights
+      // with the request alias and resolves context windows from the response
+      // `model`, so rewriting it there would break auto-compaction. On the
+      // default-route fallback the requested id names no route we honoured, so
+      // reporting the real target is the only honest answer; the Anthropic
+      // passthrough already refuses to echo there and the translated path has
+      // to agree.
+      const responseModelId = resolvedRoute && typeof originalModel === 'string'
+        ? originalModel
+        : route.realModelId;
       // Anthropic-format is not the same question as "implements
       // count_tokens". Before third-party anthropic-format routes existed the
       // local path was the only one ever taken; now a route whose upstream
@@ -681,7 +692,7 @@ export async function startProxyCatalog(
                 () => streamAnthropicResponse(
                   model,
                   params,
-                  originalModel,
+                  responseModelId,
                   writeStreamChunk,
                   plog,
                   {
@@ -709,7 +720,7 @@ export async function startProxyCatalog(
               () => generateAnthropicResponse(
                 model,
                 params,
-                originalModel,
+                responseModelId,
                 {
                   forceStream: openAiOAuth,
                   abortSignal: clientAbort.signal,

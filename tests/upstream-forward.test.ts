@@ -189,6 +189,74 @@ describe('anthropicSseModelRewrite', () => {
     expect(out.split('\n').length).toBe(crlf.split('\n').length);
     expect(out.replace(/\r\n/g, '')).not.toContain('\n');
   });
+
+  // Collect what reached the client *before* the stream ended, which is what a
+  // relay is for. `collect` cannot see a stall: it ends the transform, so a
+  // transform that emitted nothing until flush still returns the whole body.
+  const collectBeforeEnd = async (
+    transform: Transform,
+    chunks: string[],
+  ): Promise<{ streamed: string; total: string }> => {
+    const out: Buffer[] = [];
+    transform.on('data', chunk => out.push(Buffer.from(chunk)));
+    for (const chunk of chunks) transform.write(Buffer.from(chunk, 'utf8'));
+    await new Promise(resolve => setImmediate(resolve));
+    const streamed = Buffer.concat(out).toString('utf8');
+    await new Promise<void>((resolve, reject) => {
+      transform.on('end', resolve);
+      transform.on('error', reject);
+      transform.end();
+    });
+    return { streamed, total: Buffer.concat(out).toString('utf8') };
+  };
+
+  const crOnly = 'event: message_start\r'
+    + 'data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5"}}\r\r'
+    + 'event: ping\rdata: {"type":"ping"}\r\r';
+
+  it('frames a CR-delimited stream instead of holding it until the upstream closes', async () => {
+    // SSE terminates a line with CRLF, LF, or a bare CR. Splitting on \n alone
+    // finds no line boundary at all in a CR-framed stream, so every byte
+    // accumulates in the tail buffer and the client receives nothing until the
+    // upstream closes — a stalled relay, not just a missed rewrite.
+    const { streamed } = await collectBeforeEnd(anthropicSseModelRewrite('alias-x'), [crOnly]);
+    expect(streamed).not.toBe('');
+    expect(streamed).toContain('"model":"alias-x"');
+  });
+
+  it('keeps CR-only line endings on the line it rewrites', async () => {
+    const out = await collect(anthropicSseModelRewrite('alias-x'), [crOnly]);
+    expect(out).toContain('"model":"alias-x"');
+    expect(out).not.toContain('"model":"claude-sonnet-4-5"');
+    // Framing is preserved exactly: no \n was introduced and no \r was lost.
+    expect(out).not.toContain('\n');
+    expect(out.split('\r').length).toBe(crOnly.split('\r').length);
+  });
+
+  it('does not split a CRLF whose halves land in different chunks', async () => {
+    // The hazard the CR terminator introduces: a trailing \r may be the first
+    // half of a CRLF. Framing it as a bare-CR terminator would turn one line
+    // ending into two and insert a phantom blank line, which in SSE ends the
+    // event.
+    const crlf = 'event: message_start\r\n'
+      + 'data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5"}}\r\n\r\n';
+    const boundary = crlf.indexOf('\r\n') + 1;
+    const out = await collect(
+      anthropicSseModelRewrite('alias-x'),
+      [crlf.slice(0, boundary), crlf.slice(boundary)],
+    );
+    expect(out).toContain('"model":"alias-x"');
+    expect(out.replace(/\r\n/g, '')).not.toContain('\r');
+    expect(out.replace(/\r\n/g, '')).not.toContain('\n');
+    expect(out.split('\r\n').length).toBe(crlf.split('\r\n').length);
+  });
+
+  it('passes an LF stream through with its framing byte-for-byte', async () => {
+    // Conservation for the ending Anthropic actually sends.
+    const out = await collect(anthropicSseModelRewrite('alias-x'), [messageStart + textDelta]);
+    expect(out).not.toContain('\r');
+    expect(out).toBe((messageStart + textDelta).replace('"model":"claude-sonnet-4-5"', '"model":"alias-x"'));
+  });
 });
 
 describe('relayAnthropicMessages responseModelOverride', () => {

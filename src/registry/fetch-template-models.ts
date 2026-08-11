@@ -1,6 +1,7 @@
 // src/registry/fetch-template-models.ts — test connection and list models for template providers
 
 import { TEST_TIMEOUT_MS } from '../constants.js';
+import { OPENCODE_GO_PROVIDER_ID } from '../data/opencode-go-models.js';
 import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
 import type { ProviderTemplate } from '../provider-templates.js';
@@ -101,8 +102,19 @@ function parseNativePricing(pricing: ProviderModelListRow['pricing']): CachedMod
   return cost;
 }
 
-function parseModelList(body: OpenAiModelListResponse, npm: string): CachedModel[] {
-  const rows = Array.isArray(body) ? body : body.data ?? body.models ?? [];
+function parseModelList(
+  body: OpenAiModelListResponse,
+  npm: string,
+  allowBareArray: boolean,
+): CachedModel[] {
+  // A bare top-level array is OpenCode Go's documented `/models` shape, and
+  // only its call site opts in. Every other template was reviewed against the
+  // object envelope, so an upstream that starts answering with an array of
+  // something else keeps reporting "no models" instead of turning unreviewed
+  // rows into catalog entries.
+  const rows = Array.isArray(body)
+    ? (allowBareArray ? body : [])
+    : body.data ?? body.models ?? [];
   const format = modelFormatForNpm(npm);
   const models: CachedModel[] = [];
 
@@ -261,6 +273,26 @@ export async function fetchTemplateModels(
     };
   }
 
+  // OpenCode Go's endpoints are the reviewed literals in its own template, and
+  // this call puts a live credential on the wire. `verifyCredential` is
+  // already structurally unredirectable because it takes no URL; discovery
+  // took one, and `refreshApiListProvider` feeds the provider record's stored
+  // `api.url` straight back in here, so a registry that was hand-edited or
+  // imported with a different address was enough to re-aim the key. Refuse
+  // rather than quietly substitute the default: a caller that believed it had
+  // redirected discovery should find out that it had not.
+  if (
+    template.id === OPENCODE_GO_PROVIDER_ID
+    && baseUrl !== template.defaultBaseUrl?.replace(/\/$/, '')
+  ) {
+    return {
+      models: [],
+      baseUrl: '',
+      error: `${template.name} does not support a custom API base URL.`,
+      hint: 'This provider always uses its own endpoint. Remove the custom URL and try again.',
+    };
+  }
+
   // No template declares `static-seed` today, so this arm and
   // `materializeTemplateModel` are unreachable — kept deliberately, not
   // overlooked. `static-seed` is a member of ProviderModelSource, and deleting
@@ -350,7 +382,11 @@ export async function fetchTemplateModels(
       // Failed to parse, use empty object
     }
 
-    const discovered = parseModelList(json, template.npm);
+    const discovered = parseModelList(
+      json,
+      template.npm,
+      template.id === OPENCODE_GO_PROVIDER_ID,
+    );
     const models = applyTemplateModelMetadata(template, discovered);
     if (models.length === 0) {
       // An allowlist template can end up empty for two very different reasons,
