@@ -66,10 +66,10 @@ the alternative explanations you ruled out.
 
 ## Claims about Claude Code's own behavior come from the binary
 
-Never from docs, comments, or a subagent's summary. Extract the bundle using clodex's own tweakcc
-dependency (`tryDetectInstallation({ path })` → `readContent`) against a pristine
-`~/.tweakcc/claude-<ver>-<hash>.orig`. Raw byte greps do **not** work — the bundle is compressed
-inside the native binary. The script must live inside this repo so `node_modules` resolves.
+Never from docs, comments, or a subagent's summary. Raw byte greps do **not** work — the bundle is
+compressed inside the native binary. Extract it with `node scripts/extract-cc-bundles.mjs`; the
+procedure, and what is already known so you need not re-derive it, are in
+`.claude/docs/claude-code-internals.md`.
 
 Then **enumerate every branch of the function yourself.** Shipped bugs have come from reading the
 two gates that happened to be visible. Grepping one syntactic form of a comparison is not an
@@ -106,6 +106,24 @@ Ordered by how often each would have caught a real finding.
 10. **Hostile composition.** `CLODEX_HOME="$(mktemp -d)" pnpm test`, plus a write-path tripwire —
     `os.userInfo().homedir` ignores both `CLODEX_HOME` and `$HOME`.
 11. **Standard gate:** `pnpm typecheck && pnpm test && pnpm build`. Necessary, never sufficient.
+
+## Fit the change to the codebase
+
+- **Follow existing patterns rather than introducing parallel ones.** Where the codebase already
+  solves a problem — file locking, credential resolution, stale-state detection — match the
+  established approach. A new mechanism that is subtly weaker than the existing one is much harder
+  to spot than an obvious bug, and several of these are documented precisely because the weaker
+  version was tried first.
+- **Update every consumer.** When you change a representation — a type, a stored format, a sentinel
+  value — search the tree for readers of the old form. A missed consumer is where the real bug
+  hides, especially in auth code, where the failure is silent rather than loud. Grep the *value*,
+  not one comparison spelling.
+- **Consider the upgrade path.** If a change affects data persisted in `~/.clodex` or the system
+  keychain, make sure an existing install still works after upgrading, or add a migration.
+- **Don't leave no-op edits behind.** A conditional whose branches are identical, an option parsed
+  but never read, a helper implemented but never called — these read as finished work and quietly
+  aren't. If you started a change and decided against it, revert it rather than leaving the
+  scaffolding.
 
 **When a change touches a launch path, smoke test the product, not just the path you changed.**
 Launch real Claude Code through clodex on the default proxy mode and confirm it answers:

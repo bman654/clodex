@@ -10,12 +10,11 @@ These are **starting points, not fixtures.** They were written against the head 
 some are pinned to a bundle version or a since-changed function shape. Expect to fix imports and
 re-point paths; that still beats starting from nothing.
 
-They are named `*.harness.ts`, **not** `*.test.ts`, deliberately. `vitest.config.ts` sets no
-`include`, so the default glob is repo-wide and anything named `*.test.ts` anywhere in this
-repository runs in CI. Several of these would fail at collection, one would hang unbounded, and a
-few would pass vacuously with zero assertions. Copy one into `tests/` only after you have run it and
-confirmed it actually asserts something. `tsconfig.json` includes only `src`, so nothing here is
-typechecked either.
+They are named `*.harness.ts`, **not** `*.test.ts`, and they live outside `tests/` — two reasons
+`vitest.config.ts`'s `include: ['tests/**/*.test.ts']` never collects them. Several would fail at
+collection, one would hang unbounded, and a few would pass vacuously with zero assertions, so copy
+one into `tests/` only after you have run it and confirmed it actually asserts something.
+`tsconfig.json` includes only `src`, so nothing here is typechecked either.
 
 Several need real Claude Code bundles. Extract them once with
 `node scripts/extract-cc-bundles.mjs` and point `REVIEW_BUNDLE_DIR` at the output.

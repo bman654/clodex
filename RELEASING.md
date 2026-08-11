@@ -25,6 +25,10 @@ release job then rebuilds `dist/` and **stages** the npm release via trusted pub
 package → "Staged Packages" → Approve, or `npm stage approve <stage-id>` (inspect first with
 `npm stage list` / `npm stage view` / `npm stage download`).
 
+> `npm stage` needs **npm >= 11.15.0**, which is newer than the npm bundled with Node 24 — on the
+> pinned toolchain `npm stage` fails with `Unknown command: "stage"`. Run `npm install -g npm@latest`
+> first, or just use the npmjs.com web UI. The release workflow upgrades npm for the same reason.
+
 > Ordering matters: an earlier design ran tests *after* release-please tagged, so a flaky test
 > left a dangling `v1.0.1` tag with nothing on npm. The tag-then-test ordering is fixed —
 > don't reintroduce it.

@@ -58,9 +58,10 @@ Development targets **Node 24** (`.nvmrc` pins v24.14.1; CI runs 24) while the p
 supports **Node >= 22** (`engines.node`) — don't use APIs newer than Node 22 in `src/`. Dev package
 manager is **pnpm**, pinned via `packageManager: "pnpm@10.34.5"` and activated with corepack.
 Dependencies are **exact-pinned** (no `^`/`~`). `pnpm-workspace.yaml` sets
-`minimumReleaseAge: 14400` (minutes) — no dependency version younger than 10 days can be resolved;
-already-locked versions install fine, but fresh resolution of a too-new version fails with
-`ERR_PNPM_NO_MATURE_MATCHING_VERSION`.
+`minimumReleaseAge: 14400` (minutes) — no **direct or transitive** dependency version younger than
+10 days can be resolved; already-locked versions install fine, but fresh resolution of a too-new
+version fails with `ERR_PNPM_NO_MATURE_MATCHING_VERSION`. End users install with
+`npm install -g @bman654/clodex`; the dev package manager does not affect consumers.
 
 Use `CLODEX_HOME=$(mktemp -d)` to exercise the CLI against throwaway config instead of your real
 `~/.clodex`.
@@ -83,15 +84,21 @@ Add `!` after the type (`feat!:`) or a `BREAKING CHANGE:` footer for an incompat
 Hard-wrap bodies and footers at **≤100 characters per line** — commitlint's `body-max-line-length`
 is enforced by the hook and again on every push to `main`.
 
-**Your summary line is the release note.** Generated changelog entries come from commit summary
-headers only — never bodies. Release-please renders `type(scope): summary` as a bullet with the
-scope bolded and issue/commit links appended, but the summary text itself is carried through
-unchanged. Get it right; nobody polices commit-body wording, because it reaches no user-facing
-surface. (The one hand-written entry, 0.1.0, predates this and is preserved as prose.)
+**Your summary line is the release note.** Changelog entries are generated from commit summary
+headers. Release-please renders `type(scope): summary` as a bullet with the scope bolded and
+issue/commit links appended, but the summary text itself is carried through unchanged. Get it
+right — it is what every user reads. (The one hand-written entry, 0.1.0, predates this and is
+preserved as prose.)
 
-Today most summaries fail. Reviewing the 60 generated entries in `CHANGELOG.md` against the rules
-below, **44 were judged unreadable to a non-technical user** and only 2 clearly passed. That
-judgment is a review assessment, not a measurement — but the direction is not in doubt.
+Ordinary commit-body wording reaches no user-facing surface, so nobody polices it. **The exception
+is a merge commit**: `gh pr merge` without `--body ""` puts the PR title into the merge-commit body,
+and release-please parses it as a second entry — a release has shipped with a duplicate changelog
+line proving it. See `.claude/skills/pr-review/SKILL.md`.
+
+Today most summaries fail. Reviewing the generated entries in `CHANGELOG.md` against the rules below
+— 62 bullets, 60 distinct summaries once two duplicates are collapsed — **44 were judged unreadable
+to a non-technical user** and only 2 clearly passed. That judgment is a review assessment, not a
+measurement, but the direction is not in doubt.
 
 **Write the summary line for someone who uses clodex and has never read the source.** It must say
 what they can now do, what they stop seeing, or what got more reliable.
@@ -154,10 +161,17 @@ These bite from outside the subsystem that owns them, so they live here rather t
 - **The alias IS the model identity** once a binary is patched: the short name is what lands in the
   Agent-tool enum, is sent, is echoed, and keys the context-window map. Full rules in
   `.claude/docs/patcher.md`.
-- **Do not restructure `src/oauth/responses-websocket.ts`.** The continuation logic took extensive
-  real-world testing.
+- **Do not restructure `src/oauth/responses-websocket.ts` or `src/sdk-adapter.ts`.** The
+  continuation and translation logic took extensive real-world testing. Surgical changes only.
 - **`~/.claude/settings.json` is never touched by clodex.** Launch config is env-var-only (plus
   `--model`), child process only.
+- **`node-gyp-build` is a deliberate direct dependency that no clodex source imports.** Routine
+  "remove the unused dependency" cleanup breaks fresh installs. Reason in
+  `.claude/docs/patcher.md`.
+- **Every SDK generation entry point must resolve `CLODEX_UPSTREAM_MAX_RETRIES` through
+  `src/upstream-retry.ts`.** Adding a new streaming or non-streaming path without wiring it leaves
+  that path on a different retry policy than the rest. Details in
+  `.claude/docs/oauth-continuation.md`.
 
 ## Tests
 

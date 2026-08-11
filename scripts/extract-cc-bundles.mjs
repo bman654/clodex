@@ -32,11 +32,20 @@ if (args.includes('-h') || args.includes('--help')) {
   process.exit(0);
 }
 
-const positional = args.find((a) => !a.startsWith('-'));
-if (args.length > 0 && !positional) {
-  console.error(`Unrecognized option: ${args[0]}. Try --help.`);
+const flags = args.filter((a) => a.startsWith('-'));
+if (flags.length > 0) {
+  console.error(`Unrecognized option: ${flags[0]}. Try --help.`);
   process.exit(1);
 }
+const positionals = args.filter((a) => !a.startsWith('-'));
+if (positionals.length > 1) {
+  console.error(`Expected at most one output directory, got ${positionals.length}. Try --help.`);
+  process.exit(1);
+}
+const positional = positionals[0];
+
+// A real bundle is ~20 MB; anything far below that is truncated, not cached.
+const MIN_BUNDLE_BYTES = 1_000_000;
 
 const srcDir = process.env['TWEAKCC_CONFIG_DIR'] || path.join(homedir(), '.tweakcc');
 const outDir = positional || process.env['REVIEW_BUNDLE_DIR'] || path.join(tmpdir(), 'cc-bundles');
@@ -64,16 +73,30 @@ let failed = 0;
 
 for (const f of files) {
   const target = path.join(outDir, f.replace(/\.orig$/, '.js'));
+  // Treat an existing target as cached only if it is plausibly a whole bundle. A truncated or
+  // zero-byte file would otherwise be reported as a success and then silently used as evidence
+  // by the real-bundle harnesses.
   if (existsSync(target)) {
-    console.log('cached', f);
-    cached++;
-    continue;
+    const size = statSync(target).size;
+    if (size >= MIN_BUNDLE_BYTES) {
+      console.log('cached', f);
+      cached++;
+      continue;
+    }
+    console.log(`re-extracting ${f}: cached file is only ${size} bytes`);
   }
   try {
     const inst = await tryDetectInstallation({ path: path.join(srcDir, f) });
     if (!inst) throw new Error('tweakcc did not recognize the binary');
     const src = await readContent(inst);
     if (!src) throw new Error('readContent returned nothing');
+    // These backups are only *named* pristine. clodex documents poisoned backups as reachable,
+    // and a patched claude reports its version perfectly well — the patch marker is the only
+    // thing that distinguishes them. Warn rather than refuse: reading a patched bundle is
+    // sometimes exactly what you want, but never by accident.
+    if (src.includes('/*ccpatch:')) {
+      console.log(`WARN ${f} carries a clodex patch marker — this backup is NOT pristine`);
+    }
     writeFileSync(target, src);
     console.log(`OK ${f} version=${inst.version} kind=${inst.kind} bytes=${src.length}`);
     ok++;

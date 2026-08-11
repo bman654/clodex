@@ -89,10 +89,10 @@ once rebuilt from scratch that already existed there. Its README maps each harne
 settles. They drift — treat them as starting points, not fixtures — but starting from one beats
 starting from nothing.
 
-They are named `*.harness.ts` on purpose: `vitest.config.ts` sets no `include`, so the default glob
-is repo-wide and **anything named `*.test.ts` anywhere in this repo runs in CI.** Copy one into
-`tests/` only after running it and confirming it asserts something — several fail at collection, one
-hangs, and a few would pass vacuously with zero assertions.
+They are named `*.harness.ts` and live outside `tests/`, so `vitest.config.ts`'s
+`include: ['tests/**/*.test.ts']` does not collect them. Copy one into `tests/` only after running
+it and confirming it asserts something — several fail at collection, one hangs, and a few would pass
+vacuously with zero assertions.
 
 Bundle-dependent harnesses need `node scripts/extract-cc-bundles.mjs` run once, with
 `REVIEW_BUNDLE_DIR` pointed at the output.

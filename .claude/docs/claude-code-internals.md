@@ -3,9 +3,12 @@
 <!-- Read before asserting anything about how Claude Code itself behaves, and before re-deriving
      something in this list. -->
 
-Everything here was read out of a real Claude Code bundle. **Every entry is stamped with the version
-it was verified against** — Claude Code is minified and reshaped between releases, so treat an entry
-older than the version you care about as a lead, not a fact, and re-verify before relying on it.
+Everything here was read out of a real Claude Code bundle. **Each section states the version it was
+verified against wherever that was recorded** — Claude Code is minified and reshaped between
+releases, so treat an entry older than the version you care about as a lead, not a fact, and
+re-verify before relying on it. Where a stamp is missing or open-ended (`2.1.223+` means "first seen
+in .223 and not re-checked since"), treat the entry as *less* trustworthy, not more, and stamp it
+properly the next time you confirm it.
 
 Nothing in this file is a clodex invariant. It is what the *client* does, which is why our
 invariants are shaped the way they are.
@@ -101,7 +104,7 @@ Background pty hosts are started `detached: true` and resized via
 `process.kill(-process.pid, 'SIGWINCH')` to the process group — which is why the wrapper must `exec`
 rather than spawn.
 
-## Things that looked like clodex bugs and were not
+## Things that looked like clodex bugs and were not (not version-specific)
 
 - **"Concurrent subagents died at turn 2" was not unknown-model classification.** The agents' first
   tool call injected ~230k tokens of bundled-skill content into a 272k-window model, exceeding any

@@ -148,7 +148,9 @@ capabilities/defaults, and child-command network isolation.
   `getInstalledClaudeVersion()`, whose PATH lookup can land on a different install and whose
   `'2.1.183'` fallback is only safe for request metadata. The version names the backup that gets
   restored, so borrowing it from a shim silently downgraded the user's Claude Code.
-  `resolveClaudeBinaryForPatch` returns `binary-not-found` vs `version-unknown`; the launch-time
+  **An unprobeable binary is a hard error on the patch path** — patching is elective, so it refuses
+  rather than guessing. `resolveClaudeBinaryForPatch` returns `binary-not-found` vs
+  `version-unknown`; the launch-time
   check stays non-fatal for both.
 - Concurrency lock `~/.clodex/patch.lock` (pid + 10-min staleness + ESRCH liveness); the loser skips
   with a notice — never blocks, corrupts, or double-patches.

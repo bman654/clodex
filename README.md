@@ -239,7 +239,7 @@ clodex --version    # version
 
 ## Configuration
 
-- Config home: `~/.clodex` (override with `CLODEX_HOME`). On first run, config is migrated automatically from a legacy `~/.relay-ai` directory if present; the legacy directory is never modified.
+- Config home: `~/.clodex` (override with `CLODEX_HOME`). A legacy `~/.relay-ai` directory is never read or modified — automatic migration from it was removed in 2.0.0.
 - The config-home filesystem and the native account home must support hard
   links because registry and credential locks are published atomically. Keep
   `CLODEX_HOME` and `~/.clodex/credential-locks` on local filesystems rather
