@@ -20,9 +20,26 @@ import { readdirSync, writeFileSync, existsSync, mkdirSync, statSync } from 'nod
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 
+const args = process.argv.slice(2);
+if (args.includes('-h') || args.includes('--help')) {
+  console.log(
+    'Usage: node scripts/extract-cc-bundles.mjs [outDir]\n\n' +
+      '  outDir              positional, else $REVIEW_BUNDLE_DIR, else <tmpdir>/cc-bundles\n' +
+      '  TWEAKCC_CONFIG_DIR  where pristine *.orig backups live (default ~/.tweakcc)\n\n' +
+      'Already-extracted bundles are left alone. Point REVIEW_BUNDLE_DIR at the output so the\n' +
+      'harnesses in .claude/harnesses/ can find them.',
+  );
+  process.exit(0);
+}
+
+const positional = args.find((a) => !a.startsWith('-'));
+if (args.length > 0 && !positional) {
+  console.error(`Unrecognized option: ${args[0]}. Try --help.`);
+  process.exit(1);
+}
+
 const srcDir = process.env['TWEAKCC_CONFIG_DIR'] || path.join(homedir(), '.tweakcc');
-const outDir =
-  process.argv[2] || process.env['REVIEW_BUNDLE_DIR'] || path.join(tmpdir(), 'cc-bundles');
+const outDir = positional || process.env['REVIEW_BUNDLE_DIR'] || path.join(tmpdir(), 'cc-bundles');
 
 if (!existsSync(srcDir) || !statSync(srcDir).isDirectory()) {
   console.error(
