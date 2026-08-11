@@ -49,13 +49,31 @@ function retryAfterFromText(message: unknown): number | undefined {
   return match ? Number(match[1]) : undefined;
 }
 
+/**
+ * Structured `error` payload carried by an APICallError — the parsed `data`
+ * the SDK populated, or, when it only serialized the body, the `error` object
+ * inside the parsed `responseBody` JSON. Data wins over the serialized body so
+ * both consumers below read one consistent payload; malformed or non-object
+ * shapes safely yield undefined and never throw.
+ */
+function structuredErrorPayload(inner: InstanceType<typeof APICallError>): Record<string, unknown> | undefined {
+  const fromData = asRecord(asRecord(inner.data)?.error);
+  if (fromData !== undefined) return fromData;
+  if (typeof inner.responseBody !== 'string') return undefined;
+  try {
+    return asRecord(asRecord(JSON.parse(inner.responseBody))?.error);
+  } catch {
+    return undefined;
+  }
+}
+
 function numericRetryAfterSeconds(inner: InstanceType<typeof APICallError>): number | undefined {
-  const data = inner.data as { error?: { retry_after_seconds?: unknown; message?: unknown } } | undefined;
-  const fromBody = data?.error?.retry_after_seconds;
+  const error = structuredErrorPayload(inner);
+  const fromBody = error?.retry_after_seconds;
   if (typeof fromBody === 'number' && Number.isFinite(fromBody) && fromBody >= 0) return fromBody;
   const fromHeader = inner.responseHeaders?.['retry-after'];
   if (typeof fromHeader === 'string' && /^\d+$/.test(fromHeader.trim())) return Number(fromHeader.trim());
-  for (const message of [data?.error?.message, inner.message]) {
+  for (const message of [error?.message, inner.message]) {
     const fromText = retryAfterFromText(message);
     if (fromText !== undefined) return fromText;
   }
@@ -63,7 +81,7 @@ function numericRetryAfterSeconds(inner: InstanceType<typeof APICallError>): num
 }
 
 function apiErrorIsPlanUsageLimit(inner: InstanceType<typeof APICallError>): boolean {
-  const error = (inner.data as { error?: { type?: unknown; code?: unknown } } | undefined)?.error;
+  const error = structuredErrorPayload(inner);
   return [error?.type, error?.code].some(value => (
     typeof value === 'string' && value.toLowerCase().includes('usage_limit')
   ));

@@ -107,6 +107,36 @@ describe('sdkUpstreamErrorDetails retry-after extraction', () => {
     expect(details).toMatchObject({ statusCode: 429, isRetryable: true });
     expect(details?.retryAfterSeconds).toBeUndefined();
   });
+
+  it('detects a usage limit whose discriminator survives only in the serialized body', () => {
+    // The SDK may serialize the error body into responseBody without also
+    // populating `data`; the usage-limit signal then lives only in that JSON,
+    // so the classifier must read the same structured payload both consumers
+    // use. Misread, the oversized retry-after below would be clamped to 60s
+    // instead of omitted.
+    const details = sdkUpstreamErrorDetails(apiCallError({
+      statusCode: 429,
+      responseBody: JSON.stringify({
+        error: {
+          type: 'usage_limit_reached',
+          code: 'usage_limit_reached',
+          message: 'Weekly usage limit reached',
+        },
+      }),
+      responseHeaders: { 'retry-after': '21600' },
+    }));
+    expect(details).toMatchObject({ statusCode: 429, isRetryable: true });
+    expect(details?.retryAfterSeconds).toBeUndefined();
+  });
+
+  it('treats a malformed serialized body as absent instead of crashing the classifier', () => {
+    const details = sdkUpstreamErrorDetails(apiCallError({
+      statusCode: 429,
+      responseBody: 'not json {',
+      responseHeaders: { 'retry-after': '3600' },
+    }));
+    expect(details).toMatchObject({ statusCode: 429, isRetryable: true, retryAfterSeconds: 60 });
+  });
 });
 
 describe('usage-limit classification', () => {
