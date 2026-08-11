@@ -119,15 +119,12 @@ export function resolveCatalogModelAliases(
 
 /**
  * Claude-specific catalog builder. Takes a `resolveRoute` function (not a
- * ResolveContext) and returns built ProxyRoute[] — does NOT delegate to
- * `buildFavoritesList` in `./favorites-resolver.ts` because the input/output
- * shapes are different (closure-based lookup vs. ResolveContext, ProxyRoute
- * vs. ResolvedFavorite). Persisted-order capacity selection is shared through
- * `projectFavoriteExposure` and happens BEFORE route resolution: one slot is
- * reserved for the starting model (`startingFavorite`), and a favorite that
- * fails resolution still consumes its selected window slot — the window is
- * never backfilled with later favorites. Only route resolution remains
- * surface-specific.
+ * ResolveContext) and returns built ProxyRoute[]. Persisted-order capacity
+ * selection is shared through `projectFavoriteExposure` and happens BEFORE
+ * route resolution: one slot is reserved for the starting model
+ * (`startingFavorite`), and a favorite that fails resolution still consumes
+ * its selected window slot — the window is never backfilled with later
+ * favorites. Only route resolution remains surface-specific.
  */
 export function buildCatalogRoutes(
   startingRoute: ProxyRoute,
