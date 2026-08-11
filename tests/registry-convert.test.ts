@@ -16,6 +16,7 @@ const sampleProvider: LocalProvider = {
     npm: '@ai-sdk/groq',
     isFree: true,
     freeStatus: 'verified_free',
+    codingCapabilitiesAuthoritative: true,
     modalities: ['text', 'image'],
     compatibility: {
       reasoningEffortMap: { high: 'max' },
@@ -36,6 +37,7 @@ describe('localProviderToRegistry', () => {
     expect(entry?.modelsCache?.models[0]?.upstreamModelId).toBe('llama-3.3-70b');
     expect(entry?.modelsCache?.models[0]?.isFree).toBe(true);
     expect(entry?.modelsCache?.models[0]?.freeStatus).toBe('verified_free');
+    expect(entry?.modelsCache?.models[0]?.codingCapabilitiesAuthoritative).toBe(true);
     expect(entry?.modelsCache?.models[0]?.modalities).toEqual(['text', 'image']);
     expect(entry?.modelsCache?.models[0]?.compatibility).toEqual({
       reasoningEffortMap: { high: 'max' },

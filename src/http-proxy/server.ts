@@ -15,6 +15,8 @@ import { routeUnavailableMessage } from '../route-unavailable.js';
 import { HTTP_PROXY_MODEL_PREFIX, type ResolvedHttpProxyAlias } from './routes.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
+import { normalizeAnthropicBetaHeader } from '../anthropic-beta-policy.js';
+import type { UnsupportedEffortPolicy } from '../effort-policy.js';
 import {
   getLatestMessagePreview,
   INFERENCE_PROGRESS_INTERVAL_MS,
@@ -156,6 +158,8 @@ export interface HttpProxyOptions {
   inferenceLogPath?: string;
   /** Opt-in request-envelope and WebSocket head-decision diagnostics. */
   webSocketDiagnosticsLogPath?: string;
+  /** Startup snapshot applied by the inner clodex-route adapter only. */
+  unsupportedEffortPolicy?: UnsupportedEffortPolicy;
   /** Test hook; production always uses https://api.anthropic.com. */
   anthropicOrigin?: string;
   /** Test hook for a local self-signed Anthropic origin. */
@@ -467,6 +471,7 @@ function forwardToAdapter(
   isLocalShutdown: () => boolean = () => false,
 ): Promise<void> {
   return new Promise(resolve => {
+    const inboundBeta = normalizeAnthropicBetaHeader(req.headers['anthropic-beta']);
     const startedAt = Date.now();
     let lastActivityAt = startedAt;
     let headersReceived = false;
@@ -593,6 +598,7 @@ function forwardToAdapter(
         ...(typeof req.headers['x-claude-code-session-id'] === 'string'
           ? { 'x-claude-code-session-id': req.headers['x-claude-code-session-id'] }
           : {}),
+        ...(inboundBeta ? { 'anthropic-beta': inboundBeta } : {}),
         ...(lifecycle ? { 'x-relay-request-id': lifecycle.requestId } : {}),
       },
     }, upstreamRes => {
@@ -734,6 +740,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       options.debugLogPath,
       options.webSocketDiagnosticsLogPath,
       options.modelAliases,
+      options.unsupportedEffortPolicy,
     );
   }
   const adapterAgent = adapter ? new http.Agent({ keepAlive: true }) : undefined;

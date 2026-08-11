@@ -23,7 +23,13 @@ function blacklistAgentForTarget(target: RelayLaunchTarget): CompatibilityAgent 
 
 export function isTargetCompatibleModel(ctx: TargetCompatibilityContext): TargetCompatibilityResult {
   const blacklistAgent = blacklistAgentForTarget(ctx.target);
-  if (shouldHideModel({ providerId: ctx.providerId, modelId: ctx.model.id, agent: blacklistAgent })) {
+  if (shouldHideModel({
+    providerId: ctx.providerId,
+    modelId: ctx.model.id,
+    agent: blacklistAgent,
+    codingCapabilitiesAuthoritative: ctx.model.codingCapabilitiesAuthoritative,
+    ignoreModelsDevCapabilities: ctx.model.ignoreModelsDevCapabilities,
+  })) {
     return { compatible: false, reason: 'model is hidden by compatibility filters' };
   }
 

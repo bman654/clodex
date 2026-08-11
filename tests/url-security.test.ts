@@ -12,6 +12,21 @@ describe('validateCustomEndpointUrl', () => {
     expect(result.normalizedUrl).toContain('api.groq.com');
   });
 
+  it('rejects embedded URL credentials before resolving the host', async () => {
+    const result = await validateCustomEndpointUrl('https://user:secret@example.invalid/v1');
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/embedded credentials/i);
+  });
+
+  it.each([
+    'https://example.invalid/v1?api-version=1',
+    'https://example.invalid/v1#models',
+  ])('rejects query strings and fragments in base URLs (%s)', async url => {
+    const result = await validateCustomEndpointUrl(url);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/query string or fragment/i);
+  });
+
   it('blocks cloud metadata hostnames', async () => {
     const result = await validateCustomEndpointUrl('https://metadata.google.internal/computeMetadata/v1');
     expect(result.ok).toBe(false);

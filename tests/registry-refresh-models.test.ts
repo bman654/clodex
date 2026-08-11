@@ -15,6 +15,11 @@ vi.mock('../src/registry/pricing.js', () => ({
   enrichPricingAsync: vi.fn(),
   pricingPlatformForProvider: vi.fn(),
   buildPricingIndex: vi.fn(),
+  // Reads through to the template when the provider record omits the flag, so
+  // an older clodex round trip cannot drop the setting permanently.
+  providerPreservesModelPricing: vi.fn(
+    (provider: { preserveModelPricing?: boolean }) => provider.preserveModelPricing ?? false,
+  ),
 }));
 
 describe('registry/refresh-models', () => {

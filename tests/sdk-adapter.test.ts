@@ -1,13 +1,16 @@
 import { describe, it, expect, vi } from 'vitest';
+import { createAnthropic } from '@ai-sdk/anthropic';
 import {
   annotateToolNames,
   anthropicEffortFromRequest,
+  validatedAnthropicEffortFromRequest,
   translateMessages,
   translateTools,
   translateToolChoice,
   translateRequest,
   writeAnthropicStream,
   streamAnthropicResponse,
+  generateAnthropicResponse,
   supportsOpenAiPromptCacheBreakpoints,
   extractClaudeSessionId,
   claudeSessionPromptCacheKey,
@@ -329,6 +332,119 @@ describe('translateRequest', () => {
     });
   });
 
+  it('treats a null boundary resolution as intentional omission, not a default fallback', () => {
+    const params = translateRequest({
+      model: 'deepseek-v4-flash',
+      output_config: { effort: 'xhigh' },
+      messages: [{ role: 'user', content: 'hi' }],
+    }, '@ai-sdk/openai-compatible', {
+      defaultEffort: 'high',
+      resolvedEffort: null,
+      reasoningMetadata: {
+        upstreamModelId: 'deepseek-v4-flash',
+        compatibility: { reasoningEffortMap: { high: 'high', max: 'max' } },
+      },
+    });
+    expect(params.providerOptions?.openaiCompatible).toBeUndefined();
+  });
+
+  it('encodes an already-resolved target effort instead of resolving the client value twice', () => {
+    const onEffortResolution = vi.fn();
+    const params = translateRequest({
+      model: 'deepseek-v4-flash',
+      output_config: { effort: 'xhigh' },
+      messages: [{ role: 'user', content: 'hi' }],
+    }, '@ai-sdk/openai-compatible', {
+      resolvedEffort: 'max',
+      unsupportedEffortPolicy: 'exact',
+      onEffortResolution,
+      reasoningMetadata: {
+        upstreamModelId: 'deepseek-v4-flash',
+        compatibility: { reasoningEffortMap: { high: 'high', max: 'max' } },
+      },
+    });
+    expect(params.providerOptions?.openaiCompatible).toMatchObject({ reasoningEffort: 'max' });
+    expect(onEffortResolution).not.toHaveBeenCalled();
+  });
+
+  it('keeps exact native Claude max effort in adaptive provider options', () => {
+    const params = translateRequest({
+      model: 'claude-opus-4-6',
+      output_config: { effort: 'max' },
+      messages: [{ role: 'user', content: 'use maximum effort' }],
+    }, '@ai-sdk/anthropic', {
+      unsupportedEffortPolicy: 'exact',
+      reasoningMetadata: { upstreamModelId: 'claude-opus-4-6' },
+    });
+    expect(params.providerOptions?.anthropic).toEqual({
+      thinking: { type: 'adaptive' },
+      effort: 'max',
+    });
+  });
+
+  it('keeps exact Opus 4.5 effort without adding adaptive thinking', () => {
+    const params = translateRequest({
+      model: 'claude-opus-4-5',
+      output_config: { effort: 'medium' },
+      messages: [{ role: 'user', content: 'use medium effort' }],
+    }, '@ai-sdk/anthropic', {
+      unsupportedEffortPolicy: 'exact',
+      reasoningMetadata: { upstreamModelId: 'claude-opus-4-5' },
+    });
+    expect(params.providerOptions?.anthropic).toEqual({
+      effort: 'medium',
+    });
+  });
+
+  it.each([
+    {
+      modelId: 'claude-opus-4-6',
+      effort: 'max',
+      expectedThinking: { type: 'adaptive' },
+    },
+    {
+      modelId: 'claude-opus-4-5',
+      effort: 'medium',
+      expectedThinking: undefined,
+    },
+  ])('emits $effort on the actual Anthropic wire for $modelId', async ({
+    modelId,
+    effort,
+    expectedThinking,
+  }) => {
+    let capturedBody: Record<string, unknown> | undefined;
+    const anthropic = createAnthropic({
+      apiKey: 'test-key',
+      baseURL: 'https://anthropic.test/v1',
+      fetch: async (_input, init) => {
+        capturedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({
+          id: 'msg_wire',
+          type: 'message',
+          role: 'assistant',
+          model: modelId,
+          content: [{ type: 'text', text: 'ok' }],
+          stop_reason: 'end_turn',
+          stop_sequence: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      },
+    });
+    const params = translateRequest({
+      model: modelId,
+      output_config: { effort },
+      messages: [{ role: 'user', content: 'exercise the real SDK wire' }],
+    }, '@ai-sdk/anthropic', {
+      unsupportedEffortPolicy: 'exact',
+      reasoningMetadata: { upstreamModelId: modelId },
+    });
+
+    await generateAnthropicResponse(anthropic(modelId), params, modelId);
+
+    expect(capturedBody?.output_config).toEqual({ effort });
+    expect(capturedBody?.thinking).toEqual(expectedThinking);
+  });
+
   it('applies reasoning effort using reasoningMetadata.upstreamModelId, not the gateway-aliased body.model', () => {
     const params = translateRequest({
       model: 'anthropic-xai__grok-4.3',
@@ -349,7 +465,30 @@ describe('translateRequest', () => {
 
   it('reads effort from output_config via anthropicEffortFromRequest', () => {
     expect(anthropicEffortFromRequest({ model: 'm', messages: [], output_config: { effort: 'high' } })).toBe('high');
+    expect(anthropicEffortFromRequest({ model: 'm', messages: [], output_config: { effort: ' high ' } })).toBe(' high ');
+    expect(anthropicEffortFromRequest({ model: 'm', messages: [], output_config: { effort: '' } })).toBe('');
+    expect(anthropicEffortFromRequest({ model: 'm', messages: [], output_config: { effort: '   ' } })).toBe('   ');
     expect(anthropicEffortFromRequest({ model: 'm', messages: [] })).toBeUndefined();
+  });
+
+  it('distinguishes malformed assigned effort from omission at routed boundaries', () => {
+    expect(validatedAnthropicEffortFromRequest({ model: 'm', messages: [] })).toBeUndefined();
+    expect(validatedAnthropicEffortFromRequest({
+      model: 'm', messages: [], output_config: { effort: ' high ' },
+    })).toBe(' high ');
+    for (const output_config of [
+      { effort: 123 },
+      { effort: null },
+      [],
+      null,
+    ]) {
+      expect(() => validatedAnthropicEffortFromRequest({
+        model: 'm',
+        messages: [],
+        output_config,
+      } as unknown as Parameters<typeof validatedAnthropicEffortFromRequest>[0]))
+        .toThrow(/Invalid effort level/);
+    }
   });
 
   it('maps output_config.effort to DeepSeek reasoning_effort via openai-compatible', () => {

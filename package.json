@@ -4,13 +4,14 @@
   "publishConfig": {
     "access": "public"
   },
-  "description": "Bridge Claude Code to OpenAI models — OpenAI API key or ChatGPT/Codex-plan OAuth, with prompt caching, auto-compaction, model switching, and a Claude Code binary patcher",
+  "description": "Bridge Claude Code to OpenAI and OpenCode Go models — API keys or ChatGPT/Codex-plan OAuth, with prompt caching, auto-compaction, model switching, and a Claude Code binary patcher",
   "author": "Brandon Wallace",
   "license": "MIT",
   "keywords": [
     "claude",
     "claude-code",
     "openai",
+    "opencode",
     "chatgpt",
     "codex",
     "ai",
@@ -40,7 +41,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "prepare": "husky",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "pnpm build",
+    "update:opencode-go": "node scripts/update-opencode-go-models.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.12",

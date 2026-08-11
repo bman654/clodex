@@ -101,25 +101,48 @@ describe('buildPatchModelConfig', () => {
     );
 
     expect(config['clodex:openai-oauth:gpt-5.6-sol']).toEqual({
-      alias: 'sol',
+      aliases: ['sol'],
       context: 272_000,
       display: 'GPT-5.6 Sol (OpenAI (ChatGPT))',
       effort: {
-        levels: ['low', 'medium', 'high', 'xhigh', 'max'],
-        defaultLevel: 'high',
+        levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'medium',
       },
     });
     expect(config['clodex:openai-oauth:gpt-5.6-luna']).toEqual({
       context: 272_000,
       display: 'GPT-5.6 Luna (OpenAI (ChatGPT))',
       effort: {
-        levels: ['low', 'medium', 'high', 'xhigh', 'max'],
-        defaultLevel: 'high',
+        levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+        defaultLevel: 'medium',
       },
     });
     // Unknown window → no context (Claude Code's 200k default) + warning entry
     expect(config['clodex:openai:mystery-model']).toEqual({});
     expect(unknownWindows).toEqual(['clodex:openai:mystery-model']);
+  });
+
+  it('preserves every alias when several names target one favorite', () => {
+    const { config } = buildPatchModelConfig(
+      [{ providerId: 'opencode-go', modelId: 'deepseek-v4-flash' }],
+      [
+        { name: 'luna', providerId: 'opencode-go', modelId: 'deepseek-v4-flash' },
+        { name: 'terra', providerId: 'opencode-go', modelId: 'deepseek-v4-flash' },
+        { name: 'ds4', providerId: 'opencode-go', modelId: 'deepseek-v4-flash' },
+      ],
+      () => ({
+        contextWindow: 1_000_000,
+        displayName: 'DeepSeek V4 Flash (OpenCode Go)',
+        effort: { levels: ['high', 'max'], defaultLevel: null },
+      }),
+    );
+
+    expect(config['clodex:opencode-go:deepseek-v4-flash']).toEqual({
+      aliases: ['luna', 'terra', 'ds4'],
+      context: 1_000_000,
+      display: 'DeepSeek V4 Flash (OpenCode Go)',
+      effort: { levels: ['high', 'max'], defaultLevel: null },
+    });
   });
 
   it('omits context when the window equals the 200k default', () => {
@@ -152,7 +175,7 @@ describe('buildPatchModelConfig', () => {
       levels: ['none', 'low', 'medium', 'high'],
       defaultLevel: 'none',
     },
-  ])('omits client effort metadata for $name', ({ levels, defaultLevel }) => {
+  ])('projects sparse native effort metadata for $name', ({ levels, defaultLevel }) => {
     const { config } = buildPatchModelConfig(
       [{ providerId: 'openai', modelId: 'reasoning-model' }],
       [],
@@ -161,7 +184,14 @@ describe('buildPatchModelConfig', () => {
         effort: { levels, defaultLevel },
       }),
     );
-    expect(config['clodex:openai:reasoning-model']).toEqual({});
+    expect(config['clodex:openai:reasoning-model']).toEqual({
+      effort: {
+        levels,
+        defaultLevel: ['off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(defaultLevel)
+          ? defaultLevel
+          : null,
+      },
+    });
   });
 
   it('canonicalizes aliases and omits ambiguous case-fold collisions', () => {
@@ -175,9 +205,9 @@ describe('buildPatchModelConfig', () => {
       (providerId, modelId) => meta.get(`${providerId}:${modelId}`),
     );
 
-    expect(config['clodex:openai-oauth:gpt-5.6-sol']?.alias).toBe('sol');
-    expect(config['clodex:openai-oauth:gpt-5.6-luna']?.alias).toBeUndefined();
-    expect(config['clodex:openai:mystery-model']?.alias).toBeUndefined();
+    expect(config['clodex:openai-oauth:gpt-5.6-sol']?.aliases).toEqual(['sol']);
+    expect(config['clodex:openai-oauth:gpt-5.6-luna']?.aliases).toBeUndefined();
+    expect(config['clodex:openai:mystery-model']?.aliases).toBeUndefined();
   });
 
   it('returns every rejected saved alias so the patch command can report it', () => {
@@ -189,6 +219,23 @@ describe('buildPatchModelConfig', () => {
 
     expect(desired.rejectedAliases).toEqual(rejectedAliases);
     expect(desired.rejectedAliasRejections).toEqual(rejectedAliasRejections);
+  });
+
+  it('distinguishes aliases whose saved favorite was removed by a provider allowlist', () => {
+    const droppedTarget = 'opencode-go:gpt-5.6-luna';
+    const alias = { name: 'luna', providerId: 'opencode-go', modelId: 'gpt-5.6-luna' };
+    const desired = buildPatchModelConfig(
+      [],
+      [alias],
+      () => undefined,
+      { droppedFavoriteTargets: new Set([droppedTarget]) },
+    );
+
+    expect(desired.droppedFavoriteIds).toEqual(['clodex:opencode-go:gpt-5.6-luna']);
+    expect(desired.rejectedAliasRejections).toEqual([{
+      alias,
+      reason: 'target-not-exposed',
+    }]);
   });
 
   it('reports each rejected alias with its exact stored name and reason', () => {
@@ -232,6 +279,7 @@ describe('buildDesiredPatchConfig', () => {
       templateId?: string;
       name?: string;
       npm?: string;
+      url?: string;
     } = {},
   ): void {
     const providerId = provider.id ?? 'openai';
@@ -251,7 +299,10 @@ describe('buildDesiredPatchConfig', () => {
           name: provider.name ?? 'OpenAI',
           enabled: true,
           authRef: 'env:OPENAI_API_KEY',
-          api: { npm: provider.npm ?? '@ai-sdk/openai' },
+          api: {
+            npm: provider.npm ?? '@ai-sdk/openai',
+            ...(provider.url ? { url: provider.url } : {}),
+          },
           modelsCache: {
             fetchedAt: '2026-07-27T00:00:00.000Z',
             models: [model],
@@ -262,7 +313,7 @@ describe('buildDesiredPatchConfig', () => {
     );
   }
 
-  it('preserves the native high default when provider metadata defaults to medium', () => {
+  it('preserves the provider metadata default in the native picker', () => {
     writeInputs({
       id: 'gpt-5.6-sol',
       upstreamModelId: 'gpt-5.6-sol',
@@ -274,8 +325,8 @@ describe('buildDesiredPatchConfig', () => {
     const desired = buildDesiredPatchConfig();
 
     expect(desired.config['clodex:openai:gpt-5.6-sol']?.effort).toEqual({
-      levels: ['low', 'medium', 'high', 'xhigh', 'max'],
-      defaultLevel: 'high',
+      levels: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      defaultLevel: 'medium',
     });
   });
 
@@ -292,8 +343,70 @@ describe('buildDesiredPatchConfig', () => {
 
     expect(desired.config['clodex:openai:gpt-5.5']?.effort).toEqual({
       levels: ['low', 'medium', 'high'],
-      defaultLevel: 'high',
+      defaultLevel: 'medium',
     });
+  });
+
+  it('omits an inferred ladder when no level has a valid provider wire option', () => {
+    writeInputs({
+      id: 'claude-sonnet-4-5',
+      upstreamModelId: 'claude-sonnet-4-5',
+      name: 'Claude Sonnet 4.5',
+      contextWindow: 200_000,
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      apiUrl: 'https://anthropic.example/v1',
+      reasoning: true,
+    }, {
+      id: 'anthropic-custom',
+      templateId: 'custom-anthropic',
+      name: 'Anthropic Custom',
+      npm: '@ai-sdk/anthropic',
+      url: 'https://anthropic.example/v1',
+    });
+
+    expect(buildDesiredPatchConfig().config[
+      'clodex:anthropic-custom:claude-sonnet-4-5'
+    ]).toEqual({ display: 'Claude Sonnet 4.5 (Anthropic Custom)' });
+  });
+
+  it.each([
+    {
+      providerId: 'deepseek',
+      npm: '@ai-sdk/openai-compatible',
+      modelId: 'deepseek-v4-flash',
+      expectedLevels: ['off', 'high', 'max'],
+    },
+    {
+      providerId: 'mistral',
+      npm: '@ai-sdk/mistral',
+      modelId: 'mistral-large',
+      expectedLevels: ['off', 'high'],
+    },
+  ])('projects the canonical sparse ladder for direct $providerId models', ({
+    providerId,
+    npm,
+    modelId,
+    expectedLevels,
+  }) => {
+    writeInputs({
+      id: modelId,
+      upstreamModelId: modelId,
+      name: modelId,
+      contextWindow: 128_000,
+      modelFormat: 'openai',
+      npm,
+      apiUrl: 'https://provider.example/v1',
+    }, {
+      id: providerId,
+      templateId: 'custom-openai',
+      name: providerId,
+      npm,
+      url: 'https://provider.example/v1',
+    });
+
+    expect(buildDesiredPatchConfig().config[`clodex:${providerId}:${modelId}`]?.effort)
+      .toEqual({ levels: expectedLevels, defaultLevel: 'high' });
   });
 
   it('uses the catalog id when an older cache entry lacks upstreamModelId', () => {
@@ -308,8 +421,31 @@ describe('buildDesiredPatchConfig', () => {
 
     expect(desired.config['clodex:openai:gpt-5.5']?.effort).toEqual({
       levels: ['low', 'medium', 'high'],
-      defaultLevel: 'high',
+      defaultLevel: 'medium',
     });
+  });
+
+  it('keeps a no-cache custom-provider favorite patchable with unknown metadata', () => {
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId: 'custom', modelId: 'future-model' }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: 'custom',
+        templateId: 'custom-openai',
+        name: 'Custom',
+        enabled: true,
+        authRef: 'keyring:provider:custom',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://example.test/v1' },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({ 'clodex:custom:future-model': {} });
+    expect(desired.unknownWindows).toEqual(['clodex:custom:future-model']);
+    expect(desired.droppedFavoriteIds).toEqual([]);
   });
 
   it('omits effort when enriched catalog metadata explicitly disables reasoning', () => {
@@ -330,6 +466,457 @@ describe('buildDesiredPatchConfig', () => {
 
     expect(desired.config['clodex:qiniu-ai:kimi-k2']?.effort).toBeUndefined();
   });
+
+  it('corrects stale built-in OpenCode Go metadata before building patch config', () => {
+    writeInputs({
+      id: 'qwen3.6-plus',
+      upstreamModelId: 'qwen3.6-plus',
+      name: 'stale qwen',
+      contextWindow: 123_000,
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      apiUrl: 'https://example.test/v1',
+      codingCapabilitiesAuthoritative: true,
+      compatibility: {
+        reasoningEffortMap: { low: 'low', medium: 'medium', high: 'high' },
+        thinkingFormat: 'qwen',
+      },
+    }, {
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      npm: '@ai-sdk/openai-compatible',
+      url: 'https://opencode.ai/zen/go/v1',
+    });
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(desired.config['clodex:opencode-go:qwen3.6-plus']).toMatchObject({
+      context: 1_000_000,
+      display: 'Qwen3.6 Plus (OpenCode Go)',
+    });
+    expect(desired.config['clodex:opencode-go:qwen3.6-plus']?.effort).toEqual({
+      levels: ['high', 'max'],
+      defaultLevel: null,
+    });
+  });
+
+  it('does not patch a Responses-only model left in an existing built-in cache', () => {
+    writeInputs({
+      id: 'gpt-5.6-luna',
+      upstreamModelId: 'gpt-5.6-luna',
+      name: 'GPT-5.6 Luna',
+      contextWindow: 1_050_000,
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+    }, {
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      npm: '@ai-sdk/openai-compatible',
+      url: 'https://opencode.ai/zen/go/v1',
+    });
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual(['clodex:opencode-go:gpt-5.6-luna']);
+  });
+
+  it('patches valid favorites while naming every saved OpenCode favorite dropped by the allowlist', () => {
+    const providerId = 'opencode-go';
+    writeFileSync(
+      join(home, 'config.json'),
+      JSON.stringify({
+        favoriteModels: [
+          { providerId, modelId: 'qwen3.6-plus' },
+          { providerId, modelId: 'gpt-5.6-luna' },
+        ],
+        modelAliases: [
+          { name: 'luna', providerId, modelId: 'gpt-5.6-luna' },
+        ],
+      }),
+    );
+    writeFileSync(
+      join(home, 'providers.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        providers: [{
+          id: providerId,
+          templateId: providerId,
+          name: 'OpenCode Go',
+          enabled: true,
+          authRef: 'keyring:provider:opencode-go',
+          api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+          modelsCache: {
+            fetchedAt: '2026-08-09T00:00:00.000Z',
+            models: [
+              {
+                id: 'qwen3.6-plus',
+                upstreamModelId: 'qwen3.6-plus',
+                name: 'Qwen',
+                modelFormat: 'openai',
+              },
+              {
+                id: 'gpt-5.6-luna',
+                upstreamModelId: 'gpt-5.6-luna',
+                name: 'Luna',
+                modelFormat: 'openai',
+              },
+            ],
+          },
+          addedAt: '2026-08-09T00:00:00.000Z',
+        }],
+      }),
+    );
+
+    const desired = buildDesiredPatchConfig();
+    expect(Object.keys(desired.config)).toEqual(['clodex:opencode-go:qwen3.6-plus']);
+    expect(desired.droppedFavoriteIds).toEqual(['clodex:opencode-go:gpt-5.6-luna']);
+    expect(desired.rejectedAliasRejections).toEqual([{
+      alias: { name: 'luna', providerId, modelId: 'gpt-5.6-luna' },
+      reason: 'target-not-exposed',
+    }]);
+  });
+
+  it('does not correct OpenCode-shaped metadata for a custom endpoint', () => {
+    writeInputs({
+      id: 'qwen3.6-plus',
+      upstreamModelId: 'qwen3.6-plus',
+      name: 'Custom Qwen',
+      contextWindow: 123_000,
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      apiUrl: 'https://example.test/v1',
+      codingCapabilitiesAuthoritative: true,
+    }, {
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'Custom endpoint',
+      npm: '@ai-sdk/openai-compatible',
+      url: 'https://example.test/v1',
+    });
+
+    expect(buildDesiredPatchConfig().config['clodex:opencode-go:qwen3.6-plus']?.context)
+      .toBe(123_000);
+  });
+
+  it('rejects only stale official favorites quarantined under a custom OpenCode URL', () => {
+    const providerId = 'opencode-go';
+    const modelId = 'qwen3.6-plus';
+    writeInputs({
+      id: modelId,
+      upstreamModelId: modelId,
+      name: 'Stale official Qwen',
+      contextWindow: 1_000_000,
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      apiUrl: 'https://opencode.ai/zen/go',
+      codingCapabilitiesAuthoritative: true,
+    }, {
+      id: providerId,
+      templateId: providerId,
+      name: 'Custom endpoint',
+      npm: '@ai-sdk/openai-compatible',
+      url: 'https://example.test/v1',
+    });
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+      modelAliases: [{ name: 'qwen', providerId, modelId }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+    expect(desired.rejectedAliasRejections).toEqual([{
+      alias: { name: 'qwen', providerId, modelId },
+      reason: 'target-not-exposed',
+    }]);
+  });
+
+  it.each([
+    ['uppercase official host', 'https://OPENCODE.AI/zen/go'],
+    ['default-port official host', 'https://opencode.ai:443/zen/go/v1'],
+    ['alternate official path', 'https://opencode.ai/some/older/resolver/path'],
+  ])('drops a non-canonical stale official favorite after a custom transition (%s)', (
+    _label,
+    staleApiUrl,
+  ) => {
+    const providerId = 'opencode-go';
+    const modelId = 'qwen3.6-plus';
+    writeInputs({
+      id: modelId,
+      upstreamModelId: modelId,
+      name: 'Stale official Qwen',
+      contextWindow: 1_000_000,
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      apiUrl: staleApiUrl,
+      codingCapabilitiesAuthoritative: true,
+    }, {
+      id: providerId,
+      templateId: providerId,
+      name: 'Custom endpoint',
+      npm: '@ai-sdk/openai-compatible',
+      url: 'https://example.test/v1',
+    });
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+  });
+
+  it('keeps a custom target patchable when a neutral live row supersedes a stale official duplicate', () => {
+    const providerId = 'opencode-go';
+    const modelId = 'qwen3.6-plus';
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+      modelAliases: [{ name: 'qwen', providerId, modelId }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: providerId,
+        templateId: providerId,
+        name: 'Custom endpoint',
+        enabled: true,
+        authRef: 'keyring:provider:custom',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://example.test/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-09T00:00:00.000Z',
+          models: [
+            {
+              id: modelId,
+              upstreamModelId: modelId,
+              name: 'Stale official Qwen',
+              contextWindow: 1_000_000,
+              modelFormat: 'anthropic',
+              npm: '@ai-sdk/anthropic',
+              apiUrl: 'https://opencode.ai/zen/go',
+            },
+            {
+              id: modelId,
+              upstreamModelId: modelId,
+              name: 'Current custom Qwen',
+              contextWindow: 123_000,
+              modelFormat: 'openai',
+              npm: '@ai-sdk/openai-compatible',
+              apiUrl: 'https://example.test/v1',
+            },
+          ],
+        },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config[`clodex:${providerId}:${modelId}`]).toMatchObject({
+      aliases: ['qwen'],
+      context: 123_000,
+    });
+    expect(desired.droppedFavoriteIds).toEqual([]);
+    expect(desired.rejectedAliasRejections).toEqual([]);
+  });
+
+  it('quarantines neutral rows when a partial OpenCode identity points at an official URL', () => {
+    const providerId = 'opencode-go';
+    const modelId = 'custom-model';
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: providerId,
+        templateId: 'legacy-unmapped-template',
+        name: 'Partial OpenCode identity',
+        enabled: true,
+        authRef: 'keyring:provider:custom',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-09T00:00:00.000Z',
+          models: [{
+            id: modelId,
+            upstreamModelId: modelId,
+            name: 'Neutral custom model',
+            modelFormat: 'openai',
+            npm: '@ai-sdk/openai-compatible',
+          }],
+        },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+  });
+
+  it.each([
+    ['uppercase host', 'https://OPENCODE.AI/zen/go/v1'],
+    ['default port', 'https://opencode.ai:443/zen/go/v1'],
+    ['dot segment', 'https://opencode.ai/zen/./go/v1'],
+    ['encoded path', 'https://opencode.ai/%7Aen/go/%76%31'],
+    ['encoded separator', 'https://opencode.ai/zen%2Fgo/v1'],
+    ['trailing-dot host and alternate path', 'https://opencode.ai./some/other/path'],
+    ['userinfo and query', 'https://user:secret@opencode.ai/zen/go/v1?source=custom#fragment'],
+    ['plaintext scheme', 'http://opencode.ai/zen/go/v1'],
+  ])('drops partial-identity favorites for official-equivalent URLs (%s)', (
+    _label,
+    url,
+  ) => {
+    const providerId = 'opencode-go';
+    const modelId = 'custom-model';
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: providerId,
+        templateId: 'groq',
+        name: 'Partial OpenCode identity',
+        enabled: true,
+        authRef: 'keyring:provider:partial',
+        api: { npm: '@ai-sdk/openai-compatible', url },
+        modelsCache: {
+          fetchedAt: '2026-08-09T00:00:00.000Z',
+          models: [{
+            id: modelId,
+            upstreamModelId: modelId,
+            name: 'Neutral custom model',
+            modelFormat: 'openai',
+            npm: '@ai-sdk/openai-compatible',
+          }],
+        },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+  });
+
+  it('drops every favorite for an ambiguous OpenCode provider with no URL or cache', () => {
+    const providerId = 'opencode-go';
+    const modelId = 'qwen3.6-plus';
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: providerId,
+        templateId: providerId,
+        name: 'Ambiguous OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:ambiguous',
+        api: { npm: '@ai-sdk/openai-compatible' },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+  });
+
+  it('drops absent favorites for a partial OpenCode identity on an official URL', () => {
+    const providerId = 'opencode-go';
+    const modelId = 'favorite-not-in-cache';
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: providerId,
+        templateId: 'groq',
+        name: 'Partial OpenCode identity',
+        enabled: true,
+        authRef: 'keyring:provider:partial',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-09T00:00:00.000Z',
+          models: [{
+            id: 'different-model',
+            upstreamModelId: 'different-model',
+            name: 'Different model',
+            modelFormat: 'openai',
+            npm: '@ai-sdk/openai-compatible',
+          }],
+        },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+  });
+
+  it.each([
+    {
+      label: 'official OpenCode provider',
+      providerId: 'opencode-go',
+      templateId: 'opencode-go',
+      url: 'https://opencode.ai/zen/go/v1',
+      modelId: 'qwen3.6-plus',
+      apiUrl: 'https://opencode.ai/zen/go',
+    },
+    {
+      label: 'generic custom provider',
+      providerId: 'custom-disabled',
+      templateId: 'custom-openai',
+      url: 'https://example.test/v1',
+      modelId: 'custom-model',
+      apiUrl: 'https://example.test/v1',
+    },
+  ])('drops favorites and aliases owned by a disabled $label', ({
+    providerId,
+    templateId,
+    url,
+    modelId,
+    apiUrl,
+  }) => {
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId, modelId }],
+      modelAliases: [{ name: 'disabled-alias', providerId, modelId }],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: providerId,
+        templateId,
+        name: 'Disabled provider',
+        enabled: false,
+        authRef: `keyring:provider:${providerId}`,
+        api: { npm: '@ai-sdk/openai-compatible', url },
+        modelsCache: {
+          fetchedAt: '2026-08-09T00:00:00.000Z',
+          models: [{
+            id: modelId,
+            upstreamModelId: modelId,
+            name: 'Disabled model',
+            modelFormat: 'openai',
+            npm: '@ai-sdk/openai-compatible',
+            apiUrl,
+          }],
+        },
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+    expect(desired.config).toEqual({});
+    expect(desired.droppedFavoriteIds).toEqual([`clodex:${providerId}:${modelId}`]);
+    expect(desired.rejectedAliasRejections).toEqual([
+      expect.objectContaining({ reason: 'target-not-exposed' }),
+    ]);
+  });
 });
 
 describe('computePatchConfigHash', () => {
@@ -343,6 +930,20 @@ describe('computePatchConfigHash', () => {
     expect(computePatchConfigHash(a)).not.toBe(
       computePatchConfigHash({ ...a, 'clodex:p:m1': { alias: 'x', context: 2000 } }),
     );
+  });
+
+  it('hashes every alias in saved order', () => {
+    const one = { 'clodex:p:m1': { aliases: ['luna'], context: 1000 } };
+    const three = {
+      'clodex:p:m1': { aliases: ['luna', 'terra', 'ds4'], context: 1000 },
+    };
+    expect(computePatchConfigHash(one)).not.toBe(computePatchConfigHash(three));
+    expect(computePatchConfigHash(three)).not.toBe(computePatchConfigHash({
+      'clodex:p:m1': { aliases: ['ds4', 'terra', 'luna'], context: 1000 },
+    }));
+    expect(computePatchConfigHash({
+      'clodex:p:m1': { alias: 'luna', context: 1000 },
+    })).toBe(computePatchConfigHash(one));
   });
 
   it('changes when only the display label changes (so an old patch reads as stale)', () => {
@@ -450,8 +1051,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
     ).replace(/\r\n/g, '\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 3,
-      digest: '8698e34835e19503f3591284d241f02ea2fb325844d6f5531f514f91ca76554b',
+      version: 5,
+      digest: '5343912197cc2d0d52cbf51fdb7657b75748d075d48dac901023844ed3bc6010',
     });
   });
 });
@@ -585,6 +1186,25 @@ describe('applyClodexPatches input validation', () => {
     })).toThrow(/reserved alias/);
   });
 
+  it('rejects malformed alias lists and non-string entries', () => {
+    expect(() => applyClodexPatches('var x = 1;', {
+      'clodex:openai:model': { aliases: 'luna' as unknown as string[] },
+    })).toThrow(/aliases .* must be an array/);
+    expect(() => applyClodexPatches('var x = 1;', {
+      'clodex:openai:model': { aliases: ['luna', 7 as unknown as string] },
+    })).toThrow(/alias .* must be a string/);
+  });
+
+  it('rejects duplicate aliases instead of silently overwriting one', () => {
+    expect(() => applyClodexPatches('var x = 1;', {
+      'clodex:openai:model-a': { aliases: ['luna'] },
+      'clodex:openai:model-b': { aliases: ['luna'] },
+    })).toThrow(/alias "luna" is configured more than once/);
+    expect(() => applyClodexPatches('var x = 1;', {
+      'clodex:openai:model': { alias: 'luna', aliases: ['luna'] },
+    })).toThrow(/alias "luna" is configured more than once/);
+  });
+
   it('rejects an explicit context on a [1m]-suffixed id (the suffix already forces 1M)', () => {
     expect(() => applyClodexPatches('var x = 1;', {
       'clodex:openai:model[1m]': { context: 1_000_000 },
@@ -593,17 +1213,29 @@ describe('applyClodexPatches input validation', () => {
 
   it.each([
     {
-      levels: ['low', 'high'],
-      defaultLevel: 'high',
+      levels: [],
+      defaultLevel: null,
     },
     {
       levels: ['low', 'medium', 'high'],
       defaultLevel: 'max',
     },
+    {
+      levels: ['high', 'low'],
+      defaultLevel: 'high',
+    },
+    {
+      levels: ['low', 'low'],
+      defaultLevel: 'low',
+    },
+    {
+      levels: ['turbo'],
+      defaultLevel: null,
+    },
   ])('rejects effort metadata outside the native client contract', effort => {
     expect(() => applyClodexPatches('var x = 1;', {
       'clodex:openai:model': { effort },
-    })).toThrow(/must include low, medium, and high with a native default/);
+    })).toThrow(/must expose a native level and use a declared default or null/);
   });
 
   it('throws PatchApplyError carrying per-site results when a required anchor is missing', () => {
@@ -727,7 +1359,9 @@ describe('applyPatch', () => {
       expect(outcome.detailLines).toContain(
         'clodex patch: FAILED patches: PATCH 8a: effort capability; '
           + 'PATCH 8b: xhigh effort capability; '
-          + 'PATCH 8c: max effort capability; PATCH 9: default effort',
+          + 'PATCH 8c: max effort capability; PATCH 8d: exact effort level helper; '
+          + 'PATCH 8e: exact effort metadata lists; PATCH 8f: preserve requested effort; '
+          + 'PATCH 9: default effort',
       );
       expect(tweakccMocks.writeContent).not.toHaveBeenCalled();
       expect(readFileSync(binaryPath, 'utf8')).toBe('pristine-native');
@@ -911,7 +1545,7 @@ describe('applyPatch', () => {
         {
           config: {
             'clodex:test:extended': {
-              alias: 'extended',
+              aliases: ['extended', 'second', 'third'],
               effort: {
                 levels: ['low', 'medium', 'high', 'xhigh', 'max'],
                 defaultLevel: 'high',
@@ -927,6 +1561,7 @@ describe('applyPatch', () => {
       const manifestBytes = readFileSync(getPatchManifestPath(), 'utf8');
       const manifest = JSON.parse(manifestBytes) as PatchManifest;
       expect(outcome.ok).toBe(true);
+      expect(outcome.message).toContain('3 aliases');
       expect(readFileSync(binaryPath, 'utf8')).toBe(replacement);
       expect(readFileSync(pristinePath, 'utf8')).toBe('pristine-native');
       expect(readFileSync(join(tweakccHome, 'native-binary.backup'), 'utf8')).toBe('pristine-native');
@@ -951,17 +1586,29 @@ describe('applyPatch', () => {
 
 const CLAUDE_FIXTURE = [
   CLAUDE_CORE_FIXTURE,
+  'var PM=["low","medium","high","xhigh","max"];',
+  'function iJe(e,t){return!0}',
+  'function a3e(e){return PM.filter((t)=>iJe(t,e))}',
   'function OI(e){if(SNr(e))return!1;let t=Ede(e,"effort");if(t!==void 0)return t;return!1}',
   'function I_e(e){if(SNr(e))return!1;let t=Ede(e,"xhigh_effort");if(t!==void 0)return t;return!1}',
   'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return!1}',
+  'var EM1={...o&&{supportsEffort:!0,supportedEffortLevels:PM.filter((l)=>{if(l==="max"&&!eqe(n))return!1;if(l==="xhigh"&&!I_e(n))return!1;return!0})}};',
+  'var EM2={...To&&{supportsEffort:!0,supportedEffortLevels:PM.filter((Fo)=>{if(Fo==="max"&&!eqe(Et))return!1;if(Fo==="xhigh"&&!I_e(Et))return!1;return!0})}};',
+  'function nEu(e,t){let r=e;if(typeof r==="string"&&a_e(r))r=IDe(r,t);if(r==="max"&&!eqe(t))r="high";if(r==="xhigh"&&!I_e(t))r="high";return r}',
   'function ait(e){return ww(lo(e))?.default_effort??"high"}',
 ].join('\n');
 
 const CLAUDE_PROXY_EFFORT_FIXTURE = [
   CLAUDE_CORE_FIXTURE,
+  'var PM=["low","medium","high","xhigh","max"];',
+  'function iJe(e,t){return!0}',
+  'function a3e(e){return PM.filter((t)=>iJe(t,e))}',
   'function OI(e){if(SNr(e))return!1;let t=Ede(e,"effort");if(t!==void 0)return t;return proxyMode(e)}',
   'function I_e(e){if(SNr(e))return!1;let t=Ede(e,"xhigh_effort");if(t!==void 0)return t;return proxyMode(e)}',
   'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return proxyMode(e)}',
+  'var EM1={...o&&{supportsEffort:!0,supportedEffortLevels:PM.filter((l)=>{if(l==="max"&&!eqe(n))return!1;if(l==="xhigh"&&!I_e(n))return!1;return!0})}};',
+  'var EM2={...To&&{supportsEffort:!0,supportedEffortLevels:PM.filter((Fo)=>{if(Fo==="max"&&!eqe(Et))return!1;if(Fo==="xhigh"&&!I_e(Et))return!1;return!0})}};',
+  'function nEu(e,t){let r=e;if(typeof r==="string"&&a_e(r))r=IDe(r,t);if(r==="max"&&!eqe(t))r="high";if(r==="xhigh"&&!I_e(t))r="high";return r}',
   'function ait(e){return ww(lo(e))?.default_effort??"high"}',
 ].join('\n');
 
@@ -999,7 +1646,7 @@ function executeDefaultEffort(
   source: string,
   modelId: string,
   nativeDefault: string,
-): string {
+): string | null {
   const declaration = source
     .split('\n')
     .find(line => line.startsWith('function ait('));
@@ -1011,8 +1658,45 @@ function executeDefaultEffort(
   )(
     (id: string) => id,
     () => ({ default_effort: nativeDefault }),
-  ) as (id: string) => string;
+  ) as (id: string) => string | null;
   return defaultEffort(modelId);
+}
+
+function executeExactEffortLevels(source: string, modelId: string): string[] {
+  const declaration = source.split('\n').find(line => line.startsWith('function a3e('));
+  expect(declaration).toBeDefined();
+  const levels = Function(
+    'PM',
+    'iJe',
+    `${declaration};return a3e;`,
+  )(
+    ['low', 'medium', 'high', 'xhigh', 'max'],
+    () => true,
+  ) as (id: string) => string[];
+  return levels(modelId);
+}
+
+function executeRequestedEffort(
+  source: string,
+  requested: string,
+  modelId: string,
+  organizationClamp: (value: string, model: string) => string,
+): string {
+  const declaration = source.split('\n').find(line => line.startsWith('function nEu('));
+  expect(declaration).toBeDefined();
+  const resolve = Function(
+    'a_e',
+    'IDe',
+    'eqe',
+    'I_e',
+    `${declaration};return nEu;`,
+  )(
+    () => true,
+    organizationClamp,
+    () => false,
+    () => false,
+  ) as (effort: string, model: string) => string;
+  return resolve(requested, modelId);
 }
 
 const CAPABILITY_GATES: Array<{
@@ -1062,6 +1746,15 @@ describe('patch script identity naming', () => {
     return runPatchScript(capabilityConfig, CLAUDE_PROXY_EFFORT_FIXTURE);
   }
 
+  const multiAliasConfig = {
+    'clodex:opencode-go:deepseek-v4-flash': {
+      aliases: ['luna', 'terra', 'ds4'],
+      context: 1_000_000,
+      display: 'DeepSeek V4 Flash (OpenCode Go)',
+      effort: { levels: ['high', 'max'], defaultLevel: null },
+    },
+  };
+
   it('injects the ALIAS — not the canonical id — as the model identity', () => {
     const out = runPatchScript(config);
 
@@ -1074,6 +1767,48 @@ describe('patch script identity naming', () => {
     // list (it survives only as an extra key in the context table).
     expect(out).not.toMatch(/\.enum\(\[[^\]]*gpt-5\.6-sol/);
     expect(out).not.toMatch(/KNOWN=\[[^\]]*gpt-5\.6-sol/);
+  });
+
+  it('injects every same-target alias as a complete native identity', () => {
+    const patched = applyClodexPatches(CLAUDE_FIXTURE, multiAliasConfig);
+    const out = patched.content;
+
+    expect(out).toContain(
+      '.enum(["sonnet","opus","haiku","fable","luna","terra","ds4"])',
+    );
+    expect(out).toContain(
+      '["sonnet","opus","haiku","fable","opusplan","luna","terra","ds4"]',
+    );
+    expect(out).not.toMatch(/\.enum\(\[[^\]]*deepseek-v4-flash/);
+
+    const contextTable = out.match(
+      /\/\*ccpatch:ctx\*\/var _ccw=\((\{[^}]*\})\)/,
+    )?.[1];
+    const context = JSON.parse(contextTable!) as Record<string, number>;
+    for (const alias of ['luna', 'terra', 'ds4']) {
+      expect(out).toContain(`case"${alias}":return "${alias}";`);
+      expect(out).toContain(
+        `{value:"${alias}",label:"${alias.charAt(0).toUpperCase() + alias.slice(1)}",`
+        + 'description:"DeepSeek V4 Flash (OpenCode Go)"}',
+      );
+      expect(context[alias]).toBe(1_000_000);
+      expect(executeExactEffortLevels(out, alias)).toEqual(['high', 'max']);
+      expect(executeDefaultEffort(out, alias, 'high')).toBeNull();
+      expect(executeCapability(out, 'OI', alias, false)).toBe(true);
+      expect(executeCapability(out, 'I_e', alias, true)).toBe(false);
+      expect(executeCapability(out, 'eqe', alias, false)).toBe(true);
+    }
+    expect(context['clodex:opencode-go:deepseek-v4-flash']).toBe(1_000_000);
+
+    const proofNames = captureBuiltInPatchProofs(
+      out,
+      multiAliasConfig,
+      patched.results,
+    ).map(proof => proof.name);
+    for (const alias of ['luna', 'terra', 'ds4']) {
+      expect(proofNames).toContain(`PATCH 6: alias resolver switch (${alias})`);
+      expect(proofNames).toContain(`PATCH 5: model picker options (${alias})`);
+    }
   });
 
   it('resolves an alias to ITSELF so the sent name and the context-map key stay identical', () => {
@@ -1094,13 +1829,58 @@ describe('patch script identity naming', () => {
     expect(parsed['clodex:openai:mystery']).toBe(128_000);
   });
 
-  it('enables GPT-5.6 effort, xhigh, max, and the native high default for its alias', () => {
+  it('enables GPT-5.6 effort, xhigh, max, and its provider default for its alias', () => {
     const out = runPatchScript(config);
     expect(out).toContain('/*ccpatch:effort*/');
     expect(out).toContain('/*ccpatch:xhigh-effort*/');
     expect(out).toContain('/*ccpatch:max-effort*/');
     expect(out).toContain('/*ccpatch:default-effort*/');
-    expect(out).toContain('"sol":"high"');
+    expect(out).toContain('"sol":"medium"');
+  });
+
+  it('exposes an exact sparse ladder for aliases and canonical ids without inventing a default', () => {
+    const sparse = runPatchScript({
+      'clodex:opencode-go:deepseek-v4': {
+        alias: 'ds4',
+        effort: { levels: ['high', 'max'], defaultLevel: null },
+      },
+    });
+    for (const id of [
+      'ds4',
+      'ds4[1m]',
+      'clodex:opencode-go:deepseek-v4',
+      'clodex:opencode-go:deepseek-v4[1m]',
+    ]) {
+      expect(executeExactEffortLevels(sparse, id)).toEqual(['high', 'max']);
+      expect(executeDefaultEffort(sparse, id, 'high')).toBeNull();
+    }
+    expect(executeExactEffortLevels(sparse, 'unconfigured')).toEqual([
+      'low', 'medium', 'high', 'xhigh', 'max',
+    ]);
+  });
+
+  it('preserves a worker xhigh request for route policy after the organization clamp', () => {
+    const sparse = runPatchScript({
+      'clodex:opencode-go:deepseek-v4': {
+        alias: 'ds4',
+        effort: { levels: ['high', 'max'], defaultLevel: null },
+      },
+    });
+    expect(executeRequestedEffort(sparse, 'xhigh', 'ds4', value => value)).toBe('xhigh');
+    expect(executeRequestedEffort(sparse, 'xhigh', 'ds4', () => 'high')).toBe('high');
+    expect(executeRequestedEffort(sparse, 'xhigh', 'unconfigured', value => value)).toBe('high');
+  });
+
+  it('supplies non-native canonical session levels from the configured exact list', () => {
+    const out = runPatchScript({
+      'clodex:custom:thinking': {
+        effort: { levels: ['off', 'minimal', 'high'], defaultLevel: 'off' },
+      },
+    });
+    expect(executeExactEffortLevels(out, 'clodex:custom:thinking')).toEqual([
+      'off', 'minimal', 'high',
+    ]);
+    expect(executeDefaultEffort(out, 'clodex:custom:thinking', 'high')).toBe('off');
   });
 
   it.each([
@@ -1213,8 +1993,8 @@ describe('patch script identity naming', () => {
     'sol[1m]',
     'clodex:openai-oauth:gpt-5.6-sol',
     'clodex:openai-oauth:gpt-5.6-sol[1m]',
-  ])('returns high for configured default key %s against native medium', modelId => {
-    expect(executeDefaultEffort(runPatchScript(config), modelId, 'medium')).toBe('high');
+  ])('returns the configured medium default for key %s', modelId => {
+    expect(executeDefaultEffort(runPatchScript(config), modelId, 'high')).toBe('medium');
   });
 
   it('falls through to the native default for an unconfigured identity', () => {
@@ -1294,6 +2074,9 @@ describe('patch script identity naming', () => {
       ['PATCH 8a: effort capability', 'OK'],
       ['PATCH 8b: xhigh effort capability', 'OK'],
       ['PATCH 8c: max effort capability', 'OK'],
+      ['PATCH 8d: exact effort level helper', 'OK'],
+      ['PATCH 8e: exact effort metadata lists', 'OK'],
+      ['PATCH 8f: preserve requested effort', 'OK'],
       ['PATCH 9: default effort', 'OK'],
     ]);
     const rerun = applyClodexPatches(fresh.content, config);
@@ -1309,6 +2092,9 @@ describe('patch script identity naming', () => {
       ['PATCH 8a: effort capability (refresh)', 'SKIP'],
       ['PATCH 8b: xhigh effort capability (refresh)', 'SKIP'],
       ['PATCH 8c: max effort capability (refresh)', 'SKIP'],
+      ['PATCH 8d: exact effort level helper (refresh)', 'SKIP'],
+      ['PATCH 8e: exact effort metadata lists (refresh)', 'SKIP'],
+      ['PATCH 8f: preserve requested effort (refresh)', 'SKIP'],
       ['PATCH 9: default effort (refresh)', 'SKIP'],
     ]);
   });
@@ -1317,7 +2103,8 @@ describe('patch script identity naming', () => {
     const patched = applyClodexPatches(CLAUDE_FIXTURE, config);
     const proofs = captureBuiltInPatchProofs(patched.content, config, patched.results);
 
-    expect(proofs).toHaveLength(patched.results.length);
+    // PATCH 8e protects both independently generated metadata copies.
+    expect(proofs).toHaveLength(patched.results.length + 1);
     expect(builtInPatchProofsChanged(patched.content, proofs)).toBe(false);
     expect(builtInPatchProofsChanged(
       patched.content.replace('"fable","sol"', '"sol"'),
@@ -1354,6 +2141,9 @@ describe('patch script identity naming', () => {
       { status: 'FAIL', name: 'PATCH 8a: effort capability', extra: 'anchor not found' },
       { status: 'FAIL', name: 'PATCH 8b: xhigh effort capability', extra: 'anchor not found' },
       { status: 'FAIL', name: 'PATCH 8c: max effort capability', extra: 'anchor not found' },
+      { status: 'FAIL', name: 'PATCH 8d: exact effort level helper', extra: 'anchor not found' },
+      { status: 'FAIL', name: 'PATCH 8e: exact effort metadata lists', extra: 'anchor matched 0 times (expected 2)' },
+      { status: 'FAIL', name: 'PATCH 8f: preserve requested effort', extra: 'anchor not found' },
       { status: 'FAIL', name: 'PATCH 9: default effort', extra: 'anchor not found' },
     ]);
   });

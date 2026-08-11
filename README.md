@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/%40bman654%2Fclodex.svg)](https://www.npmjs.com/package/@bman654/clodex)
 
-**clodex** lets you use your ChatGPT/Codex plan or OpenAI models with Claude Code as if they were Anthropic models.
+**clodex** lets you use your ChatGPT/Codex plan, OpenAI API models, or OpenCode Go models with Claude Code as first-class model choices.
 You can use them anywhere you use Anthropic models like Opus and Sonnet — as the main session model, and in subagents, workflows, and agent teams. Clodex integrates them directly into Claude Code, using Claude Code's system prompt.
 It works with your existing Claude Code plan as well as your Codex plans WITHOUT violating Anthropic's ToS.
 No messing with CMUX or child codex processes or any of that stuff.
@@ -25,6 +25,7 @@ clodex models                  # 3. pick favorite models and aliases
 clodex models --alias sol=clodex:openai-oauth:gpt-5.6-sol
 clodex models --alias luna=clodex:openai-oauth:gpt-5.6-luna
 clodex models --alias terra=clodex:openai-oauth:gpt-5.6-terra
+clodex models --effort-policy provider-default  # optional: unsupported worker effort policy
 clodex patch                   # 4. (optional) patch Claude Code so those models are first-class
 clodex claude                  # 5. launch Claude Code on an OpenAI model
 ```
@@ -32,8 +33,22 @@ clodex claude                  # 5. launch Claude Code on an OpenAI model
 1. **Install** — puts the `clodex` command on your PATH.
 2. **Sign in** — opens a device-code OAuth flow for your ChatGPT/Codex plan; the token is stored in your OS credential store. (API-key users: `clodex providers add` instead.)
 3. **Pick models** — an interactive manager for favorites (max 20) and short aliases like `sol` so you do not need to type the long names. Favorites drive the `/model` switch menu, proxy-mode routing, and the patcher.
-4. **Patch** *(optional but recommended for proxy mode)* — bakes your favorites and aliases into the Claude Code binary so they pass model validation, appear in `/model`, and report their real context windows. Re-run after each `claude` update; `clodex patch --restore` undoes it. This step is required if you want to use your OpenAI models as subagents via the Agent tool.
+4. **Patch** *(optional but recommended for proxy mode)* — bakes your favorites and aliases into the Claude Code binary so they pass model validation, appear in `/model`, and report their real context windows. Re-run after each `claude` update; `clodex patch --restore` undoes it. This step is required if you want to use clodex-routed models as subagents via the Agent tool.
 5. **Launch** — starts Claude Code bridged to the model you choose.
+
+## Supported providers
+
+| Provider | Auth | Support |
+|---|---|---|
+| OpenAI | API key | Fully supported by the clodex maintainer |
+| OpenAI (ChatGPT / Codex plan) | OAuth | Fully supported by the clodex maintainer |
+| OpenCode Go | API key | Community-supported — maintained by its contributor |
+
+**Community-supported** means the maintainer holds no account for that service,
+so it cannot be exercised against the live API here or debugged when the vendor
+changes something. Such an integration is reviewed and tested like everything
+else and shipped gladly — it just depends on its contributor when upstream
+moves. New providers land under this tier by default.
 
 ## Difference between Clodex and other solutions
 
@@ -45,8 +60,8 @@ clodex claude                  # 5. launch Claude Code on an OpenAI model
 | Claude Code aware of true model context window size | ✅ | ❌ | ❌ | n/a |
 | Supports Agent tool | ✅ | ❌ | ✅ | ❌ |
 | Supports use in Dynamic Workflows | ✅ | ✅ | ✅ | ❌ |
-| OpenAI models use Claude Code skills/tools | ✅ | ✅ | ✅ | ❌ |
-| OpenAI models use Claude Code system prompt | ✅ | ✅ | ✅ | ❌ |
+| Routed models use Claude Code skills/tools | ✅ | ✅ | ✅ | ❌ |
+| Routed models use Claude Code system prompt | ✅ | ✅ | ✅ | ❌ |
 | Supports use in skill/agent frontmatter | ✅ | ❌ | ✅ | ❌ |
 | Supports OpenAI prompt caching | ✅ | ❌ | ? | ✅ |
 | Uses Websockets to talk to OpenAI API | ✅ | ❌ | ? | ✅ |
@@ -65,17 +80,17 @@ Clodex avoids this. In proxy mode it uses an HTTP proxy to intercept requests bo
 
 Both `clodex claude` and `clodex server` support two bridge modes. A mode flag applies to **that run only**; to change a command's default, add `--save-mode` (e.g. `clodex claude --endpoint --save-mode`). With no flag and nothing saved, both commands default to **proxy** mode, which works with your existing Claude auth.
 
-- **`--proxy`** (the default): a selective man-in-the-middle proxy for `api.anthropic.com`. Claude Code keeps its normal Anthropic login — Anthropic models work untouched — while models named `clodex:<provider-id>:<model-id>` (or their saved aliases) route to OpenAI. Switch with `/model clodex:openai-oauth:gpt-5.6-sol` or `/model sol` after patching.
+- **`--proxy`** (the default): a selective man-in-the-middle proxy for `api.anthropic.com`. Claude Code keeps its normal Anthropic login — Anthropic models work untouched — while models named `clodex:<provider-id>:<model-id>` (or their saved aliases) route to the selected configured provider. Switch with `/model clodex:openai-oauth:gpt-5.6-sol` or `/model sol` after patching.
 - **`--endpoint`**: clodex runs a local Anthropic-format gateway and launches Claude Code with `ANTHROPIC_BASE_URL` pointed at it. All traffic goes through the gateway. With favorites saved, the gateway is multi-route and Claude Code's `/model` menu lists your starting model plus favorites for live switching.
 
 > [!TIP]
-> Proxy mode allows you to continue using your Claude Code plan: login to claude code like normal and the proxy will intercept requests and leave requests for Anthropic models untouched, while requests for your favorite OpenAI models will be re-routed to OpenAI.
+> Proxy mode allows you to continue using your Claude Code plan: login to claude code like normal and the proxy will intercept requests and leave requests for Anthropic models untouched, while requests for your favorite clodex models are routed to their configured providers.
 
 ```mermaid
 flowchart LR
     CC["Claude Code<br/>(own Anthropic login)"] -->|"HTTPS via HTTPS_PROXY,<br/>trusts the clodex CA"| MITM["clodex MITM proxy"]
     MITM --> DEC{"model is clodex:...<br/>or a saved alias?"}
-    DEC -->|"yes — translated request,<br/>clodex-managed OpenAI credentials"| OAI["OpenAI<br/>(OAuth: Responses WebSocket /<br/>API key: HTTPS)"]
+    DEC -->|"yes — routed request,<br/>clodex-managed provider credentials"| UP["Configured provider<br/>(OpenAI / OpenCode Go)"]
     DEC -->|"no — passed through untouched,<br/>Claude Code's Anthropic credentials ride along"| ANT["api.anthropic.com"]
 ```
 
@@ -86,7 +101,7 @@ flowchart LR
     CC["Claude Code<br/>(ANTHROPIC_BASE_URL + local API key,<br/>no Anthropic account credentials)"] -->|"Anthropic-format /v1/messages<br/>+ local API key"| GW["clodex gateway<br/>(:17645/anthropic)"]
     CC -->|"GET /v1/models at startup"| GW
     GW -->|"model catalog with context windows<br/>(feeds the /model menu)"| CC
-    GW -->|"translated request,<br/>clodex-managed OpenAI credentials"| OAI["OpenAI"]
+    GW -->|"routed request,<br/>clodex-managed provider credentials"| UP["Configured provider"]
 ```
 
 > [!TIP]
@@ -96,16 +111,16 @@ flowchart LR
 
 ### `clodex claude [options] [claude-flags]`
 
-Launch Claude Code bridged to OpenAI models. Unrecognized flags (and everything after `--`) pass through to Claude Code (`-c`, `--resume`, `--print`, …).
+Launch Claude Code bridged to configured model providers. Unrecognized flags (and everything after `--`) pass through to Claude Code (`-c`, `--resume`, `--print`, …).
 
 | Flag | Effect |
 | --- | --- |
 | `--endpoint` | Endpoint bridge mode for this run: local gateway + `ANTHROPIC_BASE_URL` |
-| `--proxy` | Proxy bridge mode for this run: keep Claude Code's Anthropic auth; `clodex:` models route to OpenAI (default when nothing is saved) |
+| `--proxy` | Proxy bridge mode for this run: keep Claude Code's Anthropic auth; `clodex:` models route to configured providers (default when nothing is saved) |
 | `--save-mode` | With `--endpoint`/`--proxy`: save that mode as the `claude` default |
 | `--dry-run` | Run the wizard but print a launch preview instead of launching (never persists anything) |
 | `--trace` | Write debug logs to `~/.clodex/logs/` and show errors on exit |
-| `--provider <id>` | Boot provider id (`openai` or `openai-oauth`); with `--model`, skips the wizard |
+| `--provider <id>` | Boot provider id (`openai`, `openai-oauth`, or `opencode-go`); with `--model`, skips the wizard |
 | `--model <id>` | Boot model id; with `--provider`, skips the wizard |
 | `--help`, `--version` | Help / version |
 
@@ -179,7 +194,7 @@ Patch the installed Claude Code binary so clodex favorites and aliases are first
 | `--disable-local-patches` | Disable local patches and rebuild from pristine bytes without them |
 | `--help` | Help |
 
-The patch map is built from your favorites and aliases; context windows come from provider metadata. A pristine per-version backup is kept, and a manifest (`~/.clodex/patch-state.json`) makes re-runs no-ops until your config or Claude Code version changes — then the binary is restored first and re-patched fresh. `clodex claude` checks patch freshness at launch and offers to re-patch (a non-blocking notice when not interactive). Re-run `clodex patch` after every `claude` update.
+The patch map is built from your favorites and aliases, including every alias when several names target the same favorite; context windows come from provider metadata. A pristine per-version backup is kept, and a manifest (`~/.clodex/patch-state.json`) makes re-runs no-ops until your config or Claude Code version changes — then the binary is restored first and re-patched fresh. `clodex claude` checks patch freshness at launch and offers to re-patch (a non-blocking notice when not interactive). Re-run `clodex patch` after every `claude` update.
 
 #### Local patches (trusted code)
 
@@ -214,20 +229,31 @@ Manage favorite models (max 20) and short aliases. Favorites feed the endpoint-m
 | `--list` | Print the exact `clodex:<provider-id>:<model-id>` names (and aliases) without opening the manager |
 | `--alias <name=target>` | Save a short name for a favorite, e.g. `--alias sol=clodex:openai-oauth:gpt-5.6-sol` (the `clodex:` prefix is optional in the target) |
 | `--unalias <name>` | Remove a saved short name |
+| `--effort-policy <provider-default\|up\|down\|exact>` | Save the global rule for an explicit worker effort the target does not support |
 | `--help`, `--version` | Help / version |
+
+The default effort policy is `provider-default`: an unsupported explicit level
+is omitted and the target provider chooses. `up` and `down` round to the nearest
+level in the target model's exact ladder (saturating at an edge); `exact`
+rejects the request with HTTP 400. Aliases always inherit their target's ladder.
+Changing the policy affects new clodex processes, so restart running Claude or
+server sessions. `clodex patch` also writes exact sparse ladders into Claude's
+picker—for example DeepSeek V4 Flash exposes `low/high/max`, DeepSeek V4 Pro
+exposes `high/max`, and the OpenCode Qwen 3.6–3.8 Messages models expose
+`high/max`. An omitted effort remains omitted.
 
 ### `clodex providers [subcommand]`
 
 | Subcommand | Effect |
 | --- | --- |
 | *(none)* | Provider hub wizard |
-| `add` | Add OpenAI with an API key (choose OAuth or API key) |
+| `add` | Add OpenAI or OpenCode Go with an API key, or sign in with ChatGPT |
 | `auth openai` | Sign in with ChatGPT/Codex-plan OAuth (device code) |
 | `list` | Show configured providers |
 | `remove <id>` | Remove a provider by id |
 | `refresh-models [id]` | Update cached model lists |
 
-Providers supported: `openai` (API key, platform.openai.com) and `openai-oauth` (ChatGPT/Codex plan).
+Providers supported: `openai` (API key, platform.openai.com), `openai-oauth` (ChatGPT/Codex plan), and `opencode-go` (OpenCode Go API key). OpenCode Go exposes its Anthropic Messages and Chat Completions models; Responses-only entries are intentionally excluded. See [OpenCode Go provider](docs/opencode-go.md).
 
 ### Root
 
@@ -287,7 +313,7 @@ clodex --version    # version
 
 ## Known limitations
 
-- Cost display inside Claude Code is inaccurate for OpenAI models (Claude Code applies its own pricing table).
+- Cost display inside Claude Code is inaccurate for routed third-party models (Claude Code applies its own pricing table).
 - In the endpoint-mode switch menu, the displayed context window reflects the launch model and does not update on live `/model` switches (Claude Code fetches window metadata once at startup). Proxy mode with `clodex patch` reports correct per-model windows.
 - ChatGPT/Codex OAuth requires `store:false` upstream; some OpenAI cache controls are intentionally omitted on OAuth routes because they returned empty responses during compatibility testing.
 

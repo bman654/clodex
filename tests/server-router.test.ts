@@ -10,6 +10,9 @@ import { createLanguageModel } from '../src/provider-factory.js';
 import { generateAnthropicResponse, streamAnthropicResponse } from '../src/sdk-adapter.js';
 import { generateOpenAiResponse, streamOpenAiResponse } from '../src/openai-adapter.js';
 import { resolveProviderCredential } from '../src/env.js';
+import { buildOpenCodeGoModels } from '../src/data/opencode-go-models.js';
+import { NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE } from '../src/anthropic-beta-policy.js';
+import { ANTHROPIC_X_API_KEY_ONLY_AUTH_MODE } from '../src/anthropic-auth-mode.js';
 
 const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:oauth-provider`;
 
@@ -66,6 +69,10 @@ interface UpstreamRequest {
   url: string;
   authorization: string | undefined;
   xApiKey: string | undefined;
+  anthropicBeta?: string;
+  userAgent?: string;
+  xApp?: string;
+  claudeCodeSessionId?: string;
   xPlan?: string;
   body: any;
 }
@@ -89,6 +96,12 @@ async function startUpstream(responseBody: any): Promise<{ baseUrl: string; requ
       xApiKey: Array.isArray(req.headers['x-api-key'])
         ? req.headers['x-api-key'][0]
         : req.headers['x-api-key'],
+      anthropicBeta: Array.isArray(req.headers['anthropic-beta'])
+        ? req.headers['anthropic-beta'][0]
+        : req.headers['anthropic-beta'],
+      userAgent: req.headers['user-agent'],
+      xApp: req.headers['x-app'],
+      claudeCodeSessionId: req.headers['x-claude-code-session-id'],
       xPlan: Array.isArray(req.headers['x-plan'])
         ? req.headers['x-plan'][0]
         : req.headers['x-plan'],
@@ -121,6 +134,15 @@ async function startSequencedUpstream(
       authorization: Array.isArray(req.headers.authorization)
         ? req.headers.authorization[0]
         : req.headers.authorization,
+      xApiKey: Array.isArray(req.headers['x-api-key'])
+        ? req.headers['x-api-key'][0]
+        : req.headers['x-api-key'],
+      anthropicBeta: Array.isArray(req.headers['anthropic-beta'])
+        ? req.headers['anthropic-beta'][0]
+        : req.headers['anthropic-beta'],
+      userAgent: req.headers['user-agent'],
+      xApp: req.headers['x-app'],
+      claudeCodeSessionId: req.headers['x-claude-code-session-id'],
       body: await readRequestBody(req),
     });
     const response = responses[Math.min(requests.length - 1, responses.length - 1)]!;
@@ -204,9 +226,516 @@ afterEach(async () => {
 });
 
 describe('server router', () => {
+  it('rejects unsupported exact effort before resolving OAuth credentials', async () => {
+    const qwen = buildOpenCodeGoModels().find(entry => entry.id === 'qwen3.6-plus');
+    if (!qwen) throw new Error('missing qwen3.6-plus fixture');
+    const server = await startTestServer({
+      unsupportedEffortPolicy: 'exact',
+      catalog: createGatewayModelCatalog([{
+        id: qwen.id,
+        name: qwen.name,
+        isFree: false,
+        brand: 'Qwen',
+        providerId: 'opencode-go',
+        sourceBackend: 'opencode-go',
+        modelFormat: 'anthropic',
+        baseUrl: 'https://must-not-fetch.example',
+        authType: 'oauth',
+        authRef: TEST_HELPER_REF,
+        compatibility: qwen.compatibility,
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: qwen.id,
+        output_config: { effort: 'xhigh' },
+        messages: [{ role: 'user', content: 'do not dispatch' }],
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { type: 'invalid_request_error', message: expect.stringContaining('unsupported') },
+    });
+    expect(resolveProviderCredential).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['claude-opus-4-6', 'max'],
+    ['claude-opus-4-5', 'medium'],
+  ] as const)('accepts native %s effort %s exactly and relays it unchanged', async (modelId, effort) => {
+    const upstream = await startUpstream({
+      id: 'msg_effort', type: 'message', role: 'assistant', model: modelId, content: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      unsupportedEffortPolicy: 'exact',
+      catalog: createGatewayModelCatalog([{
+        ...model(modelId, 'anthropic', 'anthropic', { baseUrl: upstream.baseUrl }),
+        npm: '@ai-sdk/anthropic',
+        authType: 'none',
+        apiKey: '',
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: modelId,
+        output_config: { effort },
+        messages: [{ role: 'user', content: 'use assigned effort' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-clodex-effort-resolution')).toBeNull();
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0]!.body).toMatchObject({
+      model: modelId,
+      output_config: { effort },
+    });
+  });
+
+  it.each([' high ', '', '   ', 123, null])(
+    'rejects non-canonical effort %j before resolving OAuth credentials',
+    async invalidEffort => {
+      const qwen = buildOpenCodeGoModels().find(entry => entry.id === 'qwen3.6-plus');
+      if (!qwen) throw new Error('missing qwen3.6-plus fixture');
+      const server = await startTestServer({
+        catalog: createGatewayModelCatalog([{
+          id: qwen.id,
+          name: qwen.name,
+          isFree: false,
+          brand: 'Qwen',
+          providerId: 'opencode-go',
+          sourceBackend: 'opencode-go',
+          modelFormat: 'anthropic',
+          baseUrl: 'https://must-not-fetch.example',
+          authType: 'oauth',
+          authRef: TEST_HELPER_REF,
+          compatibility: qwen.compatibility,
+        }]),
+      });
+
+      const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: qwen.id,
+          output_config: { effort: invalidEffort },
+          messages: [{ role: 'user', content: 'do not dispatch' }],
+        }),
+      });
+
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: { type: 'invalid_request_error', message: expect.stringContaining('effort') },
+      });
+      expect(resolveProviderCredential).not.toHaveBeenCalled();
+    },
+  );
+
+  it('labels invalid effort metadata as an internal API error before credentials', async () => {
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        id: 'invalid-effort-metadata',
+        name: 'Invalid effort metadata',
+        isFree: false,
+        brand: 'Test',
+        providerId: 'test-provider',
+        sourceBackend: 'test-provider',
+        modelFormat: 'anthropic',
+        baseUrl: 'https://must-not-fetch.example',
+        authType: 'oauth',
+        authRef: TEST_HELPER_REF,
+        compatibility: { anthropicThinkingBudgetMap: { turbo: 8_000 } },
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'invalid-effort-metadata',
+        output_config: { effort: 'high' },
+        messages: [{ role: 'user', content: 'do not dispatch' }],
+      }),
+    });
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({
+      error: { type: 'api_error', message: expect.stringContaining('non-canonical') },
+    });
+    expect(resolveProviderCredential).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid budget map before emitting adjustment diagnostics', async () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const server = await startTestServer({
+      unsupportedEffortPolicy: 'up',
+      catalog: createGatewayModelCatalog([{
+        id: 'invalid-budget-map',
+        name: 'Invalid budget map',
+        isFree: false,
+        brand: 'Test',
+        providerId: 'test-provider',
+        sourceBackend: 'test-provider',
+        modelFormat: 'anthropic',
+        baseUrl: 'https://must-not-fetch.example',
+        authType: 'oauth',
+        authRef: TEST_HELPER_REF,
+        compatibility: { anthropicThinkingBudgetMap: { high: 16_000, max: 0 } },
+      }]),
+    });
+
+    try {
+      const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'invalid-budget-map',
+          output_config: { effort: 'low' },
+          messages: [{ role: 'user', content: 'do not dispatch' }],
+        }),
+      });
+
+      expect(response.status).toBe(500);
+      expect(response.headers.get('x-clodex-effort-resolution')).toBeNull();
+      expect(stderr).not.toHaveBeenCalled();
+      expect(resolveProviderCredential).not.toHaveBeenCalled();
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('uses target metadata for an aliased Qwen effort and reports upward rounding', async () => {
+    const qwen = buildOpenCodeGoModels().find(entry => entry.id === 'qwen3.6-plus');
+    if (!qwen) throw new Error('missing qwen3.6-plus fixture');
+    const upstream = await startUpstream({
+      id: 'msg_qwen', type: 'message', role: 'assistant', model: qwen.id,
+      content: [], usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    handles.push(upstream);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const server = await startTestServer({
+      unsupportedEffortPolicy: 'up',
+      aliasNames: new Set(['luna-xhigh']),
+      catalog: createGatewayModelCatalog([{
+        id: qwen.id,
+        name: qwen.name,
+        isFree: false,
+        brand: 'Qwen',
+        providerId: 'opencode-go',
+        sourceBackend: 'opencode-go',
+        modelFormat: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: '',
+        authType: 'none',
+        compatibility: qwen.compatibility,
+      }], undefined, [{ name: 'luna-xhigh', providerId: 'opencode-go', modelId: qwen.id }]),
+    });
+
+    try {
+      const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'luna-xhigh',
+          output_config: { effort: 'xhigh', extra: true },
+          messages: [{ role: 'user', content: 'round this' }],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get('x-clodex-effort-resolution')).toContain('resolved=max');
+      expect(upstream.requests).toHaveLength(1);
+      expect(upstream.requests[0]!.body).toMatchObject({
+        model: qwen.id,
+        output_config: { extra: true },
+        thinking: { type: 'enabled', budget_tokens: 31_999 },
+      });
+      expect(stderr).toHaveBeenCalledTimes(1);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('answers count_tokens locally for a generated OpenCode Go Messages row', async () => {
+    const qwen = buildOpenCodeGoModels().find(entry => entry.id === 'qwen3.6-plus');
+    if (!qwen) throw new Error('missing qwen3.6-plus fixture');
+    const upstream = await startUpstream({ input_tokens: 999 });
+    handles.push(upstream);
+    const server = await startTestServer({
+      unsupportedEffortPolicy: 'exact',
+      catalog: createGatewayModelCatalog([{
+        id: qwen.id,
+        name: qwen.name,
+        isFree: false,
+        brand: 'Qwen',
+        providerId: 'opencode-go',
+        sourceBackend: 'opencode-go',
+        modelFormat: 'anthropic',
+        baseUrl: upstream.baseUrl,
+        apiKey: 'go-key',
+        compatibility: qwen.compatibility,
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: qwen.id,
+        output_config: { effort: 'turbo' },
+        messages: [{ role: 'user', content: 'count this locally' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-relay-token-count-source')).toBe('local-estimate');
+    expect(await response.json()).toMatchObject({ input_tokens: expect.any(Number) });
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it('forwards count_tokens for Anthropic routes without an explicit local-fallback capability', async () => {
+    const upstream = await startUpstream({ input_tokens: 17 });
+    handles.push(upstream);
+    const server = await startTestServer({
+      unsupportedEffortPolicy: 'exact',
+      catalog: createGatewayModelCatalog([{
+        ...model('custom-anthropic', 'anthropic', 'custom', { baseUrl: upstream.baseUrl }),
+        apiKey: 'custom-key',
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'custom-anthropic',
+        messages: [{ role: 'user', content: 'count upstream' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ input_tokens: 17 });
+    expect(upstream.requests).toEqual([
+      expect.objectContaining({
+        method: 'POST',
+        url: '/v1/messages/count_tokens',
+        authorization: 'Bearer custom-key',
+        xApiKey: 'custom-key',
+        body: expect.objectContaining({ model: 'custom-anthropic' }),
+      }),
+    ]);
+  });
+
+  it.each([
+    [
+      'messages',
+      '/anthropic/v1/messages',
+      {
+        id: 'msg_custom',
+        type: 'message',
+        role: 'assistant',
+        model: 'custom-anthropic',
+        content: [],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    ],
+    ['count_tokens', '/anthropic/v1/messages/count_tokens', { input_tokens: 17 }],
+  ])('uses x-api-key-only custom endpoint provenance for %s inference', async (
+    _endpoint,
+    path,
+    upstreamBody,
+  ) => {
+    const upstream = await startUpstream(upstreamBody);
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('custom-anthropic', 'anthropic', 'custom', { baseUrl: upstream.baseUrl }),
+        apiKey: 'custom-key',
+        authType: 'api',
+        anthropicAuthMode: ANTHROPIC_X_API_KEY_ONLY_AUTH_MODE,
+      }]),
+    });
+
+    const response = await fetch(`${server.url}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'custom-anthropic',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests).toEqual([
+      expect.objectContaining({
+        authorization: undefined,
+        xApiKey: 'custom-key',
+      }),
+    ]);
+  });
+
+  it.each([
+    [
+      'messages',
+      '/anthropic/v1/messages',
+      {
+        id: 'msg_1',
+        type: 'message',
+        role: 'assistant',
+        model: 'custom-anthropic',
+        content: [],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    ],
+    ['count_tokens', '/anthropic/v1/messages/count_tokens', { input_tokens: 17 }],
+  ])('suppresses experimental betas on API-key Anthropic %s passthrough', async (
+    _endpoint,
+    path,
+    upstreamBody,
+  ) => {
+    const upstream = await startUpstream(upstreamBody);
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('custom-anthropic', 'anthropic', 'custom', { baseUrl: upstream.baseUrl }),
+        apiKey: 'custom-key',
+        authType: 'api',
+      }]),
+    });
+
+    const response = await fetch(`${server.url}${path}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-beta': 'client-beta-2026-01-01',
+      },
+      body: JSON.stringify({
+        model: 'custom-anthropic',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0]?.anthropicBeta).toBeUndefined();
+  });
+
+  it.each([
+    ['generic OAuth', 'oauth', 'oauth-token'],
+    ['anonymous', 'none', ''],
+  ] as const)('defaults %s Anthropic routes to stripping client betas', async (
+    _label,
+    authType,
+    apiKey,
+  ) => {
+    const upstream = await startUpstream({ input_tokens: 17 });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('custom-anthropic', 'anthropic', 'custom', { baseUrl: upstream.baseUrl }),
+        providerId: 'custom-oauth',
+        apiKey,
+        authType,
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-beta': ' client-beta-a, client-beta-b,client-beta-a ',
+      },
+      body: JSON.stringify({
+        model: 'custom-anthropic',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests[0]?.anthropicBeta).toBeUndefined();
+    expect(upstream.requests[0]?.userAgent).not.toContain('claude-cli/');
+    expect(upstream.requests[0]?.xApp).toBeUndefined();
+    expect(upstream.requests[0]?.claudeCodeSessionId).toBeUndefined();
+  });
+
+  it('allows and synthesizes betas only for proven native Claude Code OAuth routes', async () => {
+    const upstream = await startUpstream({
+      id: 'msg_1',
+      type: 'message',
+      role: 'assistant',
+      model: 'claude-sonnet-4-6',
+      content: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('claude-sonnet-4-6', 'anthropic', 'claude-code', { baseUrl: upstream.baseUrl }),
+        providerId: 'claude-code',
+        apiKey: 'oauth-token',
+        authType: 'oauth',
+        anthropicBetaProvenance: NATIVE_CLAUDE_CODE_OAUTH_BETA_PROVENANCE,
+        providerData: {
+          cliUserID: 'a'.repeat(64),
+          accountUUID: '11111111-1111-4111-8111-111111111111',
+        },
+      }]),
+    });
+
+    const messagesResponse = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-beta': 'interleaved-thinking-2025-05-14',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+    const countResponse = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-beta': ' client-beta-a, client-beta-b,client-beta-a ',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        messages: [{ role: 'user', content: 'count this' }],
+      }),
+    });
+
+    expect(messagesResponse.status).toBe(200);
+    expect(countResponse.status).toBe(200);
+    expect(upstream.requests[0]?.anthropicBeta).toContain('oauth-2025-04-20');
+    expect(upstream.requests[0]?.body).toHaveProperty('metadata.user_id');
+    expect(upstream.requests[0]?.userAgent).toContain('claude-cli/');
+    expect(upstream.requests[0]?.xApp).toBe('cli');
+    expect(upstream.requests[0]?.claudeCodeSessionId).toEqual(expect.any(String));
+    expect(upstream.requests[1]?.anthropicBeta).toBe('client-beta-a,client-beta-b');
+    expect(upstream.requests[1]?.userAgent).toContain('claude-cli/');
+    expect(upstream.requests[1]?.xApp).toBe('cli');
+    expect(upstream.requests[1]?.claudeCodeSessionId).toBeUndefined();
+  });
+
   it('logs inference routing metadata without request content', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-server-audit-'));
     const inferenceLogPath = join(dir, 'requests.jsonl');
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const auditUpstream = await startUpstream({
       id: 'msg-audit',
       type: 'message',
@@ -249,7 +778,9 @@ describe('server router', () => {
         expect.objectContaining({ modelId: 'anthropic-groq__llama-test', effort: 'medium', provider: 'groq', route: 'translated' }),
       ]);
       expect(readFileSync(inferenceLogPath, 'utf8')).not.toContain('private prompt');
+      expect(stderr).toHaveBeenCalledTimes(2);
     } finally {
+      stderr.mockRestore();
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -403,6 +934,7 @@ describe('server router', () => {
     });
     handles.push(upstream);
     const server = await startTestServer({
+      unsupportedEffortPolicy: 'exact',
       catalog: createGatewayModelCatalog([{
         id: 'anonymous-chat-model',
         name: 'Anonymous Chat Model',
@@ -426,11 +958,13 @@ describe('server router', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: 'anonymous-chat-model',
+        reasoning_effort: 'turbo',
         messages: [{ role: 'user', content: 'hi' }],
       }),
     });
 
     expect(response.status).toBe(200);
+    expect(response.headers.get('x-clodex-effort-resolution')).toBeNull();
     expect(await response.json()).toMatchObject({ id: 'chatcmpl-anonymous' });
     expect(upstream.requests).toHaveLength(1);
     expect(upstream.requests[0]).toMatchObject({
@@ -439,6 +973,51 @@ describe('server router', () => {
       authorization: undefined,
       xApiKey: undefined,
       xPlan: 'free',
+      body: expect.objectContaining({ reasoning_effort: 'turbo' }),
+    });
+  });
+
+  it('applies generated OpenCode Go compatibility on direct OpenAI chat ingress', async () => {
+    const kimi = buildOpenCodeGoModels().find(entry => entry.id === 'kimi-k2.7-code');
+    if (!kimi) throw new Error('missing kimi-k2.7-code fixture');
+    const upstream = await startUpstream({
+      id: 'chatcmpl-kimi',
+      choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        id: kimi.id,
+        name: kimi.name,
+        isFree: false,
+        brand: 'Kimi',
+        providerId: 'opencode-go',
+        sourceBackend: 'opencode-go',
+        modelFormat: 'openai',
+        completionsUrl: `${upstream.baseUrl}/v1/chat/completions`,
+        apiKey: 'go-key',
+        compatibility: kimi.compatibility,
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: kimi.id,
+        reasoning_effort: 'max',
+        temperature: 0.2,
+        store: false,
+        max_completion_tokens: 4096,
+        messages: [{ role: 'developer', content: 'instructions' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests[0]?.body).toEqual({
+      model: kimi.id,
+      max_tokens: 4096,
+      messages: [{ role: 'system', content: 'instructions' }],
     });
   });
 
@@ -478,6 +1057,10 @@ describe('server router', () => {
       TEST_HELPER_REF,
     );
     expect(upstream.requests[0]?.authorization).toBe('Bearer current-oauth-token');
+    expect(upstream.requests[0]?.userAgent).not.toContain('claude-cli/');
+    expect(upstream.requests[0]?.xApp).toBeUndefined();
+    expect(upstream.requests[0]?.claudeCodeSessionId).toBeUndefined();
+    expect(upstream.requests[0]?.body).not.toHaveProperty('metadata');
   });
 
   it('retries native Anthropic passthrough once with the replacement credential', async () => {

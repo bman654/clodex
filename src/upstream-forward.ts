@@ -4,6 +4,11 @@ import type { ServerResponse } from 'node:http';
 import { sanitizeCredential } from './server/auth.js';
 import { CLAUDE_CODE_USER_AGENT } from './oauth/claude-identity.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
+import {
+  ANTHROPIC_X_API_KEY_ONLY_AUTH_MODE,
+  type AnthropicAuthMode,
+} from './anthropic-auth-mode.js';
+import { clampRetryAfterSeconds } from './upstream-error.js';
 
 export function anthropicUpstreamHeaders(
   apiKey: string,
@@ -12,6 +17,9 @@ export function anthropicUpstreamHeaders(
   authType?: 'api' | 'oauth' | 'none',
   claudeCodeSessionId?: string,
   extraHeaders?: Record<string, string>,
+  disableExperimentalBetas = false,
+  nativeClaudeCodeOAuth = false,
+  anthropicAuthMode?: AnthropicAuthMode,
 ): Record<string, string> {
   const key = sanitizeCredential(apiKey) ?? apiKey.trim();
   const resolvedAuthType = authType ?? 'api';
@@ -29,15 +37,20 @@ export function anthropicUpstreamHeaders(
     'anthropic-version': '2023-06-01',
     ...(resolvedAuthType === 'none'
       ? {}
-      : {
-          Authorization: `Bearer ${key}`,
-          ...(isOAuth ? {} : { 'x-api-key': key }),
-        }),
-    ...(isOAuth ? { 'User-Agent': CLAUDE_CODE_USER_AGENT, 'x-app': 'cli' } : {}),
-    ...(isOAuth && claudeCodeSessionId ? { 'X-Claude-Code-Session-Id': claudeCodeSessionId } : {}),
+      : isOAuth
+        ? { Authorization: `Bearer ${key}` }
+        : anthropicAuthMode === ANTHROPIC_X_API_KEY_ONLY_AUTH_MODE
+          ? { 'x-api-key': key }
+          : { Authorization: `Bearer ${key}`, 'x-api-key': key }),
+    ...(nativeClaudeCodeOAuth
+      ? { 'User-Agent': CLAUDE_CODE_USER_AGENT, 'x-app': 'cli' }
+      : {}),
+    ...(nativeClaudeCodeOAuth && claudeCodeSessionId
+      ? { 'X-Claude-Code-Session-Id': claudeCodeSessionId }
+      : {}),
     ...(stream ? { Accept: 'text/event-stream' } : {}),
   };
-  if (inboundBeta) {
+  if (inboundBeta && !disableExperimentalBetas) {
     headers['anthropic-beta'] = inboundBeta;
   }
   return headers;
@@ -98,7 +111,13 @@ export async function fetchWithOAuthRetry<TResponse extends {
 /** Relay an Anthropic /v1/messages response (JSON or SSE) to the client. */
 export interface RelayAnthropicOptions {
   inboundBeta?: string;
+  /** Ignore the client-supplied anthropic-beta header at the upstream boundary. */
+  disableExperimentalBetas?: boolean;
   authType?: 'api' | 'oauth' | 'none';
+  /** Positive provenance proof; never infer native Claude identity from authType. */
+  nativeClaudeCodeOAuth?: boolean;
+  /** Positive provenance for a non-default Anthropic upstream auth envelope. */
+  anthropicAuthMode?: AnthropicAuthMode;
   log?: (message: string) => void;
   claudeCodeSessionId?: string;
   extraHeaders?: Record<string, string>;
@@ -118,6 +137,39 @@ export interface RelayAnthropicOptions {
 }
 
 /**
+ * Preserve only operationally useful Anthropic response metadata. The relay
+ * must not copy credential/session headers such as Set-Cookie, but clients do
+ * need bounded retry guidance and request/rate-limit ids that a direct launch
+ * would have received from the upstream response.
+ */
+function anthropicRelayResponseHeaders(
+  upstreamRes: Response,
+  fallbackContentType: string,
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': upstreamRes.headers.get('content-type') || fallbackContentType,
+  };
+  if (typeof upstreamRes.headers.forEach === 'function') {
+    upstreamRes.headers.forEach((value, name) => {
+      if (
+        name === 'request-id'
+        || name === 'x-request-id'
+        || /^anthropic-ratelimit-[a-z0-9-]+$/.test(name)
+        || /^x-ratelimit-[a-z0-9-]+$/.test(name)
+      ) {
+        headers[name] = value;
+      }
+    });
+  }
+  if (upstreamRes.status === 429) {
+    const raw = upstreamRes.headers.get('retry-after')?.trim();
+    const numeric = raw && /^\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : undefined;
+    headers['retry-after'] = String(clampRetryAfterSeconds(numeric));
+  }
+  return headers;
+}
+
+/**
  * Line-preserving SSE transform that rewrites the `message_start` event's
  * `message.model` to the requested id. Buffers only up to one line; every
  * line that is not a parseable `message_start` data line passes through
@@ -127,12 +179,22 @@ export function anthropicSseModelRewrite(override: string): Transform {
   const decoder = new StringDecoder('utf8');
   let tail = '';
   const rewriteLine = (line: string): string => {
-    if (!line.startsWith('data:') || !line.includes('"message_start"')) return line;
+    // Splitting on \n leaves the \r of a CRLF stream on the end of every line.
+    // JSON.parse tolerates it, so without stripping and restoring it a
+    // rewritten line would quietly lose its \r while every neighbouring line
+    // kept one — a stream with mixed endings. Anthropic sends LF, so this is
+    // insurance rather than an observed case.
+    const cr = line.endsWith('\r') ? '\r' : '';
+    const bare = cr ? line.slice(0, -1) : line;
+    if (!bare.startsWith('data:') || !bare.includes('"message_start"')) return line;
     try {
-      const parsed = JSON.parse(line.slice(5)) as { type?: string; message?: { model?: unknown } };
+      // A multi-line `data:` payload (legal SSE, never emitted by Anthropic)
+      // fails to parse here and relays untouched — fail-open, so the worst
+      // case is an un-rewritten model id rather than a corrupted stream.
+      const parsed = JSON.parse(bare.slice(5)) as { type?: string; message?: { model?: unknown } };
       if (parsed.type === 'message_start' && parsed.message && typeof parsed.message.model === 'string') {
         parsed.message.model = override;
-        return 'data: ' + JSON.stringify(parsed);
+        return 'data: ' + JSON.stringify(parsed) + cr;
       }
     } catch {
       // Not a single-line JSON payload; relay it untouched.
@@ -170,6 +232,9 @@ export async function relayAnthropicMessages(
       options.authType,
       options.claudeCodeSessionId,
       options.extraHeaders,
+      options.disableExperimentalBetas,
+      options.nativeClaudeCodeOAuth,
+      options.anthropicAuthMode,
     ),
     body: JSON.stringify(body),
     signal: options.signal,
@@ -188,13 +253,17 @@ export async function relayAnthropicMessages(
     const errBody = await upstreamRes.text();
     options.log?.(`anthropic upstream ${upstreamRes.status}: ${errBody}`);
     options.onUpstreamError?.(upstreamRes.status, errBody);
-    res.writeHead(upstreamRes.status, { 'Content-Type': upstreamRes.headers.get('content-type') || 'application/json' });
+    res.writeHead(
+      upstreamRes.status,
+      anthropicRelayResponseHeaders(upstreamRes, 'application/json'),
+    );
     res.end(errBody);
     return;
   }
 
   if (clientWantsStream && upstreamRes.body) {
     res.writeHead(200, {
+      ...anthropicRelayResponseHeaders(upstreamRes, 'text/event-stream'),
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
       'Connection': 'keep-alive',
@@ -236,6 +305,7 @@ export async function relayAnthropicMessages(
     text = JSON.stringify(parsed);
   }
   res.writeHead(200, {
+    ...anthropicRelayResponseHeaders(upstreamRes, 'application/json'),
     'Content-Type': 'application/json',
     'Content-Length': Buffer.byteLength(text).toString(),
   });

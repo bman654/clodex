@@ -73,6 +73,13 @@ import { httpProxyDisplayName, httpProxyModelId } from './http-proxy/routes.js';
 import { stripOneMContextSuffix } from './context-model-id.js';
 import { getPatchReasoningCapabilities } from './provider-factory.js';
 import {
+  effectiveProviderCachedModels,
+  ignoresModelsDevForOpenCodeGoProvider,
+  isFailClosedOpenCodeGoBoundaryProvider,
+  isOfficialBuiltInOpenCodeGoProvider,
+  quarantinedOpenCodeGoModelTargets,
+} from './data/opencode-go-models.js';
+import {
   describeModelAliasRejection,
   normalizeModelAliases,
   type ModelAliasRejection,
@@ -81,6 +88,7 @@ import {
 import {
   applyClodexPatches,
   formatPatchSiteLine,
+  patchEntryAliases,
   PatchApplyError,
   projectNativeEffort,
   PATCH_TRANSFORMS_VERSION,
@@ -146,6 +154,8 @@ export interface DesiredPatchConfig {
   /** Saved aliases excluded from the patch while remaining in configuration. */
   rejectedAliases: StoredModelAlias[];
   rejectedAliasRejections: ModelAliasRejection[];
+  /** Exact clodex ids saved as favorites but no longer exposed by their provider. */
+  droppedFavoriteIds: string[];
 }
 
 /** Model metadata the patch bakes in, resolved from the registry models cache. */
@@ -155,20 +165,21 @@ export interface PatchModelMeta {
   displayName?: string;
   effort?: {
     levels: string[];
-    defaultLevel: string;
+    defaultLevel: string | null;
   };
 }
 
 /**
  * Build the patch model config from favorites + aliases.
  * Keys are the bare `clodex:<provider>:<model>` ids (no [1m] suffix — the
- * context patch and the suffix are mutually exclusive). When an entry has an
- * alias, that alias becomes the model's identity inside the patched binary.
+ * context patch and the suffix are mutually exclusive). When an entry has
+ * aliases, every alias becomes a model identity inside the patched binary.
  */
 export function buildPatchModelConfig(
   favorites: Array<{ providerId: string; modelId: string }>,
   aliases: unknown,
   modelMetaFor: (providerId: string, modelId: string) => PatchModelMeta | undefined,
+  opts: { droppedFavoriteTargets?: ReadonlySet<string> } = {},
 ): DesiredPatchConfig {
   const config: PatchScriptModelConfig = {};
   const unknownWindows: string[] = [];
@@ -182,25 +193,27 @@ export function buildPatchModelConfig(
     ))
     .flatMap(({ sources }) => sources.map(source => ({
       alias: source,
-      reason: 'target-not-favorite',
+      reason: opts.droppedFavoriteTargets?.has(`${source.providerId}:${source.modelId}`)
+        ? 'target-not-exposed'
+        : 'target-not-favorite',
     })));
-  const aliasByFavorite = new Map(
-    normalizedAliases.aliases
-      .filter(alias => favoriteTargets.has(`${alias.providerId}:${alias.modelId}`))
-      .map(alias => [
-        `${alias.providerId}:${alias.modelId}`,
-        alias.name,
-      ]),
-  );
+  const aliasesByFavorite = new Map<string, string[]>();
+  for (const alias of normalizedAliases.aliases) {
+    const target = `${alias.providerId}:${alias.modelId}`;
+    if (!favoriteTargets.has(target)) continue;
+    const targetAliases = aliasesByFavorite.get(target) ?? [];
+    targetAliases.push(alias.name);
+    aliasesByFavorite.set(target, targetAliases);
+  }
 
   for (const favorite of favorites) {
     const id = stripOneMContextSuffix(httpProxyModelId(favorite.providerId, favorite.modelId));
     if (config[id]) continue;
     const meta = modelMetaFor(favorite.providerId, favorite.modelId);
     const context = meta?.contextWindow;
-    const alias = aliasByFavorite.get(`${favorite.providerId}:${favorite.modelId}`);
+    const modelAliases = aliasesByFavorite.get(`${favorite.providerId}:${favorite.modelId}`);
     const entry: PatchScriptModelConfig[string] = {};
-    if (alias) entry.alias = alias;
+    if (modelAliases?.length) entry.aliases = modelAliases;
     if (context === undefined || context <= 0) unknownWindows.push(id);
     else if (context !== 200_000) entry.context = context;
     const display = meta?.displayName?.trim();
@@ -220,6 +233,8 @@ export function buildPatchModelConfig(
       ...normalizedAliases.rejections,
       ...targetRejections,
     ],
+    droppedFavoriteIds: [...(opts.droppedFavoriteTargets ?? [])]
+      .map(target => `clodex:${target}`),
   };
 }
 
@@ -234,6 +249,12 @@ export function reportRejectedModelAliases(
   }
 }
 
+export function reportDroppedPatchFavorites(ids: string[]): void {
+  for (const id of ids) {
+    p.log.warn(`Saved favorite ${id} was not patched — it is no longer exposed by its provider.`);
+  }
+}
+
 /** Canonical (key-sorted) hash of the transform-set version and patch model config. */
 export function computePatchConfigHash(
   config: PatchScriptModelConfig,
@@ -244,7 +265,7 @@ export function computePatchConfigHash(
     const entry = config[key]!;
     return [
       key,
-      entry.alias ?? null,
+      patchEntryAliases(entry),
       entry.context ?? null,
       entry.display ?? null,
       entry.effort?.levels ?? null,
@@ -266,18 +287,44 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
   const registry = loadRegistry();
 
   const meta = new Map<string, PatchModelMeta>();
+  const bundledAllowlistedTargets = new Set<string>();
+  const bundledAllowlistedProviders = new Set<string>();
+  const disabledProviders = new Set<string>();
+  const failClosedOpenCodeProviders = new Set<string>();
+  const quarantinedTargets = new Set<string>();
   for (const provider of registry.providers) {
-    for (const model of provider.modelsCache?.models ?? []) {
+    if (!provider.enabled) {
+      disabledProviders.add(provider.id);
+      continue;
+    }
+    const effectiveModels = effectiveProviderCachedModels(provider);
+    if (isOfficialBuiltInOpenCodeGoProvider(provider)) bundledAllowlistedProviders.add(provider.id);
+    if (isFailClosedOpenCodeGoBoundaryProvider(provider)) {
+      failClosedOpenCodeProviders.add(provider.id);
+    }
+    for (const target of quarantinedOpenCodeGoModelTargets(provider)) {
+      quarantinedTargets.add(target);
+    }
+    const ignoreModelsDevCapabilities = ignoresModelsDevForOpenCodeGoProvider(provider);
+    for (const model of effectiveModels) {
+      const target = `${provider.id}:${model.id}`;
+      bundledAllowlistedTargets.add(target);
       const npm = model.npm ?? provider.api.npm ?? '';
       const upstreamModelId = model.upstreamModelId ?? model.id;
-      const modelsDev = findModelsDevModel(provider.id, model.id);
+      const modelsDev = ignoreModelsDevCapabilities
+        ? null
+        : findModelsDevModel(provider.id, model.id);
       const effort = getPatchReasoningCapabilities(npm, upstreamModelId, {
         providerId: provider.id,
         apiBaseUrl: model.apiUrl ?? provider.api.url,
         supportedParameters: model.supportedParameters,
-        reasoning: model.reasoning ?? modelsDev?.reasoning,
+        reasoning: model.codingCapabilitiesAuthoritative
+          ? model.reasoning
+          : model.reasoning ?? modelsDev?.reasoning,
         interleavedReasoningField:
-          model.interleavedReasoningField ?? modelsDev?.interleaved?.field,
+          model.codingCapabilitiesAuthoritative
+            ? model.interleavedReasoningField
+            : model.interleavedReasoningField ?? modelsDev?.interleaved?.field,
         compatibility: model.compatibility,
         upstreamModelId,
       });
@@ -286,16 +333,41 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
         // Same label `clodex server` prints at startup and `models --list` shows.
         displayName: httpProxyDisplayName(model, provider.name),
         effort: effort.mode === 'controllable'
-          ? { levels: effort.levels, defaultLevel: effort.defaultLevel }
+          ? { levels: effort.levels, defaultLevel: effort.defaultLevel || null }
           : undefined,
       });
     }
   }
 
+  const droppedFavoriteTargets = new Set<string>();
+  for (const favorite of favorites) {
+    const target = `${favorite.providerId}:${favorite.modelId}`;
+    // A stale official row and a current neutral custom row can share an id.
+    // Quarantine only when the effective custom projection does not expose
+    // that target.
+    const hiddenByQuarantine = quarantinedTargets.has(target)
+      && !bundledAllowlistedTargets.has(target);
+    if (
+      disabledProviders.has(favorite.providerId) ||
+      failClosedOpenCodeProviders.has(favorite.providerId) ||
+      hiddenByQuarantine ||
+      (
+        bundledAllowlistedProviders.has(favorite.providerId)
+        && !bundledAllowlistedTargets.has(target)
+      )
+    ) {
+      droppedFavoriteTargets.add(target);
+    }
+  }
+  const patchableFavorites = favorites.filter(favorite => (
+    !droppedFavoriteTargets.has(`${favorite.providerId}:${favorite.modelId}`)
+  ));
+
   return buildPatchModelConfig(
-    favorites,
+    patchableFavorites,
     aliases,
     (providerId, modelId) => meta.get(`${providerId}:${modelId}`),
+    { droppedFavoriteTargets },
   );
 }
 
@@ -533,6 +605,9 @@ function requiredEffortPatchFailures(results: PatchSiteResult[]): PatchSiteResul
       result.name.startsWith('PATCH 8a:')
       || result.name.startsWith('PATCH 8b:')
       || result.name.startsWith('PATCH 8c:')
+      || result.name.startsWith('PATCH 8d:')
+      || result.name.startsWith('PATCH 8e:')
+      || result.name.startsWith('PATCH 8f:')
       || result.name.startsWith('PATCH 9:')
     ),
   );
@@ -813,7 +888,8 @@ export async function applyPatch(
   writePatchManifest(manifest);
 
   const modelCount = Object.keys(desired.config).length;
-  const aliasCount = Object.values(desired.config).filter(entry => entry.alias).length;
+  const aliasCount = Object.values(desired.config)
+    .reduce((count, entry) => count + patchEntryAliases(entry).length, 0);
   const windowCount = Object.values(desired.config).filter(entry => entry.context).length;
   return {
     ok: true,
@@ -906,14 +982,23 @@ export async function runPatchCommand(opts: {
   }
 
   const desired = buildDesiredPatchConfig();
+  reportRejectedModelAliases(desired.rejectedAliasRejections);
   if (Object.keys(desired.config).length === 0) {
-    p.log.error('No favorite models to patch. Save favorites with `clodex models` first.');
+    reportDroppedPatchFavorites(desired.droppedFavoriteIds);
+    if (desired.droppedFavoriteIds.length > 0) {
+      p.log.error(
+        'No exposed favorite models remain to patch. If Claude Code still has an older clodex patch, '
+        + 'restore it with `clodex patch --restore`.',
+      );
+    } else {
+      p.log.error('No favorite models to patch. Save favorites with `clodex models` first.');
+    }
     return 1;
   }
   for (const id of desired.unknownWindows) {
     p.log.warn(`No context window metadata for ${id} — Claude Code will assume the 200k default.`);
   }
-  reportRejectedModelAliases(desired.rejectedAliasRejections);
+  reportDroppedPatchFavorites(desired.droppedFavoriteIds);
 
   const localPatches = inspectLocalPatchSource(
     loadPreferences().localPatchesEnabled === true,
@@ -978,7 +1063,17 @@ export async function runPatchCommand(opts: {
 export async function runLaunchPatchCheck(opts: { agentStdout?: boolean; dryRun?: boolean } = {}): Promise<void> {
   try {
     const desired = buildDesiredPatchConfig();
-    if (Object.keys(desired.config).length === 0) return; // nothing to patch
+    if (Object.keys(desired.config).length === 0) {
+      if (!opts.agentStdout && desired.droppedFavoriteIds.length > 0 && readPatchManifest()) {
+        for (const id of desired.droppedFavoriteIds) {
+          console.error(pc.dim(`clodex: saved favorite ${id} is no longer exposed; a previous clodex patch is recorded.`));
+        }
+        console.error(pc.dim(
+          'clodex: if Claude Code still shows an old removed entry, run `clodex patch --restore`.',
+        ));
+      }
+      return;
+    }
 
     const target = resolveClaudeBinaryForPatch();
     if (!target.ok) {
@@ -1007,6 +1102,12 @@ export async function runLaunchPatchCheck(opts: { agentStdout?: boolean; dryRun?
       configHash,
       binarySize: statSync(resolved.binaryPath).size,
     });
+
+    if (desired.droppedFavoriteIds.length > 0 && !opts.agentStdout) {
+      for (const id of desired.droppedFavoriteIds) {
+        console.error(pc.dim(`clodex: saved favorite ${id} is no longer exposed and is not included in the current patch configuration.`));
+      }
+    }
     if (state === 'current') return;
 
     const interactive = !opts.dryRun && !opts.agentStdout

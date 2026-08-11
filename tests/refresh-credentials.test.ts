@@ -1,6 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { isLikelyPlaceholderKey, isPlaceholderProviderKey, resolveRefreshCredential } from '../src/registry/refresh-credentials.js';
+import {
+  cachedModelCount,
+  isLikelyPlaceholderKey,
+  isPlaceholderProviderKey,
+  resolveRefreshCredential,
+  skipWithCachedModels,
+} from '../src/registry/refresh-credentials.js';
 import type { RegistryProvider } from '../src/registry/types.js';
+import { OPENCODE_GO_COMPLETIONS_BASE_URL } from '../src/data/opencode-go-models.js';
 
 function makeProvider(overrides: Partial<RegistryProvider> = {}): RegistryProvider {
   return {
@@ -36,6 +43,46 @@ describe('isPlaceholderProviderKey', () => {
   it('treats very short keys as likely placeholders', () => {
     expect(isLikelyPlaceholderKey('a')).toBe(true);
     expect(isLikelyPlaceholderKey('ok')).toBe(true);
+  });
+});
+
+describe('cached model status', () => {
+  function openCodeGoProvider(modelIds: string[]): RegistryProvider {
+    return makeProvider({
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      authRef: 'keyring:provider:opencode-go',
+      authType: 'api',
+      api: { npm: '@ai-sdk/openai-compatible', url: OPENCODE_GO_COMPLETIONS_BASE_URL },
+      modelsCache: {
+        fetchedAt: '2026-08-08T00:00:00.000Z',
+        models: modelIds.map(id => ({ id, name: id, upstreamModelId: id, modelFormat: 'openai' })),
+      },
+    });
+  }
+
+  it('counts only models exposed by the committed OpenCode Go allowlist', () => {
+    const provider = openCodeGoProvider([
+      'deepseek-v4-flash',
+      'deepseek-v4-flash',
+      'gpt-5.6-luna',
+      'unknown-future-model',
+    ]);
+
+    expect(cachedModelCount(provider)).toBe(1);
+    expect(skipWithCachedModels(provider, 'kept cache')).toMatchObject({
+      ok: true,
+      skipped: true,
+      modelCount: 1,
+    });
+  });
+
+  it('does not report a stale Responses-only cache as usable models', () => {
+    const provider = openCodeGoProvider(['gpt-5.6-luna']);
+
+    expect(cachedModelCount(provider)).toBe(0);
+    expect(skipWithCachedModels(provider, 'kept cache').modelCount).toBeUndefined();
   });
 });
 

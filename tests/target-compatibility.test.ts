@@ -59,6 +59,31 @@ describe('target compatibility matrix', () => {
     })).toMatchObject({ compatible: false });
   });
 
+  it('uses per-model capability authority consistently at the target filter', () => {
+    const contradicted = {
+      ...openAiModel,
+      id: 'deepseek-v3',
+    };
+    expect(isTargetCompatibleModel({
+      target: 'claude',
+      providerId: 'qiniu-ai',
+      authType: 'api',
+      model: contradicted,
+    }).compatible).toBe(false);
+    expect(isTargetCompatibleModel({
+      target: 'claude',
+      providerId: 'qiniu-ai',
+      authType: 'api',
+      model: { ...contradicted, codingCapabilitiesAuthoritative: true },
+    }).compatible).toBe(true);
+    expect(isTargetCompatibleModel({
+      target: 'claude',
+      providerId: 'qiniu-ai',
+      authType: 'api',
+      model: { ...contradicted, ignoreModelsDevCapabilities: true },
+    }).compatible).toBe(true);
+  });
+
   it('filters providers and models per target', () => {
     const providers: LocalProvider[] = [
       { id: 'openai', name: 'OpenAI', apiKey: 'k', authType: 'api', models: [openAiModel] },

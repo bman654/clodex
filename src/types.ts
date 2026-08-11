@@ -1,7 +1,9 @@
 // src/types.ts
 
 import type { FreeStatus } from './free-models.js';
+import type { UnsupportedEffortPolicy } from './effort-policy.js';
 import type { ModelRuntimeCompatibility } from './model-runtime-compatibility.js';
+import type { AnthropicAuthMode } from './anthropic-auth-mode.js';
 
 export type ModelFormat = 'anthropic' | 'openai' | 'unsupported';
 
@@ -33,6 +35,10 @@ export interface LocalProviderModel {
   supportedParameters?: string[];
   /** Broad model metadata: model can produce reasoning/thinking output. */
   reasoning?: boolean;
+  /** Provider-resolved coding capabilities are authoritative; do not replace or veto them with models.dev. */
+  codingCapabilitiesAuthoritative?: boolean;
+  /** This provider identity does not correspond to models.dev; skip its capability fallback/filter. */
+  ignoreModelsDevCapabilities?: boolean;
   /** Streaming/interleaved reasoning field name from metadata, e.g. reasoning_content. */
   interleavedReasoningField?: string;
   /** Backend capability: model requires the Responses-Lite request shape (x-openai-internal-codex-responses-lite). */
@@ -55,6 +61,8 @@ export interface LocalProvider {
   authType?: 'api' | 'oauth' | 'none';
   oauthAccountId?: string;
   providerData?: Record<string, unknown>;
+  /** Positive provenance for a non-default Anthropic upstream auth envelope. */
+  anthropicAuthMode?: AnthropicAuthMode;
   /** Static headers sent on every upstream request (e.g. a plan/auth-tracking header a custom endpoint requires). */
   headers?: Record<string, string>;
   models: LocalProviderModel[];
@@ -86,6 +94,8 @@ export interface UserPreferences {
   appPathOverrides?: Record<string, string>;
   /** Explicit opt-in to execute ~/.clodex/local-patches.mjs during patch runs. */
   localPatchesEnabled?: boolean;
+  /** Global policy for explicit effort levels a target model does not support. */
+  effortPolicy?: UnsupportedEffortPolicy;
   recentLaunchFolders?: string[];
   server?: {
     savedPassword?: string;
@@ -139,6 +149,8 @@ export interface ParsedArgs {
   favoritesAlias?: string;
   /** Remove a saved short proxy-mode model alias. */
   favoritesUnalias?: string;
+  /** Persist the global policy for explicit effort levels a target does not support. */
+  effortPolicy?: UnsupportedEffortPolicy;
   /** clodex patch: restore the pristine Claude Code binary. */
   patchRestore?: boolean;
   /** clodex patch: persistently enable or disable local patch execution. */

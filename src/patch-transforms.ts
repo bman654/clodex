@@ -12,13 +12,13 @@
 // from-scratch reimplementation with a different patch mechanism and an added
 // per-model context window patch.
 //
-// The ALIAS is the model's identity inside the binary: for any entry that
-// defines one, the alias (not the canonical `clodex:<provider>:<model>` id) is
-// what lands in the Agent-tool enum, the known-alias validator, the /model
-// picker, and the context-window table — so `model: sol` in agent/skill
-// frontmatter validates. Entries with no alias fall back to their canonical id
-// as the identity (they still join the enum, validator, and context table, but
-// skip the resolver and /model picker patches).
+// Each ALIAS is a model identity inside the binary: for any entry that defines
+// one or more, every alias (not the canonical `clodex:<provider>:<model>` id) is
+// added to the Agent-tool enum, known-alias validator, /model picker, and
+// context-window table — so `model: sol` in agent/skill frontmatter validates.
+// Entries with no alias fall back to their canonical id as the identity (they
+// still join the enum, validator, and context table, but skip the resolver and
+// /model picker patches).
 
 import { isReservedModelAlias } from './model-aliases.js';
 
@@ -33,9 +33,12 @@ import { isReservedModelAlias } from './model-aliases.js';
  * and never receive the new transforms, silently. `tests/patcher.test.ts` pins a
  * hash of this file to force that decision to be made rather than forgotten.
  */
-export const PATCH_TRANSFORMS_VERSION = 3;
+export const PATCH_TRANSFORMS_VERSION = 5;
 
 export interface PatchScriptModelEntry {
+  /** Ordered native identities for this model. */
+  aliases?: string[];
+  /** Legacy internal input accepted while callers migrate to `aliases`. */
   alias?: string;
   context?: number;
   /** Human label for the /model picker, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. */
@@ -46,25 +49,52 @@ export interface PatchScriptModelEntry {
 
 export interface PatchScriptEffort {
   levels: string[];
-  defaultLevel: string;
+  /** null keeps the provider's opt-in variants from becoming a client default. */
+  defaultLevel: string | null;
 }
 
 /** Real model id (e.g. `clodex:openai-oauth:gpt-5.6-sol`) → alias/context. */
 export type PatchScriptModelConfig = Record<string, PatchScriptModelEntry>;
 
-const NATIVE_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
-const BASE_EFFORT_LEVELS = ['low', 'medium', 'high'] as const;
+/** Ordered aliases carried by a patch entry, normalized like saved aliases. */
+export function patchEntryAliases(entry: PatchScriptModelEntry): string[] {
+  return [
+    ...(entry.alias === undefined ? [] : [entry.alias]),
+    ...(entry.aliases ?? []),
+  ].map(alias => String(alias).trim().toLowerCase());
+}
 
+// Claude 2.1.226's picker accepts arbitrary exact strings from its supplied
+// option list even though persistence/icons only special-case the native five.
+const NATIVE_EFFORT_LEVELS = [
+  'off',
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const;
 export function projectNativeEffort(
   effort: PatchScriptEffort | undefined,
 ): PatchScriptEffort | undefined {
-  if (!effort || !Array.isArray(effort.levels) || typeof effort.defaultLevel !== 'string') return undefined;
+  if (
+    !effort
+    || !Array.isArray(effort.levels)
+    || (effort.defaultLevel !== null && typeof effort.defaultLevel !== 'string')
+  ) return undefined;
   const declared = new Set(effort.levels);
   const levels = NATIVE_EFFORT_LEVELS.filter(level => declared.has(level));
-  if (!BASE_EFFORT_LEVELS.every(level => declared.has(level))) return undefined;
-  if (!levels.some(level => level === effort.defaultLevel)) return undefined;
-  // The native client defaults custom identities to high; preserve that contract.
-  return { levels, defaultLevel: 'high' };
+  if (
+    levels.length === 0
+    || levels.length !== effort.levels.length
+    || levels.some((level, index) => level !== effort.levels[index])
+  ) return undefined;
+  if (effort.defaultLevel !== null && !levels.includes(
+    effort.defaultLevel as typeof NATIVE_EFFORT_LEVELS[number],
+  )) return undefined;
+  return { levels, defaultLevel: effort.defaultLevel };
 }
 
 export type PatchSiteStatus = 'OK' | 'SKIP' | 'FAIL';
@@ -112,10 +142,10 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   const MODEL_CONFIG = config;
 
   // ---- derive helpers ------------------------------------------------------
-  // alias -> model id (only for entries that define an alias)
+  // alias -> model id (only for entries that define aliases)
   const ALIAS_TO_ID: Record<string, string> = Object.create(null);
-  // The name Claude Code knows a model by: its alias when it has one, else its
-  // canonical id. This single value is used for the Agent-tool enum, the
+  // The names Claude Code knows a model by: every alias when it has any, else
+  // its canonical id. These values are used for the Agent-tool enum, the
   // known-alias validator, the /model picker value, and the context-window table,
   // so the name the binary validates == the name it sends upstream == the name
   // the proxy echoes back == the key its context window is stored under.
@@ -151,24 +181,40 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
 
   for (const [id, value] of Object.entries(MODEL_CONFIG)) {
     const spec: PatchScriptModelEntry = value && typeof value === 'object' ? value : { alias: value as unknown as string };
-    if (spec.alias !== undefined) {
-      const rawAlias = String(spec.alias).trim();
+    if (spec.aliases !== undefined && !Array.isArray(spec.aliases)) {
+      fail('clodex patch: aliases for "' + id + '" must be an array');
+    }
+    const rawAliases: unknown[] = [
+      ...(spec.alias === undefined ? [] : [spec.alias]),
+      ...(spec.aliases ?? []),
+    ];
+    const aliases: string[] = [];
+    for (const raw of rawAliases) {
+      if (typeof raw !== 'string') {
+        fail('clodex patch: alias for "' + id + '" must be a string');
+      }
+      const rawAlias = (raw as string).trim();
       const a = rawAlias.toLowerCase();
       if (!/^[a-z0-9][a-z0-9._-]*(\[1m\])?$/.test(a)) {
-        fail('clodex patch: alias "' + spec.alias + '" is not a safe lowercase alias');
+        fail('clodex patch: alias "' + raw + '" is not a safe lowercase alias');
       }
       if (isReservedModelAlias(a)) {
         fail('clodex patch: reserved alias "' + a + '" cannot be reassigned');
       }
+      if (ALIAS_TO_ID[a] !== undefined) {
+        fail('clodex patch: alias "' + a + '" is configured more than once');
+      }
       ALIAS_TO_ID[a] = String(id);
+      aliases.push(a);
       IDENTITIES.push(a);
       if (spec.display) DISPLAY_BY_IDENTITY[a] = String(spec.display);
-    } else {
+    }
+    if (aliases.length === 0) {
       IDENTITIES.push(String(id));
       if (spec.display) DISPLAY_BY_IDENTITY[String(id)] = String(spec.display);
     }
-    if (spec.alias !== undefined) {
-      registerCapabilityKeys(String(spec.alias));
+    for (const alias of aliases) {
+      registerCapabilityKeys(alias);
     }
     registerCapabilityKeys(String(id));
 
@@ -180,12 +226,12 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       // A [1m] suffix hard-codes 1M upstream (and sends the context-1m beta header
       // + raises the media cap). An explicit context on a [1m] model would win via
       // PATCH 7 while those side effects silently stayed on — so reject it.
-      if (/\[1m\]/i.test(String(spec.alias ?? '')) || /\[1m\]/i.test(id)) {
+      if (aliases.some(alias => /\[1m\]/i.test(alias)) || /\[1m\]/i.test(id)) {
         fail(
-          'clodex patch: "' + id + '" sets context but keeps the [1m] suffix — drop the suffix from both the id and the alias'
+          'clodex patch: "' + id + '" sets context but keeps the [1m] suffix — drop the suffix from the id and every alias'
         );
       }
-      if (spec.alias !== undefined) CONTEXT_BY_KEY[String(spec.alias).trim().toLowerCase()] = n;
+      for (const alias of aliases) CONTEXT_BY_KEY[alias] = n;
       CONTEXT_BY_KEY[String(id).trim().toLowerCase()] = n;
     }
 
@@ -193,11 +239,11 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       const effort = projectNativeEffort(spec.effort);
       if (!effort) {
         fail(
-          `clodex patch: effort for "${id}" must include low, medium, and high with a native default`,
+          `clodex patch: effort for "${id}" must expose a native level and use a declared default or null`,
         );
       }
-      if (spec.alias !== undefined) {
-        for (const key of capabilityKeys(String(spec.alias))) {
+      for (const alias of aliases) {
+        for (const key of capabilityKeys(alias)) {
           EFFORT_BY_KEY[key] = effort;
         }
       }
@@ -258,6 +304,31 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       if (noopIsSkip) { log('SKIP', name, 'already patched'); return; }
       log('FAIL', name, 'replacement made no change');
       if (required) fail(name);
+      return;
+    }
+    log('OK', name);
+  }
+
+  /** Apply one replacement to an exact number of identical-shape sites. */
+  function applyExactCount(
+    name: string,
+    regex: RegExp,
+    expected: number,
+    fn: (match: string, ...groups: string[]) => string,
+    required: boolean,
+  ): void {
+    const flags = regex.flags.includes('g') ? regex.flags : regex.flags + 'g';
+    const global = new RegExp(regex.source, flags);
+    const matches = [...js.matchAll(global)];
+    if (matches.length !== expected) {
+      log('FAIL', name, `anchor matched ${matches.length} times (expected ${expected})`);
+      if (required) fail(`clodex patch: required patch failed: ${name}`);
+      return;
+    }
+    const before = js;
+    js = js.replace(global, fn as (substring: string, ...args: unknown[]) => string);
+    if (js === before) {
+      log('SKIP', name, 'already patched');
       return;
     }
     log('OK', name);
@@ -509,6 +580,96 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     'PATCH 8c: max effort capability',
     /(function [\w$]+\(([\w$]+)\)\{if\([\w$]+\(\2\)\)return!1;)(let [\w$]+=[\w$]+\(\2,"max_effort"\);)/,
   );
+
+  // ---------------------------------------------------------------------------
+  // PATCH 8d–8f — exact effort ladders and request preservation.
+  //
+  // Claude Code materializes supported effort levels in one shared helper and
+  // two model-metadata copies. It separately clamps xhigh/max in nEu before a
+  // request reaches the local proxy. Patch all four sites as one contract:
+  // configured aliases and canonical ids advertise the target's exact sparse
+  // native ladder, while canonical requested values survive the model clamp
+  // (after the native organization limit) so clodex's global policy can round,
+  // omit, or reject them at the route boundary.
+  // ---------------------------------------------------------------------------
+  const effortLevels = Object.fromEntries(
+    Object.entries(EFFORT_BY_KEY).map(([key, effort]) => [key, effort!.levels]),
+  );
+  const hasEffortModels = Object.keys(effortLevels).length > 0;
+  if (hasEffortModels || js.includes('/*ccpatch:effort-level-list*/')) {
+    const table = JSON.stringify(effortLevels);
+    const snippet = (arg: string, predicate: string) =>
+      '/*ccpatch:effort-level-list*/var _ccl=Object.assign(Object.create(null),'
+      + table + ')[String(' + arg + '||"").trim().toLowerCase()];'
+      + 'if(_ccl!==void 0)return _ccl.filter(function(_cclv){return '
+      + predicate + '(_cclv,' + arg + ')});';
+    if (js.includes('/*ccpatch:effort-level-list*/')) {
+      applyOnce(
+        'PATCH 8d: exact effort level helper (refresh)',
+        /(function [\w$]+\(([\w$]+)\)\{)\/\*ccpatch:effort-level-list\*\/var _ccl=Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\(\2\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_ccl!==void 0\)return _ccl\.filter\(function\(_cclv\)\{return ([\w$]+)\(_cclv,\2\)\}\);/,
+        (_m, head, arg, predicate) => head! + snippet(arg!, predicate!),
+        { required: false, noopIsSkip: true },
+      );
+    } else {
+      applyOnce(
+        'PATCH 8d: exact effort level helper',
+        /(function [\w$]+\(([\w$]+)\)\{)(return PM\.filter\(\(([\w$]+)\)=>([\w$]+)\(\4,\2\)\)\})/,
+        (_m, head, arg, body, _level, predicate) => head! + snippet(arg!, predicate!) + body!,
+        { required: false },
+      );
+    }
+  }
+
+  if (hasEffortModels || js.includes('/*ccpatch:effort-level-consumer*/')) {
+    const table = JSON.stringify(effortLevels);
+    const expression = (model: string, tail: string) =>
+      'supportedEffortLevels:(/*ccpatch:effort-level-consumer*/Object.assign('
+      + 'Object.create(null),' + table + ')[String(' + model
+      + '||"").trim().toLowerCase()]??PM)' + tail;
+    if (js.includes('/*ccpatch:effort-level-consumer*/')) {
+      applyExactCount(
+        'PATCH 8e: exact effort metadata lists (refresh)',
+        /supportedEffortLevels:\(\/\*ccpatch:effort-level-consumer\*\/Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\(([\w$]+)\|\|""\)\.trim\(\)\.toLowerCase\(\)\]\?\?PM\)(\.filter\(\(([\w$]+)\)=>\{if\(\3==="max"&&!([\w$]+)\(\1\)\)return!1;if\(\3==="xhigh"&&!([\w$]+)\(\1\)\)return!1;return!0\}\))/,
+        2,
+        (_m, model, tail) => expression(model!, tail!),
+        false,
+      );
+    } else {
+      applyExactCount(
+        'PATCH 8e: exact effort metadata lists',
+        /supportedEffortLevels:PM(\.filter\(\(([\w$]+)\)=>\{if\(\2==="max"&&!([\w$]+)\(([\w$]+)\)\)return!1;if\(\2==="xhigh"&&!([\w$]+)\(\4\)\)return!1;return!0\}\))/,
+        2,
+        (_m, tail, _level, _maxGate, model) => expression(model!, tail!),
+        false,
+      );
+    }
+  }
+
+  const REQUESTED_EFFORT_MARKER = '/*ccpatch:requested-effort*/';
+  if (hasEffortModels || js.includes(REQUESTED_EFFORT_MARKER)) {
+    const table = JSON.stringify(effortLevels);
+    const snippet = (value: string, model: string, isCanonical: string) =>
+      REQUESTED_EFFORT_MARKER
+      + 'if(typeof ' + value + '==="string"&&' + isCanonical + '(' + value + ')){'
+      + 'var _ccl=Object.assign(Object.create(null),' + table + ')[String('
+      + model + '||"").trim().toLowerCase()];if(_ccl!==void 0)return ' + value + ';}';
+    if (js.includes(REQUESTED_EFFORT_MARKER)) {
+      applyOnce(
+        'PATCH 8f: preserve requested effort (refresh)',
+        /\/\*ccpatch:requested-effort\*\/if\(typeof ([\w$]+)==="string"&&([\w$]+)\(\1\)\)\{var _ccl=Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\(([\w$]+)\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_ccl!==void 0\)return \1;\}/,
+        (_m, value, isCanonical, model) => snippet(value!, model!, isCanonical!),
+        { required: false, noopIsSkip: true },
+      );
+    } else {
+      applyOnce(
+        'PATCH 8f: preserve requested effort',
+        /(function [\w$]+\(([\w$]+),([\w$]+)\)\{let ([\w$]+)=\2;if\(typeof \4==="string"&&([\w$]+)\(\4\)\)\4=([\w$]+)\(\4,\3\);)(if\(\4==="max"&&!([\w$]+)\(\3\)\)\4="high";if\(\4==="xhigh"&&!([\w$]+)\(\3\)\)\4="high";return \4\})/,
+        (_m, head, _input, model, value, isCanonical, _orgClamp, body) =>
+          head! + snippet(value!, model!, isCanonical!) + body!,
+        { required: false },
+      );
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // PATCH 9 — per-model default effort.

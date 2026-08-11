@@ -155,12 +155,14 @@ describe('buildChildEnv', () => {
     process.env['CLAUDE_CODE_USE_VERTEX'] = '1';
     process.env['ANTHROPIC_VERTEX_PROJECT_ID'] = 'my-project';
     process.env['ANTHROPIC_DEFAULT_OPUS_MODEL'] = 'claude-opus-4-6[1m]';
+    process.env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
   });
 
   afterEach(() => {
     delete process.env['CLAUDE_CODE_USE_VERTEX'];
     delete process.env['ANTHROPIC_VERTEX_PROJECT_ID'];
     delete process.env['ANTHROPIC_DEFAULT_OPUS_MODEL'];
+    delete process.env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'];
   });
 
   it('removes all conflicting vars from child env', () => {
@@ -207,6 +209,7 @@ describe('buildChildEnv', () => {
     const env = buildChildEnv(UPSTREAM_URL, 'big-pickle', 'k', 1234, 200_000, true);
     expect(env['CLAUDE_CODE_MAX_CONTEXT_TOKENS']).toBe('200000');
     expect(env['CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY']).toBe('1');
+    expect(env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS']).toBe('1');
   });
 
   it('does NOT mutate process.env', () => {
@@ -224,6 +227,12 @@ describe('buildChildEnv', () => {
   it('uses proxy URL when proxyPort is provided', () => {
     const env = buildChildEnv(UPSTREAM_URL, 'deepseek-v4-flash', 'my-key', 12345);
     expect(env['ANTHROPIC_BASE_URL']).toBe('http://127.0.0.1:12345');
+    expect(env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS']).toBe('1');
+  });
+
+  it('preserves explicitly inherited beta suppression', () => {
+    const env = buildChildEnv(UPSTREAM_URL, 'claude-sonnet-4-6', 'my-key');
+    expect(env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS']).toBe('1');
   });
 
   it('restores first-party-like Claude Code behavior for proxy/gateway routes', () => {
@@ -245,6 +254,7 @@ describe('buildHttpProxyChildEnv', () => {
     process.env['ANTHROPIC_MODEL'] = 'sonnet';
     process.env['ANTHROPIC_BASE_URL'] = 'https://old-gateway.example';
     process.env['CLAUDE_CODE_USE_VERTEX'] = '1';
+    process.env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'] = '1';
     process.env['NO_PROXY'] = 'localhost,api.anthropic.com,.internal.example';
     try {
       const env = buildHttpProxyChildEnv(18181, '/tmp/relay-ca.pem');
@@ -255,6 +265,7 @@ describe('buildHttpProxyChildEnv', () => {
       expect(env['NODE_EXTRA_CA_CERTS']).toBe('/tmp/relay-ca.pem');
       expect(env['ANTHROPIC_BASE_URL']).toBeUndefined();
       expect(env['CLAUDE_CODE_USE_VERTEX']).toBeUndefined();
+      expect(env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS']).toBe('1');
       expect(env['ANTHROPIC_API_KEY']).toBe('normal-api-key');
       expect(env['ANTHROPIC_AUTH_TOKEN']).toBe('normal-auth-token');
       expect(env['ANTHROPIC_MODEL']).toBe('sonnet');
@@ -266,6 +277,7 @@ describe('buildHttpProxyChildEnv', () => {
       delete process.env['ANTHROPIC_MODEL'];
       delete process.env['ANTHROPIC_BASE_URL'];
       delete process.env['CLAUDE_CODE_USE_VERTEX'];
+      delete process.env['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS'];
       delete process.env['NO_PROXY'];
     }
   });

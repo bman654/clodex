@@ -1,5 +1,6 @@
 // src/registry/fetch-template-models.ts — test connection and list models for template providers
 
+import { TEST_TIMEOUT_MS } from '../constants.js';
 import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
 import type { ProviderTemplate } from '../provider-templates.js';
@@ -12,12 +13,11 @@ import {
 } from '../trace-log.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 
-const TEST_TIMEOUT_MS = 10_000;
 
-interface OpenAiModelListResponse {
+type OpenAiModelListResponse = ProviderModelListRow[] | {
   data?: ProviderModelListRow[];
   models?: ProviderModelListRow[];
-}
+};
 
 interface ProviderModelListRow {
   id?: string;
@@ -30,6 +30,16 @@ interface ProviderModelListRow {
   pricing?: Record<string, string | number | undefined>;
   use_responses_lite?: boolean;
   prefer_websockets?: boolean;
+}
+
+/** Preserve the first occurrence/order of each provider-reported model id. */
+export function dedupeCachedModels(models: CachedModel[]): CachedModel[] {
+  const seen = new Set<string>();
+  return models.filter(model => {
+    if (seen.has(model.id)) return false;
+    seen.add(model.id);
+    return true;
+  });
 }
 
 function modelFormatForNpm(npm: string): 'anthropic' | 'openai' {
@@ -102,7 +112,7 @@ function parseNativePricing(pricing: ProviderModelListRow['pricing']): CachedMod
 }
 
 function parseModelList(body: OpenAiModelListResponse, npm: string): CachedModel[] {
-  const rows = body.data ?? body.models ?? [];
+  const rows = Array.isArray(body) ? body : body.data ?? body.models ?? [];
   const format = modelFormatForNpm(npm);
   const models: CachedModel[] = [];
 
@@ -214,7 +224,6 @@ function normalizeTemplateOverlay(
 export function applyTemplateModelMetadata(
   template: ProviderTemplate,
   discovered: CachedModel[],
-  _baseUrl: string,
 ): CachedModel[] {
   const curated = new Map(
     (template.staticModels ?? [])
@@ -226,7 +235,10 @@ export function applyTemplateModelMetadata(
     ? discovered.filter(model => curated.has(model.id))
     : discovered;
 
-  return visible.map(model => {
+  // Provider model-list endpoints occasionally repeat ids. Persisting those
+  // duplicates makes add/refresh counts disagree with every runtime surface,
+  // which necessarily de-duplicates routes by id.
+  return dedupeCachedModels(visible).map(model => {
     const overlay = curated.get(model.id);
     if (!overlay) return model;
     return {
@@ -262,6 +274,20 @@ export async function fetchTemplateModels(
     };
   }
 
+  const defaultBaseUrl = template.defaultBaseUrl?.trim().replace(/\/+$/, '');
+  const customBaseOverride = Boolean(
+    trimmedOverride
+    && trimmedOverride.replace(/\/+$/, '') !== defaultBaseUrl,
+  );
+  const metadataTemplate = customBaseOverride
+    ? { ...template, staticModels: undefined, staticModelPolicy: undefined }
+    : template;
+
+  // No template declares `static-seed` today, so this arm and
+  // `materializeTemplateModel` are unreachable — kept deliberately, not
+  // overlooked. `static-seed` is a member of ProviderModelSource, and deleting
+  // the arm would make a template that adopts it fall through to the api-list
+  // path and try to fetch a catalog it does not have.
   if (template.modelSource === 'static-seed') {
     const models = (template.staticModels ?? [])
       .map(model => materializeTemplateModel(template, model, baseUrl));
@@ -346,13 +372,23 @@ export async function fetchTemplateModels(
       // Failed to parse, use empty object
     }
 
-    const models = applyTemplateModelMetadata(template, parseModelList(json, template.npm), baseUrl);
+    const discovered = parseModelList(json, template.npm);
+    const models = applyTemplateModelMetadata(metadataTemplate, discovered);
     if (models.length === 0) {
+      // An allowlist template can end up empty for two very different reasons,
+      // and "no models were returned" points at the wrong one when upstream
+      // answered with a healthy list that simply shares no ids with the
+      // curated catalog — an upstream rename, or a catalog gone stale.
+      const filteredOut = template.staticModelPolicy === 'allowlist' && discovered.length > 0;
       return {
         models: [],
         baseUrl,
-        error: 'Connected but no models were returned.',
-        hint: 'The API key may be valid but model listing is unavailable for this provider.',
+        error: filteredOut
+          ? `Connected, but none of the ${discovered.length} models upstream returned are in this provider's supported list.`
+          : 'Connected but no models were returned.',
+        hint: filteredOut
+          ? 'The upstream catalog may have renamed its models, or clodex\'s list may be out of date.'
+          : 'The API key may be valid but model listing is unavailable for this provider.',
       };
     }
 

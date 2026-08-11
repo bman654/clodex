@@ -14,6 +14,7 @@ import {
 import {
   deepMergeProviderOptions,
   effortProviderOptions,
+  getPatchReasoningCapabilities,
   thinkingProviderOptions,
   type ReasoningMetadata,
 } from './provider-factory.js';
@@ -23,6 +24,13 @@ import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-t
 import { anthropicErrorType, upstreamHttpStatus } from './upstream-error.js';
 import { upstreamMaxRetries } from './upstream-retry.js';
 import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
+import {
+  DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+  EffortResolutionError,
+  resolveEffort,
+  type EffortResolution,
+  type UnsupportedEffortPolicy,
+} from './effort-policy.js';
 
 export { silenceSdkWarnings };
 
@@ -82,6 +90,16 @@ export interface AnthropicRequest {
 export interface TranslateRequestOptions {
   /** Fallback when the client omits effort (e.g. Claude Desktop gateway). */
   defaultEffort?: string;
+  /**
+   * Request-boundary effort decision. A string applies that exact target
+   * effort; null deliberately omits effort and suppresses `defaultEffort`.
+   * Absence preserves the standalone adapter's legacy resolve-on-call path.
+   */
+  resolvedEffort?: string | null;
+  /** Global policy for an explicit client effort absent from the target ladder. */
+  unsupportedEffortPolicy?: UnsupportedEffortPolicy;
+  /** Reports exact/rounded/provider-default resolution before provider dispatch. */
+  onEffortResolution?: (resolution: EffortResolution) => void;
   reasoningMetadata?: ReasoningMetadata;
   /** ChatGPT Codex OAuth requires instructions and manages its own output limit. */
   openAiOAuth?: boolean;
@@ -124,9 +142,43 @@ export function claudeSessionPromptCacheKey(sessionId: string): string {
 
 /** Read reasoning effort from an Anthropic-format request body. */
 export function anthropicEffortFromRequest(body: AnthropicRequest): string | undefined {
-  const effort = body.output_config?.effort;
-  if (typeof effort === 'string' && effort.trim()) return effort.trim();
+  const outputConfig = (body as unknown as Record<string, unknown>).output_config;
+  if (!outputConfig || typeof outputConfig !== 'object' || Array.isArray(outputConfig)) {
+    return undefined;
+  }
+  const effort = (outputConfig as Record<string, unknown>).effort;
+  if (typeof effort === 'string') return effort;
   return undefined;
+}
+
+/**
+ * Read one routed request's explicit effort without conflating malformed input
+ * with omission. Raw MITM audit logging uses the lenient extractor above; a
+ * clodex-owned request boundary uses this validator before credentials/network.
+ */
+export function validatedAnthropicEffortFromRequest(
+  body: AnthropicRequest,
+): string | undefined {
+  const request = body as unknown as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(request, 'output_config')) return undefined;
+  const outputConfig = request.output_config;
+  if (!outputConfig || typeof outputConfig !== 'object' || Array.isArray(outputConfig)) {
+    throw new EffortResolutionError({
+      code: 'invalid-effort',
+      message: 'Invalid effort level. output_config must be an object when provided.',
+      statusCode: 400,
+    });
+  }
+  const config = outputConfig as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(config, 'effort')) return undefined;
+  if (typeof config.effort !== 'string') {
+    throw new EffortResolutionError({
+      code: 'invalid-effort',
+      message: 'Invalid effort level. output_config.effort must be a string.',
+      statusCode: 400,
+    });
+  }
+  return config.effort;
 }
 
 /**
@@ -497,7 +549,27 @@ export function translateRequest(
   if (options?.maxTools !== undefined && upstreamTools.length > options.maxTools) {
     upstreamTools = upstreamTools.slice(0, options.maxTools);
   }
-  const effort = anthropicEffortFromRequest(body) ?? options?.defaultEffort;
+  const requestedEffort = validatedAnthropicEffortFromRequest(body);
+  const hasResolvedEffort = options !== undefined
+    && Object.prototype.hasOwnProperty.call(options, 'resolvedEffort');
+  let effort = hasResolvedEffort
+    ? options!.resolvedEffort ?? undefined
+    : requestedEffort ?? options?.defaultEffort;
+  if (!hasResolvedEffort && requestedEffort !== undefined) {
+    const modelId = options?.reasoningMetadata?.upstreamModelId ?? body.model;
+    const capabilities = getPatchReasoningCapabilities(
+      npm,
+      modelId,
+      options?.reasoningMetadata,
+    );
+    const resolution = resolveEffort(
+      requestedEffort,
+      capabilities.levels,
+      options?.unsupportedEffortPolicy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+    );
+    options?.onEffortResolution?.(resolution);
+    effort = resolution.resolvedEffort;
+  }
   let providerOptions = deepMergeProviderOptions(
     thinkingProviderOptions(npm),
     effortProviderOptions(npm, effort, options?.reasoningMetadata?.upstreamModelId ?? body.model, options?.reasoningMetadata),

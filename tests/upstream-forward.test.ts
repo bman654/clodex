@@ -1,12 +1,13 @@
 // tests/upstream-forward.test.ts
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import type { Transform } from 'node:stream';
+import { Writable, type Transform } from 'node:stream';
 import {
   anthropicUpstreamHeaders,
   fetchWithOAuthRetry,
   anthropicSseModelRewrite,
   relayAnthropicMessages,
 } from '../src/upstream-forward.js';
+import { ANTHROPIC_X_API_KEY_ONLY_AUTH_MODE } from '../src/anthropic-auth-mode.js';
 
 describe('anthropicUpstreamHeaders', () => {
   it('includes bearer and x-api-key', () => {
@@ -17,17 +18,57 @@ describe('anthropicUpstreamHeaders', () => {
     });
   });
 
+  it('applies x-api-key-only mode to API keys without changing OAuth or anonymous auth', () => {
+    const apiHeaders = anthropicUpstreamHeaders(
+      'secret-key', false, undefined, 'api', undefined, undefined, false, false,
+      ANTHROPIC_X_API_KEY_ONLY_AUTH_MODE,
+    );
+    expect(apiHeaders['x-api-key']).toBe('secret-key');
+    expect(apiHeaders).not.toHaveProperty('Authorization');
+
+    const oauthHeaders = anthropicUpstreamHeaders(
+      'oauth-token', false, undefined, 'oauth', undefined, undefined, false, false,
+      ANTHROPIC_X_API_KEY_ONLY_AUTH_MODE,
+    );
+    expect(oauthHeaders.Authorization).toBe('Bearer oauth-token');
+    expect(oauthHeaders).not.toHaveProperty('x-api-key');
+
+    const anonymousHeaders = anthropicUpstreamHeaders(
+      '', false, undefined, 'none', undefined, undefined, false, false,
+      ANTHROPIC_X_API_KEY_ONLY_AUTH_MODE,
+    );
+    expect(anonymousHeaders).not.toHaveProperty('Authorization');
+    expect(anonymousHeaders).not.toHaveProperty('x-api-key');
+  });
+
   it('adds stream accept header when requested', () => {
     expect(anthropicUpstreamHeaders('secret-key', true).Accept).toBe('text/event-stream');
   });
 
-  it('adds Claude Code session header for OAuth requests', () => {
+  it('adds Claude Code identity headers only with explicit native provenance', () => {
+    const genericOAuthHeaders = anthropicUpstreamHeaders(
+      'oauth-token',
+      true,
+      'oauth-2025-04-20',
+      'oauth',
+      'session-123',
+    );
+    expect(genericOAuthHeaders).toMatchObject({
+      Authorization: 'Bearer oauth-token',
+    });
+    expect(genericOAuthHeaders).not.toHaveProperty('User-Agent');
+    expect(genericOAuthHeaders).not.toHaveProperty('x-app');
+    expect(genericOAuthHeaders).not.toHaveProperty('X-Claude-Code-Session-Id');
+
     expect(anthropicUpstreamHeaders(
       'oauth-token',
       true,
       'oauth-2025-04-20',
       'oauth',
       'session-123',
+      undefined,
+      false,
+      true,
     )).toMatchObject({
       Authorization: 'Bearer oauth-token',
       'User-Agent': 'claude-cli/2.1.195 (external, cli)',
@@ -80,6 +121,25 @@ describe('anthropicUpstreamHeaders', () => {
       Authorization: 'Bearer oauth-token',
       'X-Plan': 'coding',
     });
+  });
+
+  it('drops client beta input but preserves explicit provider headers when betas are disabled', () => {
+    const headers = anthropicUpstreamHeaders(
+      'api-key',
+      false,
+      'client-beta-2026-01-01',
+      'api',
+      undefined,
+      {
+        'Anthropic-Beta': 'configured-beta-2026-01-01',
+        'X-Plan': 'coding',
+      },
+      true,
+    );
+
+    expect(headers).not.toHaveProperty('anthropic-beta');
+    expect(headers['Anthropic-Beta']).toBe('configured-beta-2026-01-01');
+    expect(headers['X-Plan']).toBe('coding');
   });
 });
 
@@ -238,5 +298,133 @@ describe('relayAnthropicMessages responseModelOverride', () => {
       {},
     );
     expect(res.body()).toBe(raw);
+  });
+
+  it('preserves bounded retry and safe Anthropic diagnostics on upstream errors', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ type: 'error', error: { type: 'rate_limit_error' } }),
+      {
+        status: 429,
+        headers: {
+          'Content-Type': 'application/json',
+          'Retry-After': '17',
+          'Request-Id': 'req_upstream_1',
+          'Anthropic-Ratelimit-Tokens-Remaining': '0',
+          'X-Ratelimit-Limit-Requests': '10',
+          'Set-Cookie': 'must-not-relay=secret',
+        },
+      },
+    )));
+    const res = makeRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'claude-opus-4-6' },
+      'key',
+      false,
+    );
+
+    expect(res.status()).toBe(429);
+    expect(res.headers()).toMatchObject({
+      'retry-after': '17',
+      'request-id': 'req_upstream_1',
+      'anthropic-ratelimit-tokens-remaining': '0',
+      'x-ratelimit-limit-requests': '10',
+    });
+    expect(res.headers()).not.toHaveProperty('set-cookie');
+  });
+});
+
+describe('relayAnthropicMessages streaming', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * A REAL Writable, unlike the object mock above: the streaming path reaches
+   * the client through `.pipe(res)`, so a plain object never exercises it.
+   * That is the gap this suite had — `anthropicSseModelRewrite` was well
+   * covered directly, but deleting the `.pipe(...)` that installs it in the
+   * relay left every test green.
+   */
+  function makeStreamRes() {
+    const chunks: Buffer[] = [];
+    let status = 0;
+    let headers: Record<string, string> = {};
+    const res = new Writable({
+      write(chunk: Buffer, _enc, cb) { chunks.push(Buffer.from(chunk)); cb(); },
+    }) as Writable & {
+      writeHead: (code: number, hdrs?: Record<string, string>) => unknown;
+      body: () => string;
+      status: () => number;
+      headers: () => Record<string, string>;
+    };
+    res.writeHead = (code, hdrs) => { status = code; headers = hdrs ?? {}; return res; };
+    res.body = () => Buffer.concat(chunks).toString('utf8');
+    res.status = () => status;
+    res.headers = () => headers;
+    return res;
+  }
+
+  const SSE = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"id":"msg_1","model":"qwen3.8-max","content":[]}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}',
+    '',
+    'event: message_stop',
+    'data: {"type":"message_stop"}',
+    '',
+  ].join('\n');
+
+  it('pipes the streaming body through the model rewrite', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(SSE, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })));
+    const res = makeStreamRes();
+    const done = new Promise<void>(resolve => res.on('finish', () => resolve()));
+
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'qwen3.8-max', stream: true },
+      'key',
+      true,
+      { responseModelOverride: 'clodex:opencode-go:qwen3.8-max[1m]' },
+    );
+    await done;
+
+    expect(res.status()).toBe(200);
+    expect(res.headers()['Content-Type']).toBe('text/event-stream');
+    const body = res.body();
+    // The echo invariant: the client sees back exactly the id it asked for.
+    expect(body).toContain('"model":"clodex:opencode-go:qwen3.8-max[1m]"');
+    expect(body).not.toContain('"model":"qwen3.8-max"');
+    // Every other line survives byte-for-byte.
+    expect(body).toContain('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}');
+    expect(body).toContain('event: message_stop');
+  });
+
+  it('streams through untouched without an override', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(SSE, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })));
+    const res = makeStreamRes();
+    const done = new Promise<void>(resolve => res.on('finish', () => resolve()));
+
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'qwen3.8-max', stream: true },
+      'key',
+      true,
+      {},
+    );
+    await done;
+
+    expect(res.body()).toBe(SSE);
   });
 });

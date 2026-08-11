@@ -134,11 +134,10 @@ export function scanPristineBackups(version: string, dir = backupDir()): BackupS
  * sites inject. The text is OURS, not Claude Code's, so a false positive would
  * take a Claude Code bundle literally shipping this prefix.
  *
- * It covers every binary current clodex publishes: PATCH 8a/8b/8c/9 emit the
- * `effort`, `xhigh-effort`, `max-effort` and `default-effort` variants, and those
- * sites are REQUIRED (applyPatch throws when any FAILs), so at least one is
- * always present. PATCH 7 adds the `ctx` variant when any model has a
- * non-default context window.
+ * It covers every binary current clodex publishes: PATCH 8a-8c run for every
+ * non-empty model config and emit `ccpatch` markers. PATCH 8d-8f/9 additionally
+ * emit markers, and are required, whenever exact effort metadata is present.
+ * PATCH 7 adds the `ctx` variant when any model has a non-default context window.
  *
  * Raw byte inspection of the native binary cannot see these (the bundle is
  * compressed inside it), so this runs on the JS `readContent` extracts.

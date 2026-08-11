@@ -92,6 +92,30 @@ describe('resolveFavorite', () => {
       expect(result).toBeDefined();
     }
   });
+
+  it('uses the resolved model capability authority when applying models.dev filters', async () => {
+    const contradictedModel = {
+      ...sampleLocalProvider.models[0]!,
+      id: 'deepseek-v3',
+      upstreamModelId: 'deepseek-v3',
+      modelFormat: 'openai' as const,
+      npm: '@ai-sdk/openai-compatible',
+    };
+    const provider: LocalProvider = {
+      ...sampleLocalProvider,
+      id: 'qiniu-ai',
+      models: [contradictedModel],
+    };
+    const findLocalModel = () => ({ provider, model: provider.models[0]! });
+    const favorite = { providerId: 'qiniu-ai', modelId: contradictedModel.id };
+
+    expect(await resolveFavorite(favorite, { agent: 'claude', findLocalModel })).toBeUndefined();
+    provider.models[0] = { ...contradictedModel, codingCapabilitiesAuthoritative: true };
+    expect(await resolveFavorite(favorite, { agent: 'claude', findLocalModel })).toBeDefined();
+    provider.models[0] = { ...contradictedModel, ignoreModelsDevCapabilities: true };
+    expect(await resolveFavorite(favorite, { agent: 'claude', findLocalModel })).toBeDefined();
+    expect(provider.models[0]?.codingCapabilitiesAuthoritative).toBeUndefined();
+  });
 });
 
 describe('buildFavoritesList', () => {
