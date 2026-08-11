@@ -296,7 +296,9 @@ describe('HTTP proxy startup model list', () => {
       reportSkippedHttpProxyFavorites(loaded);
       expect(warn).toHaveBeenCalledWith(
         '2 saved favorites not exposed because clodex limits this Claude-facing catalog to 20 models. '
-        + 'The first saved favorites remain active; skipped entries were preserved:\n'
+        + 'Capacity is selected from saved order before availability and support checks; unavailable '
+        + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+        + 'entries reclaims positions. Skipped entries were preserved:\n'
         + '  clodex:one:model-20\n'
         + '  clodex:two:model-21',
       );

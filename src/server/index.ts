@@ -429,7 +429,9 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
         p.log.warn(
           `${favoriteCatalog.capacitySkippedFavorites.length} saved favorite${favoriteCatalog.capacitySkippedFavorites.length === 1 ? '' : 's'} `
           + `not exposed because clodex limits this Claude-facing catalog to ${MAX_MODEL_CATALOG} models. `
-          + 'The first saved favorites remain active; skipped entries were preserved:\n'
+          + 'Capacity is selected from saved order before availability and support checks; unavailable '
+          + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+          + 'entries reclaims positions. Skipped entries were preserved:\n'
           + favoriteCatalog.capacitySkippedFavorites
             .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
             .join('\n'),
