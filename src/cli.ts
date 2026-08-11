@@ -22,10 +22,11 @@ import { pickLocalModel } from './prompts.js';
 import { fetchProviderCatalog, providersForPicker, resolveLocalProviderApiKey } from './provider-catalog.js';
 import { VERSION } from './constants.js';
 import type { ParsedArgs, FavoriteModel, LocalProvider, LocalProviderModel } from './types.js';
-import { addFavorite, removeFavorite, isFavorite } from './favorites.js';
+import { addFavorite, isFavorite, projectFavoriteExposure, removeFavorite } from './favorites.js';
 import { httpProxyModelId } from './http-proxy/routes.js';
 import {
   canonicalModelAliasName,
+  describeModelAliasRejection,
   modelAliasMatchesName,
   modelAliasMatchesStoredName,
   modelAliasTarget,
@@ -706,6 +707,16 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
     modelAliases.push(parsed);
     savePreferences({ modelAliases });
     p.log.success(`Saved model alias ${parsed.name} → ${modelAliasTarget(parsed)}.`);
+    const exposure = projectFavoriteExposure(prefs.favoriteModels ?? []);
+    const targetExposed = exposure.exposedFavorites.some(
+      favorite => favorite.providerId === parsed.providerId && favorite.modelId === parsed.modelId,
+    );
+    if (!targetExposed) {
+      p.log.warn(
+        `Saved model alias ${JSON.stringify(parsed.name)} — `
+        + `${describeModelAliasRejection('target-not-exposed')}. The alias was saved and preserved.`,
+      );
+    }
     return 0;
   }
   if (opts.unalias !== undefined) {
@@ -1307,7 +1318,9 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
       p.log.warn(
         `${capacitySkippedFavorites.length} saved favorite${capacitySkippedFavorites.length === 1 ? '' : 's'} `
         + `not exposed because clodex limits this /model catalog to ${MAX_MODEL_CATALOG} models. `
-        + 'The starting model and first saved favorites remain active; skipped entries were preserved:\n'
+        + 'Capacity is selected from saved order before availability and support checks; unavailable '
+        + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+        + 'entries reclaims positions. Skipped entries were preserved:\n'
         + capacitySkippedFavorites
           .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
           .join('\n'),
