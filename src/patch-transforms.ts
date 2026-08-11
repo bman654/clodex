@@ -38,7 +38,7 @@ import {
  * hash of the transform inputs to force that decision to be made rather than
  * forgotten.
  */
-export const PATCH_TRANSFORMS_VERSION = 4;
+export const PATCH_TRANSFORMS_VERSION = 5;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -561,6 +561,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     const contractVar = q(NETWORK_ENV_CONTRACT_VAR);
     const networkVars = JSON.stringify(CHILD_NETWORK_ENV_VARS);
     const requiredBodyLiterals = [
+      '{...process.env',
       'CLAUDE_CODE_REMOTE',
       'CLAUDE_CODE_OAUTH_TOKEN',
       'CLAUDE_CODE_SUBSCRIPTION_TYPE',
@@ -573,7 +574,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       /(function [\w$]+\(\)\{)(let [\w$]+=[\w$]+\(\),[\w$]+=Object\.keys\([\w$]+\)\.length>0,[\w$]+=Object\.keys\([\w$]+\)\.length>0,[\w$]+=[\w$]+\(process\.env\.CLAUDE_CODE_REMOTE\)\?(?:(?!\}\s*function )[\s\S])*?for\(let [\w$]+ of [\w$]+\)delete [\w$]+\[[\w$]+\],delete [\w$]+\[`INPUT_\$\{[\w$]+\}`\];return [\w$]+)(\})/,
       (_match, head, body, tail) => {
         const targetIsValid = requiredBodyLiterals.every(literal => body!.includes(literal))
-          && !/\bfunction [\w$]*\(/.test(body!);
+          && !/\bfunction\s*[\w$]*\(/.test(body!);
         if (!targetIsValid) {
           log('FAIL', patchName, 'target validation failed');
           fail('clodex patch: child network environment target validation failed');
@@ -588,7 +589,17 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
           + '&&_clodexNetwork.version===1&&_clodexNetwork.original'
           + '&&typeof _clodexNetwork.original==="object"&&!Array.isArray(_clodexNetwork.original)'
           + '&&_clodexNetwork.injected&&typeof _clodexNetwork.injected==="object"'
-          + '&&!Array.isArray(_clodexNetwork.injected))'
+          + '&&!Array.isArray(_clodexNetwork.injected)'
+          + '&&Object.keys(_clodexNetwork.original).every(_clodexKey=>'
+          + networkVars + '.includes(_clodexKey)'
+          + '&&(typeof _clodexNetwork.original[_clodexKey]==="string"'
+          + '||_clodexNetwork.original[_clodexKey]===null)'
+          + '&&Object.prototype.hasOwnProperty.call(_clodexNetwork.injected,_clodexKey))'
+          + '&&Object.keys(_clodexNetwork.injected).every(_clodexKey=>'
+          + networkVars + '.includes(_clodexKey)'
+          + '&&(typeof _clodexNetwork.injected[_clodexKey]==="string"'
+          + '||_clodexNetwork.injected[_clodexKey]===null)'
+          + '&&Object.prototype.hasOwnProperty.call(_clodexNetwork.original,_clodexKey)))'
           + 'for(let _clodexKey of ' + networkVars + '){'
           + 'if(Object.prototype.hasOwnProperty.call(_clodexNetwork.original,_clodexKey)'
           + '&&Object.prototype.hasOwnProperty.call(_clodexNetwork.injected,_clodexKey)){'

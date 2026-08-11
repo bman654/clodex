@@ -89,9 +89,14 @@ After `clodex patch`, standard Bash-tool commands, MCP/LSP servers, hooks, and
 other paths that use Claude Code's shared child environment receive the
 external proxy and CA settings rather than Clodex's local bridge settings.
 Settings-level overrides are preserved. The separate `claude --bg --exec`
-environment path is not covered. A plain nested `claude` launched from Bash is
-also an ordinary child and is intentionally unbridged; invoke `clodex-claude`
-when that nested client must use the advertised server.
+environment path is not covered. The parent process also retains the external
+proxy URL in `CLAUDE_CODE_CLODEX_NETWORK_ENV` until it builds a standard child
+environment; that URL can contain proxy credentials, so do not expose the
+parent environment or use `--bg --exec` for untrusted commands while
+authenticated proxy settings
+are present. A plain nested `claude` launched from Bash is also an ordinary
+child and is intentionally unbridged; invoke `clodex-claude` when that nested
+client must use the advertised server.
 
 For service-manager readiness checks, `clodex-claude --check` exits `0` when an
 advertised server passes the process and TCP checks, and exits `1` otherwise.

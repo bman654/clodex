@@ -26,6 +26,10 @@ import {
   builtInPatchProofsChanged,
   captureBuiltInPatchProofs,
 } from '../src/built-in-patch-proofs.js';
+import {
+  NETWORK_ENV_CONTRACT_VAR,
+  networkEnvBaseline,
+} from '../src/network-env.js';
 
 /**
  * The digest a pre-versioning clodex wrote into `patch-state.json`: the bare
@@ -452,8 +456,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 4,
-      digest: 'c0cf08dd5144edf1138e82b3f94872a294db238fc3a8f4f92be8c0451d260070',
+      version: 5,
+      digest: 'aa9880c15a84007512c700c6a9a0d52975fded04145bb691254e216cf131d0ad',
     });
   });
 });
@@ -1263,10 +1267,24 @@ describe('patch script identity naming', () => {
     expect(out).not.toContain('function adjacent(){/*ccpatch:child-network-env*/');
   });
 
-  it('rejects a nested function in the child-environment patch target', () => {
+  it.each([
+    ['named', 'function nested(){}'],
+    ['anonymous', 'let nested=function(){};'],
+  ])('rejects a %s nested function in the child-environment patch target', (_name, nested) => {
     const source = CLAUDE_FIXTURE.replace(
       's=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};let o=',
-      's=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};function nested(){}let o=',
+      `s=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};${nested}let o=`,
+    );
+
+    expect(() => runPatchScript(config, source)).toThrow(
+      'clodex patch: child network environment target validation failed',
+    );
+  });
+
+  it('rejects a child builder whose merge spread no longer reads process.env', () => {
+    const source = CLAUDE_FIXTURE.replace(
+      'let v={...process.env,...e,...s}',
+      'let v={...te,...e,...s}',
     );
 
     expect(() => runPatchScript(config, source)).toThrow(
@@ -1285,7 +1303,7 @@ describe('patch script identity naming', () => {
       NO_PROXY: 'localhost',
       no_proxy: 'localhost',
       NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
-      CLAUDE_CODE_CLODEX_NETWORK_ENV: JSON.stringify({
+      [NETWORK_ENV_CONTRACT_VAR]: JSON.stringify({
         version: 1,
         original: {
           HTTPS_PROXY: 'http://corp-proxy.example:8080',
@@ -1318,7 +1336,37 @@ describe('patch script identity naming', () => {
     expect(env['https_proxy']).toBeUndefined();
     expect(env['http_proxy']).toBeUndefined();
     expect(env['no_proxy']).toBeUndefined();
-    expect(env['CLAUDE_CODE_CLODEX_NETWORK_ENV']).toBeUndefined();
+    expect(env[NETWORK_ENV_CONTRACT_VAR]).toBeUndefined();
+  });
+
+  it('restores the original network environment on the merge branch', () => {
+    const out = runPatchScript(config);
+    const env = executeChildEnv(out, {
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://127.0.0.1:3457',
+      NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
+      [NETWORK_ENV_CONTRACT_VAR]: JSON.stringify({
+        version: 1,
+        original: {
+          HTTPS_PROXY: 'http://proxy.example.test:8080',
+          NODE_EXTRA_CA_CERTS: '/tmp/external-ca.pem',
+        },
+        injected: {
+          HTTPS_PROXY: 'http://127.0.0.1:3457',
+          NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
+        },
+      }),
+    }, {
+      CHILD_ENV_MARKER: 'merge-branch',
+    });
+
+    expect(env).toMatchObject({
+      PATH: '/usr/bin',
+      CHILD_ENV_MARKER: 'merge-branch',
+      HTTPS_PROXY: 'http://proxy.example.test:8080',
+      NODE_EXTRA_CA_CERTS: '/tmp/external-ca.pem',
+    });
+    expect(env[NETWORK_ENV_CONTRACT_VAR]).toBeUndefined();
   });
 
   it('keeps the native child environment unchanged without a wrapper snapshot', () => {
@@ -1336,7 +1384,7 @@ describe('patch script identity naming', () => {
     const env = executeChildEnv(out, {
       PATH: '/usr/bin',
       HTTPS_PROXY: 'http://settings-proxy.example:9000',
-      CLAUDE_CODE_CLODEX_NETWORK_ENV: JSON.stringify({
+      [NETWORK_ENV_CONTRACT_VAR]: JSON.stringify({
         version: 1,
         original: { HTTPS_PROXY: 'http://corp-proxy.example:8080' },
         injected: { HTTPS_PROXY: 'http://127.0.0.1:3457' },
@@ -1354,7 +1402,7 @@ describe('patch script identity naming', () => {
     const env = executeChildEnv(out, {
       PATH: '/usr/bin',
       HTTPS_PROXY: 'http://127.0.0.1:3457',
-      CLAUDE_CODE_CLODEX_NETWORK_ENV: JSON.stringify({
+      [NETWORK_ENV_CONTRACT_VAR]: JSON.stringify({
         version: 1,
         original: { HTTPS_PROXY: null },
         injected: { HTTPS_PROXY: 'http://127.0.0.1:3457' },
@@ -1378,12 +1426,67 @@ describe('patch script identity naming', () => {
     const env = executeChildEnv(out, {
       PATH: '/usr/bin',
       HTTPS_PROXY: 'http://127.0.0.1:3457',
-      CLAUDE_CODE_CLODEX_NETWORK_ENV: contract,
+      [NETWORK_ENV_CONTRACT_VAR]: contract,
     });
 
     expect(env).toEqual({
       PATH: '/usr/bin',
       HTTPS_PROXY: 'http://127.0.0.1:3457',
+    });
+  });
+
+  it.each([
+    ['valid pair', {
+      version: 1,
+      original: { HTTPS_PROXY: 'http://proxy.example.test:8080' },
+      injected: { HTTPS_PROXY: 'http://127.0.0.1:3457' },
+    }],
+    ['missing injected key', {
+      version: 1,
+      original: { HTTPS_PROXY: null },
+      injected: {},
+    }],
+    ['missing original key', {
+      version: 1,
+      original: {},
+      injected: { HTTPS_PROXY: 'http://127.0.0.1:3457' },
+    }],
+    ['unknown original key', {
+      version: 1,
+      original: { HTTPS_PROXY: null, EXTRA_PROXY: null },
+      injected: { HTTPS_PROXY: 'http://127.0.0.1:3457', EXTRA_PROXY: null },
+    }],
+    ['unknown injected key', {
+      version: 1,
+      original: { EXTRA_PROXY: null },
+      injected: { EXTRA_PROXY: 'http://127.0.0.1:3457' },
+    }],
+    ['invalid original value', {
+      version: 1,
+      original: { HTTPS_PROXY: 42 },
+      injected: { HTTPS_PROXY: 'http://127.0.0.1:3457' },
+    }],
+    ['invalid injected value', {
+      version: 1,
+      original: { HTTPS_PROXY: null },
+      injected: { HTTPS_PROXY: false },
+    }],
+    ['invalid version', {
+      version: 2,
+      original: { HTTPS_PROXY: null },
+      injected: { HTTPS_PROXY: 'http://127.0.0.1:3457' },
+    }],
+  ])('matches the host contract reader for %s', (_name, contract) => {
+    const out = runPatchScript(config);
+    const baseEnv = {
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://127.0.0.1:3457',
+      [NETWORK_ENV_CONTRACT_VAR]: JSON.stringify(contract),
+    };
+
+    expect(executeChildEnv(out, baseEnv, { CHILD_ENV_MARKER: 'merge-branch' })).toEqual({
+      ...networkEnvBaseline(baseEnv),
+      CHILD_ENV_MARKER: 'merge-branch',
     });
   });
 
