@@ -78,6 +78,30 @@ describe('models alias command', () => {
     expect(loadPreferences().modelAliases).toEqual([]);
   });
 
+  it('warns when an alias target is beyond the first 20 exposed favorites', async () => {
+    const favorites = Array.from({ length: 21 }, (_, index) => ({
+      providerId: 'openai-oauth',
+      modelId: `gpt-5.6-${String(index + 1).padStart(2, '0')}`,
+    }));
+    writeFileSync(getConfigPath(), JSON.stringify({ favoriteModels: favorites }));
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+
+    try {
+      expect(await runModelsCommand({
+        alias: 'tail=clodex:openai-oauth:gpt-5.6-21',
+      })).toBe(0);
+      expect(loadPreferences().modelAliases).toEqual([
+        { name: 'tail', providerId: 'openai-oauth', modelId: 'gpt-5.6-21' },
+      ]);
+      expect(warn).toHaveBeenCalledWith(
+        'Saved model alias "tail" — target is outside the active Claude Code catalog. '
+        + 'The alias was saved and preserved.',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('rejects aliases whose targets are not saved favorites', async () => {
     expect(await runModelsCommand({ alias: 'other=clodex:openai-oauth:gpt-other' })).toBe(1);
     expect(loadPreferences().modelAliases).toBeUndefined();
