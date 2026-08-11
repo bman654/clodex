@@ -105,6 +105,7 @@ Launch Claude Code bridged to OpenAI models. Unrecognized flags (and everything 
 | `--save-mode` | With `--endpoint`/`--proxy`: save that mode as the `claude` default |
 | `--dry-run` | Run the wizard but print a launch preview instead of launching (never persists anything) |
 | `--trace` | Write debug logs to `~/.clodex/logs/` and show errors on exit |
+| `--fast` | Request Codex fast mode (`service_tier=priority`) for ChatGPT/Codex OAuth routes; equivalent to `CLODEX_SERVICE_TIER=fast` |
 | `--provider <id>` | Boot provider id (`openai` or `openai-oauth`); with `--model`, skips the wizard |
 | `--model <id>` | Boot model id; with `--provider`, skips the wizard |
 | `--help`, `--version` | Help / version |
@@ -274,6 +275,15 @@ clodex --version    # version
   secure store instead; see [credential helpers](docs/credential-helpers.md).
 - Proxied routes forward configured provider headers for API-key and OAuth authentication. Anonymous routes preserve non-credential headers while removing authorization, API-key, cookie, token, secret, and credential-bearing header names before dispatch.
 - `CLODEX_CLAUDE_PATH` overrides Claude Code binary discovery.
+- **Codex service tier:** `CLODEX_SERVICE_TIER` accepts `fast` (normalized to
+  `priority`), `priority`, `flex`, `auto`, or `default`. Clodex requests the
+  resolved value only after selecting a ChatGPT/Codex OAuth route; OpenAI
+  API-key and non-OpenAI routes are unaffected. `clodex claude --fast` sets the
+  value to `fast` for that invocation, overriding an ambient value, and composes
+  the same environment before a dry-run preview. Request diagnostics record
+  this pre-dispatch intent, not proof of wire serialization. If the provider
+  SDK reports that it omitted the tier for a model, clodex warns once and the
+  backend default remains in use.
 - **Outbound proxy:** when `HTTP_PROXY`/`HTTPS_PROXY` (and optionally `NO_PROXY`) are set in clodex's environment, all clodex-originated network calls honor them — OAuth sign-in and token refresh, model-list and models.dev refreshes, upstream OpenAI API calls, and the ChatGPT/Codex OAuth WebSocket transport (tunneled via HTTP CONNECT).
 - **Upstream retries:** set `CLODEX_UPSTREAM_MAX_RETRIES` to an integer from
   `0` through `5` to override the SDK's default of two retries for retryable

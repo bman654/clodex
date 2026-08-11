@@ -6,8 +6,12 @@
 // stays tiny and fast — it runs for every Claude-Code-spawned agent process.
 
 import type { ServerRuntimeState } from './server-runtime.js';
+import {
+  networkEnvBaseline,
+  PROXY_ENV_VARS,
+  recordNetworkEnvMutation,
+} from './network-env.js';
 
-const PROXY_ENV_VARS = ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy'] as const;
 export const REQUIRE_SERVER_ENV = 'CLODEX_REQUIRE_SERVER';
 
 export function removeAnthropicProxyBypass(env: NodeJS.ProcessEnv): void {
@@ -53,10 +57,12 @@ export function computeWrapperEnv(
   baseEnv: NodeJS.ProcessEnv,
   state: ServerRuntimeState | null,
 ): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...baseEnv };
   // No live server: launch claude completely untouched — a down server must
   // never break launching claude.
-  if (!state) return env;
+  if (!state) return { ...baseEnv };
+
+  const baseline = networkEnvBaseline(baseEnv);
+  const env: NodeJS.ProcessEnv = { ...baseline };
 
   if (state.mode === 'proxy') {
     // Selective MITM: claude keeps its own Anthropic credentials; the proxy
@@ -66,6 +72,7 @@ export function computeWrapperEnv(
     for (const name of PROXY_ENV_VARS) env[name] = proxyUrl;
     if (state.caPath) env['NODE_EXTRA_CA_CERTS'] = state.caPath;
     removeAnthropicProxyBypass(env);
+    recordNetworkEnvMutation(baseline, env);
     return env;
   }
 
@@ -73,5 +80,6 @@ export function computeWrapperEnv(
   for (const name of PROXY_ENV_VARS) delete env[name];
   env['ANTHROPIC_BASE_URL'] = `http://127.0.0.1:${state.port}/anthropic`;
   env['ANTHROPIC_API_KEY'] = LOCAL_GATEWAY_API_KEY;
+  recordNetworkEnvMutation(baseline, env);
   return env;
 }

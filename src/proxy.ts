@@ -35,6 +35,8 @@ import {
 import { createLanguageModel, isSdkMigratedNpm, maxToolsForNpm } from './provider-factory.js';
 import { randomUUID } from 'node:crypto';
 import {
+  isOpenAiOAuthRoute,
+  oauthServiceTier,
   translateRequest as sdkTranslateRequest,
   streamAnthropicResponse,
   generateAnthropicResponse,
@@ -458,8 +460,12 @@ export async function startProxyCatalog(
       const upstreamUrl = route.upstreamUrl;
       const routeAuthType = route.authType ?? 'api';
 
+      // Record the tier clodex resolved for this route before dispatch. This is
+      // requested intent; the provider SDK may still omit it during serialization.
+      const loggedTier = isOpenAiOAuthRoute(route) ? oauthServiceTier() : undefined;
       plog(() =>
-        `POST /v1/messages - alias=${originalModel} route=${route.realModelId} format=${route.modelFormat} key=${routeAuthType === 'none' ? 'none' : apiKey ? `len:${apiKey.length}` : 'MISSING'}`,
+        `POST /v1/messages - alias=${originalModel} route=${route.realModelId} format=${route.modelFormat} key=${routeAuthType === 'none' ? 'none' : apiKey ? `len:${apiKey.length}` : 'MISSING'}`
+        + (loggedTier ? ` tier=${loggedTier}` : ''),
       );
 
       const usesSdkAdapter = isSdkMigratedNpm(route.npm);
@@ -564,7 +570,7 @@ export async function startProxyCatalog(
       // OpenCode-assigned npm packages route through the SDK, which owns wire
       // format, endpoint selection, and provider quirks.
       if (usesSdkAdapter) {
-        const openAiOAuth = route.npm === '@ai-sdk/openai' && route.authType === 'oauth';
+        const openAiOAuth = isOpenAiOAuthRoute(route);
         const claudeSessionIdHeader = Array.isArray(req.headers['x-claude-code-session-id'])
           ? req.headers['x-claude-code-session-id'][0]
           : req.headers['x-claude-code-session-id'];

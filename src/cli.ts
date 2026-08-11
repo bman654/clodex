@@ -61,7 +61,7 @@ import {
 } from './http-proxy/index.js';
 import { runPatchCommand, runLaunchPatchCheck } from './patcher.js';
 import { installOutboundProxyDispatcher } from './outbound-proxy.js';
-const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--trace', '--endpoint', '--proxy', '--save-mode', '--help', '-h', '--version', '-v']);
+const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--trace', '--fast', '--endpoint', '--proxy', '--save-mode', '--help', '-h', '--version', '-v']);
 const CLODEX_LAUNCH_FLAGS = new Set(['--provider', '--model']);
 
 function parseClodexLaunchFlag(
@@ -331,6 +331,7 @@ export function parseArgs(args: string[]): ParsedArgs {
 
     if (arg === '--dry-run') parsed.dryRun = true;
     if (arg === '--trace') parsed.trace = true;
+    if (arg === '--fast') parsed.fast = true;
     consumeBridgeModeFlag(arg, parsed);
     if (arg === '--save-mode') parsed.saveBridgeMode = true;
     if (arg === '--help' || arg === '-h') parsed.showHelp = true;
@@ -403,6 +404,8 @@ ${pc.bold('Options:')}
   --save-mode  With --endpoint/--proxy: save that mode as the claude default
   --dry-run    Run the wizard but show a preview instead of launching Claude Code
   --trace      Write debug logs to ~/.clodex/logs/ and show errors on exit
+  --fast       Request Codex fast mode (service_tier=priority) on ChatGPT-OAuth models
+               (equivalent to CLODEX_SERVICE_TIER=fast; warns if the SDK omits it)
   --provider   Boot provider id (skip wizard when paired with --model or in print mode)
   --model      Boot model id (skip wizard when paired with --provider or in print mode)
   --help       Show this command help
@@ -1074,6 +1077,12 @@ async function runClaudeHttpProxyCommand(
 
 export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   const { dryRun, trace, launchProvider, launchModel } = parsed;
+  // --fast: Codex fast mode for this launch. The proxy runs in this process
+  // and the env inherits into every request; an explicit flag outranks any
+  // ambient CLODEX_SERVICE_TIER. Compose it before prerequisite/dry-run handling
+  // so launch previews and real launches resolve the same environment. Tier
+  // semantics (OAuth-only, post-resolution) live in sdk-adapter's resolver.
+  if (parsed.fast) process.env.CLODEX_SERVICE_TIER = 'fast';
   const claudeArgs = normalizeClaudeAgentArgs(parsed.claudeArgs);
   const agentStdout = wantsCleanAgentStdout('claude', claudeArgs);
   setAgentStdoutMode(agentStdout);
@@ -1155,7 +1164,14 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   }
 
   const allProviders = providersForTarget(providersForPicker(catalog), 'claude');
+  const blockedLaunchReason = launchPlan.skip && launchPlan.target?.providerId
+    ? catalog.blockedProviders.get(launchPlan.target.providerId)
+    : undefined;
   if (allProviders.length === 0) {
+    if (blockedLaunchReason) {
+      p.log.error(blockedLaunchReason);
+      return 1;
+    }
     p.log.warn('No providers available.');
     p.log.info(pc.dim('Run clodex providers to get started.'));
     return 0;
@@ -1183,7 +1199,8 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     const resolved = findProviderAndModel(allProviders, launchPlan.target);
     if (!resolved) {
       p.log.error(
-        `Provider/model not found: ${launchPlan.target.providerId} / ${launchPlan.target.modelId}`,
+        blockedLaunchReason
+          ?? `Provider/model not found: ${launchPlan.target.providerId} / ${launchPlan.target.modelId}`,
       );
       return 1;
     }

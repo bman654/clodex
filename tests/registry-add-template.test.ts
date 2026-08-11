@@ -441,6 +441,41 @@ describe('registry/add-template', () => {
     expect(env.deleteProviderCredential).toHaveBeenCalledWith('keyring:provider:test-template');
   });
 
+  it('refuses in-place replacement when it would discard OAuth account credential lineages', async () => {
+    registryState = {
+      schemaVersion: 5,
+      providers: [{
+        id: 'test-template',
+        templateId: 'test-template',
+        name: 'Existing',
+        enabled: true,
+        authType: 'oauth',
+        authRef: 'keyring:oauth:account:work',
+        defaultAuthRef: 'keyring:oauth:default',
+        activeAuthAccount: 'work',
+        authAccounts: {
+          work: { authRef: 'keyring:oauth:account:work', addedAt: '2026-08-09T00:00:00.000Z' },
+        },
+        api: {},
+        addedAt: '2026-01-01T00:00:00.000Z',
+      }],
+    };
+
+    const result = await addProviderFromTemplate(dummyTemplate, 'replacement-key', {
+      replaceExisting: true,
+    });
+
+    expect(result).toMatchObject({
+      added: false,
+      error: expect.stringContaining('OAuth account state'),
+      hint: 'Remove it first with: clodex providers remove test-template',
+    });
+    expect(fetchTemplate.fetchTemplateModels).not.toHaveBeenCalled();
+    expect(env.provisionProviderCredential).not.toHaveBeenCalled();
+    expect(env.saveProviderCredential).not.toHaveBeenCalled();
+    expect(io.saveRegistry).not.toHaveBeenCalled();
+  });
+
   it('retains a removal marker queued immediately after replacement commit', async () => {
     registryState = {
       schemaVersion: 1,

@@ -41,6 +41,7 @@ import {
 } from './registry/lock.js';
 import type { ConflictInfo } from './types.js';
 import { removeAnthropicProxyBypass } from './wrapper-env.js';
+import { networkEnvBaseline, recordNetworkEnvMutation } from './network-env.js';
 
 export function detectConflicts(): ConflictInfo[] {
   return CONFLICTING_ENV_VARS.filter(name => process.env[name] !== undefined).map(name => ({
@@ -192,8 +193,13 @@ export function buildChildEnv(
  * intact, remove only endpoint modes that would bypass api.anthropic.com, and
  * trust the per-user clodex CA for this child process.
  */
-export function buildHttpProxyChildEnv(proxyPort: number, caCertPath: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+export function buildHttpProxyChildEnv(
+  proxyPort: number,
+  caCertPath: string,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const baseline = networkEnvBaseline(baseEnv);
+  const env: NodeJS.ProcessEnv = { ...baseline };
   for (const name of CONFLICTING_ENV_VARS) {
     if (name === 'ANTHROPIC_API_KEY' || name === 'ANTHROPIC_AUTH_TOKEN' || name === 'ANTHROPIC_MODEL') continue;
     delete env[name];
@@ -205,6 +211,7 @@ export function buildHttpProxyChildEnv(proxyPort: number, caCertPath: string): N
   env['http_proxy'] = proxyUrl;
   env['NODE_EXTRA_CA_CERTS'] = caCertPath;
   removeAnthropicProxyBypass(env);
+  recordNetworkEnvMutation(baseline, env);
   return env;
 }
 
@@ -276,10 +283,17 @@ export function oauthProviderKeyringAccount(providerId: string): string {
   return `oauth:provider:${providerId}`;
 }
 
-function oauthProviderIdFromAccount(account: string): string | null {
+export function oauthProviderIdFromAccount(account: string): string | null {
   const prefix = 'oauth:provider:';
   const baseAccount = credentialAccountBase(account);
-  return baseAccount.startsWith(prefix) ? baseAccount.slice(prefix.length) : null;
+  if (!baseAccount.startsWith(prefix)) return null;
+  const id = baseAccount.slice(prefix.length);
+  // A named account slot (oauth:provider:<id>:account:<name>) shares the base
+  // provider's refresh identity — refreshStoredOAuthCredential supports exact
+  // provider ids only, and per-slot cache keys already come from the full
+  // account string, so collapsing here changes refresh routing, not caching.
+  const slot = id.indexOf(':account:');
+  return slot === -1 ? id : id.slice(0, slot);
 }
 
 const oauthRefreshInflight = new Map<string, Promise<string | null>>();
@@ -328,6 +342,26 @@ function isReservedKeyringAccount(account: string): boolean {
 
 export interface ResolveCredentialOptions {
   rejectedAccessToken?: string;
+  /** Resolve the configured credential store without a CLODEX_KEY_* override. */
+  ignoreProviderOverride?: boolean;
+}
+
+/**
+ * Redaction-safe identity for a usable namespaced provider credential.
+ *
+ * The fingerprint is sufficient to fence an environment change without ever
+ * copying the credential itself into registry snapshots, diagnostics, or UI
+ * state.
+ */
+export interface ProviderCredentialOverrideState {
+  variable: string;
+  fingerprint: string;
+}
+
+export interface ResolvedProviderCredential {
+  credential: string | null;
+  /** Present only when the namespaced provider environment variable won. */
+  credentialOverride?: ProviderCredentialOverrideState;
 }
 
 /** Parse registry credential references. */
@@ -353,8 +387,11 @@ export function clodexKeyEnvVar(providerId: string): string {
   return `CLODEX_KEY_${providerId.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
 }
 
-function readEnvCredential(varName: string): string | null {
-  const raw = process.env[varName];
+function readEnvCredential(
+  varName: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const raw = env[varName];
   if (!raw?.trim()) return null;
   return raw.trim().split(/\r?\n/)[0]?.trim() || null;
 }
@@ -388,6 +425,40 @@ function usableEnvCredential(
     rejectedEnvCredentialFingerprints.delete(source);
   }
   return value;
+}
+
+function readProviderCredentialOverride(
+  providerId: string,
+  env: NodeJS.ProcessEnv,
+  options: ResolveCredentialOptions,
+): { credential: string; state: ProviderCredentialOverrideState } | null {
+  if (options.ignoreProviderOverride) return null;
+  const variable = clodexKeyEnvVar(providerId);
+  const credential = usableEnvCredential(
+    `provider:${providerId}`,
+    readEnvCredential(variable, env),
+    options.rejectedAccessToken,
+  );
+  if (!credential) return null;
+  return {
+    credential,
+    state: {
+      variable,
+      fingerprint: credentialFingerprint(credential),
+    },
+  };
+}
+
+/**
+ * Inspect the usable namespaced provider override without exposing its value.
+ * This deliberately shares the resolver's remembered-rejection semantics.
+ */
+export function resolveProviderCredentialOverrideState(
+  providerId: string,
+  env: NodeJS.ProcessEnv = process.env,
+  options: ResolveCredentialOptions = {},
+): ProviderCredentialOverrideState | null {
+  return readProviderCredentialOverride(providerId, env, options)?.state ?? null;
 }
 
 function readKeyringEntry(keyring: KeyringApi, service: string, account: string): string | null {
@@ -2329,6 +2400,44 @@ async function deleteStoredCredential(
   }
 }
 
+/**
+ * Resolve a provider secret and retain only redaction-safe provenance when the
+ * namespaced environment override supplies it.
+ */
+export async function resolveProviderCredentialWithSource(
+  providerId: string,
+  authRef: string,
+  diag?: (msg: string) => void,
+  options: ResolveCredentialOptions = {},
+): Promise<ResolvedProviderCredential> {
+  const parsed = parseAuthRef(authRef);
+  if (parsed?.kind === 'none') return { credential: null };
+
+  const namespaced = readProviderCredentialOverride(providerId, process.env, options);
+  if (namespaced) {
+    return {
+      credential: namespaced.credential,
+      credentialOverride: namespaced.state,
+    };
+  }
+
+  if (!parsed) return { credential: null };
+
+  if (parsed.kind === 'env') {
+    return {
+      credential: usableEnvCredential(
+        `provider:${providerId}:env:${parsed.varName}`,
+        readEnvCredential(parsed.varName),
+        options.rejectedAccessToken,
+      ),
+    };
+  }
+
+  return {
+    credential: await readProviderSecret(parsed, diag, options.rejectedAccessToken),
+  };
+}
+
 /** Resolve a provider secret from a namespaced env var or its configured store. */
 export async function resolveProviderCredential(
   providerId: string,
@@ -2336,28 +2445,12 @@ export async function resolveProviderCredential(
   diag?: (msg: string) => void,
   options: ResolveCredentialOptions = {},
 ): Promise<string | null> {
-  const parsed = parseAuthRef(authRef);
-  if (parsed?.kind === 'none') return null;
-
-  const namespacedVar = clodexKeyEnvVar(providerId);
-  const namespaced = usableEnvCredential(
-    `provider:${providerId}`,
-    readEnvCredential(namespacedVar),
-    options.rejectedAccessToken,
-  );
-  if (namespaced) return namespaced;
-
-  if (!parsed) return null;
-
-  if (parsed.kind === 'env') {
-    return usableEnvCredential(
-      `provider:${providerId}:env:${parsed.varName}`,
-      readEnvCredential(parsed.varName),
-      options.rejectedAccessToken,
-    );
-  }
-
-  return readProviderSecret(parsed, diag, options.rejectedAccessToken);
+  return (await resolveProviderCredentialWithSource(
+    providerId,
+    authRef,
+    diag,
+    options,
+  )).credential;
 }
 
 /** Read OAuth metadata retained alongside the access token. */

@@ -56,6 +56,8 @@ import {
   silenceSdkWarnings,
   anthropicEffortFromRequest,
   extractClaudeSessionId,
+  isOpenAiOAuthRoute,
+  oauthServiceTier,
   type AnthropicRequest,
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
@@ -392,6 +394,9 @@ async function handleAnthropicMessages(
       modelId: body.model,
       effort: anthropicEffortFromRequest(body as AnthropicRequest) ?? model.defaultEffort,
       claudeSessionId,
+      // Use the adapter's route predicate and resolver so this records the same
+      // pre-dispatch request intent. It does not prove SDK serialization.
+      serviceTier: isOpenAiOAuthRoute(model) ? oauthServiceTier() : undefined,
       provider: inferenceProvider(model),
       route: 'translated',
       requestPreview: getLatestMessagePreview(body.messages, body.system),
@@ -401,7 +406,7 @@ async function handleAnthropicMessages(
     if (npmMaxTools !== undefined && toolCount > npmMaxTools) {
       plog(`tools truncated: ${toolCount} → ${npmMaxTools} (provider limit)`);
     }
-    const openAiOAuth = model.npm === '@ai-sdk/openai' && model.authType === 'oauth';
+    const openAiOAuth = isOpenAiOAuthRoute(model);
     const params = sdkTranslateRequest(body as unknown as AnthropicRequest, model.npm!, {
       defaultEffort: anthropicEffortFromRequest(body as AnthropicRequest) ? undefined : model.defaultEffort,
       openAiOAuth,
@@ -613,12 +618,13 @@ async function handleOpenAIChatCompletions(
   auditInference(options, {
     modelId: body.model,
     effort: openAiEffort(body),
+    serviceTier: isOpenAiOAuthRoute(model) ? oauthServiceTier() : undefined,
     provider: inferenceProvider(model),
     route: 'translated',
     requestPreview: getLatestMessagePreview(body.messages, body.system),
   });
   const baseURL = model.modelFormat === 'anthropic' ? model.baseUrl : model.apiBaseUrl;
-  const openAiOAuth = npm === '@ai-sdk/openai' && model.authType === 'oauth';
+  const openAiOAuth = isOpenAiOAuthRoute(model);
   const params = translateOpenAiRequest(body as unknown as OpenAiRequest, { openAiOAuth });
   const clientWantsStream = Boolean(body.stream);
   const responseModelId = getResponseModelId(body.model, model, options);

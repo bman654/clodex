@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { OAUTH_ACCOUNT_NAME_RE } from './types.js';
 import {
   closeSync,
   existsSync,
@@ -72,7 +73,16 @@ function isManagedCredentialAccount(account: string): boolean {
   if (!base) return false;
 
   const oauth = /^oauth:provider:(.+)$/.exec(base);
-  if (oauth) return isValidProviderId(oauth[1]!);
+  if (oauth) {
+    const id = oauth[1]!;
+    const slot = id.indexOf(':account:');
+    if (slot === -1) return isValidProviderId(id);
+    // Named account slots (oauth:provider:<id>:account:<name>) are managed
+    // credentials too — rejecting them here made journalCredentialWrite throw
+    // and no named account could ever be saved.
+    return isValidProviderId(id.slice(0, slot))
+      && OAUTH_ACCOUNT_NAME_RE.test(id.slice(slot + ':account:'.length));
+  }
 
   const provider = /^provider:([^:]+)(?::(.+))?$/.exec(base);
   if (!provider || !isValidProviderId(provider[1]!)) return false;

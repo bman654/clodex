@@ -37,6 +37,35 @@ export interface AddTemplateResult {
   credentialCleanupReconciled?: boolean;
 }
 
+function existingProviderError(
+  template: ProviderTemplate,
+  existing: RegistryProvider | undefined,
+  replaceExisting: boolean | undefined,
+): AddTemplateResult | null {
+  if (!existing) return null;
+  const removeFirst = `Remove it first with: clodex providers remove ${template.id}`;
+  if (!replaceExisting) {
+    return {
+      added: false,
+      error: `${template.name} is already configured.`,
+      hint: removeFirst,
+    };
+  }
+  if (existing.defaultAuthRef !== undefined
+    || existing.activeAuthAccount !== undefined
+    || Object.keys(existing.authAccounts ?? {}).length > 0) {
+    // Template replacement publishes one credential lineage. It cannot safely
+    // discard a selected slot, parked default, or named slots; the provider
+    // removal lifecycle is the operation that journals every one of them.
+    return {
+      added: false,
+      error: `${template.name} has OAuth account state and cannot be replaced in place.`,
+      hint: removeFirst,
+    };
+  }
+  return null;
+}
+
 async function probeTemplatePackage(template: ProviderTemplate): Promise<string | null> {
   if (!template.supported) return template.unsupportedReason ?? 'Provider is not supported yet.';
   if (!template.npm) return 'Template is missing an SDK package.';
@@ -82,13 +111,10 @@ export async function addProviderFromTemplate(
   const existingState = await withRegistryWriteLock(() => {
     const registry = loadRegistryStrict();
     const existing = registry.providers.find(p => p.id === template.id);
-    if (existing && !opts?.replaceExisting) {
+    const error = existingProviderError(template, existing, opts?.replaceExisting);
+    if (error) {
       return {
-        error: {
-          added: false as const,
-          error: `${template.name} is already configured.`,
-          hint: `Remove it first with: clodex providers remove ${template.id}`,
-        },
+        error,
       };
     }
     return { authRef: existing?.authRef ?? null, error: null };
@@ -128,14 +154,11 @@ export async function addProviderFromTemplate(
     const currentState = await withRegistryWriteLock(() => {
       const registry = loadRegistryStrict();
       const existing = registry.providers.find(p => p.id === template.id);
-      if (existing && !opts?.replaceExisting) {
+      const error = existingProviderError(template, existing, opts?.replaceExisting);
+      if (error) {
         return {
           existingAuthRef: null,
-          error: {
-            added: false as const,
-            error: `${template.name} is already configured.`,
-            hint: `Remove it first with: clodex providers remove ${template.id}`,
-          },
+          error,
         };
       }
       return { existingAuthRef: existing?.authRef ?? null, error: null };
@@ -162,13 +185,8 @@ export async function addProviderFromTemplate(
       return withRegistryWriteLock(async () => {
         const registry = loadRegistryStrict();
         const existing = registry.providers.find(p => p.id === template.id);
-        if (existing && !opts?.replaceExisting) {
-          return {
-            added: false,
-            error: `${template.name} is already configured.`,
-            hint: `Remove it first with: clodex providers remove ${template.id}`,
-          };
-        }
+        const existingError = existingProviderError(template, existing, opts?.replaceExisting);
+        if (existingError) return existingError;
         if ((existing?.authRef ?? null) !== currentState.existingAuthRef) {
           return {
             added: false,

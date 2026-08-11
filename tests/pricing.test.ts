@@ -95,6 +95,86 @@ describe('pricing enrich', () => {
     });
   });
 
+  it('composes provider-owned pricing with account-cache enrichment', () => {
+    const fetchedAt = '2026-08-09T00:00:00.000Z';
+    const model = {
+      id: 'llama-3.3-70b-versatile',
+      name: 'Llama 3.3 70B',
+      upstreamModelId: 'llama-3.3-70b-versatile',
+      modelFormat: 'openai' as const,
+    };
+    const ordinaryCache = () => ({ fetchedAt, models: [{ ...model }] });
+    const curatedCache = () => ({
+      fetchedAt,
+      models: [{ ...model, cost: { input: 7, output: 11 } }],
+    });
+    const registry = {
+      schemaVersion: 5,
+      providers: [{
+        id: 'curated-groq',
+        templateId: 'groq',
+        name: 'Curated Groq',
+        enabled: true,
+        authRef: 'keyring:provider:curated-work',
+        defaultAuthRef: 'keyring:provider:curated-default',
+        authType: 'oauth' as const,
+        activeAuthAccount: 'work',
+        defaultModelsCache: curatedCache(),
+        authAccounts: {
+          work: {
+            authRef: 'keyring:provider:curated-work',
+            addedAt: fetchedAt,
+            modelsCache: curatedCache(),
+          },
+          alt: {
+            authRef: 'keyring:provider:curated-alt',
+            addedAt: fetchedAt,
+            modelsCache: curatedCache(),
+          },
+        },
+        preserveModelPricing: true,
+        api: { npm: '@ai-sdk/groq' },
+        addedAt: fetchedAt,
+        modelsCache: curatedCache(),
+      }, {
+        id: 'ordinary-groq',
+        templateId: 'groq',
+        name: 'Ordinary Groq',
+        enabled: true,
+        authRef: 'keyring:provider:ordinary-work',
+        defaultAuthRef: 'keyring:provider:ordinary-default',
+        authType: 'oauth' as const,
+        activeAuthAccount: 'work',
+        defaultModelsCache: ordinaryCache(),
+        authAccounts: {
+          work: {
+            authRef: 'keyring:provider:ordinary-work',
+            addedAt: fetchedAt,
+            modelsCache: ordinaryCache(),
+          },
+          alt: {
+            authRef: 'keyring:provider:ordinary-alt',
+            addedAt: fetchedAt,
+            modelsCache: ordinaryCache(),
+          },
+        },
+        api: { npm: '@ai-sdk/groq' },
+        addedAt: fetchedAt,
+        modelsCache: ordinaryCache(),
+      }],
+    };
+
+    expect(applyPricingToRegistryProviders(registry, loadBundledPricingCache())).toBe(true);
+    expect(registry.providers[0]?.modelsCache.models[0]?.cost).toEqual({ input: 7, output: 11 });
+    expect(registry.providers[0]?.defaultModelsCache.models[0]?.cost).toEqual({ input: 7, output: 11 });
+    expect(registry.providers[0]?.authAccounts.work.modelsCache.models[0]?.cost).toEqual({ input: 7, output: 11 });
+    expect(registry.providers[0]?.authAccounts.alt.modelsCache.models[0]?.cost).toEqual({ input: 7, output: 11 });
+    expect(registry.providers[1]?.modelsCache.models[0]?.cost?.input).toBe(0.59);
+    expect(registry.providers[1]?.defaultModelsCache.models[0]?.cost?.input).toBe(0.59);
+    expect(registry.providers[1]?.authAccounts.work.modelsCache.models[0]?.cost?.input).toBe(0.59);
+    expect(registry.providers[1]?.authAccounts.alt.modelsCache.models[0]?.cost?.input).toBe(0.59);
+  });
+
   it('marks enriched zero-cost models as verified free', () => {
     const index = buildPricingIndex({
       models: [{

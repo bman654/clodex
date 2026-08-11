@@ -1,3 +1,4 @@
+import { createOpenAI } from '@ai-sdk/openai';
 import { describe, it, expect, vi } from 'vitest';
 import {
   annotateToolNames,
@@ -8,10 +9,13 @@ import {
   translateRequest,
   writeAnthropicStream,
   streamAnthropicResponse,
+  generateAnthropicResponse,
   supportsOpenAiPromptCacheBreakpoints,
   extractClaudeSessionId,
   claudeSessionPromptCacheKey,
   sdkTranslationErrorSignature,
+  resetServiceTierWarningForTests,
+  silenceSdkWarnings,
 } from '../src/sdk-adapter.js';
 
 describe('sdkTranslationErrorSignature', () => {
@@ -260,6 +264,101 @@ describe('translateRequest', () => {
     const systemMessages = explicitCaching.messages.filter(m => m.role === 'system');
     expect(systemMessages).toHaveLength(1);
     expect(systemMessages[0]?.content).toBe('You are Claude Code.\nFollow the user instructions.');
+  });
+
+  it('applies CLODEX_SERVICE_TIER on the OAuth route only, normalizing the Codex fast spelling', () => {
+    const body = {
+      model: 'gpt-5.6-sol',
+      messages: [{ role: 'user' as const, content: 'hello' }],
+    };
+    const prior = process.env.CLODEX_SERVICE_TIER;
+    try {
+      process.env.CLODEX_SERVICE_TIER = 'fast';
+      resetServiceTierWarningForTests();
+      const oauth = translateRequest(body, '@ai-sdk/openai', { openAiOAuth: true });
+      expect(oauth.providerOptions?.openai?.serviceTier).toBe('priority');
+
+      const publicApi = translateRequest(body, '@ai-sdk/openai');
+      expect(publicApi.providerOptions?.openai?.serviceTier).toBeUndefined();
+
+      const compatible = translateRequest(
+        { ...body, model: 'deepseek-v4-flash' },
+        '@ai-sdk/openai-compatible',
+      );
+      expect(compatible.providerOptions?.openai?.serviceTier).toBeUndefined();
+
+      process.env.CLODEX_SERVICE_TIER = 'priority';
+      const explicit = translateRequest(body, '@ai-sdk/openai', { openAiOAuth: true });
+      expect(explicit.providerOptions?.openai?.serviceTier).toBe('priority');
+
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const hostile = String.fromCharCode(27) + '[31msk-ant-api03-secret1234567890\nsecond-line';
+      process.env.CLODEX_SERVICE_TIER = hostile;
+      resetServiceTierWarningForTests();
+      const malformed = translateRequest(body, '@ai-sdk/openai', { openAiOAuth: true });
+      const malformedAgain = translateRequest(body, '@ai-sdk/openai', { openAiOAuth: true });
+      expect(malformed.providerOptions?.openai?.serviceTier).toBeUndefined();
+      expect(malformedAgain.providerOptions?.openai?.serviceTier).toBeUndefined();
+      expect(error).toHaveBeenCalledOnce();
+      const warning = String(error.mock.calls[0]![0]);
+      expect(warning).not.toContain('sk-ant-api03-secret1234567890');
+      expect(warning).not.toContain(String.fromCharCode(27));
+      expect(warning).not.toContain('\n');
+
+      delete process.env.CLODEX_SERVICE_TIER;
+      const unset = translateRequest(body, '@ai-sdk/openai', { openAiOAuth: true });
+      expect(unset.providerOptions?.openai?.serviceTier).toBeUndefined();
+    } finally {
+      if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
+      else process.env.CLODEX_SERVICE_TIER = prior;
+      resetServiceTierWarningForTests();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('warns once when the OpenAI SDK omits a requested tier during serialization', async () => {
+    const prior = process.env.CLODEX_SERVICE_TIER;
+    const requestBodies: Array<Record<string, unknown>> = [];
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      process.env.CLODEX_SERVICE_TIER = 'fast';
+      resetServiceTierWarningForTests();
+      silenceSdkWarnings();
+      const provider = createOpenAI({
+        apiKey: 'synthetic-test-key',
+        fetch: async (_input, init) => {
+          requestBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+          return new Response(JSON.stringify({
+            id: 'resp_synthetic',
+            model: 'codex-auto-review',
+            output: [],
+            usage: {
+              input_tokens: 1,
+              input_tokens_details: { cached_tokens: 0 },
+              output_tokens: 0,
+              output_tokens_details: { reasoning_tokens: 0 },
+            },
+          }), { status: 200, headers: { 'content-type': 'application/json' } });
+        },
+      });
+      const params = translateRequest({
+        model: 'codex-auto-review',
+        messages: [{ role: 'user', content: 'synthetic prompt' }],
+      }, '@ai-sdk/openai', { openAiOAuth: true });
+
+      await generateAnthropicResponse(provider.responses('codex-auto-review'), params, 'codex-auto-review');
+      await generateAnthropicResponse(provider.responses('codex-auto-review'), params, 'codex-auto-review');
+
+      expect(requestBodies).toHaveLength(2);
+      expect(requestBodies.every(body => !Object.hasOwn(body, 'service_tier'))).toBe(true);
+      expect(error).toHaveBeenCalledOnce();
+      expect(String(error.mock.calls[0]![0])).toContain('requested service tier was not sent');
+    } finally {
+      if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
+      else process.env.CLODEX_SERVICE_TIER = prior;
+      resetServiceTierWarningForTests();
+      error.mockRestore();
+    }
   });
 
   it('maps output_config.effort to Google thinking budget without dropping includeThoughts', () => {
@@ -755,6 +854,43 @@ describe('streamAnthropicResponse idle timeout', () => {
     } finally {
       if (previous === undefined) delete process.env['CLODEX_UPSTREAM_MAX_RETRIES'];
       else process.env['CLODEX_UPSTREAM_MAX_RETRIES'] = previous;
+      vi.doUnmock('ai');
+      vi.resetModules();
+    }
+  });
+
+  it('surfaces an unsupported serialized tier once from the streaming production seam', async () => {
+    vi.resetModules();
+    async function* stream() {
+      yield { type: 'start' };
+      yield { type: 'finish', finishReason: 'stop' };
+    }
+    const streamText = vi.fn((options: { onStepFinish?: (step: { warnings?: unknown[] }) => void }) => {
+      options.onStepFinish?.({ warnings: [{ type: 'unsupported', feature: 'serviceTier' }] });
+      return { stream: stream() };
+    });
+    vi.doMock('ai', () => ({
+      generateText: vi.fn(),
+      streamText,
+      tool: vi.fn((spec: unknown) => spec),
+      jsonSchema: vi.fn((schema: unknown) => schema),
+    }));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const { streamAnthropicResponse, resetServiceTierWarningForTests } = await import('../src/sdk-adapter.js');
+      resetServiceTierWarningForTests();
+      const params = {
+        messages: [],
+        providerOptions: { openai: { serviceTier: 'priority' } },
+      };
+      await streamAnthropicResponse({} as never, params, 'codex-auto-review', () => {});
+      await streamAnthropicResponse({} as never, params, 'codex-auto-review', () => {});
+
+      expect(error).toHaveBeenCalledOnce();
+      expect(String(error.mock.calls[0]![0])).toContain('requested service tier was not sent');
+    } finally {
+      error.mockRestore();
       vi.doUnmock('ai');
       vi.resetModules();
     }

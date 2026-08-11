@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { generateText, streamText } from 'ai';
 import { collectOpenAiStream, generateOpenAiResponse, streamOpenAiResponse, translateOpenAiRequest } from '../src/openai-adapter.js';
+import { resetServiceTierWarningForTests } from '../src/sdk-adapter.js';
 
 vi.mock('ai', () => ({
   streamText: vi.fn(),
@@ -99,24 +100,46 @@ describe('streamOpenAiResponse', () => {
 
 describe('translateOpenAiRequest OAuth shaping', () => {
   it('moves the system prompt into providerOptions and drops the output limit for OAuth routes', async () => {
-    const params = translateOpenAiRequest({
-      model: 'gpt-test',
-      max_tokens: 100,
-      messages: [
-        { role: 'system', content: 'Be terse.' },
-        { role: 'user', content: 'hi' },
-      ],
-    }, { openAiOAuth: true });
+    const prior = process.env.CLODEX_SERVICE_TIER;
+    try {
+      delete process.env.CLODEX_SERVICE_TIER;
+      const params = translateOpenAiRequest({
+        model: 'gpt-test',
+        max_tokens: 100,
+        messages: [
+          { role: 'system', content: 'Be terse.' },
+          { role: 'user', content: 'hi' },
+        ],
+      }, { openAiOAuth: true });
 
-    expect(params.instructions).toBeUndefined();
-    expect(params.maxOutputTokens).toBeUndefined();
-    expect(params.providerOptions).toEqual({
-      openai: {
-        store: false,
-        include: ['reasoning.encrypted_content'],
-        instructions: 'Be terse.',
-      },
-    });
+      expect(params.instructions).toBeUndefined();
+      expect(params.maxOutputTokens).toBeUndefined();
+      expect(params.providerOptions).toEqual({
+        openai: {
+          store: false,
+          include: ['reasoning.encrypted_content'],
+          instructions: 'Be terse.',
+        },
+      });
+    } finally {
+      if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
+      else process.env.CLODEX_SERVICE_TIER = prior;
+    }
+  });
+
+  it('applies CLODEX_SERVICE_TIER on the OAuth route of the OpenAI-format endpoint too', async () => {
+    const prior = process.env.CLODEX_SERVICE_TIER;
+    try {
+      process.env.CLODEX_SERVICE_TIER = 'fast';
+      const oauth = translateOpenAiRequest({
+        model: 'gpt-test',
+        messages: [{ role: 'user', content: 'hi' }],
+      }, { openAiOAuth: true });
+      expect((oauth.providerOptions?.openai as Record<string, unknown>)?.serviceTier).toBe('priority');
+    } finally {
+      if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
+      else process.env.CLODEX_SERVICE_TIER = prior;
+    }
   });
 
   it('defaults OAuth instructions when the request has no system prompt', async () => {
@@ -218,5 +241,107 @@ describe('generateOpenAiResponse with forceStream', () => {
     expect(streamText).not.toHaveBeenCalled();
     expect(response.choices[0].message.content).toBe('plain');
     expect(response.usage).toEqual({ prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
+  });
+});
+
+describe('OpenAI-format service tier omission warning', () => {
+  it('surfaces the structured tier omission warning on non-streaming responses, once per process', async () => {
+    const prior = process.env.CLODEX_SERVICE_TIER;
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      process.env.CLODEX_SERVICE_TIER = 'fast';
+      resetServiceTierWarningForTests();
+      vi.mocked(generateText).mockResolvedValue({
+        text: 'plain',
+        toolCalls: [],
+        finishReason: 'stop',
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+        warnings: [{ type: 'unsupported', feature: 'serviceTier' }],
+      } as never);
+      const params = translateOpenAiRequest({
+        model: 'gpt-test',
+        messages: [{ role: 'user', content: 'hi' }],
+      }, { openAiOAuth: true });
+
+      await generateOpenAiResponse({} as never, params, 'gpt-test');
+      await generateOpenAiResponse({} as never, params, 'gpt-test');
+
+      expect(error).toHaveBeenCalledOnce();
+      expect(String(error.mock.calls[0]![0])).toContain('requested service tier was not sent');
+    } finally {
+      if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
+      else process.env.CLODEX_SERVICE_TIER = prior;
+      resetServiceTierWarningForTests();
+      error.mockRestore();
+      vi.mocked(generateText).mockReset();
+    }
+  });
+
+  it('surfaces the structured tier omission warning on force-stream responses, once per process', async () => {
+    const prior = process.env.CLODEX_SERVICE_TIER;
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      process.env.CLODEX_SERVICE_TIER = 'fast';
+      resetServiceTierWarningForTests();
+      async function* stream() {
+        yield { type: 'finish', finishReason: 'stop' };
+      }
+      vi.mocked(streamText).mockReturnValue({ stream: stream() } as never);
+      const params = translateOpenAiRequest({
+        model: 'gpt-test',
+        messages: [{ role: 'user', content: 'hi' }],
+      }, { openAiOAuth: true });
+
+      await generateOpenAiResponse({} as never, params, 'gpt-test', { forceStream: true });
+
+      const onStepFinish = vi.mocked(streamText).mock.calls[0]![0].onStepFinish;
+      expect(onStepFinish).toBeTypeOf('function');
+      const step = { warnings: [{ type: 'unsupported', feature: 'serviceTier' }] } as never;
+      onStepFinish?.(step);
+      onStepFinish?.(step);
+
+      expect(error).toHaveBeenCalledOnce();
+      expect(String(error.mock.calls[0]![0])).toContain('requested service tier was not sent');
+    } finally {
+      if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
+      else process.env.CLODEX_SERVICE_TIER = prior;
+      resetServiceTierWarningForTests();
+      error.mockRestore();
+      vi.mocked(streamText).mockReset();
+    }
+  });
+
+  it('surfaces the structured tier omission warning on streaming responses, once per process', async () => {
+    const prior = process.env.CLODEX_SERVICE_TIER;
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      process.env.CLODEX_SERVICE_TIER = 'fast';
+      resetServiceTierWarningForTests();
+      async function* stream() {
+        yield { type: 'finish', finishReason: 'stop' };
+      }
+      vi.mocked(streamText).mockReturnValue({ stream: stream() } as never);
+      const params = translateOpenAiRequest({
+        model: 'gpt-test',
+        messages: [{ role: 'user', content: 'hi' }],
+      }, { openAiOAuth: true });
+
+      await streamOpenAiResponse({} as never, params, 'gpt-test', () => {});
+
+      const onStepFinish = vi.mocked(streamText).mock.calls[0]![0].onStepFinish;
+      expect(onStepFinish).toBeTypeOf('function');
+      const step = { warnings: [{ type: 'unsupported', feature: 'serviceTier' }] } as never;
+      onStepFinish?.(step);
+      onStepFinish?.(step);
+
+      expect(error).toHaveBeenCalledOnce();
+      expect(String(error.mock.calls[0]![0])).toContain('requested service tier was not sent');
+    } finally {
+      if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
+      else process.env.CLODEX_SERVICE_TIER = prior;
+      resetServiceTierWarningForTests();
+      error.mockRestore();
+      vi.mocked(streamText).mockReset();
+    }
   });
 });

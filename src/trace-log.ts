@@ -189,6 +189,13 @@ export interface InferenceRequestLogEntry {
   modelId: string;
   provider: string;
   effort?: string;
+  /**
+   * Service tier clodex resolved and requested for this route before dispatch.
+   * This records intent, not proof of SDK serialization or wire transmission;
+   * the provider SDK may report the requested tier as unsupported and omit it.
+   * Absence means clodex did not request a tier for this route.
+   */
+  serviceTier?: string;
   route: 'passthrough' | 'translated';
   stream?: boolean;
   requestPreview?: string;
@@ -413,6 +420,7 @@ export function writeInferenceRequestLog(
     ...(claudeSessionId ? { claudeSessionId } : {}),
     modelId: compactLogValue(entry.modelId),
     ...(entry.effort ? { effort: compactLogValue(entry.effort, 100) } : {}),
+    ...(entry.serviceTier ? { serviceTier: compactLogValue(entry.serviceTier, 40) } : {}),
     provider: compactLogValue(entry.provider, 200),
     route: entry.route,
     ...(entry.stream !== undefined ? { stream: entry.stream } : {}),

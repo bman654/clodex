@@ -21,6 +21,10 @@
 // skip the resolver and /model picker patches).
 
 import { isReservedModelAlias } from './model-aliases.js';
+import {
+  CHILD_NETWORK_ENV_VARS,
+  NETWORK_ENV_CONTRACT_VAR,
+} from './network-env.js';
 
 /**
  * Version of the transform set below — NOT of the patch-state manifest, whose
@@ -31,9 +35,10 @@ import { isReservedModelAlias } from './model-aliases.js';
  * removing a PATCH site, or changing a site's regex, replacement, or ordering.
  * Without a bump, users whose favorites are unchanged keep the OLD patch forever
  * and never receive the new transforms, silently. `tests/patcher.test.ts` pins a
- * hash of this file to force that decision to be made rather than forgotten.
+ * hash of the transform inputs to force that decision to be made rather than
+ * forgotten.
  */
-export const PATCH_TRANSFORMS_VERSION = 3;
+export const PATCH_TRANSFORMS_VERSION = 5;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -102,7 +107,7 @@ export function formatPatchSiteLine(result: PatchSiteResult): string {
 }
 
 /**
- * Apply the clodex patch sites (PATCH 1–9) to the Claude Code source.
+ * Apply the clodex patch sites (PATCH 1–10) to the Claude Code source.
  * Pure: source string in → patched string + per-site results out. Throws
  * `PatchApplyError` when the config is invalid or a required site fails —
  * nothing should be written to the binary in that case.
@@ -539,6 +544,77 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         { required: false },
       );
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 10 — child command network environment.
+  //
+  // The wrapper routes the parent client through a local bridge and records the
+  // external and injected values. In the shared child-environment builder,
+  // revert a key only while its live value still equals the Clodex injection.
+  // Settings-level overrides therefore remain authoritative, and the builder's
+  // existing filtering continues against the resulting copy.
+  // ---------------------------------------------------------------------------
+  {
+    const patchName = 'PATCH 10: child network environment';
+    const marker = '/*ccpatch:child-network-env*/';
+    const contractVar = q(NETWORK_ENV_CONTRACT_VAR);
+    const networkVars = JSON.stringify(CHILD_NETWORK_ENV_VARS);
+    const requiredBodyLiterals = [
+      '{...process.env',
+      'CLAUDE_CODE_REMOTE',
+      'CLAUDE_CODE_OAUTH_TOKEN',
+      'CLAUDE_CODE_SUBSCRIPTION_TYPE',
+      'CLAUDE_BG_PTY_AUTH',
+      '"OTEL_"',
+      'CLAUDE_CODE_OTEL_DIAG_STDERR',
+    ];
+    applyOnce(
+      patchName,
+      /(function [\w$]+\(\)\{)(let [\w$]+=[\w$]+\(\),[\w$]+=Object\.keys\([\w$]+\)\.length>0,[\w$]+=Object\.keys\([\w$]+\)\.length>0,[\w$]+=[\w$]+\(process\.env\.CLAUDE_CODE_REMOTE\)\?(?:(?!\}\s*function )[\s\S])*?for\(let [\w$]+ of [\w$]+\)delete [\w$]+\[[\w$]+\],delete [\w$]+\[`INPUT_\$\{[\w$]+\}`\];return [\w$]+)(\})/,
+      (_match, head, body, tail) => {
+        const targetIsValid = requiredBodyLiterals.every(literal => body!.includes(literal))
+          && !/\bfunction\s*[\w$]*\(/.test(body!);
+        if (!targetIsValid) {
+          log('FAIL', patchName, 'target validation failed');
+          fail('clodex patch: child network environment target validation failed');
+        }
+        const restoredBody = body!.replace(/process\.env/g, '_clodexChildEnv');
+        const restore = marker
+          + 'let _clodexChildEnv=process.env,_clodexNetworkRaw=_clodexChildEnv[' + contractVar + '];'
+          + 'if(_clodexNetworkRaw!==void 0){_clodexChildEnv={..._clodexChildEnv};'
+          + 'delete _clodexChildEnv[' + contractVar + '];try{'
+          + 'let _clodexNetwork=JSON.parse(_clodexNetworkRaw);'
+          + 'if(_clodexNetwork&&typeof _clodexNetwork==="object"&&!Array.isArray(_clodexNetwork)'
+          + '&&_clodexNetwork.version===1&&_clodexNetwork.original'
+          + '&&typeof _clodexNetwork.original==="object"&&!Array.isArray(_clodexNetwork.original)'
+          + '&&_clodexNetwork.injected&&typeof _clodexNetwork.injected==="object"'
+          + '&&!Array.isArray(_clodexNetwork.injected)'
+          + '&&Object.keys(_clodexNetwork.original).every(_clodexKey=>'
+          + networkVars + '.includes(_clodexKey)'
+          + '&&(typeof _clodexNetwork.original[_clodexKey]==="string"'
+          + '||_clodexNetwork.original[_clodexKey]===null)'
+          + '&&Object.prototype.hasOwnProperty.call(_clodexNetwork.injected,_clodexKey))'
+          + '&&Object.keys(_clodexNetwork.injected).every(_clodexKey=>'
+          + networkVars + '.includes(_clodexKey)'
+          + '&&(typeof _clodexNetwork.injected[_clodexKey]==="string"'
+          + '||_clodexNetwork.injected[_clodexKey]===null)'
+          + '&&Object.prototype.hasOwnProperty.call(_clodexNetwork.original,_clodexKey)))'
+          + 'for(let _clodexKey of ' + networkVars + '){'
+          + 'if(Object.prototype.hasOwnProperty.call(_clodexNetwork.original,_clodexKey)'
+          + '&&Object.prototype.hasOwnProperty.call(_clodexNetwork.injected,_clodexKey)){'
+          + 'let _clodexOriginal=_clodexNetwork.original[_clodexKey],'
+          + '_clodexInjected=_clodexNetwork.injected[_clodexKey],'
+          + '_clodexCurrent=_clodexChildEnv[_clodexKey]===void 0?null:_clodexChildEnv[_clodexKey];'
+          + 'if((typeof _clodexOriginal==="string"||_clodexOriginal===null)'
+          + '&&(typeof _clodexInjected==="string"||_clodexInjected===null)'
+          + '&&_clodexCurrent===_clodexInjected){if(_clodexOriginal===null)'
+          + 'delete _clodexChildEnv[_clodexKey];else '
+          + '_clodexChildEnv[_clodexKey]=_clodexOriginal}}}}catch(_clodexError){}}';
+        return head! + restore + restoredBody + tail!;
+      },
+      { marker, required: true },
+    );
   }
 
   return { content: js, results: report };

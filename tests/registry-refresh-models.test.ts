@@ -187,6 +187,46 @@ describe('registry/refresh-models', () => {
       expect(mockRegistry.providers[0]?.modelsCache?.models[0]?.id).toBe('gpt-5.6-sol');
     });
 
+    it('retains a cached catalog but rejects a credential refused by both OAuth endpoints', async () => {
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+          modelsCache: {
+            models: [{
+              id: 'cached-model',
+              name: 'Cached model',
+              upstreamModelId: 'cached-model',
+              modelFormat: 'openai',
+            }],
+            fetchedAt: Date.now(),
+          },
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+      vi.mocked(global.fetch).mockResolvedValue({
+        ok: false,
+        status: 401,
+        text: async () => 'unauthorized',
+      } as Response);
+
+      const result = await refreshProviderModels('openai-oauth', 'rejected-token', mockRegistry);
+
+      expect(result).toMatchObject({
+        ok: false,
+        modelCount: 1,
+        reason: expect.stringContaining('OAuth credential was rejected'),
+      });
+      expect(io.saveRegistry).not.toHaveBeenCalled();
+      expect(mockRegistry.providers[0]?.modelsCache?.models[0]?.id).toBe('cached-model');
+    });
+
     it('captures use_responses_lite / prefer_websockets flags from the live Codex endpoint', async () => {
       const mockRegistry: ProviderRegistry = {
         version: 1,

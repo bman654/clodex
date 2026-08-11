@@ -148,6 +148,36 @@ describe('credential cleanup lifecycle', () => {
     expect(journalState.pending.size).toBe(0);
   });
 
+  it('never deletes a provider default parked behind a selected OAuth slot', async () => {
+    const defaultRef = helperRef('oauth:provider:openai-oauth');
+    const selectedRef = helperRef('oauth:provider:openai-oauth:account:work');
+    registryState.current = {
+      schemaVersion: 5,
+      providers: [{
+        id: 'openai-oauth',
+        templateId: 'openai',
+        name: 'OpenAI (ChatGPT)',
+        enabled: true,
+        authType: 'oauth',
+        authRef: selectedRef,
+        defaultAuthRef: defaultRef,
+        activeAuthAccount: 'work',
+        authAccounts: {
+          work: { authRef: selectedRef, addedAt: '2026-08-09T00:00:00.000Z' },
+        },
+        api: {},
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    };
+    journalState.pending.add(defaultRef);
+
+    const result = await reconcilePendingCredentialDeletes();
+
+    expect(deleteProviderCredential).not.toHaveBeenCalled();
+    expect(result.pending).toEqual([]);
+    expect(journalState.pending.size).toBe(0);
+  });
+
   it('does not cancel a removal marker queued after an active-reference decision', async () => {
     const authRef = helperRef('provider:removed-after-check');
     registryState.current.providers.push({
