@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +9,7 @@ import * as tls from 'node:tls';
 import { EventEmitter, once } from 'node:events';
 import { PassThrough } from 'node:stream';
 import { gzipSync } from 'node:zlib';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { ensureHttpProxyCaBundle, ensureHttpProxyCertificates } from '../src/http-proxy/ca.js';
 import { shouldInterceptConnect, startHttpProxy } from '../src/http-proxy/server.js';
 
@@ -202,6 +203,17 @@ afterAll(() => {
 });
 
 describe('selective HTTP proxy', () => {
+  let restoreAmbientProxyEnv: (() => void) | undefined;
+
+  beforeEach(() => {
+    restoreAmbientProxyEnv = replaceOutboundProxyEnv();
+  });
+
+  afterEach(() => {
+    restoreAmbientProxyEnv?.();
+    restoreAmbientProxyEnv = undefined;
+  });
+
   it('preserves an existing custom CA in the child trust bundle', () => {
     const certificates = ensureHttpProxyCertificates();
     const extraPath = join(testHome, 'corporate-ca.pem');
@@ -565,6 +577,7 @@ describe('selective HTTP proxy', () => {
     await new Promise<void>(resolve => reservation.close(() => resolve()));
     const restoreProxyEnv = replaceOutboundProxyEnv(`http://127.0.0.1:${proxyPort}`);
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const connect = vi.spyOn(HttpsProxyAgent.prototype, 'connect');
     let proxy: Awaited<ReturnType<typeof startHttpProxy>> | undefined;
 
     try {
@@ -583,14 +596,34 @@ describe('selective HTTP proxy', () => {
 
       expect(response).toContain('200 OK');
       expect(originRequests).toBe(1);
+      expect(connect).not.toHaveBeenCalled();
       expect(error).toHaveBeenCalledWith(
         'clodex: HTTP(S)_PROXY points at this proxy; sending Anthropic passthrough direct',
       );
     } finally {
       restoreProxyEnv();
+      connect.mockRestore();
       error.mockRestore();
       await proxy?.close();
       await new Promise<void>(resolve => origin.close(() => resolve()));
+    }
+  });
+
+  it('destroys the raw passthrough proxy agent when the bridge closes', async () => {
+    const restoreProxyEnv = replaceOutboundProxyEnv('http://127.0.0.1:9');
+    const destroy = vi.spyOn(HttpsProxyAgent.prototype, 'destroy');
+    let proxy: Awaited<ReturnType<typeof startHttpProxy>> | undefined;
+
+    try {
+      proxy = await startHttpProxy({ routes: [] });
+      await proxy.close();
+      proxy = undefined;
+
+      expect(destroy).toHaveBeenCalledOnce();
+    } finally {
+      await proxy?.close();
+      destroy.mockRestore();
+      restoreProxyEnv();
     }
   });
 
@@ -753,7 +786,6 @@ describe('selective HTTP proxy', () => {
     });
     const unavailablePort = await listen(unavailableOrigin);
     await new Promise<void>(resolve => unavailableOrigin.close(() => resolve()));
-    const restoreProxyEnv = replaceOutboundProxyEnv();
     let proxy: Awaited<ReturnType<typeof startHttpProxy>> | undefined;
 
     try {
@@ -800,7 +832,6 @@ describe('selective HTTP proxy', () => {
         statusCode: 502,
       }));
     } finally {
-      restoreProxyEnv();
       await proxy?.close();
     }
   }, 20_000);

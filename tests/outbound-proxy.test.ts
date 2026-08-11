@@ -5,6 +5,7 @@ import {
   noProxyBypasses,
   outboundHttpProxyAgent,
   outboundProxyUrlForTarget,
+  outboundWsProxyAgent,
   proxyUrlTargetsListener,
 } from '../src/outbound-proxy.js';
 
@@ -96,6 +97,16 @@ describe('outboundHttpProxyAgent', () => {
       error.mockRestore();
     }
   });
+
+  it('builds the WebSocket transport with the same keep-alive proxy agent', () => {
+    const agent = outboundWsProxyAgent('wss://api.example.test/responses', {
+      HTTPS_PROXY: PROXY,
+    });
+
+    expect(agent).toBeDefined();
+    expect(agent?.keepAlive).toBe(true);
+    agent?.destroy();
+  });
 });
 
 describe('proxyUrlTargetsListener', () => {
@@ -103,6 +114,18 @@ describe('proxyUrlTargetsListener', () => {
     expect(proxyUrlTargetsListener('http://127.0.0.1:17645', '127.0.0.1', 17645)).toBe(true);
     expect(proxyUrlTargetsListener('http://localhost:17645', '127.0.0.1', 17645)).toBe(true);
     expect(proxyUrlTargetsListener('http://127.0.0.2:17645', '0.0.0.0', 17645)).toBe(true);
+    expect(proxyUrlTargetsListener(
+      'http://192.0.2.10:17645',
+      '0.0.0.0',
+      17645,
+      new Set(['192.0.2.10']),
+    )).toBe(true);
+    expect(proxyUrlTargetsListener(
+      'http://192.0.2.11:17645',
+      '0.0.0.0',
+      17645,
+      new Set(['192.0.2.10']),
+    )).toBe(false);
     expect(proxyUrlTargetsListener('http://127.0.0.1:17646', '127.0.0.1', 17645)).toBe(false);
     expect(proxyUrlTargetsListener('http://proxy.example.test:17645', '127.0.0.1', 17645)).toBe(false);
     expect(proxyUrlTargetsListener('not a URL', '127.0.0.1', 17645)).toBe(false);

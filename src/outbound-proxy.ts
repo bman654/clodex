@@ -18,6 +18,8 @@
 // creates an agent, preventing a CONNECT loop through the same MITM.
 
 import type { Agent as HttpAgent } from 'node:http';
+import { networkInterfaces } from 'node:os';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 export function hasOutboundProxyEnv(env: NodeJS.ProcessEnv = process.env): boolean {
   return Boolean(
@@ -72,6 +74,10 @@ export function proxyUrlTargetsListener(
   proxyUrl: string,
   listenerHost: string,
   listenerPort: number,
+  localAddresses: ReadonlySet<string> = new Set(
+    Object.values(networkInterfaces()).flatMap(entries =>
+      (entries ?? []).map(entry => entry.address.toLowerCase())),
+  ),
 ): boolean {
   let parsed: URL;
   try {
@@ -93,7 +99,11 @@ export function proxyUrlTargetsListener(
     || host === '::1'
     || /^127(?:\.\d{1,3}){3}$/.test(host);
   const isWildcard = (host: string): boolean => host === '0.0.0.0' || host === '::';
-  return isLoopback(proxyHost) && (isLoopback(boundHost) || isWildcard(boundHost));
+  if (isLoopback(proxyHost) && (isLoopback(boundHost) || isWildcard(boundHost))) return true;
+  return isWildcard(boundHost) && (
+    isWildcard(proxyHost)
+    || localAddresses.has(proxyHost)
+  );
 }
 
 let dispatcherInstalled = false;
@@ -126,10 +136,10 @@ export async function installOutboundProxyDispatcher(): Promise<boolean> {
 }
 
 /** CONNECT-tunnel agent for a target URL, or undefined when no proxy applies. */
-export async function outboundHttpProxyAgent(
+export function outboundHttpProxyAgent(
   targetUrl: string,
   env: NodeJS.ProcessEnv = process.env,
-): Promise<import('https-proxy-agent').HttpsProxyAgent<string> | undefined> {
+): HttpsProxyAgent<string> | undefined {
   const proxyUrl = outboundProxyUrlForTarget(targetUrl, env);
   if (!proxyUrl) return undefined;
   try {
@@ -137,7 +147,6 @@ export async function outboundHttpProxyAgent(
     if (!parsedProxy.hostname || !['http:', 'https:'].includes(parsedProxy.protocol)) {
       throw new TypeError('Invalid proxy URL');
     }
-    const { HttpsProxyAgent } = await import('https-proxy-agent');
     return new HttpsProxyAgent(parsedProxy, { keepAlive: true });
   } catch (err) {
     console.error(
@@ -149,6 +158,9 @@ export async function outboundHttpProxyAgent(
 }
 
 /** CONNECT-tunnel agent for the `ws` OAuth WebSocket transport. */
-export async function outboundWsProxyAgent(wsUrl: string): Promise<HttpAgent | undefined> {
-  return outboundHttpProxyAgent(wsUrl);
+export function outboundWsProxyAgent(
+  wsUrl: string,
+  env: NodeJS.ProcessEnv = process.env,
+): HttpAgent | undefined {
+  return outboundHttpProxyAgent(wsUrl, env);
 }

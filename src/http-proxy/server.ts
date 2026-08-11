@@ -732,7 +732,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   }
   const anthropicOrigin = new URL(options.anthropicOrigin ?? 'https://api.anthropic.com');
   const anthropicProxyUrl = outboundProxyUrlForTarget(anthropicOrigin.href);
-  let anthropicAgent: Awaited<ReturnType<typeof outboundHttpProxyAgent>>;
+  let anthropicAgent: ReturnType<typeof outboundHttpProxyAgent>;
   let adapter: ProxyHandle | null = options.adapterHandle ?? null;
   if (options.routes.length > 0) {
     adapter ??= await startProxyCatalog(
@@ -1004,7 +1004,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       'clodex: HTTP(S)_PROXY points at this proxy; sending Anthropic passthrough direct',
     );
   } else {
-    anthropicAgent = await outboundHttpProxyAgent(anthropicOrigin.href);
+    anthropicAgent = outboundHttpProxyAgent(anthropicOrigin.href);
   }
 
   return {
