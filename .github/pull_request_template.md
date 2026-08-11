@@ -28,7 +28,9 @@
 - [ ] `pnpm typecheck && pnpm test && pnpm build`
 - [ ] Feature-deletion mutation run (full file, not `-t`) — the intended test fails without the fix
 - [ ] Reachability stated above
-- [ ] Manual smoke, if a launch path changed (both an OpenAI and an Anthropic model)
+- [ ] Manual smoke, if a launch path changed — Anthropic passthrough (`--model haiku`) **plus**
+      every other provider you have credentials for that the change could affect. Name any
+      provider you could not test.
 - [ ] Commit summary line reads as a release note for a non-technical user
 
 ## Failure and rollback behavior

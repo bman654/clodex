@@ -108,11 +108,27 @@ Ordered by how often each would have caught a real finding.
 11. **Standard gate:** `pnpm typecheck && pnpm test && pnpm build`. Necessary, never sufficient.
 
 **When a change touches a launch path, smoke test the product, not just the path you changed.**
-Launch real Claude Code through clodex on the default proxy mode against *both* an OpenAI model
-(translated) and an Anthropic model (passthrough). A shared-code change — error formatting, status
-mapping — can be fine on one and broken on the other. Add an `--endpoint` leg when the change
-touches `buildChildEnv` or the gateway. Curl against
-a running server is a fallback, only for wire shapes the client will not produce.
+Launch real Claude Code through clodex on the default proxy mode and confirm it answers:
+
+```bash
+# Anthropic passthrough — always run this leg; it needs only your normal Claude Code auth.
+clodex claude -- --model haiku -p 'Reply with exactly: HAIKU-OK'
+
+# Translated leg — one model per provider you have credentials for, using your own alias.
+clodex claude -- --model <your-openai-alias> -p 'Reply with exactly: MODEL-OK'
+```
+
+**Run the Anthropic leg plus every other provider you have access to that the change could
+affect.** A shared-code change — error formatting, status mapping, usage accounting — can be
+perfectly fine on the translated path and broken on passthrough, or fine on one provider and broken
+on the next. Passthrough is the leg people forget, because it looks like the path clodex "doesn't
+touch."
+
+Add an `--endpoint` leg when the change touches `buildChildEnv` or the gateway. If you lack
+credentials for a provider your change plausibly affects, say so in the PR rather than leaving it
+unmentioned — an untested provider is a known gap, not a silent one.
+
+Curl against a running server is a fallback, only for wire shapes the client will not produce.
 
 **A change made after review earns a new review**; a redesign earns a fresh one, not a re-read. And
 "not a regression versus `main`" does not excuse shipping a broken guarantee — if the change exists
