@@ -21,6 +21,7 @@ class FakeWebSocket extends EventEmitter {
 
 vi.mock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
 
+import { installParentNoticeSink } from '../src/parent-notice.js';
 import {
   createResponsesWebSocketFetch,
   resetReasoningGapWarningsForTests,
@@ -2460,6 +2461,34 @@ describe('createResponsesWebSocketFetch', () => {
       });
   });
 
+  it('routes the reasoning-gap warning through the channel launchClaude leaves open', async () => {
+    // `clodex claude` mutes process.stderr for as long as Claude Code owns the
+    // terminal, so a warning written straight to it is never seen. Installing the
+    // sink is what launchClaude does; the warning has to arrive there instead.
+    const notices: string[] = [];
+    const release = installParentNoticeSink(line => notices.push(line));
+    try {
+      const { stderr } = await runReasoningMismatch({
+        accountId: 'acct-reasoning-gap-muted',
+        responseId: 'resp_gap_muted',
+        storedReasoning: {
+          type: 'reasoning', id: 'rs_1', encrypted_content: 'enc_same',
+          content: [{ type: 'reasoning_text', text: 'private' }], summary: GAP_SUMMARY,
+        },
+        echoedReasoning: {
+          type: 'reasoning', encrypted_content: 'enc_same', summary: GAP_SUMMARY,
+        },
+      });
+
+      expect(notices.join('')).toContain('identical encrypted_content');
+      expect(notices.every(line => line.endsWith('\n'))).toBe(true);
+      // Nothing may go to the muted write while the sink is installed.
+      expect(stderr.join('')).toBe('');
+    } finally {
+      release();
+    }
+  });
+
   it('stays silent when the reasoning items are genuinely different reasoning', async () => {
     const { stderr, diagnostics } = await runReasoningMismatch({
       accountId: 'acct-reasoning-divergent',
@@ -2598,6 +2627,28 @@ describe('createResponsesWebSocketFetch', () => {
     expect(decision.decision).toBe('history_mismatch_new_head');
     expect(firstHeadMismatch(diagnostics))
       .toMatchObject({ toolArgumentNormalizationGap: { tool: 'Grep', equalAfterStrip: true } });
+  });
+
+  it('routes the tool-argument canary through the channel launchClaude leaves open', async () => {
+    // The regression detector for issue #84 is worthless if it only prints on a
+    // path `clodex claude` never takes: with the child holding the terminal, the
+    // warning must arrive on the notice channel, not the muted stderr.
+    const notices: string[] = [];
+    const release = installParentNoticeSink(line => notices.push(line));
+    try {
+      const { stderr } = await runToolArgumentMismatch({
+        accountId: 'acct-tool-gap-muted',
+        responseId: 'resp_tool_gap_muted',
+        ...FORKED_STRIP,
+      });
+
+      expect(notices.join('')).toContain('filler-strip rule is applied');
+      expect(notices.join('')).toContain('Grep');
+      expect(notices.every(line => line.endsWith('\n'))).toBe(true);
+      expect(stderr.join('')).toBe('');
+    } finally {
+      release();
+    }
   });
 
   it('reports a repeated tool-argument gap once rather than on every turn', async () => {

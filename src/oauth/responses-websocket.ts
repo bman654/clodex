@@ -12,6 +12,7 @@ import type { FetchFunction } from '@ai-sdk/provider-utils';
 import type { RawData, WebSocket as WsWebSocket } from 'ws';
 import { CODEX_RESPONSES_WEBSOCKETS_BETA } from '../constants.js';
 import { outboundWsProxyAgent } from '../outbound-proxy.js';
+import { emitParentNotice } from '../parent-notice.js';
 import { anthropicErrorType, clampRetryAfterSeconds, frameStatusCode } from '../upstream-error.js';
 import { sanitizeToolInput } from '../tool-input-sanitize.js';
 
@@ -497,12 +498,13 @@ function warnReasoningNormalizationGap(fields: string[], log?: (message: string)
   if (warnedReasoningGaps.has(signature)) return;
   if (warnedReasoningGaps.size >= MAX_REASONING_GAP_WARNINGS) return;
   warnedReasoningGaps.add(signature);
-  try {
-    process.stderr.write(`${message}\n`);
-    if (warnedReasoningGaps.size === MAX_REASONING_GAP_WARNINGS) {
-      process.stderr.write('clodex: warning: further reasoning-normalization warnings suppressed.\n');
-    }
-  } catch { /* a warning must never break a request */ }
+  // emitParentNotice, not a bare process.stderr.write: while `clodex claude` has
+  // Claude Code running, launch.ts has the parent's stderr muted to protect the
+  // child's TUI, and a direct write here would never reach the terminal.
+  emitParentNotice(message);
+  if (warnedReasoningGaps.size === MAX_REASONING_GAP_WARNINGS) {
+    emitParentNotice('clodex: warning: further reasoning-normalization warnings suppressed.');
+  }
 }
 
 /** Test seam: the warning cap is process-wide and would leak between cases. */
@@ -611,12 +613,13 @@ function warnToolArgumentNormalizationGap(
   if (warnedToolArgumentGaps.has(signature)) return;
   if (warnedToolArgumentGaps.size >= MAX_TOOL_ARGUMENT_GAP_WARNINGS) return;
   warnedToolArgumentGaps.add(signature);
-  try {
-    process.stderr.write(`${message}\n`);
-    if (warnedToolArgumentGaps.size === MAX_TOOL_ARGUMENT_GAP_WARNINGS) {
-      process.stderr.write('clodex: warning: further tool-argument normalization warnings suppressed.\n');
-    }
-  } catch { /* a warning must never break a request */ }
+  // emitParentNotice, not a bare process.stderr.write: while `clodex claude` has
+  // Claude Code running, launch.ts has the parent's stderr muted to protect the
+  // child's TUI, and a direct write here would never reach the terminal.
+  emitParentNotice(message);
+  if (warnedToolArgumentGaps.size === MAX_TOOL_ARGUMENT_GAP_WARNINGS) {
+    emitParentNotice('clodex: warning: further tool-argument normalization warnings suppressed.');
+  }
 }
 
 /** Test seam: the warning cap is process-wide and would leak between cases. */

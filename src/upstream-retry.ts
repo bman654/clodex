@@ -1,3 +1,5 @@
+import { emitParentNotice } from './parent-notice.js';
+
 export const UPSTREAM_MAX_RETRIES_ENV = 'CLODEX_UPSTREAM_MAX_RETRIES';
 export const MAX_UPSTREAM_MAX_RETRIES = 5;
 const reportedValues = new Set<string>();
@@ -19,7 +21,10 @@ function reportOnce(raw: string, message: string, warn: (message: string) => voi
  */
 export function upstreamMaxRetries(
   env: NodeJS.ProcessEnv = process.env,
-  warn: (message: string) => void = message => console.error(`clodex: ${message}`),
+  // emitParentNotice rather than console.error: this fires from a request while
+  // `clodex claude` has the parent's stdout/stderr muted for Claude Code's TUI,
+  // and console.error resolves the muted write at call time.
+  warn: (message: string) => void = message => emitParentNotice(`clodex: ${message}`),
 ): number | undefined {
   const raw = env[UPSTREAM_MAX_RETRIES_ENV]?.trim();
   if (raw === undefined || raw === '') return undefined;

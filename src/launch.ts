@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { getAppPathOverride } from './config.js';
 import { findBinaryOnPath } from './binary-lookup.js';
+import { installParentNoticeSink } from './parent-notice.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -119,7 +120,25 @@ export function launchClaude(
     process.stdout.write = muteWrite as any;
     process.stderr.write = muteWrite as any;
 
+    // The mute protects Claude Code's TUI from stray parent writes, but clodex's
+    // gateway/MITM runs in THIS process and keeps producing the few bounded
+    // diagnostics that are documented as reaching stderr. Give exactly those an
+    // explicit way through: `emitParentNotice` call sites route here, everything
+    // else stays muted. The debug-file copy is preserved so a traced launch
+    // still records the line as `[parent] ...`.
+    const releaseNoticeSink = installParentNoticeSink((line) => {
+      if (debugLogPath) {
+        try {
+          appendFileSync(debugLogPath, `[parent] ${line}`);
+        } catch {
+          // ignore
+        }
+      }
+      originalStderrWrite.call(process.stderr, line);
+    });
+
     const restore = () => {
+      releaseNoticeSink();
       process.stdout.write = originalStdoutWrite;
       process.stderr.write = originalStderrWrite;
     };

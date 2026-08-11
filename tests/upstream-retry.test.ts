@@ -4,6 +4,7 @@ import {
   UPSTREAM_MAX_RETRIES_ENV,
   upstreamMaxRetries,
 } from '../src/upstream-retry.js';
+import { installParentNoticeSink } from '../src/parent-notice.js';
 
 describe('upstreamMaxRetries', () => {
   it('leaves the SDK default in control when the setting is absent', () => {
@@ -56,17 +57,40 @@ describe('upstreamMaxRetries', () => {
   });
 
   it('warns on stderr when no request logger is available', () => {
-    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stderr: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => { stderr.push(String(chunk)); return true; });
 
     try {
       expect(upstreamMaxRetries({ [UPSTREAM_MAX_RETRIES_ENV]: '6' }))
         .toBe(MAX_UPSTREAM_MAX_RETRIES);
-      expect(stderr).toHaveBeenCalledWith(
+      expect(stderr.join('')).toBe(
         `clodex: clamping ${UPSTREAM_MAX_RETRIES_ENV}=6 to ${MAX_UPSTREAM_MAX_RETRIES} `
-        + '(higher values exceed the 120s streaming idle budget)',
+        + '(higher values exceed the 120s streaming idle budget)\n',
       );
     } finally {
-      stderr.mockRestore();
+      spy.mockRestore();
+    }
+  });
+
+  it('reaches the terminal even while Claude Code owns the parent stdio', () => {
+    // The clamp notice fires from a live request, which on `clodex claude` means
+    // the parent's stdout/stderr are muted for the child's TUI. console.error
+    // resolved that muted write; the notice channel is what gets past it.
+    const stderr: string[] = [];
+    const spy = vi.spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => { stderr.push(String(chunk)); return true; });
+    const notices: string[] = [];
+    const release = installParentNoticeSink(line => notices.push(line));
+
+    try {
+      expect(upstreamMaxRetries({ [UPSTREAM_MAX_RETRIES_ENV]: '7' }))
+        .toBe(MAX_UPSTREAM_MAX_RETRIES);
+      expect(notices.join('')).toContain(`clamping ${UPSTREAM_MAX_RETRIES_ENV}=7`);
+      expect(stderr.join('')).toBe('');
+    } finally {
+      release();
+      spy.mockRestore();
     }
   });
 });
