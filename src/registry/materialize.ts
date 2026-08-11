@@ -8,6 +8,7 @@ import { normalizeGoogleDisplayName, normalizeGoogleModelId } from './google-mod
 import { findModelsDevModel } from './models-dev.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js';
 import { isValidProviderId } from './validate.js';
+import { resolveProviderTemplate } from './resolve-template.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 import { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
 import {
@@ -47,17 +48,48 @@ export interface MaterializeOptions {
   agent?: CompatibilityAgent;
 }
 
+/**
+ * Recognize the retained OpenCode Go built-in by its canonical template
+ * relationship rather than by one mutable field.
+ *
+ * The registry file is data, not an authority: `parseProvider` accepts `id`,
+ * `templateId`, `api.npm`, and `api.url` as written, and nothing couples `id`
+ * to `templateId`. So a persisted or imported record can drift its `id` while
+ * keeping `templateId: 'opencode-go'` — and it keeps the OpenCode credential,
+ * because `authRef` still names the keyring slot the user filled in for
+ * OpenCode Go. Matching on `id` alone let exactly that record escape the
+ * pinned endpoints and pair the secret with a stored address.
+ *
+ * `resolveProviderTemplate` is the existing resolver for that relationship
+ * (it already understands the legacy alias table), and the explicit `id` arm
+ * retains the original behaviour for a record that keeps the canonical id
+ * while naming some other template.
+ */
+export function isRetainedOpenCodeGoProvider(provider: RegistryProvider): boolean {
+  return provider.id === OPENCODE_GO_PROVIDER_ID
+    || resolveProviderTemplate(provider)?.id === OPENCODE_GO_PROVIDER_ID;
+}
+
+/**
+ * The single immutable endpoint the retained built-in allows for an SDK
+ * package. `null` means the package is not one OpenCode Go serves, and every
+ * caller must fail closed rather than fall back to a stored address.
+ */
+export function openCodeGoPinnedApiUrl(npm: string): string | null {
+  if (npm === '@ai-sdk/openai-compatible') return OPENCODE_GO_COMPLETIONS_BASE_URL;
+  if (npm === '@ai-sdk/anthropic') return OPENCODE_GO_ANTHROPIC_BASE_URL;
+  return null;
+}
+
 function resolveMaterializedApiUrl(
   cached: CachedModel,
   provider: RegistryProvider,
   npm: string,
 ): string | null {
-  if (provider.id !== OPENCODE_GO_PROVIDER_ID) {
+  if (!isRetainedOpenCodeGoProvider(provider)) {
     return cached.apiUrl ?? provider.api.url ?? '';
   }
-  if (npm === '@ai-sdk/openai-compatible') return OPENCODE_GO_COMPLETIONS_BASE_URL;
-  if (npm === '@ai-sdk/anthropic') return OPENCODE_GO_ANTHROPIC_BASE_URL;
-  return null;
+  return openCodeGoPinnedApiUrl(npm);
 }
 
 export function cachedModelToLocal(

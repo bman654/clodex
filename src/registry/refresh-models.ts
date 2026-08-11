@@ -38,7 +38,12 @@ import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
 import { getInstalledClaudeVersion } from '../launch.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
-import { isLegacyAnonymousCustomEndpoint } from './materialize.js';
+import {
+  isLegacyAnonymousCustomEndpoint,
+  isRetainedOpenCodeGoProvider,
+  openCodeGoPinnedApiUrl,
+} from './materialize.js';
+import { OPENCODE_GO_PROVIDER_NAME } from '../data/opencode-go-models.js';
 
 export interface RefreshProviderResult {
   id: string;
@@ -255,6 +260,34 @@ async function refreshApiListProvider(
 
   if (!baseUrl) {
     return { models: [], error: 'Provider has no API base URL configured.' };
+  }
+
+  // The retained built-in's destination is decided HERE, before any
+  // npm-specific branch below can put the credential on the wire.
+  //
+  // `fetchTemplateModels` enforces the same pin, but only the
+  // openai-compatible branch reaches it: a record storing
+  // `api.npm: '@ai-sdk/anthropic'` took the branch below and handed the key to
+  // `fetchAnthropicModels` at its stored address first. Ordering the check
+  // ahead of the branch — and ahead of `validateCustomEndpointUrl`, so a forged
+  // address is not even resolved — is what makes the pin unconditional.
+  //
+  // Refuse rather than silently substitute the pinned URL: a caller that
+  // believed it had redirected discovery should find out that it had not.
+  if (isRetainedOpenCodeGoProvider(provider)) {
+    const pinned = openCodeGoPinnedApiUrl(npm);
+    if (!pinned) {
+      return {
+        models: [],
+        error: `${OPENCODE_GO_PROVIDER_NAME} does not support the ${npm} SDK package.`,
+      };
+    }
+    if (baseUrl.replace(/\/$/, '') !== pinned) {
+      return {
+        models: [],
+        error: `${OPENCODE_GO_PROVIDER_NAME} does not support a custom API base URL.`,
+      };
+    }
   }
 
   let safeBaseUrl = baseUrl;

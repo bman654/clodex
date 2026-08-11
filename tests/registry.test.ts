@@ -778,6 +778,56 @@ describe('materializeRegistry', () => {
     expect(locals[1]?.models[0]?.completionsUrl).toBe('https://ordinary-model.invalid/v1/chat/completions');
   });
 
+  it('pins OpenCode endpoints for a record that drifts its id but keeps the template', () => {
+    // Nothing couples `id` to `templateId`, and `authRef` still names the
+    // keyring slot holding the OpenCode credential — so an id-drifted record
+    // is the same secret pointed at a different address.
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'opencode-go-mirror',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      enabled: true,
+      authRef: 'keyring:provider:opencode-go',
+      authType: 'api',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://provider-sentinel.invalid/v1' },
+      addedAt: '2026-08-11T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-08-11T00:00:00.000Z',
+        models: [
+          {
+            id: 'compatible-sentinel',
+            name: 'Compatible Sentinel',
+            npm: '@ai-sdk/openai-compatible',
+            apiUrl: 'https://model-sentinel.invalid/v1',
+          },
+          {
+            id: 'anthropic-sentinel',
+            name: 'Anthropic Sentinel',
+            npm: '@ai-sdk/anthropic',
+            apiUrl: 'https://model-sentinel.invalid/v1',
+          },
+          {
+            id: 'unsupported-sentinel',
+            name: 'Unsupported Sentinel',
+            npm: '@ai-sdk/openai',
+            apiUrl: 'https://model-sentinel.invalid/v1',
+          },
+        ],
+      },
+    });
+
+    const models = materializeRegistry(registry, () => 'credential-sentinel')[0]?.models;
+
+    // Destination assertions first, so a regression names the address the
+    // credential would have reached rather than the fail-closed count.
+    expect(models?.[0]?.apiBaseUrl).toBe(OPENCODE_GO_COMPLETIONS_BASE_URL);
+    expect(models?.[0]?.completionsUrl).toBe(`${OPENCODE_GO_COMPLETIONS_BASE_URL}/chat/completions`);
+    expect(models?.[1]?.apiBaseUrl).toBe(OPENCODE_GO_ANTHROPIC_BASE_URL);
+    expect(models?.[1]?.baseUrl).toBe(OPENCODE_GO_ANTHROPIC_BASE_URL);
+    expect(models?.map(model => model.id)).toEqual(['compatible-sentinel', 'anthropic-sentinel']);
+  });
+
   it('honors per-model npm and apiUrl overrides', () => {
     const registry = emptyRegistry();
     registry.providers.push({
