@@ -2,6 +2,15 @@ import { describe, expect, it, vi } from 'vitest';
 import { generateText, streamText } from 'ai';
 import { collectOpenAiStream, generateOpenAiResponse, streamOpenAiResponse, translateOpenAiRequest } from '../src/openai-adapter.js';
 import { resetServiceTierWarningForTests } from '../src/sdk-adapter.js';
+import { installParentNoticeSink } from '../src/parent-notice.js';
+
+/** Observes the parent-notice channel, which is where request-time warnings go
+ *  now: `clodex claude` mutes the parent's stdio for Claude Code's TUI, so a
+ *  console.error here would never reach a user. */
+function captureNotices(): { lines: string[]; release: () => void } {
+  const lines: string[] = [];
+  return { lines, release: installParentNoticeSink(line => lines.push(line)) };
+}
 
 vi.mock('ai', () => ({
   streamText: vi.fn(),
@@ -247,7 +256,7 @@ describe('generateOpenAiResponse with forceStream', () => {
 describe('OpenAI-format service tier omission warning', () => {
   it('surfaces the structured tier omission warning on non-streaming responses, once per process', async () => {
     const prior = process.env.CLODEX_SERVICE_TIER;
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const notices = captureNotices();
     try {
       process.env.CLODEX_SERVICE_TIER = 'fast';
       resetServiceTierWarningForTests();
@@ -266,20 +275,20 @@ describe('OpenAI-format service tier omission warning', () => {
       await generateOpenAiResponse({} as never, params, 'gpt-test');
       await generateOpenAiResponse({} as never, params, 'gpt-test');
 
-      expect(error).toHaveBeenCalledOnce();
-      expect(String(error.mock.calls[0]![0])).toContain('requested service tier was not sent');
+      expect(notices.lines).toHaveLength(1);
+      expect(notices.lines[0]).toContain('requested service tier was not sent');
     } finally {
       if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
       else process.env.CLODEX_SERVICE_TIER = prior;
       resetServiceTierWarningForTests();
-      error.mockRestore();
+      notices.release();
       vi.mocked(generateText).mockReset();
     }
   });
 
   it('surfaces the structured tier omission warning on force-stream responses, once per process', async () => {
     const prior = process.env.CLODEX_SERVICE_TIER;
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const notices = captureNotices();
     try {
       process.env.CLODEX_SERVICE_TIER = 'fast';
       resetServiceTierWarningForTests();
@@ -300,20 +309,20 @@ describe('OpenAI-format service tier omission warning', () => {
       onStepFinish?.(step);
       onStepFinish?.(step);
 
-      expect(error).toHaveBeenCalledOnce();
-      expect(String(error.mock.calls[0]![0])).toContain('requested service tier was not sent');
+      expect(notices.lines).toHaveLength(1);
+      expect(notices.lines[0]).toContain('requested service tier was not sent');
     } finally {
       if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
       else process.env.CLODEX_SERVICE_TIER = prior;
       resetServiceTierWarningForTests();
-      error.mockRestore();
+      notices.release();
       vi.mocked(streamText).mockReset();
     }
   });
 
   it('surfaces the structured tier omission warning on streaming responses, once per process', async () => {
     const prior = process.env.CLODEX_SERVICE_TIER;
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const notices = captureNotices();
     try {
       process.env.CLODEX_SERVICE_TIER = 'fast';
       resetServiceTierWarningForTests();
@@ -334,13 +343,13 @@ describe('OpenAI-format service tier omission warning', () => {
       onStepFinish?.(step);
       onStepFinish?.(step);
 
-      expect(error).toHaveBeenCalledOnce();
-      expect(String(error.mock.calls[0]![0])).toContain('requested service tier was not sent');
+      expect(notices.lines).toHaveLength(1);
+      expect(notices.lines[0]).toContain('requested service tier was not sent');
     } finally {
       if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
       else process.env.CLODEX_SERVICE_TIER = prior;
       resetServiceTierWarningForTests();
-      error.mockRestore();
+      notices.release();
       vi.mocked(streamText).mockReset();
     }
   });

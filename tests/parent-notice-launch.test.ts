@@ -7,12 +7,22 @@
 // (tests/helpers/parent-notice-probe.ts) and asserts on the bytes that process
 // actually wrote. The probe runs once per mode, in beforeAll, because a Node
 // boot per assertion is the dominant cost of this file.
+//
+// The probe is BUNDLED with tsup — the project's own bundler, an exact-pinned
+// devDependency — into a temporary .mjs that plain `node` then runs. An earlier
+// version loaded the TypeScript directly under `--experimental-strip-types` plus
+// a resolve hook, which quietly made every module reachable from `launchClaude`
+// subject to Node's erasable-syntax rules: a `readonly` constructor parameter
+// added to src/registry/io.ts (a normal, correct change) broke this file with an
+// error that pointed nowhere near the cause. Bundling costs ~0.4s once and
+// constrains nothing about the TypeScript the rest of the repo may use.
 import { type ChildProcess, spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, openSync, closeSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { build } from 'tsup';
 
 // Kept in sync with the probe by hand: importing it would EXECUTE it here.
 const NOTICE_TEXT = 'clodex: warning: probe-notice-must-reach-the-terminal';
@@ -20,13 +30,35 @@ const AFTER_EXIT_TEXT = 'clodex: warning: probe-notice-after-child-exit';
 const MUTED_TEXT = 'probe-plain-write-must-stay-muted';
 const CHILD_LAST = 'CHILD-LAST';
 
-const PROBE = fileURLToPath(new URL('./helpers/parent-notice-probe.ts', import.meta.url));
-const REGISTER_HOOK = fileURLToPath(
-  new URL('./helpers/register-ts-resolve-hook.mjs', import.meta.url),
-);
-const NODE_ARGS = ['--experimental-strip-types', '--no-warnings', '--import', REGISTER_HOOK];
+const PROBE_SOURCE = fileURLToPath(new URL('./helpers/parent-notice-probe.ts', import.meta.url));
+/** Built next to the source so bare imports still resolve to the repo's node_modules. */
+const PROBE_BUILD_NAME = 'parent-notice-probe.built';
+const PROBE = join(dirname(PROBE_SOURCE), `${PROBE_BUILD_NAME}.mjs`);
 /** Vitest's per-test timeout cannot cancel a subprocess, so the harness owns one. */
 const PROBE_TIMEOUT_MS = 25_000;
+
+/**
+ * Compiles the probe with the project's bundler. Dependencies stay external, so
+ * the output must live inside the repo for Node to resolve them at runtime.
+ */
+async function buildProbe(): Promise<void> {
+  await build({
+    entry: { [PROBE_BUILD_NAME]: PROBE_SOURCE },
+    outDir: dirname(PROBE_SOURCE),
+    format: ['esm'],
+    target: 'node22',
+    splitting: false,
+    sourcemap: false,
+    clean: false,
+    silent: true,
+    // The repo's own tsup.config.ts builds the shipped bins; this is a test artifact.
+    config: false,
+    dts: false,
+    shims: false,
+    skipNodeModulesBundle: true,
+    outExtension: () => ({ js: '.mjs' }),
+  });
+}
 
 const live = new Set<ChildProcess>();
 
@@ -74,7 +106,7 @@ describe('parent notices while Claude Code owns the terminal', () => {
     try {
       const child = track(spawn(
         process.execPath,
-        [...NODE_ARGS, PROBE, dir, ...(mode ? [mode] : [])],
+        [PROBE, dir, ...(mode ? [mode] : [])],
         { stdio: ['ignore', fd, fd], env: { ...process.env, CLODEX_HOME: join(dir, 'home') } },
       ));
       const code = await awaitExit(child);
@@ -93,7 +125,7 @@ describe('parent notices while Claude Code owns the terminal', () => {
   async function runProbeUnderClosedPipe(): Promise<string> {
     const dir = scratchFor('epipe');
     const statusPath = join(dir, 'probe-status');
-    const quoted = [process.execPath, ...NODE_ARGS, PROBE, dir, '--epipe']
+    const quoted = [process.execPath, PROBE, dir, '--epipe']
       .map(part => `"${part}"`).join(' ');
     const script = `{ ${quoted}; echo "$?" >&3; } 3>"${statusPath}" 2>&1 | head -n 1`;
     const child = track(spawn('/bin/sh', ['-c', script], {
@@ -106,6 +138,7 @@ describe('parent notices while Claude Code owns the terminal', () => {
 
   beforeAll(async () => {
     root = mkdtempSync(join(tmpdir(), 'clodex-parent-notice-'));
+    await buildProbe();
     [plain, traced, signalled, flooded, epipeStatus] = await Promise.all([
       runProbeMerged('plain'),
       runProbeMerged('traced', '--with-debug-file'),
@@ -121,6 +154,7 @@ describe('parent notices while Claude Code owns the terminal', () => {
     for (const child of live) child.kill('SIGKILL');
     live.clear();
     rmSync(root, { recursive: true, force: true });
+    rmSync(PROBE, { force: true });
   });
 
   it('holds a notice until the child has exited, then delivers it', () => {

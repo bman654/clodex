@@ -28,3 +28,6 @@ scripts/patch-custom-models/model-config.json
 
 # build output — rebuilt by prepublishOnly and CI before publish
 dist/
+
+# probe bundle built on the fly by tests/parent-notice-launch.test.ts
+tests/helpers/*.built.mjs

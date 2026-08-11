@@ -22,6 +22,7 @@ import { sanitizeToolInput } from './tool-input-sanitize.js';
 import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-types.js';
 import { anthropicErrorType, upstreamHttpStatus } from './upstream-error.js';
 import { upstreamMaxRetries } from './upstream-retry.js';
+import { emitParentNotice } from './parent-notice.js';
 import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
 
 export { silenceSdkWarnings };
@@ -587,7 +588,9 @@ export function oauthServiceTier(): string | undefined {
   if (!SERVICE_TIERS.has(normalized)) {
     if (!warnedInvalidServiceTier) {
       warnedInvalidServiceTier = true;
-      console.error('clodex: ignoring CLODEX_SERVICE_TIER (expected auto, default, flex, priority, or fast)');
+      // emitParentNotice, not console.error: this fires from a live request, and
+      // `clodex claude` has the parent's stdio muted for Claude Code's TUI.
+      emitParentNotice('clodex: ignoring CLODEX_SERVICE_TIER (expected auto, default, flex, priority, or fast)');
     }
     return undefined;
   }
@@ -602,7 +605,7 @@ export function reportUnsupportedServiceTier(params: SdkCallParams, warnings: un
     return candidate.type === 'unsupported' && candidate.feature === 'serviceTier';
   })) return;
   warnedUnsupportedServiceTier = true;
-  console.error('clodex: requested service tier was not sent for this model; the backend default will be used');
+  emitParentNotice('clodex: requested service tier was not sent for this model; the backend default will be used');
 }
 
 export function resetServiceTierWarningForTests(): void {

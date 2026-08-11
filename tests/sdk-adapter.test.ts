@@ -17,6 +17,7 @@ import {
   resetServiceTierWarningForTests,
   silenceSdkWarnings,
 } from '../src/sdk-adapter.js';
+import { installParentNoticeSink } from '../src/parent-notice.js';
 
 describe('sdkTranslationErrorSignature', () => {
   it('classifies missing stream parts without exposing their dynamic ids', () => {
@@ -291,7 +292,10 @@ describe('translateRequest', () => {
       const explicit = translateRequest(body, '@ai-sdk/openai', { openAiOAuth: true });
       expect(explicit.providerOptions?.openai?.serviceTier).toBe('priority');
 
-      const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // Request-time warnings go through the parent-notice channel, because the
+      // launch path has the parent's stdio muted for Claude Code's TUI.
+      const notices: string[] = [];
+      const releaseNotices = installParentNoticeSink(line => notices.push(line));
       const hostile = String.fromCharCode(27) + '[31msk-ant-api03-secret1234567890\nsecond-line';
       process.env.CLODEX_SERVICE_TIER = hostile;
       resetServiceTierWarningForTests();
@@ -299,15 +303,19 @@ describe('translateRequest', () => {
       const malformedAgain = translateRequest(body, '@ai-sdk/openai', { openAiOAuth: true });
       expect(malformed.providerOptions?.openai?.serviceTier).toBeUndefined();
       expect(malformedAgain.providerOptions?.openai?.serviceTier).toBeUndefined();
-      expect(error).toHaveBeenCalledOnce();
-      const warning = String(error.mock.calls[0]![0]);
+      expect(notices).toHaveLength(1);
+      const warning = notices[0]!;
       expect(warning).not.toContain('sk-ant-api03-secret1234567890');
       expect(warning).not.toContain(String.fromCharCode(27));
-      expect(warning).not.toContain('\n');
+      // Still exactly one line: the channel terminates it, and nothing hostile
+      // may add a line of its own in the middle.
+      expect(warning.endsWith('\n')).toBe(true);
+      expect(warning.slice(0, -1)).not.toContain('\n');
 
       delete process.env.CLODEX_SERVICE_TIER;
       const unset = translateRequest(body, '@ai-sdk/openai', { openAiOAuth: true });
       expect(unset.providerOptions?.openai?.serviceTier).toBeUndefined();
+      releaseNotices();
     } finally {
       if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
       else process.env.CLODEX_SERVICE_TIER = prior;
@@ -319,7 +327,8 @@ describe('translateRequest', () => {
   it('warns once when the OpenAI SDK omits a requested tier during serialization', async () => {
     const prior = process.env.CLODEX_SERVICE_TIER;
     const requestBodies: Array<Record<string, unknown>> = [];
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const notices: string[] = [];
+    const releaseNotices = installParentNoticeSink(line => notices.push(line));
     try {
       process.env.CLODEX_SERVICE_TIER = 'fast';
       resetServiceTierWarningForTests();
@@ -351,13 +360,13 @@ describe('translateRequest', () => {
 
       expect(requestBodies).toHaveLength(2);
       expect(requestBodies.every(body => !Object.hasOwn(body, 'service_tier'))).toBe(true);
-      expect(error).toHaveBeenCalledOnce();
-      expect(String(error.mock.calls[0]![0])).toContain('requested service tier was not sent');
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain('requested service tier was not sent');
     } finally {
       if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
       else process.env.CLODEX_SERVICE_TIER = prior;
       resetServiceTierWarningForTests();
-      error.mockRestore();
+      releaseNotices();
     }
   });
 
@@ -875,7 +884,11 @@ describe('streamAnthropicResponse idle timeout', () => {
       tool: vi.fn((spec: unknown) => spec),
       jsonSchema: vi.fn((schema: unknown) => schema),
     }));
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // vi.resetModules() above means the adapter re-imports a FRESH parent-notice
+    // module; a sink installed on the statically imported one would not be seen.
+    const { installParentNoticeSink: installFreshSink } = await import('../src/parent-notice.js');
+    const notices: string[] = [];
+    const releaseNotices = installFreshSink(line => notices.push(line));
 
     try {
       const { streamAnthropicResponse, resetServiceTierWarningForTests } = await import('../src/sdk-adapter.js');
@@ -887,10 +900,10 @@ describe('streamAnthropicResponse idle timeout', () => {
       await streamAnthropicResponse({} as never, params, 'codex-auto-review', () => {});
       await streamAnthropicResponse({} as never, params, 'codex-auto-review', () => {});
 
-      expect(error).toHaveBeenCalledOnce();
-      expect(String(error.mock.calls[0]![0])).toContain('requested service tier was not sent');
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain('requested service tier was not sent');
     } finally {
-      error.mockRestore();
+      releaseNotices();
       vi.doUnmock('ai');
       vi.resetModules();
     }
