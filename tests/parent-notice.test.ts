@@ -49,13 +49,26 @@ describe('emitParentNotice', () => {
     expect(lines).toEqual(['already terminated\n', 'two lines\n']);
   });
 
-  it('strips control characters so a notice can never repaint the child UI', () => {
+  it('strips C0 control characters so a notice can never repaint the child UI', () => {
     const lines: string[] = [];
     sink(lines);
 
     emitParentNotice('clodex: \u001b[2Jwarning: \u0007cleared');
 
     expect(lines[0]).toBe('clodex:  [2Jwarning:  cleared\n');
+  });
+
+  it('strips the 8-bit C1 introducers too', () => {
+    // U+009B/009C/009D are CSI/ST/OSC in their 8-bit form: a terminal that
+    // honors them acts on an escape sequence with no ESC byte in sight. Notices
+    // interpolate upstream-influenced names (a tool name, a differing property
+    // name), so removing ESC alone is not the boundary the channel claims.
+    const lines: string[] = [];
+    sink(lines);
+
+    emitParentNotice('A \u009d8;;https://evil.example\u009cB \u009b31mC \u0080D');
+
+    expect(lines[0]).toBe('A  8;;https://evil.example B  31mC  D\n');
   });
 
   it('truncates an unbounded message', () => {

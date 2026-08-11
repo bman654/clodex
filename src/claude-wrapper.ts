@@ -27,7 +27,7 @@
 import { spawn } from 'node:child_process';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { constants as osConstants } from 'node:os';
-import { findClaudeBinary } from './launch.js';
+import { findClaudeBinary } from './claude-binary.js';
 import { waitForTcpListenerCandidate } from './listener-ready.js';
 import {
   orderWrapperServerCandidates,

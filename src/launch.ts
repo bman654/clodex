@@ -1,86 +1,29 @@
 // src/launch.ts
-import { execFileSync, execSync, spawn } from 'node:child_process';
-import { existsSync, appendFileSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
-import { getAppPathOverride } from './config.js';
-import { findBinaryOnPath } from './binary-lookup.js';
-import { installParentNoticeSink } from './parent-notice.js';
+import { spawn } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
+import { findClaudeBinary } from './claude-binary.js';
+import {
+  installParentNoticeSink,
+  writeParentNoticeLines,
+  writeParentNoticeLinesSync,
+} from './parent-notice.js';
+
+// Re-exported so existing importers (cli.ts, patcher.ts, tests) keep one entry
+// point; the wrapper imports './claude-binary.js' directly instead.
+export {
+  findClaudeBinary,
+  getClaudeVersionForBinary,
+  getInstalledClaudeVersion,
+} from './claude-binary.js';
 
 const isWindows = process.platform === 'win32';
 
-const FALLBACK_PATHS = isWindows
-  ? [
-      join(process.env['APPDATA'] ?? homedir(), 'npm', 'claude.cmd'),
-      join(process.env['APPDATA'] ?? homedir(), 'npm', 'claude'),
-      join(homedir(), 'AppData', 'Roaming', 'npm', 'claude.cmd'),
-    ]
-  : [
-      join(homedir(), '.local', 'bin', 'claude'),
-      join(homedir(), '.npm', 'bin', 'claude'),
-      '/usr/local/bin/claude',
-      '/opt/homebrew/bin/claude',
-    ];
-
-export function findClaudeBinary(): string | null {
-  const environmentOverride = process.env['CLODEX_CLAUDE_PATH'];
-  if (environmentOverride?.trim()) {
-    return existsSync(environmentOverride) ? environmentOverride : null;
-  }
-
-  const override = getAppPathOverride('claude');
-  if (override) return existsSync(override) ? override : null;
-
-  return findBinaryOnPath('claude', FALLBACK_PATHS);
-}
-
-/** Version reported when the installed claude cannot be probed. */
-const FALLBACK_CLAUDE_VERSION = '2.1.183';
-
-const VERSION_PROBE_TIMEOUT_MS = 15_000;
-
 /**
- * Probe `--version` of ONE SPECIFIC claude binary, returning null when it cannot
- * be executed or prints nothing version-shaped.
- *
- * Callers that key destructive state on the answer — the patcher names its
- * pristine backups after this version and restores them over the live install —
- * MUST use this and fail loudly on null. A guessed version tags a backup with
- * bytes it does not contain, and restoring it downgrades the user's Claude Code.
+ * Notices held while Claude Code owns the terminal. Every producer is already
+ * deduplicated and hard-capped, so this is a backstop against a future looping
+ * writer, not a budget anyone should reach.
  */
-export function getClaudeVersionForBinary(binaryPath: string): string | null {
-  try {
-    // POSIX: exec the file directly so a path containing spaces still works.
-    // Windows: `claude` is often a .cmd shim, which needs a shell — keep the
-    // quoted shell invocation there.
-    const result = isWindows
-      ? execSync(`"${binaryPath}" --version`, {
-          encoding: 'utf8',
-          stdio: ['pipe', 'pipe', 'pipe'],
-          timeout: VERSION_PROBE_TIMEOUT_MS,
-        })
-      : execFileSync(binaryPath, ['--version'], {
-          encoding: 'utf8',
-          stdio: ['pipe', 'pipe', 'pipe'],
-          timeout: VERSION_PROBE_TIMEOUT_MS,
-        });
-    return result.match(/(\d+\.\d+\.\d+)/)?.[1] ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Version of the claude found on PATH (or via the configured overrides), with a
- * known-good fallback. This is a best-effort string for request metadata — it is
- * NOT the version of any particular file, because `findClaudeBinary()` can
- * return a wrapper shim that differs from the real installation.
- */
-export function getInstalledClaudeVersion(): string {
-  const claudePath = findClaudeBinary();
-  if (!claudePath) return FALLBACK_CLAUDE_VERSION;
-  return getClaudeVersionForBinary(claudePath) ?? FALLBACK_CLAUDE_VERSION;
-}
+const MAX_QUEUED_NOTICES = 50;
 
 export function buildClaudeArgs(model: string | undefined, extraArgs: string[]): string[] {
   return model ? ['--model', model, ...extraArgs] : [...extraArgs];
@@ -122,10 +65,15 @@ export function launchClaude(
 
     // The mute protects Claude Code's TUI from stray parent writes, but clodex's
     // gateway/MITM runs in THIS process and keeps producing the few bounded
-    // diagnostics that are documented as reaching stderr. Give exactly those an
-    // explicit way through: `emitParentNotice` call sites route here, everything
-    // else stays muted. The debug-file copy is preserved so a traced launch
-    // still records the line as `[parent] ...`.
+    // diagnostics that are documented as reaching stderr. They are QUEUED here,
+    // not painted: parent and child are separate processes sharing one PTY with
+    // no render lock, so a live write lands wherever the child left the cursor —
+    // mid-frame, or right after the prompt where it reads as typed input (both
+    // observed against real Claude Code) — and the child's next redraw may erase
+    // it anyway. The queue is flushed in restore(), once the child has exited and
+    // handed the terminal back. The --debug-file copy stays immediate.
+    const queuedNotices: string[] = [];
+    let droppedNotices = 0;
     const releaseNoticeSink = installParentNoticeSink((line) => {
       if (debugLogPath) {
         try {
@@ -134,13 +82,41 @@ export function launchClaude(
           // ignore
         }
       }
-      originalStderrWrite.call(process.stderr, line);
+      // Bounded: every producer is already deduplicated and capped, so reaching
+      // this means something new is looping. Counting beats unbounded growth in
+      // a process that has to keep serving requests.
+      if (queuedNotices.length < MAX_QUEUED_NOTICES) queuedNotices.push(line);
+      else droppedNotices += 1;
     });
+
+    const takeQueuedNotices = (): string[] => {
+      const lines = queuedNotices.splice(0, queuedNotices.length);
+      if (droppedNotices > 0) {
+        lines.push(
+          `clodex: warning: and ${droppedNotices} further notice`
+          + `${droppedNotices === 1 ? '' : 's'} suppressed while Claude Code held the terminal.\n`,
+        );
+        droppedNotices = 0;
+      }
+      return lines;
+    };
+
+    // Last resort. restore() covers the child's exit and error paths (a forwarded
+    // SIGINT/SIGTERM reaches them through the child's own exit), but if this
+    // process goes down some other way the queue would die with it. An exit
+    // handler cannot await, hence the synchronous write.
+    const flushNoticesOnExit = () => {
+      writeParentNoticeLinesSync(takeQueuedNotices());
+    };
+    process.once('exit', flushNoticesOnExit);
 
     const restore = () => {
       releaseNoticeSink();
+      process.removeListener('exit', flushNoticesOnExit);
       process.stdout.write = originalStdoutWrite;
       process.stderr.write = originalStderrWrite;
+      // Only now — child gone, terminal handed back — is it safe to paint.
+      writeParentNoticeLines(takeQueuedNotices());
     };
 
     const child = spawn(claudePath, args, {
