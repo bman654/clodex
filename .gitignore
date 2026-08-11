@@ -17,8 +17,11 @@ vertex-models.json
 .idea/
 .cursor/
 
-# Local agent planning / logs
-.claude/
+# Local agent planning / logs. `.claude/skills` and `.claude/docs` are committed —
+# they are the agent-facing skills and subsystem references (see CLAUDE.md).
+.claude/*
+!.claude/docs/
+!.claude/skills/
 .gemini/
 .planning/
 ANTIGRAVITY-DEBUG-SESSION.md

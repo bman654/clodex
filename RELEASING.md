@@ -2,8 +2,8 @@
 
 Maintainer-facing. Contributors do not need anything in this file — see
 [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the commit format, and
-[`CLAUDE.md`](./CLAUDE.md#release-notes-are-written-for-users) for how to write the summary
-line that becomes a changelog entry.
+[`CLAUDE.md`](./CLAUDE.md#commit-messages) for how to write the summary line that becomes a
+changelog entry.
 
 ## How a release happens
 

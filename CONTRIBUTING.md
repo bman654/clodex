@@ -2,7 +2,8 @@
 
 Contributions are welcome — bug reports, fixes, and features all.
 
-clodex bridges Claude Code to OpenAI models. A lot of its behavior encodes real production
+clodex bridges Claude Code to primarily OpenAI models, but community contributors have also
+added support for some other AI providers. A lot of its behavior encodes real production
 failures that aren't obvious from reading the code, so this guide is mostly about the
 context you can't infer from the diff. Please skim it before opening a PR; it should save
 you rework.
@@ -18,10 +19,18 @@ turned away for skipping it. It's to protect your time: clodex has invariants th
 arbitrary until you know the failure they came from, and it's much cheaper to sort that out
 in an issue than after you've written the code.
 
-**Read [`CLAUDE.md`](./CLAUDE.md).** Despite the name it's the architecture document for the
-whole repo, and it's the single best thing to read before changing anything. It explains
-what each module does and, more importantly, *why* several of them are shaped the way they
-are.
+**Read [`CLAUDE.md`](./CLAUDE.md).** Despite the name it's the working guide for the whole
+repo — architecture, build and test commands, commit format, and the invariants — and it's
+the single best thing to read before changing anything. It applies to everyone, not just
+Claude Code. It points at deeper documents for each subsystem; load the one covering the
+code you're changing.
+
+**Read [`.claude/skills/pr-verification/SKILL.md`](./.claude/skills/pr-verification/SKILL.md)
+before you open the PR.** It is the bar your change will actually be held to, derived from
+what has gone wrong across ~100 previous PRs. The short version: green tests are not
+evidence — delete your feature and confirm the suite turns red; don't claim more than you
+observed; and prove the path you fixed is reachable in a real configuration. It also
+describes what belongs in the PR description.
 
 ## Scoping your PR
 
@@ -41,7 +50,8 @@ directions and neither review will catch it, because the conflict doesn't exist 
 diff.
 
 If you find yourself opening a third PR against the same subsystem, that's a signal the
-work wanted to be one PR (or an issue first).
+work wanted to be one PR (or an issue first). Three separate PRs have already been
+consolidated for exactly this reason.
 
 **Prefer a few well-scoped PRs over many micro-PRs.** Three or four substantial,
 self-contained PRs are easier to review and land than six or more fine-grained ones
@@ -52,136 +62,19 @@ integration risk — and they're paid per-PR.
 order in the PR description, and target each PR at the branch it builds on rather than
 `main`. That makes the diffs readable and the order explicit.
 
-## Quality bar
+**Stay inside clodex's mission.** The change should serve bridging Claude Code to other
+model providers, rather than being a general Claude Code modification. A permanent patch
+site for behavior outside that mission is out of scope.
 
-**Read the [verification standard](./CLAUDE.md#verification-standard) in `CLAUDE.md` before you
-open a PR.** It is derived from what actually goes wrong here across ~100 PRs, and it carries the
-pre-PR gate. The short version: green tests are not evidence — delete your feature and confirm the
-suite turns red; don't claim more than you observed; and prove the path you fixed is reachable in a
-real configuration.
+**Keep source files manageable.** Prefer files under ~750 lines, and consider splitting when
+adding to one already over — smaller files let independent work proceed without colliding.
+This never licenses restructuring the files `CLAUDE.md` marks as do-not-restructure.
 
-The standards below matter most, in rough order of how often they're missed:
+## Everything else
 
-**Verify the code path you're changing is actually reachable.** Before fixing behavior,
-confirm that the path can execute in a real configuration. clodex is a trimmed fork of a
-broader project, and some code is vestigial — it supports providers and options that no
-longer ship. A fix to an unreachable path passes review and CI while the real bug survives
-untouched.
-
-**Tests must be behavioral.** The test for a fix should fail if you revert the fix. Tests
-that assert structure, restate the implementation, or exercise fixtures that can't occur
-in practice give false confidence — they pass whether or not the bug is fixed. If you add
-a lot of tests, make sure at least one of them actually pins the behavior you changed.
-
-**Follow existing patterns rather than introducing parallel ones.** Where the codebase
-already solves a problem — file locking, credential resolution, stale-state detection —
-match the established approach. `CLAUDE.md` documents several of these explicitly. A new
-mechanism that's subtly weaker than the existing one is harder to spot than an obvious bug.
-
-**Don't leave no-op edits behind.** A conditional whose branches are identical, an option
-that's parsed but never read, a helper that's implemented but never called — these read as
-finished work and quietly aren't. If you started a change and decided against it, revert it
-rather than leaving the scaffolding.
-
-**Update every consumer.** When you change a representation — a type, a stored format, a
-sentinel value — search the tree for existing readers of the old form. A missed consumer is
-where the real bug hides, especially in auth code, where the failure mode is silent rather
-than loud.
-
-**Consider the upgrade path.** If a change affects data persisted in `~/.clodex` or the
-system keychain, make sure an existing install still works after upgrading, or add a
-migration.
-
-## Development
-
-```bash
-corepack enable          # activates the pinned pnpm version
-pnpm install
-pnpm build               # compile TypeScript → dist/
-pnpm test                # vitest
-pnpm typecheck           # tsc --noEmit
-pnpm dev                 # watch mode
-
-pnpm vitest run tests/patcher.test.ts    # a single test file
-```
-
-Development targets **Node 24** (`.nvmrc` pins v24.14.1; CI runs 24). The published
-package supports **Node >= 22** (`engines.node`), so don't use APIs newer than Node 22 in `src/`.
-
-The package manager is **pnpm**, pinned via `packageManager: "pnpm@10.34.5"` in `package.json`
-and activated through corepack. Dependencies are **exact-pinned** — no `^` or `~`. Note that
-`pnpm-workspace.yaml` sets `minimumReleaseAge: 14400` (minutes), so a dependency version younger
-than ten days can't be resolved — fresh resolution of a too-new version fails with
-`ERR_PNPM_NO_MATURE_MATCHING_VERSION`. Already-locked versions install normally.
-
-Before opening a PR, run:
-
-```bash
-pnpm typecheck && pnpm test && pnpm build
-```
-
-CI runs exactly these three on every pull request.
-
-## Commits
-
-This repo uses [Conventional Commits](https://www.conventionalcommits.org/) — releases and
-the changelog are generated from commit messages, so the format is enforced by commitlint
-both locally (a Husky `commit-msg` hook) and in CI.
-
-| Prefix | Use for |
-| --- | --- |
-| `feat:` | adds a feature |
-| `fix:` | fixes behavior |
-| `docs:` | documentation only |
-| `test:` | tests only |
-| `refactor:` | no behavior change |
-| `build:` / `ci:` / `chore:` | maintenance |
-
-Add `!` after the type (`feat!:`) or a `BREAKING CHANGE:` footer for an incompatible change.
-
-A scope is encouraged where it's obvious — `fix(auth):`, `feat(wrapper):`.
-
-Hard-wrap commit bodies and footers at **≤100 characters per line** — commitlint's
-`body-max-line-length` is enforced by the hook and again in CI.
-
-**Your summary line becomes a release note, verbatim.** The changelog is generated from commit
-summary headers only — never bodies — so that one line is what every user reads. Write it for
-someone who uses clodex and has never seen the source: name the user-visible outcome, not the
-mechanism. [`CLAUDE.md`](./CLAUDE.md#release-notes-are-written-for-users) has the rules and
-before/after examples.
-
-## Manual testing
-
-Much of clodex can't be covered by the automated suite, because it involves launching
-Claude Code against a real provider. The tests cover pure functions; interactive launch
-flows and real-provider behavior are verified by hand.
-
-If your change touches a launch path, please say in the PR description what you exercised
-manually. Useful commands:
-
-```bash
-clodex claude --dry-run     # full wizard, preview instead of launch, no writes
-clodex claude --trace       # debug logs to ~/.clodex/logs/
-clodex models --list        # print model names + aliases
-clodex server               # foreground gateway
-```
-
-Use `CLODEX_HOME=$(mktemp -d)` to exercise the CLI against throwaway config instead of your
-real `~/.clodex`.
-
-## A few hard rules
-
-- **Never commit `dist/`.** It's gitignored and rebuilt by CI.
-- **Never run `npm publish`.** Releases are automated; publishing is staged via CI and
-  approved by a maintainer.
-- **Never hardcode a version string.** `package.json` is the single source of truth.
-- **Never add `claude -p` end-to-end tests to the automated suite.** They're manual only.
-- **Don't restructure `src/oauth/responses-websocket.ts`.** The OAuth WebSocket
-  continuation logic took extensive real-world testing. Surgical changes only.
-- **Don't touch `~/.claude/settings.json`** from clodex code, and never mutate a legacy
-  `~/.relay-ai` directory.
-
-More context for all of these is in `CLAUDE.md`.
+Build and test commands, the toolchain and pinned versions, commit message format, the
+architecture, and the hard rules all live in [`CLAUDE.md`](./CLAUDE.md) so there is one copy
+of each. Maintainers are held to the same ones.
 
 ## Review
 
