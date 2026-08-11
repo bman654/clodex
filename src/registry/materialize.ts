@@ -10,6 +10,11 @@ import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js
 import { isValidProviderId } from './validate.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 import { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
+import {
+  OPENCODE_GO_ANTHROPIC_BASE_URL,
+  OPENCODE_GO_COMPLETIONS_BASE_URL,
+  OPENCODE_GO_PROVIDER_ID,
+} from '../data/opencode-go-models.js';
 
 export { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
 
@@ -42,6 +47,19 @@ export interface MaterializeOptions {
   agent?: CompatibilityAgent;
 }
 
+function resolveMaterializedApiUrl(
+  cached: CachedModel,
+  provider: RegistryProvider,
+  npm: string,
+): string | null {
+  if (provider.id !== OPENCODE_GO_PROVIDER_ID) {
+    return cached.apiUrl ?? provider.api.url ?? '';
+  }
+  if (npm === '@ai-sdk/openai-compatible') return OPENCODE_GO_COMPLETIONS_BASE_URL;
+  if (npm === '@ai-sdk/anthropic') return OPENCODE_GO_ANTHROPIC_BASE_URL;
+  return null;
+}
+
 export function cachedModelToLocal(
   cached: CachedModel,
   provider: RegistryProvider,
@@ -53,7 +71,8 @@ export function cachedModelToLocal(
   });
 
   const npm = cached.npm ?? provider.api.npm ?? '';
-  const apiUrl = cached.apiUrl ?? provider.api.url ?? '';
+  const apiUrl = resolveMaterializedApiUrl(cached, provider, npm);
+  if (apiUrl === null) return null;
   const endpoint = resolveEndpoint(npm, apiUrl);
   if (endpoint === null) return null;
 
