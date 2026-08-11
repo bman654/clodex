@@ -207,6 +207,47 @@ describe('registry/add-template', () => {
     expect(res.error).toBe('API key cannot be empty.');
   });
 
+  it('rejects the add when the template credential probe fails, before any models fetch', async () => {
+    const tpl: ProviderTemplate = {
+      ...dummyTemplate,
+      verifyCredential: vi.fn(async () => 'Provider rejected this API key.'),
+    };
+    const res = await addProviderFromTemplate(tpl, 'bad-key');
+    expect(res.added).toBe(false);
+    expect(res.error).toBe('Provider rejected this API key.');
+    expect(tpl.verifyCredential).toHaveBeenCalledWith('bad-key');
+    expect(fetchTemplate.fetchTemplateModels).not.toHaveBeenCalled();
+    expect(registryState.providers).toHaveLength(0);
+  });
+
+  it('never hands the credential probe a caller-supplied base URL', async () => {
+    const tpl: ProviderTemplate = {
+      ...dummyTemplate,
+      defaultBaseUrl: 'https://template-declared.example/v1',
+      verifyCredential: vi.fn(async () => null),
+    };
+    await addProviderFromTemplate(tpl, 'live-key', {
+      baseUrl: 'https://attacker.example/v1',
+    });
+    // The probe sends a live credential, so its destination must come from the
+    // template alone. Passing only the key is what makes that structural: there
+    // is no argument through which a caller could redirect it.
+    expect(tpl.verifyCredential).toHaveBeenCalledWith('live-key');
+    const [call] = vi.mocked(tpl.verifyCredential!).mock.calls;
+    expect(call).toHaveLength(1);
+    expect(JSON.stringify(call)).not.toContain('attacker.example');
+  });
+
+  it('proceeds when the template credential probe accepts the key', async () => {
+    const tpl: ProviderTemplate = {
+      ...dummyTemplate,
+      verifyCredential: vi.fn(async () => null),
+    };
+    const res = await addProviderFromTemplate(tpl, 'good-key');
+    expect(res.added).toBe(true);
+    expect(fetchTemplate.fetchTemplateModels).toHaveBeenCalled();
+  });
+
   it('fails if provider already exists and replaceExisting is not set', async () => {
     registryState = {
       schemaVersion: 1,

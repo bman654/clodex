@@ -640,11 +640,33 @@ function mapCodexEffortToGeminiBudget(effort: string): number | undefined {
   return GEMINI_25_BUDGETS[level];
 }
 
+/**
+ * Whether a compatibility block says anything at all about reasoning.
+ *
+ * A block carrying only wire-shape fields (`supportsStore`, `maxTokensField`,
+ * …) has no opinion and must fall through to the model-name rules. Both
+ * reasoning paths have to agree on that: the capability path answers
+ * `undefined` and falls through, so an effort path that treated mere presence
+ * of the block as "suppress" would advertise a control that never reaches the
+ * wire. Shared here so the two cannot drift apart again.
+ */
+function compatibilityExpressesReasoningIntent(
+  compatibility: ModelRuntimeCompatibility,
+): boolean {
+  return compatibility.supportsReasoningEffort !== undefined
+    || compatibility.reasoningEffortMap !== undefined
+    || compatibility.thinkingFormat !== undefined;
+}
+
 function compatibilityReasoningCapabilities(
   metadata?: ReasoningMetadata,
 ): ReasoningCapabilities | undefined {
   const compatibility = metadata?.compatibility;
   if (!compatibility) return undefined;
+  // Behaviour-preserving: every branch below already requires one of these.
+  // Stated up front so the predicate is visibly the same one the effort path
+  // gates on.
+  if (!compatibilityExpressesReasoningIntent(compatibility)) return undefined;
 
   if (compatibility.supportsReasoningEffort === false) {
     return metadata?.reasoning === false
@@ -952,7 +974,17 @@ export function effortProviderOptions(
 ): Record<string, Record<string, unknown>> | undefined {
   if (!effort) return undefined;
 
-  if (npm === '@ai-sdk/openai-compatible' && modelId && metadata?.compatibility) {
+  // Only when the block expresses reasoning intent. On a wire-shape-only block
+  // `compatibilityReasoningEffort` answers "no opinion", and returning here on
+  // that would skip the model-name rules the capability path still applies —
+  // the model would advertise controllable reasoning, show no levels in a
+  // patched client, and never put `reasoning_effort` on the wire.
+  if (
+    npm === '@ai-sdk/openai-compatible'
+    && modelId
+    && metadata?.compatibility
+    && compatibilityExpressesReasoningIntent(metadata.compatibility)
+  ) {
     const reasoningEffort = compatibilityReasoningEffort(
       effort,
       modelId,

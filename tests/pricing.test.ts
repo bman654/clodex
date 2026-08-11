@@ -7,6 +7,7 @@ import {
   lookupModelCost,
   normalizeModelIdCandidates,
   pickPricingRow,
+  providerPreservesModelPricing,
 } from '../src/registry/pricing.js';
 import type { CachedModel } from '../src/registry/types.js';
 
@@ -93,6 +94,89 @@ describe('pricing enrich', () => {
       input: 0.95,
       output: 4,
     });
+  });
+
+  it('reads the opt-out through the template when a record lost the flag, without disturbing ordinary providers', () => {
+    // PO4, both directions in one registry. The OpenCode Go record has no
+    // `preserveModelPricing` — the field an older clodex drops on round trip —
+    // so only the template fallback can save its curated prices. The groq
+    // record alongside it must still be enriched exactly as #98 enriches it,
+    // across the top-level and named-account caches.
+    const fetchedAt = '2026-08-09T00:00:00.000Z';
+    const curated = {
+      id: 'claude-sonnet-4-5',
+      name: 'Claude Sonnet 4.5',
+      upstreamModelId: 'claude-sonnet-4-5',
+      modelFormat: 'anthropic' as const,
+      cost: { input: 3, output: 15 },
+    };
+    const ordinary = {
+      id: 'llama-3.3-70b-versatile',
+      name: 'Llama 3.3 70B',
+      upstreamModelId: 'llama-3.3-70b-versatile',
+      modelFormat: 'openai' as const,
+    };
+    const registry = {
+      schemaVersion: 1 as const,
+      providers: [
+        {
+          id: 'opencode-go',
+          templateId: 'opencode-go',
+          name: 'OpenCode Go',
+          enabled: true,
+          authRef: 'keyring:provider:opencode-go',
+          // deliberately no preserveModelPricing field
+          api: { npm: '@ai-sdk/openai-compatible' },
+          addedAt: fetchedAt,
+          modelsCache: { fetchedAt, models: [{ ...curated }] },
+        },
+        {
+          id: 'groq',
+          templateId: 'groq',
+          name: 'Groq',
+          enabled: true,
+          authRef: 'keyring:provider:groq',
+          api: { npm: '@ai-sdk/groq' },
+          addedAt: fetchedAt,
+          modelsCache: { fetchedAt, models: [{ ...ordinary }] },
+          authAccounts: {
+            work: {
+              authRef: 'keyring:provider:groq-work',
+              addedAt: fetchedAt,
+              modelsCache: { fetchedAt, models: [{ ...ordinary }] },
+            },
+          },
+        },
+      ],
+    };
+
+    // A cache that genuinely collides with BOTH models, so preservation and
+    // enrichment are each observable rather than vacuously true.
+    const changed = applyPricingToRegistryProviders(registry, {
+      models: [
+        {
+          model_id: 'claude-sonnet-4-5',
+          pricing: [{ tier: 'standard', input_per_1m_tokens: 99, output_per_1m_tokens: 199 }],
+        },
+        {
+          model_id: 'llama-3.3-70b-versatile',
+          pricing: [{
+            platform: 'groq',
+            tier: 'standard',
+            input_per_1m_tokens: 0.59,
+            output_per_1m_tokens: 0.79,
+          }],
+        },
+      ],
+    });
+
+    // Curated OpenCode prices survive purely on the template fallback: the
+    // colliding 99/199 row must NOT land.
+    expect(registry.providers[0]?.modelsCache?.models[0]?.cost).toEqual({ input: 3, output: 15 });
+    // The ordinary provider keeps #98 enrichment on both cache locations.
+    expect(changed).toBe(true);
+    expect(registry.providers[1]?.modelsCache?.models[0]?.cost?.input).toBe(0.59);
+    expect(registry.providers[1]?.authAccounts?.work?.modelsCache?.models[0]?.cost?.input).toBe(0.59);
   });
 
   it('composes provider-owned pricing with account-cache enrichment', () => {
@@ -200,5 +284,26 @@ describe('pricing enrich', () => {
       isFree: true,
       freeStatus: 'verified_free',
     });
+  });
+});
+
+describe('providerPreservesModelPricing', () => {
+  it('honours an explicit flag on the provider record', () => {
+    expect(providerPreservesModelPricing({ templateId: 'openai', preserveModelPricing: true })).toBe(true);
+    expect(providerPreservesModelPricing({ templateId: 'opencode-go', preserveModelPricing: false })).toBe(false);
+  });
+
+  it('falls back to the template when the record lost the field', () => {
+    // The regression this closes: an older clodex parses providers.json,
+    // drops the field it does not know, and saves it back. Without the
+    // fallback the setting is gone for good and a curated price is silently
+    // replaced by a cache guess on the next enrich — cost display only, which
+    // is exactly why nobody would notice.
+    expect(providerPreservesModelPricing({ templateId: 'opencode-go' })).toBe(true);
+  });
+
+  it('defaults to false for a template that does not ask to keep its prices', () => {
+    expect(providerPreservesModelPricing({ templateId: 'openai' })).toBe(false);
+    expect(providerPreservesModelPricing({ templateId: 'no-such-template' })).toBe(false);
   });
 });

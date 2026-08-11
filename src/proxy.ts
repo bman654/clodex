@@ -434,7 +434,18 @@ export async function startProxyCatalog(
         return;
       }
       const route = resolvedRoute ?? defaultRoute;
-      if (messagesEndpoint === 'count_tokens' && route.modelFormat !== 'anthropic') {
+      // Anthropic-format is not the same question as "implements
+      // count_tokens". Before third-party anthropic-format routes existed the
+      // local path was the only one ever taken; now a route whose upstream
+      // documents no token-counting endpoint would forward the count and
+      // answer Claude Code's token accounting with a 404. Only an explicit
+      // `false` diverts — an unset capability keeps forwarding, so a custom
+      // Anthropic-compatible endpoint that does implement it is unaffected.
+      if (
+        messagesEndpoint === 'count_tokens'
+        && (route.modelFormat !== 'anthropic'
+          || route.compatibility?.supportsCountTokens === false)
+      ) {
         const inputTokens = estimateAnthropicInputTokens(anthropicBody);
         plog(() => `token-count: local estimate model=${originalModel} input_tokens=${inputTokens}`);
         res.setHeader('x-relay-token-count-source', 'local-estimate');
@@ -543,8 +554,16 @@ export async function startProxyCatalog(
             // A route selected through a clodex: id or short alias must echo the
             // exact requested id back, or patched Claude Code misses the alias
             // context-window key and can skip auto-compaction.
+            //
+            // Only when the alias actually resolved. On the default-route
+            // fallback the requested id names no route we honoured, so echoing
+            // it would report the request's identity as the answering model —
+            // the client would believe it reached a model it never reached, and
+            // would key its context window off that phantom id.
             responseModelOverride:
-              typeof originalModel === 'string' && originalModel !== route.realModelId
+              resolvedRoute
+                && typeof originalModel === 'string'
+                && originalModel !== route.realModelId
                 ? originalModel
                 : undefined,
             onUpstreamError: inferenceLogPath
