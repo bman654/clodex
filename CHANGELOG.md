@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.5.0](https://github.com/bman654/clodex/compare/v2.4.0...v2.5.0) (2026-08-11)
+
+
+### Features
+
+* **auth:** add multi-account OAuth selection ([#98](https://github.com/bman654/clodex/issues/98)) ([1683b2c](https://github.com/bman654/clodex/commit/1683b2c3d1e0e6c5b1976f91395c8f53a4441d68))
+* **oauth:** add service-tier fast mode ([#97](https://github.com/bman654/clodex/issues/97)) ([8a01696](https://github.com/bman654/clodex/commit/8a016962a0206f98e01cb4425767502b708b1608))
+
+
+### Bug Fixes
+
+* **launch:** deliver parent diagnostics that the Claude Code mute swallowed ([#112](https://github.com/bman654/clodex/issues/112)) ([9832c11](https://github.com/bman654/clodex/commit/9832c117002240a81a7a886dcd462b25ca022c63))
+* **proxy:** honor outbound proxy for raw passthrough ([#92](https://github.com/bman654/clodex/issues/92)) ([f8d017c](https://github.com/bman654/clodex/commit/f8d017c92b06ba69528d4e8b594879c4c8ec669e))
+* **proxy:** isolate bridge settings from child commands ([#78](https://github.com/bman654/clodex/issues/78)) ([f0a0b87](https://github.com/bman654/clodex/commit/f0a0b87614404744aae0ad74e8cf9ce85aabbc2d))
+
 ## [2.4.0](https://github.com/bman654/clodex/compare/v2.3.0...v2.4.0) (2026-08-10)
 
 
