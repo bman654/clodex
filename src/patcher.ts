@@ -967,7 +967,9 @@ export async function runPatchCommand(opts: {
     p.log.warn(
       `${desired.capacitySkippedFavorites.length} saved favorite${desired.capacitySkippedFavorites.length === 1 ? '' : 's'} `
       + `not patched because clodex limits the Claude-facing patch catalog to ${MAX_MODEL_CATALOG} models. `
-      + 'The first saved favorites remain active; skipped entries were preserved:\n'
+      + 'Capacity is selected from saved order before availability and support checks; unavailable '
+      + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+      + 'entries reclaims positions. Skipped entries were preserved:\n'
       + desired.capacitySkippedFavorites
         .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
         .join('\n'),
