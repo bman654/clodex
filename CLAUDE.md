@@ -3,8 +3,10 @@
 Guidance for coding agents and maintainers working in this repo. Read this file in full; load the
 deeper documents below only when you touch the subsystem they cover.
 
-**clodex** bridges Claude Code to OpenAI models — OpenAI API key (`openai`) or ChatGPT/Codex-plan
-OAuth (`openai-oauth`). It is a trimmed fork of relay-ai (full commit history preserved).
+**clodex** bridges Claude Code to non-Anthropic models — OpenAI API key (`openai`),
+ChatGPT/Codex-plan OAuth (`openai-oauth`), or community-supported OpenCode Go (`opencode-go`).
+Provider support tiers are documented in README. It is a trimmed fork of relay-ai (full commit
+history preserved).
 
 **Prime directive.** The translation, caching, auto-compaction, and OAuth-continuation code encodes
 real production failures that are not visible in the diff. Prefer surgical changes over
@@ -138,7 +140,8 @@ side effects at import time.
 
 - **endpoint** — a local Anthropic-format gateway; the child gets `ANTHROPIC_BASE_URL`.
 - **proxy** — selective MITM of `api.anthropic.com`; Claude Code keeps its normal Anthropic auth and
-  only `clodex:{provider}:{model}` ids and saved aliases route to OpenAI. **This is the default.**
+  only `clodex:{provider}:{model}` ids and saved aliases route to their configured providers. **This
+  is the default.**
 
 Details, including bridge-mode persistence rules, are in `.claude/docs/launch-and-wrapper.md`.
 
@@ -197,8 +200,8 @@ Interactive launch flow and real-provider behavior are verified manually.
 - In endpoint switch-menu mode the displayed context window reflects the **launch** model and does
   not update on live `/model` switch (Claude Code fetches `/v1/models` once at startup). Proxy mode
   + `clodex patch` reports correct per-model windows.
-- Cost display in Claude Code is always inaccurate for OpenAI models (Claude Code applies its own
-  pricing table).
+- Cost display in Claude Code is always inaccurate for routed third-party models (Claude Code applies
+  its own pricing table).
 - `MAX_MODEL_CATALOG = 20` (`constants.ts`) — favorites cap and max catalog routes.
 - OpenAI catalog ids may differ from upstream API ids — `upstreamModelId` carries the real API id.
 - Never commit `dist/` (gitignored, rebuilt by CI), never hardcode a version string
