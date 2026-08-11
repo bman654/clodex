@@ -54,7 +54,13 @@ order in the PR description, and target each PR at the branch it builds on rathe
 
 ## Quality bar
 
-These are the standards that matter most here, in rough order of how often they're missed:
+**Read the [verification standard](./CLAUDE.md#verification-standard) in `CLAUDE.md` before you
+open a PR.** It is derived from what actually goes wrong here across ~100 PRs, and it carries the
+pre-PR gate. The short version: green tests are not evidence — delete your feature and confirm the
+suite turns red; don't claim more than you observed; and prove the path you fixed is reachable in a
+real configuration.
+
+The standards below matter most, in rough order of how often they're missed:
 
 **Verify the code path you're changing is actually reachable.** Before fixing behavior,
 confirm that the path can execute in a real configuration. clodex is a trimmed fork of a
@@ -99,13 +105,14 @@ pnpm dev                 # watch mode
 pnpm vitest run tests/patcher.test.ts    # a single test file
 ```
 
-Development targets **Node 24** (`.nvmrc` pins the version; CI runs 24). The published
-package supports **Node >= 22**, so don't use APIs newer than Node 22 in `src/`.
+Development targets **Node 24** (`.nvmrc` pins v24.14.1; CI runs 24). The published
+package supports **Node >= 22** (`engines.node`), so don't use APIs newer than Node 22 in `src/`.
 
-The package manager is **pnpm**, pinned via `packageManager` in `package.json` and
-activated through corepack. Dependencies are **exact-pinned** — no `^` or `~`. Note that
-`pnpm-workspace.yaml` sets `minimumReleaseAge`, so a dependency version younger than ten
-days can't be resolved; already-locked versions install normally.
+The package manager is **pnpm**, pinned via `packageManager: "pnpm@10.34.5"` in `package.json`
+and activated through corepack. Dependencies are **exact-pinned** — no `^` or `~`. Note that
+`pnpm-workspace.yaml` sets `minimumReleaseAge: 14400` (minutes), so a dependency version younger
+than ten days can't be resolved — fresh resolution of a too-new version fails with
+`ERR_PNPM_NO_MATURE_MATCHING_VERSION`. Already-locked versions install normally.
 
 Before opening a PR, run:
 
@@ -133,6 +140,15 @@ both locally (a Husky `commit-msg` hook) and in CI.
 Add `!` after the type (`feat!:`) or a `BREAKING CHANGE:` footer for an incompatible change.
 
 A scope is encouraged where it's obvious — `fix(auth):`, `feat(wrapper):`.
+
+Hard-wrap commit bodies and footers at **≤100 characters per line** — commitlint's
+`body-max-line-length` is enforced by the hook and again in CI.
+
+**Your summary line becomes a release note, verbatim.** The changelog is generated from commit
+summary headers only — never bodies — so that one line is what every user reads. Write it for
+someone who uses clodex and has never seen the source: name the user-visible outcome, not the
+mechanism. [`CLAUDE.md`](./CLAUDE.md#release-notes-are-written-for-users) has the rules and
+before/after examples.
 
 ## Manual testing
 
