@@ -1071,6 +1071,33 @@ describe('createResponsesWebSocketFetch', () => {
     expect(await readAll(res)).toContain('retry after 60s');
   });
 
+  it('does not reinterpret an oversized status-bearing plan reset after SDK classification', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'usage_limit_reached',
+        message: 'Usage limit reached; retry after 21600s',
+        retry_after_seconds: 21_600,
+      },
+      status: 429,
+    })));
+
+    const body = await readAll(res);
+    const frame = await readErrorFrame(new Response(body));
+    expect(frame.error.type).toBe('usage_limit_reached');
+    expect(frame.error.code).toBe('429');
+    expect(frame.error.retry_after_seconds).toBeUndefined();
+    const verdict = await classifyThroughSdk(body);
+    expect(verdict).toMatchObject({ statusCode: 429, isRetryable: true });
+    expect(verdict?.retryAfterSeconds).toBeUndefined();
+  });
+
   it('states no backoff hint on a 429 when upstream gave none', async () => {
     const wsFetch = createResponsesWebSocketFetch(WS_URL);
     const res = await wsFetch('https://x', {
@@ -1329,15 +1356,21 @@ describe('createResponsesWebSocketFetch', () => {
       response: {
         id: 'r',
         status: 'failed',
-        error: { type: 'usage_limit_reached', message: 'weekly limit reached', retry_after_seconds: 21_600 },
+        error: {
+          type: 'usage_limit_reached',
+          message: 'weekly limit reached; retry after 21600s',
+          retry_after_seconds: 21_600,
+        },
       },
     });
     const frame = await readErrorFrame(new Response(body));
-    expect(frame.error.type).toBe('rate_limit_error');
+    expect(frame.error.type).toBe('usage_limit_reached');
     expect(frame.error.code).toBe('429');
     expect(frame.error.retry_after_seconds).toBeUndefined();
     expect(frame.error.message).not.toContain('retry after');
-    expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429, isRetryable: true });
+    const verdict = await classifyThroughSdk(body);
+    expect(verdict).toMatchObject({ statusCode: 429, isRetryable: true });
+    expect(verdict?.retryAfterSeconds).toBeUndefined();
   });
 
   it('asserts no backoff upstream never stated', async () => {
@@ -1414,7 +1447,7 @@ describe('createResponsesWebSocketFetch', () => {
       },
     });
     const frame = await readErrorFrame(new Response(body));
-    expect(frame.error.type).toBe('rate_limit_error');
+    expect(frame.error.type).toBe('usage_limit_reached');
     expect(frame.error.code).toBe('429');
     expect(frame.error.message).toBe('private plan-limit explanation');
     expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429, isRetryable: true });

@@ -831,6 +831,13 @@ function responseErrorType(event: unknown): string | undefined {
   return typeof responseError?.type === 'string' ? responseError.type : undefined;
 }
 
+/** Preserve a plan-limit class through failContext's existing structured `error.type` channel. */
+function responsePlanLimitType(event: unknown): string | undefined {
+  return [responseErrorType(event), responseErrorCode(event)].find(value => (
+    typeof value === 'string' && value.toLowerCase().includes('usage_limit')
+  ));
+}
+
 function responseRetryAfterSeconds(event: unknown): number | undefined {
   if (!event || typeof event !== 'object') return undefined;
   const record = event as JsonObject;
@@ -1309,6 +1316,7 @@ function failContext(
   diagnosticDetails: Record<string, unknown>,
   statusCode?: number,
   retryAfterSeconds?: number,
+  planLimitType?: string,
 ): void {
   if (ctx.closed || entry.current !== ctx) return;
   entry.debug(`fail: ${message}`);
@@ -1321,7 +1329,8 @@ function failContext(
     type: 'error',
     sequence_number: ctx.frameCount,
     error: {
-      type: statusCode === undefined ? 'transport_error' : anthropicErrorType(statusCode),
+      type: planLimitType
+        ?? (statusCode === undefined ? 'transport_error' : anthropicErrorType(statusCode)),
       code: statusCode === undefined ? 'websocket_transport_error' : String(statusCode),
       message,
       param: null,
@@ -1646,9 +1655,8 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   }
 
   if (errorStatus !== undefined) {
-    const usageLimited = [responseErrorType(event), errorCode].some(value => (
-      typeof value === 'string' && value.toLowerCase().includes('usage_limit')
-    ));
+    const planLimitType = responsePlanLimitType(event);
+    const usageLimited = planLimitType !== undefined;
     // A generic 5xx field is only a fallback when a structured plan-limit class
     // is present. Otherwise it masks the more specific 429 signal carried by the
     // same frame. Explicit deterministic 4xx statuses remain authoritative.
@@ -1683,6 +1691,7 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
       },
       statusCode,
       retryAfterSeconds,
+      planLimitType,
     );
     return;
   }
@@ -1734,7 +1743,8 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
       ? classified
       : settledReason ? 400 : 502;
     const usageLimited = statusCode === 429;
-    const planLimited = discriminator.includes('usage_limit');
+    const planLimitType = responsePlanLimitType(event);
+    const planLimited = planLimitType !== undefined;
     // Only when upstream stated one, and only baked into the TEXT: the AI SDK's
     // chunk schema is a closed zod object that strips `retry_after_seconds`, so
     // a hint carried only in the frame field never reaches the client. This is
@@ -1772,6 +1782,7 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
       },
       statusCode,
       retryAfterSeconds,
+      planLimitType,
     );
     return;
   }
