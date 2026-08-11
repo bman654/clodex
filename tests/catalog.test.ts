@@ -64,6 +64,36 @@ describe('buildCatalogRoutes', () => {
     ]);
     expect(result.capacitySkippedFavorites).toEqual(favorites.slice(2));
   });
+
+  it('keeps the saved launching model off the capacity-selected tail', () => {
+    const startingFavorite = { providerId: 'launch', modelId: 'launch-model' };
+    const favorites = [
+      startingFavorite,
+      ...Array.from({ length: 24 }, (_, index) => ({
+        providerId: 'provider',
+        modelId: `model-${index}`,
+      })),
+    ];
+    const result = buildCatalogRoutes(
+      starting,
+      favorites,
+      (providerId, modelId) =>
+        providerId === startingFavorite.providerId && modelId === startingFavorite.modelId
+          ? starting
+          : {
+              ...starting,
+              aliasId: `anthropic-${providerId}__${modelId}`,
+              realModelId: modelId,
+            },
+      MAX_MODEL_CATALOG,
+      startingFavorite,
+    );
+
+    expect(result.routes).toHaveLength(MAX_MODEL_CATALOG);
+    expect(new Set(result.routes.map(route => route.aliasId)).size).toBe(MAX_MODEL_CATALOG);
+    expect(result.routes.filter(route => route.aliasId === starting.aliasId)).toHaveLength(1);
+    expect(result.capacitySkippedFavorites).toEqual(favorites.slice(MAX_MODEL_CATALOG));
+  });
 });
 
 describe('resolveCatalogModelAliases', () => {
