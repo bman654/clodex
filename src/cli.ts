@@ -1320,10 +1320,19 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
 
   // ── Single-model path ──
 
+  const anonymousProvider = activeProvider.authType === 'none';
+  const isOAuthAnthropic = selectedModel.modelFormat === 'anthropic' && activeProvider.authType === 'oauth';
+  const requiresLocalCountEstimate = selectedModel.modelFormat === 'anthropic'
+    && selectedModel.compatibility?.supportsCountTokens === false;
+  const usesAnthropicProxy = selectedModel.modelFormat === 'anthropic' &&
+    (isOAuthAnthropic || anonymousProvider || requiresLocalCountEstimate);
+
   if (dryRun) {
-    const formatDesc = selectedModel.modelFormat === 'anthropic'
-      ? 'direct passthrough'
-      : 'via SDK adapter proxy';
+    const formatDesc = usesAnthropicProxy
+      ? 'via local passthrough proxy'
+      : selectedModel.modelFormat === 'anthropic'
+        ? 'direct passthrough'
+        : 'via SDK adapter proxy';
     const endpoint = selectedModel.modelFormat === 'anthropic'
       ? (selectedModel.baseUrl ?? '(unknown)')
       : (selectedModel.npm ?? 'SDK');
@@ -1342,7 +1351,6 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   }
 
   const launchApiKey = await resolveLocalProviderApiKey(activeProvider);
-  const anonymousProvider = activeProvider.authType === 'none';
   if (!anonymousProvider && !launchApiKey?.trim()) {
     p.log.error(
       `No credential found for ${activeProvider.name}. Add a key or sign in with clodex providers.`,
@@ -1352,10 +1360,6 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
 
   let proxyHandle: ProxyHandle | null = null;
   let childEnv: NodeJS.ProcessEnv;
-
-  const isOAuthAnthropic = selectedModel.modelFormat === 'anthropic' && activeProvider.authType === 'oauth';
-  const usesAnthropicProxy = selectedModel.modelFormat === 'anthropic' &&
-    (isOAuthAnthropic || anonymousProvider);
 
   // Static provider headers remain part of the proxied endpoint contract,
   // including OAuth routes. Anonymous dispatch filters credential-bearing
@@ -1375,6 +1379,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
           oauthAccountId: activeProvider.oauthAccountId,
           providerData: activeProvider.providerData,
           modelFormat: 'anthropic',
+          compatibility: selectedModel.compatibility,
           headers: activeProvider.headers,
         },
         launchApiKey ?? '',
