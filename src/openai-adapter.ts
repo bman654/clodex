@@ -2,7 +2,7 @@ import { tool, jsonSchema, streamText, generateText } from 'ai';
 import type { LanguageModel, ModelMessage } from 'ai';
 import { parseToolArguments } from './proxy-shared.js';
 import type { SdkCallParams } from './sdk-adapter.js';
-import { oauthServiceTier } from './sdk-adapter.js';
+import { oauthServiceTier, reportUnsupportedServiceTier } from './sdk-adapter.js';
 import { upstreamMaxRetries } from './upstream-retry.js';
 
 // ── OpenAI request shapes ───────────────────────────────────────────────────
@@ -200,7 +200,7 @@ export async function generateOpenAiResponse(
   responseModelId: string,
   options?: { forceStream?: boolean },
 ) {
-  let result: { text: string; toolCalls?: CollectedOpenAiStream['toolCalls']; finishReason?: string; usage?: CollectedOpenAiStream['usage'] };
+  let result: { text: string; toolCalls?: CollectedOpenAiStream['toolCalls']; finishReason?: string; usage?: CollectedOpenAiStream['usage']; warnings?: unknown };
   if (options?.forceStream) {
     // Some upstreams (e.g. ChatGPT's Codex OAuth backend) only ever answer as a
     // stream. Request a real stream from the SDK and collect it into one
@@ -210,6 +210,7 @@ export async function generateOpenAiResponse(
       ...(params as any),
       maxRetries: upstreamMaxRetries(),
       onError: () => {},
+      onStepFinish: step => reportUnsupportedServiceTier(params, step.warnings),
     });
     result = await collectOpenAiStream(stream);
   } else {
@@ -219,6 +220,7 @@ export async function generateOpenAiResponse(
       maxRetries: upstreamMaxRetries(),
     })) as any;
   }
+  reportUnsupportedServiceTier(params, result.warnings);
   const message: Record<string, any> = { role: 'assistant', content: result.text || null };
 
   if (result.toolCalls?.length) {
@@ -253,6 +255,7 @@ export async function streamOpenAiResponse(
     model,
     ...(params as any),
     maxRetries: upstreamMaxRetries(),
+    onStepFinish: step => reportUnsupportedServiceTier(params, step.warnings),
   });
   const baseData = {
     id: `chatcmpl-${Date.now()}`,

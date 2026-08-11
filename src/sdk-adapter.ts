@@ -594,7 +594,7 @@ export function oauthServiceTier(): string | undefined {
   return normalized;
 }
 
-function reportUnsupportedServiceTier(params: SdkCallParams, warnings: unknown): void {
+export function reportUnsupportedServiceTier(params: SdkCallParams, warnings: unknown): void {
   if (warnedUnsupportedServiceTier || !params.providerOptions?.openai?.serviceTier) return;
   if (!Array.isArray(warnings) || !warnings.some(warning => {
     if (!warning || typeof warning !== 'object') return false;
