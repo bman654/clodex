@@ -1037,6 +1037,9 @@ describe('createResponsesWebSocketFetch', () => {
     // The AI SDK strips unknown frame fields, so the hint only survives baked
     // into the message — which is how the consumer recovers it.
     expect(body).toContain('retry after 45s');
+    expect(await readErrorFrame(new Response(body))).toMatchObject({
+      error: { retry_after_seconds: 45 },
+    });
     expect(await classifyThroughSdk(body)).toMatchObject({
       statusCode: 429,
       isRetryable: true,
@@ -1068,6 +1071,60 @@ describe('createResponsesWebSocketFetch', () => {
     expect(await readAll(res)).toContain('retry after 60s');
   });
 
+  it('does not reinterpret an oversized status-bearing plan reset after SDK classification', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'usage_limit_reached',
+        message: 'Usage limit reached; retry after 21600s',
+        retry_after_seconds: 21_600,
+      },
+      status: 429,
+    })));
+
+    const body = await readAll(res);
+    const frame = await readErrorFrame(new Response(body));
+    expect(frame.error.type).toBe('usage_limit_reached');
+    expect(frame.error.code).toBe('429');
+    expect(frame.error.retry_after_seconds).toBeUndefined();
+    const verdict = await classifyThroughSdk(body);
+    expect(verdict).toMatchObject({ statusCode: 429, isRetryable: true });
+    expect(verdict?.retryAfterSeconds).toBeUndefined();
+  });
+
+  it('keeps an authoritative 403 alongside the plan-limit identity it names', async () => {
+    // Unlike the generic 5xx fallback, a deterministic 4xx status stays the
+    // mapped status: the synthetic `type` still names the plan class, while
+    // `code` carries the 403 the SDK classifies as non-retryable.
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: { type: 'usage_limit_reached', message: 'plan limit; not authorized' },
+      status: 403,
+    })));
+
+    const body = await readAll(res);
+    const frame = await readErrorFrame(new Response(body));
+    expect(frame.error.type).toBe('usage_limit_reached');
+    expect(frame.error.code).toBe('403');
+    expect(frame.error.retry_after_seconds).toBeUndefined();
+    expect(frame.error.message).not.toContain('retry after');
+    const verdict = await classifyThroughSdk(body);
+    expect(verdict).toMatchObject({ statusCode: 403, isRetryable: false });
+    expect(verdict?.retryAfterSeconds).toBeUndefined();
+  });
+
   it('states no backoff hint on a 429 when upstream gave none', async () => {
     const wsFetch = createResponsesWebSocketFetch(WS_URL);
     const res = await wsFetch('https://x', {
@@ -1088,6 +1145,62 @@ describe('createResponsesWebSocketFetch', () => {
     // send the client back long before the limit resets.
     expect(body).not.toContain('retry after');
     expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429 });
+  });
+
+  it('does not fabricate a five-second hint from a negative in-band backoff', async () => {
+    // clampRetryAfterSeconds turns a negative value into the 5s default, which
+    // would invent a hint upstream never gave; the gate rejects it instead.
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'error',
+      error: { type: 'rate_limit_error', message: 'slow down', retry_after_seconds: -5 },
+      status: 429,
+    })));
+
+    const body = await readAll(res);
+    expect(body).not.toContain('retry after');
+    const verdict = await classifyThroughSdk(body);
+    expect(verdict).toMatchObject({ statusCode: 429, isRetryable: true });
+    expect(verdict?.retryAfterSeconds).toBeUndefined();
+  });
+
+  it.each([
+    ['a fractional plan-limit hint', {
+      type: 'error',
+      error: { type: 'usage_limit_reached', message: 'plan limit', retry_after_seconds: 60.4 },
+      status: 429,
+    }, undefined],
+    ['a fractional ordinary hint', {
+      type: 'error',
+      error: { type: 'rate_limit_error', message: 'burst limit', retry_after_seconds: 60.4 },
+      status: 429,
+    }, 60],
+  ] as const)('pins the raw 60.4 policy for %s', async (_label, frame, expectedHint) => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const res = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify(frame)));
+
+    const body = await readAll(res);
+    const wire = await readErrorFrame(new Response(body));
+    expect(wire.error.code).toBe('429');
+    if (expectedHint === undefined) {
+      // Raw 60.4 is above the plan-limit cap, so the hint is omitted whole.
+      expect(wire.error.retry_after_seconds).toBeUndefined();
+      expect(wire.error.message).not.toContain('retry after');
+    } else {
+      // Ordinary rate-limit hints round, then clamp, to the transport bound.
+      expect(wire.error.retry_after_seconds).toBe(expectedHint);
+      expect(wire.error.message).toContain('retry after 60s');
+    }
   });
 
   it('reads a status nested under error, not only the top-level one', async () => {
@@ -1227,10 +1340,12 @@ describe('createResponsesWebSocketFetch', () => {
     ['content_filter', { type: 'response.incomplete', response: { id: 'r', status: 'incomplete', incomplete_details: { reason: 'content_filter' } } }],
     ['max_output_tokens', { type: 'response.incomplete', response: { id: 'r', status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } } }],
     ['invalid_request_error', { type: 'response.failed', response: { id: 'r', status: 'failed', error: { type: 'invalid_request_error', message: 'bad' } } }],
-  ])('does not make a deterministic %s outcome retryable', async (_label, frame) => {
-    const verdict = await classifyThroughSdk(await failWith(frame));
+  ])('does not make a deterministic %s outcome retryable', async (label, frame) => {
+    const body = await failWith(frame);
+    const verdict = await classifyThroughSdk(body);
     expect(verdict).toMatchObject({ statusCode: 400 });
     expect(verdict?.isRetryable).toBe(false);
+    expect(body).toContain(label);
   });
 
   it('preserves a context-limit failure as 400 so auto-compaction still fires', async () => {
@@ -1279,7 +1394,28 @@ describe('createResponsesWebSocketFetch', () => {
     }
   });
 
-  it('carries an output-less usage-limit backoff in the message text', async () => {
+  it('normalizes a finite numeric code in diagnostics and classification', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const res = await wsFetch('https://x', { method: 'POST', headers: {}, body: '{}' });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.failed',
+      response: { id: 'r', status: 'failed', error: { code: 429, message: 'limited' } },
+    })));
+
+    const body = await readAll(res);
+    expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429, isRetryable: true });
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      source: 'empty_failure_terminal',
+      errorCode: '429',
+    }));
+  });
+
+  it('carries a bounded output-less rate-limit backoff in the message text', async () => {
     // The AI SDK's chunk schema is a closed zod object that strips
     // `retry_after_seconds`, so a hint carried only in the frame field never
     // reaches the client — it has to be baked into the prose.
@@ -1288,13 +1424,57 @@ describe('createResponsesWebSocketFetch', () => {
       response: {
         id: 'r',
         status: 'failed',
-        error: { type: 'usage_limit_reached', message: 'weekly limit reached', retry_after_seconds: 1800 },
+        error: { type: 'rate_limit_exceeded', message: 'burst limit reached', retry_after_seconds: 1800 },
       },
     });
-    // Clamped to MAX_RETRY_AFTER_SECONDS: a hint of hours must not park the
-    // client past the 120s no-event stream abort.
+    // Ordinary rate-limit hints remain capped to keep clients within the
+    // transport's bounded retry window.
     expect(body).toContain('retry after 60s');
     expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429, retryAfterSeconds: 60 });
+  });
+
+  it('omits an oversized plan-limit hint instead of claiming the 60s cap is the reset time', async () => {
+    const body = await failWith({
+      type: 'response.failed',
+      response: {
+        id: 'r',
+        status: 'failed',
+        error: {
+          type: 'usage_limit_reached',
+          message: 'weekly limit reached; retry after 21600s',
+          retry_after_seconds: 21_600,
+        },
+      },
+    });
+    const frame = await readErrorFrame(new Response(body));
+    expect(frame.error.type).toBe('usage_limit_reached');
+    expect(frame.error.code).toBe('429');
+    expect(frame.error.retry_after_seconds).toBeUndefined();
+    expect(frame.error.message).not.toContain('retry after');
+    const verdict = await classifyThroughSdk(body);
+    expect(verdict).toMatchObject({ statusCode: 429, isRetryable: true });
+    expect(verdict?.retryAfterSeconds).toBeUndefined();
+  });
+
+  it('preserves plan identity from a code-only usage-limit terminal', async () => {
+    // No `type` at all: the plan class travels in `code`, and the synthetic
+    // frame still names it in `type` while `code` carries the mapped 429.
+    const body = await failWith({
+      type: 'response.failed',
+      response: {
+        id: 'r',
+        status: 'failed',
+        error: { code: 'usage_limit_reached', message: 'plan limit reached', retry_after_seconds: 21_600 },
+      },
+    });
+    const frame = await readErrorFrame(new Response(body));
+    expect(frame.error.type).toBe('usage_limit_reached');
+    expect(frame.error.code).toBe('429');
+    expect(frame.error.retry_after_seconds).toBeUndefined();
+    expect(frame.error.message).not.toContain('retry after');
+    const verdict = await classifyThroughSdk(body);
+    expect(verdict).toMatchObject({ statusCode: 429, isRetryable: true });
+    expect(verdict?.retryAfterSeconds).toBeUndefined();
   });
 
   it('asserts no backoff upstream never stated', async () => {
@@ -1304,6 +1484,51 @@ describe('createResponsesWebSocketFetch', () => {
     });
     expect(body).not.toContain('retry after');
     expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429 });
+  });
+
+  it('does not fabricate a five-second hint from a negative output-less backoff', async () => {
+    const body = await failWith({
+      type: 'response.failed',
+      response: {
+        id: 'r',
+        status: 'failed',
+        error: { type: 'rate_limit_exceeded', message: 'burst limit reached', retry_after_seconds: -5 },
+      },
+    });
+    expect(body).not.toContain('retry after');
+    const verdict = await classifyThroughSdk(body);
+    expect(verdict).toMatchObject({ statusCode: 429, isRetryable: true });
+    expect(verdict?.retryAfterSeconds).toBeUndefined();
+  });
+
+  it.each([
+    ['a fractional plan-limit hint', {
+      type: 'response.failed',
+      response: {
+        id: 'r',
+        status: 'failed',
+        error: { type: 'usage_limit_reached', message: 'plan limit reached', retry_after_seconds: 60.4 },
+      },
+    }, undefined],
+    ['a fractional ordinary hint', {
+      type: 'response.failed',
+      response: {
+        id: 'r',
+        status: 'failed',
+        error: { type: 'rate_limit_exceeded', message: 'burst limit reached', retry_after_seconds: 60.4 },
+      },
+    }, 60],
+  ] as const)('pins the raw 60.4 policy for %s', async (_label, frame, expectedHint) => {
+    const body = await failWith(frame);
+    if (expectedHint === undefined) {
+      // Raw 60.4 is above the plan-limit cap, so the hint is omitted whole.
+      expect(body).not.toContain('retry after');
+      expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429 });
+    } else {
+      // Ordinary rate-limit hints round, then clamp, to the transport bound.
+      expect(body).toContain('retry after 60s');
+      expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429, retryAfterSeconds: 60 });
+    }
   });
 
   it('never carries upstream failure prose to the log OR the client', async () => {
@@ -1352,9 +1577,29 @@ describe('createResponsesWebSocketFetch', () => {
       },
     })));
 
-    // An exhausted account is not a server fault: 502 would spend the client's
-    // whole retry budget re-asking a question upstream has already answered.
-    expect(await classifyThroughSdk(await readAll(res))).toMatchObject({ statusCode: 429 });
+    // The mapping gives downstream the real rate-limit class. It does not save
+    // SDK attempts: both 429 and generic 5xx failures are retryable.
+    expect(await classifyThroughSdk(await readAll(res))).toMatchObject({
+      statusCode: 429,
+      isRetryable: true,
+    });
+  });
+
+  it('lets a specific usage-limit identifier outrank a generic HTTP failure status', async () => {
+    const body = await failWith({
+      type: 'error',
+      status: 500,
+      error: {
+        type: 'usage_limit_reached',
+        code: 'server_error',
+        message: 'private plan-limit explanation',
+      },
+    });
+    const frame = await readErrorFrame(new Response(body));
+    expect(frame.error.type).toBe('usage_limit_reached');
+    expect(frame.error.code).toBe('429');
+    expect(frame.error.message).toBe('private plan-limit explanation');
+    expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429, isRetryable: true });
   });
 
   it('keeps a content-free fingerprint of what upstream actually said', async () => {
@@ -1386,7 +1631,8 @@ describe('createResponsesWebSocketFetch', () => {
     expect(record!.upstreamMessageBytes).toBe(29);
     expect(record!.upstreamMessageHash).toMatch(/^[a-f0-9]{16}$/);
     // ...alongside, not instead of, the fingerprint of what the client was told.
-    expect(record!.errorMessageBytes).not.toBe(29);
+    const expectedSummary = 'OpenAI ended the response with no output (server_error)';
+    expect(record!.errorMessageBytes).toBe(Buffer.byteLength(expectedSummary));
     expect(JSON.stringify(record)).not.toContain('sensitive backend explanation');
   });
 
@@ -3353,11 +3599,14 @@ describe('createResponsesWebSocketFetch', () => {
     }));
   });
 
-  it('still logs a retried rejection, which no error_frame record covers', async () => {
-    // The retry frame carries a 400, so the rejection branch would claim it if
-    // the willRetry arm of the diagnostic gate were dropped — and because the
-    // retry returns before that branch, the failure would then be logged
-    // NOWHERE. This pins the arm that prevents it.
+  it.each([
+    ['status-bearing', 400],
+    ['status-less', undefined],
+  ])('still logs a retried %s rejection, which no error_frame record covers', async (_label, status) => {
+    // The rejection branch would claim the status-bearing frame if the
+    // willRetry arm of the diagnostic gate were dropped, while the status-less
+    // frame would miss both records. Because retry returns before either branch,
+    // both would then be logged NOWHERE. These rows pin the arm that prevents it.
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const input = [{ role: 'user', content: [{ type: 'input_text', text: 'one' }] }];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
@@ -3382,7 +3631,8 @@ describe('createResponsesWebSocketFetch', () => {
       ])),
     });
     firstSocket.emit('message', Buffer.from(JSON.stringify({
-      type: 'error', status: 400,
+      type: 'error',
+      ...(status === undefined ? {} : { status }),
       error: { code: 'previous_response_not_found', message: 'gone' },
     })));
     const replacement = lastSocket();
