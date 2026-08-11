@@ -1,13 +1,13 @@
 ---
 name: pr-verification
-description: The bar a clodex change must clear before a PR is opened, and the bar a reviewer holds it to. Use when opening, preparing, reviewing, or verifying a pull request in this repo, when writing tests for a fix, or when judging whether a finding is real. Derived from ~100 merged and closed PRs.
+description: The bar a clodex change must clear before its PR is opened. Use when preparing a change for a pull request, writing or strengthening the tests for a fix, proving a bug is real before fixing it, self-checking your own work, or writing the PR description. Derived from ~100 merged and closed PRs. To review someone else's PR, use pr-review instead — it holds changes to this bar.
 ---
 
-# Verification standard
+# Before you open a PR
 
-Review holds changes to a higher bar than "the suite is green." Across ~100 merged and closed PRs,
-three failures dominate — in this order. They are what most review rounds are spent on, and every
-one of them is preventable before opening.
+Your change will be held to a higher bar than "the suite is green." Across ~100 merged and closed
+PRs, three failures dominate — in this order. They are what most review rounds are spent on, and
+every one of them is cheaper to catch now than after a reviewer finds it.
 
 ## 1. Tests must discriminate. Green is not evidence.
 
