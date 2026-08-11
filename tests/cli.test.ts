@@ -1,6 +1,6 @@
 // tests/cli.test.ts
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { parseArgs, rootHelpText, claudeHelpText, serverHelpText, modelsHelpText, patchHelpText, main } from '../src/cli.js';
+import { parseArgs, rootHelpText, claudeHelpText, serverHelpText, modelsHelpText, patchHelpText, main, runClaudeCommand } from '../src/cli.js';
 import { VERSION } from '../src/constants.js';
 
 afterEach(() => {
@@ -197,6 +197,29 @@ describe('parseArgs', () => {
   });
 });
 
+describe('runClaudeCommand', () => {
+  it('composes --fast before the dry-run preview and overrides the ambient tier', async () => {
+    const previousClaudePath = process.env.CLODEX_CLAUDE_PATH;
+    const previousTier = process.env.CLODEX_SERVICE_TIER;
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      process.env.CLODEX_CLAUDE_PATH = process.execPath;
+      process.env.CLODEX_SERVICE_TIER = 'flex';
+
+      const code = await runClaudeCommand(parseArgs(['claude', '--fast', '--dry-run']));
+
+      expect(code).toBe(0);
+      expect(process.env.CLODEX_SERVICE_TIER).toBe('fast');
+      expect(log.mock.calls.some(call => String(call[0]).includes('DRY RUN'))).toBe(true);
+    } finally {
+      if (previousClaudePath === undefined) delete process.env.CLODEX_CLAUDE_PATH;
+      else process.env.CLODEX_CLAUDE_PATH = previousClaudePath;
+      if (previousTier === undefined) delete process.env.CLODEX_SERVICE_TIER;
+      else process.env.CLODEX_SERVICE_TIER = previousTier;
+    }
+  });
+});
+
 describe('help text', () => {
   const helps = [rootHelpText(), claudeHelpText(), serverHelpText(), modelsHelpText(), patchHelpText()];
 
@@ -232,6 +255,8 @@ describe('help text', () => {
     expect(root).toContain('--proxy');
     expect(root).toContain('--save-mode');
     expect(claudeHelpText()).toContain('--save-mode');
+    expect(claudeHelpText()).toContain('--fast');
+    expect(claudeHelpText()).toContain('warns if the SDK omits it');
     expect(serverHelpText()).toContain('--save-mode');
     expect(claudeHelpText()).toContain('clodex:<provider-id>:<model-id>');
     expect(serverHelpText()).toContain('--no-discovery');

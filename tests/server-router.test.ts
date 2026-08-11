@@ -227,13 +227,41 @@ describe('server router', () => {
         npm: '@ai-sdk/groq',
         apiKey: 'groq-key',
       },
+      {
+        id: 'oauth-tier',
+        name: 'OAuth Tier',
+        isFree: false,
+        brand: 'OpenAI',
+        providerId: 'openai-oauth',
+        sourceBackend: 'openai-oauth',
+        modelFormat: 'openai',
+        npm: '@ai-sdk/openai',
+        authType: 'oauth',
+        apiKey: 'synthetic-oauth-token',
+      },
+      {
+        id: 'api-tier',
+        name: 'API Tier',
+        isFree: false,
+        brand: 'OpenAI',
+        providerId: 'openai',
+        sourceBackend: 'openai',
+        modelFormat: 'openai',
+        npm: '@ai-sdk/openai',
+        authType: 'api',
+        apiKey: 'synthetic-api-key',
+      },
     ]);
 
+    const previousTier = process.env.CLODEX_SERVICE_TIER;
+    process.env.CLODEX_SERVICE_TIER = 'fast';
     try {
       const server = await startTestServer({ catalog: auditCatalog, inferenceLogPath });
       for (const request of [
         { model: 'claude-native', output_config: { effort: 'high' }, messages: [{ role: 'user', content: 'private prompt' }] },
         { model: 'anthropic-groq__llama-test', output_config: { effort: 'medium' }, messages: [{ role: 'user', content: 'another private prompt' }] },
+        { model: 'oauth-tier', messages: [{ role: 'user', content: 'OAuth audit fixture' }] },
+        { model: 'api-tier', messages: [{ role: 'user', content: 'API audit fixture' }] },
       ]) {
         const response = await fetch(`${server.url}/anthropic/v1/messages`, {
           method: 'POST',
@@ -243,13 +271,31 @@ describe('server router', () => {
         expect(response.status).toBe(200);
       }
 
+      for (const modelId of ['oauth-tier', 'api-tier']) {
+        const response = await fetch(`${server.url}/openai/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: modelId, messages: [{ role: 'user', content: 'OpenAI audit fixture' }] }),
+        });
+        expect(response.status).toBe(200);
+      }
+
       const entries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-      expect(entries).toEqual([
+      expect(entries.slice(0, 2)).toEqual([
         expect.objectContaining({ modelId: 'claude-native', effort: 'high', provider: 'zen', route: 'passthrough' }),
         expect.objectContaining({ modelId: 'anthropic-groq__llama-test', effort: 'medium', provider: 'groq', route: 'translated' }),
       ]);
+      expect(entries).toHaveLength(6);
+      expect(entries[2]).toMatchObject({ modelId: 'oauth-tier', serviceTier: 'priority', provider: 'openai-oauth' });
+      expect(entries[3]).toMatchObject({ modelId: 'api-tier', provider: 'openai' });
+      expect(entries[3]).not.toHaveProperty('serviceTier');
+      expect(entries[4]).toMatchObject({ modelId: 'oauth-tier', serviceTier: 'priority', provider: 'openai-oauth' });
+      expect(entries[5]).toMatchObject({ modelId: 'api-tier', provider: 'openai' });
+      expect(entries[5]).not.toHaveProperty('serviceTier');
       expect(readFileSync(inferenceLogPath, 'utf8')).not.toContain('private prompt');
     } finally {
+      if (previousTier === undefined) delete process.env.CLODEX_SERVICE_TIER;
+      else process.env.CLODEX_SERVICE_TIER = previousTier;
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -190,11 +190,10 @@ export interface InferenceRequestLogEntry {
   provider: string;
   effort?: string;
   /**
-   * Resolved Codex service tier, when the route carries one. Recorded because
-   * nothing else made it observable: `--fast` sets CLODEX_SERVICE_TIER, the
-   * adapter turns that into a providerOption deep inside translateRequest, and
-   * no log carried it — so "did fast mode actually apply" could only be
-   * answered by reading source. Absent means no tier was sent.
+   * Service tier clodex resolved and requested for this route before dispatch.
+   * This records intent, not proof of SDK serialization or wire transmission;
+   * the provider SDK may report the requested tier as unsupported and omit it.
+   * Absence means clodex did not request a tier for this route.
    */
   serviceTier?: string;
   route: 'passthrough' | 'translated';

@@ -404,8 +404,8 @@ ${pc.bold('Options:')}
   --save-mode  With --endpoint/--proxy: save that mode as the claude default
   --dry-run    Run the wizard but show a preview instead of launching Claude Code
   --trace      Write debug logs to ~/.clodex/logs/ and show errors on exit
-  --fast       Codex fast mode: send service_tier=priority on ChatGPT-OAuth models
-               (equivalent to CLODEX_SERVICE_TIER=fast; other providers unaffected)
+  --fast       Request Codex fast mode (service_tier=priority) on ChatGPT-OAuth models
+               (equivalent to CLODEX_SERVICE_TIER=fast; warns if the SDK omits it)
   --provider   Boot provider id (skip wizard when paired with --model or in print mode)
   --model      Boot model id (skip wizard when paired with --provider or in print mode)
   --help       Show this command help
@@ -1079,8 +1079,9 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   const { dryRun, trace, launchProvider, launchModel } = parsed;
   // --fast: Codex fast mode for this launch. The proxy runs in this process
   // and the env inherits into every request; an explicit flag outranks any
-  // ambient CLODEX_SERVICE_TIER. Tier semantics (OAuth-only, post-resolution)
-  // live in sdk-adapter's oauthServiceTier.
+  // ambient CLODEX_SERVICE_TIER. Compose it before prerequisite/dry-run handling
+  // so launch previews and real launches resolve the same environment. Tier
+  // semantics (OAuth-only, post-resolution) live in sdk-adapter's resolver.
   if (parsed.fast) process.env.CLODEX_SERVICE_TIER = 'fast';
   const claudeArgs = normalizeClaudeAgentArgs(parsed.claudeArgs);
   const agentStdout = wantsCleanAgentStdout('claude', claudeArgs);

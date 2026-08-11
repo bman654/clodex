@@ -176,6 +176,29 @@ describe('inference request log', () => {
     }
   });
 
+  it('bounds and redacts a hostile requested service-tier diagnostic value', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-inference-tier-log-'));
+    const path = join(dir, 'requests.jsonl');
+    const syntheticCredential = ['sk-ant-api03', 'syntheticcredential123456'].join('-');
+    try {
+      writeInferenceRequestLog(path, {
+        modelId: 'gpt-test',
+        serviceTier: `Bearer ${syntheticCredential}\n${'x'.repeat(200)}`,
+        provider: 'openai-oauth',
+        route: 'translated',
+      });
+
+      const raw = readFileSync(path, 'utf8');
+      const entry = JSON.parse(raw.trim());
+      expect(raw).not.toContain(syntheticCredential);
+      expect(entry.serviceTier).toContain('[REDACTED]');
+      expect(entry.serviceTier).not.toContain('\n');
+      expect(entry.serviceTier.length).toBeLessThanOrEqual(40);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('adds only the latest message text when request previews are enabled', () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-inference-preview-'));
     const path = join(dir, 'requests.jsonl');

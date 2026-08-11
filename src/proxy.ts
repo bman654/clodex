@@ -460,8 +460,8 @@ export async function startProxyCatalog(
       const upstreamUrl = route.upstreamUrl;
       const routeAuthType = route.authType ?? 'api';
 
-      // The tier is appended only when one applies, so its absence in a log is
-      // itself the answer to "did --fast do anything on this route".
+      // Record the tier clodex resolved for this route before dispatch. This is
+      // requested intent; the provider SDK may still omit it during serialization.
       const loggedTier = isOpenAiOAuthRoute(route) ? oauthServiceTier() : undefined;
       plog(() =>
         `POST /v1/messages - alias=${originalModel} route=${route.realModelId} format=${route.modelFormat} key=${routeAuthType === 'none' ? 'none' : apiKey ? `len:${apiKey.length}` : 'MISSING'}`

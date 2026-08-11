@@ -394,9 +394,8 @@ async function handleAnthropicMessages(
       modelId: body.model,
       effort: anthropicEffortFromRequest(body as AnthropicRequest) ?? model.defaultEffort,
       claudeSessionId,
-      // Same predicate and resolver the adapter applies, so a gateway record
-      // answers the same question a proxy record does. Omitting it here made
-      // absence ambiguous — "no tier sent" or "this path forgot to log it".
+      // Use the adapter's route predicate and resolver so this records the same
+      // pre-dispatch request intent. It does not prove SDK serialization.
       serviceTier: isOpenAiOAuthRoute(model) ? oauthServiceTier() : undefined,
       provider: inferenceProvider(model),
       route: 'translated',
@@ -407,7 +406,7 @@ async function handleAnthropicMessages(
     if (npmMaxTools !== undefined && toolCount > npmMaxTools) {
       plog(`tools truncated: ${toolCount} → ${npmMaxTools} (provider limit)`);
     }
-    const openAiOAuth = model.npm === '@ai-sdk/openai' && model.authType === 'oauth';
+    const openAiOAuth = isOpenAiOAuthRoute(model);
     const params = sdkTranslateRequest(body as unknown as AnthropicRequest, model.npm!, {
       defaultEffort: anthropicEffortFromRequest(body as AnthropicRequest) ? undefined : model.defaultEffort,
       openAiOAuth,

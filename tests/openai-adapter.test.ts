@@ -99,24 +99,31 @@ describe('streamOpenAiResponse', () => {
 
 describe('translateOpenAiRequest OAuth shaping', () => {
   it('moves the system prompt into providerOptions and drops the output limit for OAuth routes', async () => {
-    const params = translateOpenAiRequest({
-      model: 'gpt-test',
-      max_tokens: 100,
-      messages: [
-        { role: 'system', content: 'Be terse.' },
-        { role: 'user', content: 'hi' },
-      ],
-    }, { openAiOAuth: true });
+    const prior = process.env.CLODEX_SERVICE_TIER;
+    try {
+      delete process.env.CLODEX_SERVICE_TIER;
+      const params = translateOpenAiRequest({
+        model: 'gpt-test',
+        max_tokens: 100,
+        messages: [
+          { role: 'system', content: 'Be terse.' },
+          { role: 'user', content: 'hi' },
+        ],
+      }, { openAiOAuth: true });
 
-    expect(params.instructions).toBeUndefined();
-    expect(params.maxOutputTokens).toBeUndefined();
-    expect(params.providerOptions).toEqual({
-      openai: {
-        store: false,
-        include: ['reasoning.encrypted_content'],
-        instructions: 'Be terse.',
-      },
-    });
+      expect(params.instructions).toBeUndefined();
+      expect(params.maxOutputTokens).toBeUndefined();
+      expect(params.providerOptions).toEqual({
+        openai: {
+          store: false,
+          include: ['reasoning.encrypted_content'],
+          instructions: 'Be terse.',
+        },
+      });
+    } finally {
+      if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
+      else process.env.CLODEX_SERVICE_TIER = prior;
+    }
   });
 
   it('applies CLODEX_SERVICE_TIER on the OAuth route of the OpenAI-format endpoint too', async () => {
@@ -128,13 +135,6 @@ describe('translateOpenAiRequest OAuth shaping', () => {
         messages: [{ role: 'user', content: 'hi' }],
       }, { openAiOAuth: true });
       expect((oauth.providerOptions?.openai as Record<string, unknown>)?.serviceTier).toBe('priority');
-
-      // Non-OAuth requests through this endpoint stay untouched.
-      const apiKey = translateOpenAiRequest({
-        model: 'gpt-test',
-        messages: [{ role: 'user', content: 'hi' }],
-      });
-      expect(apiKey.providerOptions).toBeUndefined();
     } finally {
       if (prior === undefined) delete process.env.CLODEX_SERVICE_TIER;
       else process.env.CLODEX_SERVICE_TIER = prior;

@@ -1544,8 +1544,8 @@ describe('selective HTTP proxy', () => {
   }, 20_000);
 
   it('records the resolved service tier for the route that carries one', async () => {
-    // The diagnostic exists to answer "did --fast actually put a tier on the
-    // wire", which previously could only be answered by reading source.
+    // The diagnostic records the tier clodex resolved for the selected route
+    // before dispatch; it deliberately does not claim wire transmission.
     const previous = process.env['CLODEX_SERVICE_TIER'];
     process.env['CLODEX_SERVICE_TIER'] = 'fast';
     try {
@@ -1562,10 +1562,56 @@ describe('selective HTTP proxy', () => {
       });
       const request = entries.find(entry => entry.route === 'translated');
       expect(request).toBeTruthy();
-      // The WIRE value, not the configured spelling: `fast` is the Codex CLI's
-      // word and `priority` is what is sent, so logging the input would answer
-      // the question in the wrong vocabulary.
+      // Record the resolved request vocabulary: `fast` is the Codex CLI's
+      // spelling and `priority` is the tier clodex asks the SDK to serialize.
       expect(request!.serviceTier).toBe('priority');
+    } finally {
+      if (previous === undefined) delete process.env['CLODEX_SERVICE_TIER'];
+      else process.env['CLODEX_SERVICE_TIER'] = previous;
+    }
+  });
+
+  it('requires both OAuth auth and the OpenAI SDK route before recording a tier', async () => {
+    const previous = process.env['CLODEX_SERVICE_TIER'];
+    process.env['CLODEX_SERVICE_TIER'] = 'fast';
+    try {
+      const oneFieldNegatives = [
+        {
+          logName: 'tier-api-key-negative-inference.jsonl',
+          route: {
+            aliasId: 'clodex:openai:gpt-5.6-sol',
+            realModelId: 'gpt-5.6-sol',
+            displayName: 'API-key Sol',
+            upstreamUrl: '',
+            apiKey: 'synthetic-api-key',
+            modelFormat: 'openai' as const,
+            npm: '@ai-sdk/openai',
+            authType: 'api' as const,
+            providerId: 'openai',
+          },
+        },
+        {
+          logName: 'tier-compatible-oauth-negative-inference.jsonl',
+          route: {
+            aliasId: 'clodex:compatible-oauth:gpt-5.6-sol',
+            realModelId: 'gpt-5.6-sol',
+            displayName: 'Compatible OAuth Sol',
+            upstreamUrl: '',
+            apiKey: 'synthetic-oauth-token',
+            modelFormat: 'openai' as const,
+            npm: '@ai-sdk/openai-compatible',
+            authType: 'oauth' as const,
+            providerId: 'compatible-oauth',
+          },
+        },
+      ];
+
+      for (const fixture of oneFieldNegatives) {
+        const entries = await requestLogEntriesForRoute(fixture.logName, fixture.route);
+        const request = entries.find(entry => entry.route === 'translated');
+        expect(request, fixture.logName).toBeTruthy();
+        expect(request!.serviceTier, fixture.logName).toBeUndefined();
+      }
     } finally {
       if (previous === undefined) delete process.env['CLODEX_SERVICE_TIER'];
       else process.env['CLODEX_SERVICE_TIER'] = previous;

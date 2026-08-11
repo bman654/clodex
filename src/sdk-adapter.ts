@@ -472,16 +472,16 @@ export function translateRequest(
   const messages = body.messages ?? [];
   annotateToolNames(messages);
 
-  // Claude Code prepends an Anthropic-only billing attribution block whose
-  // `cch` value changes every request. It is envelope metadata, not a model
-  // instruction, and forwarding it invalidates the stable prompt prefix on
-  // EVERY translated provider — OpenAI-compatible gateways hash the request
-  // prefix for implicit caching, and third-party Anthropic-format providers
-  // cache up to breakpoints, so a volatile first system line caps their cache
-  // hits at the first few hundred tokens (observed live: kimi-k3 via OpenCode
-  // Zen froze at 256-512 cached tokens per call). Strip it on every
-  // SDK-translated route; Anthropic passthrough does not go through
-  // translateRequest and still forwards it.
+  // Claude Code prepends an Anthropic-only billing attribution block that can
+  // carry a changing `cc_prev_req` value on first-party-base-URL requests. It
+  // is envelope metadata, not a model instruction, and forwarding it
+  // invalidates the stable prompt prefix on every SDK-translated route —
+  // OpenAI and OpenAI-compatible providers hash the request prefix for implicit
+  // caching, so a volatile first system line caps their cache hits at the first
+  // few hundred tokens (observed live: kimi-k3 via OpenCode Zen froze at
+  // 256-512 cached tokens per call). Strip it on every SDK-translated route;
+  // Anthropic passthrough does not go through translateRequest and still
+  // forwards it.
   const baseSystem = systemToString(body.system, true);
   const systemText = baseSystem?.trim() || (options?.openAiOAuth ? 'You are a coding assistant.' : undefined);
 
@@ -577,25 +577,37 @@ export function isOpenAiOAuthRoute(
 }
 
 const SERVICE_TIERS = new Set(['auto', 'default', 'flex', 'priority']);
-let warnedServiceTier = false;
-export function oauthServiceTier(log?: (message: string) => void): string | undefined {
+let warnedInvalidServiceTier = false;
+let warnedUnsupportedServiceTier = false;
+
+export function oauthServiceTier(): string | undefined {
   const raw = process.env.CLODEX_SERVICE_TIER;
   if (raw === undefined || raw.trim() === '') return undefined;
   const normalized = raw.trim().toLowerCase() === 'fast' ? 'priority' : raw.trim().toLowerCase();
   if (!SERVICE_TIERS.has(normalized)) {
-    if (!warnedServiceTier) {
-      warnedServiceTier = true;
-      const message = `ignoring CLODEX_SERVICE_TIER=${raw} (expected auto, default, flex, priority, or fast)`;
-      console.error(`clodex: ${message}`);
-      try { log?.(message); } catch { /* ignore */ }
+    if (!warnedInvalidServiceTier) {
+      warnedInvalidServiceTier = true;
+      console.error('clodex: ignoring CLODEX_SERVICE_TIER (expected auto, default, flex, priority, or fast)');
     }
     return undefined;
   }
   return normalized;
 }
 
+function reportUnsupportedServiceTier(params: SdkCallParams, warnings: unknown): void {
+  if (warnedUnsupportedServiceTier || !params.providerOptions?.openai?.serviceTier) return;
+  if (!Array.isArray(warnings) || !warnings.some(warning => {
+    if (!warning || typeof warning !== 'object') return false;
+    const candidate = warning as { type?: unknown; feature?: unknown };
+    return candidate.type === 'unsupported' && candidate.feature === 'serviceTier';
+  })) return;
+  warnedUnsupportedServiceTier = true;
+  console.error('clodex: requested service tier was not sent for this model; the backend default will be used');
+}
+
 export function resetServiceTierWarningForTests(): void {
-  warnedServiceTier = false;
+  warnedInvalidServiceTier = false;
+  warnedUnsupportedServiceTier = false;
 }
 
 // ── usage: SDK → Anthropic ────────────────────────────────────────────────────
@@ -915,6 +927,7 @@ export async function streamAnthropicResponse(
     maxRetries: upstreamMaxRetries(),
     abortSignal,
     onError: () => {},
+    onStepFinish: step => reportUnsupportedServiceTier(params, step.warnings),
   } as Parameters<typeof streamText>[0]);
 
   const watchedStream = (async function* () {
@@ -960,6 +973,7 @@ export async function generateAnthropicResponse(
   let toolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }>;
   let finishReason: string;
   let usage: SdkUsage | undefined;
+  let warnings: unknown;
 
   if (options?.forceStream) {
     // Some upstreams (e.g. ChatGPT's Codex backend) reject non-streaming requests
@@ -985,6 +999,7 @@ export async function generateAnthropicResponse(
       maxRetries: upstreamMaxRetries(),
       abortSignal,
       onError: () => {},
+      onStepFinish: step => reportUnsupportedServiceTier(params, step.warnings),
     } as Parameters<typeof streamText>[0]);
     const streamedText: string[] = [];
     const streamedToolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }> = [];
@@ -1045,7 +1060,7 @@ export async function generateAnthropicResponse(
         maxRetries: upstreamMaxRetries(),
         abortSignal: generateAbort.signal,
       } as Parameters<typeof generateText>[0]);
-      ({ text, toolCalls, finishReason, usage } = r);
+      ({ text, toolCalls, finishReason, usage, warnings } = r);
     } finally {
       stopForwardingAbort();
       clearTimeout(totalTimer);
@@ -1053,6 +1068,7 @@ export async function generateAnthropicResponse(
     }
   }
 
+  reportUnsupportedServiceTier(params, warnings);
   const requiredProps = toolRequiredProps(params.tools);
   return {
     id: 'msg_' + Date.now(), type: 'message', role: 'assistant', model: modelId,
