@@ -10,17 +10,26 @@ import type { LocalProvider } from '../types.js';
 import { applySelectedOAuthAccount, isAnonymousProvider, materializeRegistry } from './materialize.js';
 import { loadRegistry } from './io.js';
 
+export type LoadedRegistryProviders = LocalProvider[] & {
+  readonly blockedProviders: ReadonlyMap<string, string>;
+};
+
 /** Load enabled providers from ~/.clodex/providers.json with resolved credentials. */
 export async function loadRegistryProviders(
   diag?: (msg: string) => void,
-  opts?: { agent?: CompatibilityAgent },
-): Promise<LocalProvider[]> {
-  const registry = loadRegistry();
-  const providers = registry.providers.map(provider => applySelectedOAuthAccount(provider));
+  opts?: { agent?: CompatibilityAgent; warn?: (msg: string) => void },
+): Promise<LoadedRegistryProviders> {
+  const registry = loadRegistry(undefined, diag);
+  const providers = registry.providers.map(provider => applySelectedOAuthAccount(
+    provider,
+    undefined,
+    opts?.warn,
+  ));
   const selectedRegistry = { ...registry, providers };
   const keys = new Map<string, string>();
   const oauthAccountIds = new Map<string, string>();
   const oauthProviderData = new Map<string, Record<string, unknown>>();
+  const blockedProviders = new Map<string, string>();
   await Promise.all(providers.map(async provider => {
     if (
       isAnonymousProvider(provider)
@@ -36,11 +45,13 @@ export async function loadRegistryProviders(
     }
     const credentialOverride = resolved.credentialOverride !== undefined;
     if (provider.enabled && resolved.credentialOverride) {
-      throw new Error(
+      blockedProviders.set(
+        provider.id,
         `${resolved.credentialOverride.variable} is a process-scoped credential with no isolated model catalog `
         + `for provider "${provider.id}". Save that credential as a provider or account and refresh its models, `
         + 'or unset the variable.',
       );
+      return;
     }
     const credentialAvailable = Boolean(resolved.credential);
     if (resolved.credential) keys.set(provider.id, resolved.credential);
@@ -55,12 +66,17 @@ export async function loadRegistryProviders(
       }
     }
   }));
-  return materializeRegistry(selectedRegistry, provider => keys.get(provider.id) ?? null, opts)
+  const materialized = materializeRegistry(selectedRegistry, provider => keys.get(provider.id) ?? null, opts)
     .map(provider => ({
       ...provider,
       oauthAccountId: oauthAccountIds.get(provider.id),
       providerData: oauthProviderData.get(provider.id),
     }));
+  Object.defineProperty(materialized, 'blockedProviders', {
+    value: blockedProviders,
+    enumerable: false,
+  });
+  return materialized as LoadedRegistryProviders;
 }
 
 /** Sync variant when credentials are already resolved (tests). */

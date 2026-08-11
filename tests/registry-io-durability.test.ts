@@ -309,6 +309,19 @@ describe('registry publication durability', () => {
     expect(fsState.events).toEqual(['parent-fsync']);
   });
 
+  it('continues read-only when an unchanged ordinary registry cannot sync its parent', () => {
+    writeFileSync(fsState.registryPath, `${JSON.stringify(emptyRegistry(), null, 2)}\n`);
+    fsState.failParentFsync = true;
+    const diagnostics: string[] = [];
+
+    expect(loadRegistry(fsState.registryPath, message => diagnostics.push(message)))
+      .toEqual(emptyRegistry());
+    expect(fsState.events).toEqual(['parent-fsync']);
+    expect(diagnostics).toEqual([
+      `Could not durably sync the unchanged provider registry at ${fsState.registryPath}; continuing read-only: parent fsync failed`,
+    ]);
+  });
+
   it('syncs an already-migrated winner reread under the migration lock', () => {
     const defaultRef = 'keyring:oauth:provider:openai-oauth::credential::v1:default';
     const workRef =

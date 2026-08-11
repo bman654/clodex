@@ -89,7 +89,10 @@ export function syncParentDirectory(path: string): void {
   }
 }
 
-function parseProvider(raw: unknown): RegistryProvider | null {
+function parseProvider(
+  raw: unknown,
+  diag?: (message: string) => void,
+): RegistryProvider | null {
   if (!raw || typeof raw !== 'object') return null;
   const p = raw as Record<string, unknown>;
   if (typeof p.id !== 'string' || !isValidProviderId(p.id)) return null;
@@ -135,8 +138,16 @@ function parseProvider(raw: unknown): RegistryProvider | null {
     provider.activeAuthAccount = p.activeAuthAccount;
   }
   if (typeof p.refreshedAt === 'string') provider.refreshedAt = p.refreshedAt;
+  if (hasOwn(p, 'defaultModelsCache')) {
+    const defaultModelsCache = parseModelsCache(p.defaultModelsCache);
+    if (!defaultModelsCache) return null;
+    provider.defaultModelsCache = defaultModelsCache;
+  }
   const modelsCache = parseModelsCache(p.modelsCache);
   if (modelsCache) provider.modelsCache = modelsCache;
+  else if (hasOwn(p, 'modelsCache')) {
+    diag?.(`Provider registry dropped an invalid model cache for provider "${p.id}".`);
+  }
   return provider;
 }
 
@@ -182,9 +193,6 @@ function parseAuthAccounts(raw: unknown): RegistryProvider['authAccounts'] | nul
     const slot = value as Record<string, unknown>;
     if (typeof slot.authRef !== 'string' || !slot.authRef) return null;
     if (typeof slot.addedAt !== 'string' || !slot.addedAt) return null;
-    if (hasOwn(slot, 'oauthAccountId') && (typeof slot.oauthAccountId !== 'string' || !slot.oauthAccountId)) {
-      return null;
-    }
     const modelsCache = hasOwn(slot, 'modelsCache')
       ? parseModelsCache(slot.modelsCache)
       : undefined;
@@ -192,7 +200,6 @@ function parseAuthAccounts(raw: unknown): RegistryProvider['authAccounts'] | nul
     out[name] = {
       authRef: slot.authRef,
       addedAt: slot.addedAt,
-      ...(typeof slot.oauthAccountId === 'string' ? { oauthAccountId: slot.oauthAccountId } : {}),
       ...(modelsCache ? { modelsCache } : {}),
     };
   }
@@ -229,6 +236,10 @@ function hasValidStrictProviderFields(raw: unknown): boolean {
     && (typeof provider.defaultAuthRef !== 'string' || !provider.defaultAuthRef)) {
     return false;
   }
+  if (hasOwn(provider, 'defaultModelsCache')
+    && parseModelsCache(provider.defaultModelsCache) === null) {
+    return false;
+  }
   if (hasOwn(provider, 'modelsCache')) {
     if (parseModelsCache(provider.modelsCache) === null) return false;
   }
@@ -257,6 +268,7 @@ function hasValidSelectionStorage(
 ): boolean {
   const name = provider.activeAuthAccount?.trim();
   const hasDefault = provider.defaultAuthRef !== undefined;
+  const hasDefaultCache = provider.defaultModelsCache !== undefined;
 
   if (schemaVersion < REGISTRY_SCHEMA_VERSION_WITH_ACCOUNT_MODEL_CACHES
     && Object.values(provider.authAccounts ?? {}).some(account => account.modelsCache !== undefined)) {
@@ -265,11 +277,12 @@ function hasValidSelectionStorage(
   if (name && schemaVersion < REGISTRY_SCHEMA_VERSION_WITH_ACTIVE_ACCOUNT) {
     return false;
   }
-  if (schemaVersion <= REGISTRY_SCHEMA_VERSION_WITH_ACCOUNT_MODEL_CACHES && hasDefault) {
+  if (schemaVersion <= REGISTRY_SCHEMA_VERSION_WITH_ACCOUNT_MODEL_CACHES
+    && (hasDefault || hasDefaultCache)) {
     return false;
   }
-  if (!name) return !hasDefault;
-  if (provider.authType !== 'oauth') return !hasDefault;
+  if (!name) return !hasDefault && !hasDefaultCache;
+  if (provider.authType !== 'oauth') return !hasDefault && !hasDefaultCache;
   if (schemaVersion <= REGISTRY_SCHEMA_VERSION_WITH_ACCOUNT_MODEL_CACHES) {
     // A well-formed but missing legacy slot remains repairable. Migration does
     // not materialize it, and current launch-time selection still throws.
@@ -290,7 +303,10 @@ function hasValidSelectionStorage(
     && isDeepStrictEqual(provider.modelsCache, selected.modelsCache);
 }
 
-function parseRegistry(raw: unknown): ProviderRegistry {
+function parseRegistry(
+  raw: unknown,
+  diag?: (message: string) => void,
+): ProviderRegistry {
   const empty: ProviderRegistry = { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
   if (!raw || typeof raw !== 'object') return empty;
   const data = raw as Record<string, unknown>;
@@ -298,15 +314,25 @@ function parseRegistry(raw: unknown): ProviderRegistry {
     typeof data.schemaVersion === 'number' ? data.schemaVersion : REGISTRY_SCHEMA_VERSION;
   const providers: RegistryProvider[] = [];
   if (Array.isArray(data.providers)) {
-    for (const entry of data.providers) {
-      const parsed = parseProvider(entry);
+    for (const [index, entry] of data.providers.entries()) {
+      const parsed = parseProvider(entry, diag);
       const invalidKnownSelectionAuthType = schemaVersion >= REGISTRY_SCHEMA_VERSION_WITH_ACTIVE_ACCOUNT
         && schemaVersion <= REGISTRY_SCHEMA_VERSION_WITH_MATERIALIZED_ACTIVE_ACCOUNT
         && parsed?.activeAuthAccount !== undefined
         && hasPresentInvalidAuthType(entry);
-      if (parsed && !invalidKnownSelectionAuthType
-        && hasValidSelectionStorage(parsed, schemaVersion)) {
+      const validSelectionStorage = parsed
+        ? hasValidSelectionStorage(parsed, schemaVersion)
+        : false;
+      if (parsed && !invalidKnownSelectionAuthType && validSelectionStorage) {
         providers.push(parsed);
+      } else {
+        const id = entry && typeof entry === 'object' && typeof (entry as Record<string, unknown>).id === 'string'
+          ? ` "${(entry as Record<string, unknown>).id}"`
+          : ` at index ${index}`;
+        const reason = parsed && !validSelectionStorage
+          ? ' because its OAuth account selection storage is inconsistent'
+          : '';
+        diag?.(`Provider registry dropped invalid provider${id}${reason}.`);
       }
     }
   }
@@ -420,15 +446,20 @@ function hasMaterializedActiveAccount(registry: ProviderRegistry): boolean {
     && registry.providers.some(provider => provider.defaultAuthRef !== undefined);
 }
 
-export function loadRegistry(path = getProvidersPath()): ProviderRegistry {
+export function loadRegistry(
+  path = getProvidersPath(),
+  diag?: (message: string) => void,
+): ProviderRegistry {
   if (!existsSync(path)) {
     return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
   }
   let registry: ProviderRegistry;
   try {
     const raw = JSON.parse(readFileSync(path, 'utf8'));
-    registry = parseRegistry(raw);
-  } catch {
+    registry = parseRegistry(raw, diag);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    diag?.(`Could not read the provider registry at ${path}; treating it as empty: ${detail}`);
     return { schemaVersion: REGISTRY_SCHEMA_VERSION, providers: [] };
   }
 
@@ -445,11 +476,7 @@ export function loadRegistry(path = getProvidersPath()): ProviderRegistry {
         throw selectedAccountFilesystemError(path, error, 'durably sync');
       }
       const detail = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `Could not durably sync the provider registry at ${path}: ${detail} `
-        + 'Check filesystem permissions, storage health, and free disk space, then retry.',
-        { cause: error },
-      );
+      diag?.(`Could not durably sync the unchanged provider registry at ${path}; continuing read-only: ${detail}`);
     }
     return registry;
   }

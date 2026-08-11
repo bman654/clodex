@@ -31,7 +31,6 @@ export interface RefreshCredentialSnapshot {
     name: string;
     authRef: string;
     addedAt: string;
-    oauthAccountId?: string;
   };
   /** Redaction-safe identity of the namespaced provider key, when it wins. */
   credentialOverride?: ProviderCredentialOverrideState;
@@ -49,7 +48,9 @@ export function refreshCredentialSnapshot(
   selected: string | null | undefined = process.env[OAUTH_ACCOUNT_ENV],
   options: RefreshCredentialOptions = {},
 ): RefreshCredentialSnapshot {
-  const environmentAccount = selected === null ? undefined : selected?.trim() || undefined;
+  const environmentAccount = selected === null
+    ? undefined
+    : selected?.trim().toLowerCase() || undefined;
   // Pass an explicit empty selector when the captured environment had none;
   // `undefined` would adopt a variable that changed after this snapshot.
   const effective = projectSelectedOAuthAccount(provider, environmentAccount ?? '');
@@ -85,9 +86,6 @@ export function refreshCredentialSnapshot(
             name: selectedName,
             authRef: selectedAccount.authRef,
             addedAt: selectedAccount.addedAt,
-            ...(selectedAccount.oauthAccountId
-              ? { oauthAccountId: selectedAccount.oauthAccountId }
-              : {}),
           },
         }
       : {}),

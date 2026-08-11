@@ -220,7 +220,13 @@ describe('authenticateProvider', () => {
     const slot = entry.authAccounts?.work;
     expect(slot?.authRef).toBeTruthy();
     expect(slot!.authRef).not.toBe(defaultRef);
-    expect(slot!.oauthAccountId).toBe('acct-123');
+    expect(slot).not.toHaveProperty('oauthAccountId');
+    expect(JSON.stringify(entry)).not.toContain('acct-123');
+    expect(provisionProviderCredential).toHaveBeenCalledWith(
+      slot!.authRef,
+      expect.stringContaining('"accountId":"acct-123"'),
+      expect.any(Function),
+    );
     expect(result.registryProvider.authAccounts?.work?.authRef).toBe(slot!.authRef);
     // The named slot owns its catalog. Refreshing it must not replace the
     // shared cache used by the persisted selection.
@@ -401,6 +407,15 @@ describe('authenticateProvider', () => {
   it('replaces only the parked provider default while a named slot is selected', async () => {
     const oldDefaultRef = 'keyring:oauth:provider:openai-oauth::credential::v1:default-old';
     const selectedRef = credentialInstanceAuthRef('oauth:provider:openai-oauth:account:work');
+    const oldDefaultCache = {
+      fetchedAt: '2026-08-08T00:00:00.000Z',
+      models: [{
+        id: 'old-default-model',
+        name: 'Old default model',
+        upstreamModelId: 'old-default-model',
+        modelFormat: 'openai' as const,
+      }],
+    };
     const cache = {
       fetchedAt: '2026-08-09T00:00:00.000Z',
       models: [{
@@ -420,6 +435,7 @@ describe('authenticateProvider', () => {
         authType: 'oauth',
         authRef: selectedRef,
         defaultAuthRef: oldDefaultRef,
+        defaultModelsCache: oldDefaultCache,
         activeAuthAccount: 'work',
         authAccounts: {
           work: {
@@ -444,6 +460,7 @@ describe('authenticateProvider', () => {
     });
     expect(result.registryProvider.modelsCache).toEqual(cache);
     expect(result.registryProvider.authAccounts?.work?.modelsCache).toEqual(cache);
+    expect(result.registryProvider.defaultModelsCache).toBeUndefined();
     expect(deleteProviderCredential).toHaveBeenCalledWith(oldDefaultRef);
     expect(deleteProviderCredential).not.toHaveBeenCalledWith(selectedRef);
   });

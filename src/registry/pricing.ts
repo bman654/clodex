@@ -240,6 +240,8 @@ export function applyPricingToRegistryProviders(
 
     const topLevelCache = enrichCache(provider.modelsCache);
     if (topLevelCache !== provider.modelsCache) provider.modelsCache = topLevelCache;
+    const defaultCache = enrichCache(provider.defaultModelsCache);
+    if (defaultCache !== provider.defaultModelsCache) provider.defaultModelsCache = defaultCache;
     for (const [name, account] of Object.entries(provider.authAccounts ?? {})) {
       const accountCache = enrichCache(account.modelsCache);
       if (accountCache !== account.modelsCache) {

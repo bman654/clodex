@@ -77,7 +77,10 @@ describe('runtime registry credential attribution', () => {
       },
     });
 
-    await expect(loadRegistryProviders()).rejects.toThrow(
+    const providers = await loadRegistryProviders();
+
+    expect(providers).toHaveLength(0);
+    expect(providers.blockedProviders.get('openai-oauth')).toMatch(
       /CLODEX_KEY_OPENAI_OAUTH is a process-scoped credential with no isolated model catalog.*Save that credential/s,
     );
     expect(credential.resolve).toHaveBeenCalledWith(
@@ -110,7 +113,10 @@ describe('runtime registry credential attribution', () => {
       },
     });
 
-    await expect(loadRegistryProviders()).rejects.toThrow(
+    const providers = await loadRegistryProviders();
+
+    expect(providers).toHaveLength(0);
+    expect(providers.blockedProviders.get('groq')).toMatch(
       /CLODEX_KEY_GROQ is a process-scoped credential with no isolated model catalog/,
     );
     expect(state.registry.providers[0]?.modelsCache?.models[0]?.id).toBe('gpt-test');
@@ -155,7 +161,9 @@ describe('runtime registry credential attribution', () => {
     });
 
     try {
-      await expect(loadRegistryProviders()).rejects.toThrow(
+      const providers = await loadRegistryProviders();
+      expect(providers).toHaveLength(0);
+      expect(providers.blockedProviders.get('openai-oauth')).toMatch(
         /CLODEX_KEY_OPENAI_OAUTH is a process-scoped credential with no isolated model catalog/,
       );
       expect(credential.resolve).toHaveBeenCalledWith(
@@ -170,6 +178,39 @@ describe('runtime registry credential attribution', () => {
       if (previous === undefined) delete process.env.CLODEX_OAUTH_ACCOUNT;
       else process.env.CLODEX_OAUTH_ACCOUNT = previous;
     }
+  });
+
+  it('isolates an enabled overridden provider while retaining unrelated runtime providers', async () => {
+    state.registry = {
+      schemaVersion: 1,
+      providers: [
+        oauthProvider(),
+        oauthProvider({
+          id: 'groq',
+          templateId: 'groq',
+          name: 'Groq',
+          authRef: 'keyring:provider:groq',
+          authType: 'api',
+          api: { npm: '@ai-sdk/groq', url: 'https://api.groq.com/openai/v1' },
+        }),
+      ],
+    };
+    credential.resolve.mockImplementation(async (providerId: string) => providerId === 'openai-oauth'
+      ? {
+          credential: 'provider-override-token',
+          credentialOverride: {
+            variable: 'CLODEX_KEY_OPENAI_OAUTH',
+            fingerprint: 'f'.repeat(64),
+          },
+        }
+      : { credential: 'stored-groq-key' });
+
+    const providers = await loadRegistryProviders();
+
+    expect(providers).toHaveLength(1);
+    expect(providers[0]).toMatchObject({ id: 'groq', apiKey: 'stored-groq-key' });
+    expect(providers.blockedProviders.get('openai-oauth')).toContain('no isolated model catalog');
+    expect(providers.blockedProviders.has('groq')).toBe(false);
   });
 
   it('does not let an override on a disabled provider block other runtime providers', async () => {

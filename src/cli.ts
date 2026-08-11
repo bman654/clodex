@@ -1155,7 +1155,14 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   }
 
   const allProviders = providersForTarget(providersForPicker(catalog), 'claude');
+  const blockedLaunchReason = launchPlan.skip && launchPlan.target?.providerId
+    ? catalog.blockedProviders.get(launchPlan.target.providerId)
+    : undefined;
   if (allProviders.length === 0) {
+    if (blockedLaunchReason) {
+      p.log.error(blockedLaunchReason);
+      return 1;
+    }
     p.log.warn('No providers available.');
     p.log.info(pc.dim('Run clodex providers to get started.'));
     return 0;
@@ -1183,7 +1190,8 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     const resolved = findProviderAndModel(allProviders, launchPlan.target);
     if (!resolved) {
       p.log.error(
-        `Provider/model not found: ${launchPlan.target.providerId} / ${launchPlan.target.modelId}`,
+        blockedLaunchReason
+          ?? `Provider/model not found: ${launchPlan.target.providerId} / ${launchPlan.target.modelId}`,
       );
       return 1;
     }

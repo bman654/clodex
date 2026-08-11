@@ -6,13 +6,14 @@ import type { ModelRuntimeCompatibility } from '../model-runtime-compatibility.j
 export const REGISTRY_SCHEMA_VERSION = 1;
 
 /**
- * Written whenever any provider carries named OAuth account slots. Older
- * builds fail closed on an unknown schema version in every MUTATING path
- * (parseRegistryStrict throws), so a downgraded or second installation
- * cannot load a slot-bearing registry, drop the unknown field, and save the
- * providers back slot-less — which would orphan the slot credentials. A
- * registry whose last slot is removed is written back at version 1, so
- * old builds interoperate again the moment no slot state exists.
+ * Written whenever any provider carries named OAuth account slots. Builds
+ * >= 1.3.0 fail closed on an unknown schema version in every MUTATING path
+ * (parseRegistryStrict throws), so those builds cannot load a slot-bearing
+ * registry, drop the unknown field, and save the providers back slot-less.
+ * Releases 0.1.0-1.2.2 have no strict loader and silently strip slot state;
+ * the credentials remain recoverable in the credential store. A registry
+ * whose last slot is removed is written back at version 1, so older builds
+ * interoperate again the moment no slot state exists.
  */
 export const REGISTRY_SCHEMA_VERSION_WITH_ACCOUNT_SLOTS = 2;
 
@@ -100,7 +101,6 @@ export interface RegistryModelsCache {
 export interface RegistryOAuthAccount {
   authRef: string;
   addedAt: string;
-  oauthAccountId?: string;
   /** Catalog discovered with this named slot's credential. */
   modelsCache?: RegistryModelsCache;
 }
@@ -118,6 +118,8 @@ export interface RegistryProvider {
    * selection restores this value to `authRef` and removes the field.
    */
   defaultAuthRef?: string;
+  /** Catalog discovered with the provider default while a named slot is selected. */
+  defaultModelsCache?: RegistryModelsCache;
   authType?: 'api' | 'oauth' | 'none';
   /**
    * Named OAuth account slots beyond the default credential

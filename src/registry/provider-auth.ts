@@ -108,7 +108,6 @@ async function upsertOAuthAccountSlot(
   account: string,
   authRef: string,
   expectedAuthRef: string | undefined,
-  oauthAccountId?: string,
 ): Promise<RegistryProvider> {
   return withRegistryWriteLock(async () => {
     const registry = loadRegistryStrict();
@@ -129,7 +128,6 @@ async function upsertOAuthAccountSlot(
         [account]: {
           authRef,
           addedAt: new Date().toISOString(),
-          ...(oauthAccountId ? { oauthAccountId } : {}),
         },
       },
     };
@@ -230,6 +228,8 @@ async function upsertOAuthProvider(
         defaultAuthRef: authRef,
         templateId,
       };
+      // The parked catalog belonged to the replaced default credential.
+      delete entry.defaultModelsCache;
       // A dormant non-OAuth selector may carry a top-level catalog owned by
       // its prior API credential. Once OAuth is restored, the top-level cache
       // must describe the selected slot for both current and downgraded
@@ -244,6 +244,7 @@ async function upsertOAuthProvider(
     } else {
       entry = { ...entry, authType: 'oauth', authRef, templateId };
       delete entry.defaultAuthRef;
+      delete entry.defaultModelsCache;
       delete entry.modelsCache;
       delete entry.refreshedAt;
     }
@@ -318,7 +319,7 @@ async function persistNativeOAuthCredential(
         );
       }
       return accountName
-        ? upsertOAuthAccountSlot(registryId, accountName, authRef, existingAuthRef, cred.accountId)
+        ? upsertOAuthAccountSlot(registryId, accountName, authRef, existingAuthRef)
         : upsertOAuthProvider(providerId, authRef, existingAuthRef);
     });
   });

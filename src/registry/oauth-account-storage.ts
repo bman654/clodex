@@ -33,12 +33,17 @@ export function storeActiveOAuthAccount(
 ): boolean {
   const previousAuthRef = provider.authRef;
   const previousDefaultAuthRef = provider.defaultAuthRef;
+  const previousDefaultModelsCache = provider.defaultModelsCache;
   const previousAccount = provider.activeAuthAccount;
-  provider.defaultAuthRef = providerDefaultAuthRef(provider);
+  if (provider.defaultAuthRef === undefined) {
+    provider.defaultAuthRef = provider.authRef;
+    if (provider.modelsCache) provider.defaultModelsCache = provider.modelsCache;
+  }
   provider.authRef = selectedAuthRef;
   provider.activeAuthAccount = name;
   return previousAuthRef !== provider.authRef
     || previousDefaultAuthRef !== provider.defaultAuthRef
+    || previousDefaultModelsCache !== provider.defaultModelsCache
     || previousAccount !== provider.activeAuthAccount;
 }
 
@@ -46,12 +51,25 @@ export function storeActiveOAuthAccount(
 export function clearActiveOAuthAccount(provider: RegistryProvider): boolean {
   const previousAuthRef = provider.authRef;
   const previousDefaultAuthRef = provider.defaultAuthRef;
+  const previousDefaultModelsCache = provider.defaultModelsCache;
   const previousAccount = provider.activeAuthAccount;
+  const hasMaterializedSelection = provider.defaultAuthRef !== undefined;
   provider.authRef = providerDefaultAuthRef(provider);
+  if (hasMaterializedSelection) {
+    if (provider.defaultModelsCache) {
+      provider.modelsCache = provider.defaultModelsCache;
+      provider.refreshedAt = provider.defaultModelsCache.fetchedAt;
+    } else {
+      delete provider.modelsCache;
+      delete provider.refreshedAt;
+    }
+  }
   delete provider.defaultAuthRef;
+  delete provider.defaultModelsCache;
   delete provider.activeAuthAccount;
   return previousAuthRef !== provider.authRef
     || previousDefaultAuthRef !== provider.defaultAuthRef
+    || previousDefaultModelsCache !== provider.defaultModelsCache
     || previousAccount !== provider.activeAuthAccount;
 }
 

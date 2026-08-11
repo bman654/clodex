@@ -316,22 +316,22 @@ describe('clodex-claude process wrapper', () => {
     expect(existsSync(launchMarker)).toBe(true);
   });
 
-  it('refuses a per-launch account override that a standalone server cannot apply', async () => {
+  it('warns and launches when a standalone server cannot apply an account override', async () => {
     const endpoint = await openLoopbackServer();
     advertiseEndpoint(endpoint.port);
     try {
       const result = await runWrapper(claudeInvocation(), { CLODEX_OAUTH_ACCOUNT: 'work' });
 
-      expect(result).toMatchObject({ code: 1, signal: null });
-      expect(result.stderr).toContain('cannot override the credential snapshot');
+      expect(result).toMatchObject({ code: 0, signal: null });
+      expect(result.stderr).toContain('CLODEX_OAUTH_ACCOUNT is ignored');
       expect(result.stderr).toContain('restart that server with the override');
-      expect(existsSync(launchMarker)).toBe(false);
+      expect(existsSync(launchMarker)).toBe(true);
     } finally {
       await closeServer(endpoint.server);
     }
   });
 
-  it('refuses a per-launch provider key that a standalone server cannot apply', async () => {
+  it('warns without exposing a provider key and still launches through the server', async () => {
     const endpoint = await openLoopbackServer();
     advertiseEndpoint(endpoint.port);
     try {
@@ -339,11 +339,28 @@ describe('clodex-claude process wrapper', () => {
         CLODEX_KEY_OPENAI_OAUTH: 'temporary-provider-token',
       });
 
-      expect(result).toMatchObject({ code: 1, signal: null });
-      expect(result.stderr).toContain('CLODEX_KEY_OPENAI_OAUTH cannot override the credential snapshot');
+      expect(result).toMatchObject({ code: 0, signal: null });
+      expect(result.stderr).toContain('CLODEX_KEY_OPENAI_OAUTH is ignored');
       expect(result.stderr).toContain('save that credential as a provider or account');
       expect(result.stderr).not.toContain('temporary-provider-token');
-      expect(existsSync(launchMarker)).toBe(false);
+      expect(existsSync(launchMarker)).toBe(true);
+    } finally {
+      await closeServer(endpoint.server);
+    }
+  });
+
+  it('does not block launch for an unrelated provider key', async () => {
+    const endpoint = await openLoopbackServer();
+    advertiseEndpoint(endpoint.port);
+    try {
+      const result = await runWrapper(claudeInvocation(), {
+        CLODEX_KEY_UNRELATED: 'temporary-unrelated-token',
+      });
+
+      expect(result).toMatchObject({ code: 0, signal: null });
+      expect(result.stderr).toContain('CLODEX_KEY_UNRELATED is ignored');
+      expect(result.stderr).not.toContain('temporary-unrelated-token');
+      expect(existsSync(launchMarker)).toBe(true);
     } finally {
       await closeServer(endpoint.server);
     }

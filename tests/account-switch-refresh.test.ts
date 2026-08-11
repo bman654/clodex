@@ -178,7 +178,10 @@ describe('account-switch catalog lifecycle', () => {
     const persisted = loadRegistry().providers[0]!;
     expect(persisted.authRef).toBe('keyring:provider:default');
     expect(persisted.defaultAuthRef).toBeUndefined();
+    expect(persisted.defaultModelsCache).toBeUndefined();
     expect(persisted.activeAuthAccount).toBeUndefined();
-    expect(persisted.modelsCache).toBeUndefined();
+    expect(persisted.modelsCache?.models.map(model => model.id)).toEqual([
+      'default-only-model',
+    ]);
   });
 });

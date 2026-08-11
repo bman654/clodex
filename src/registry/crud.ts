@@ -131,7 +131,7 @@ export async function setActiveOAuthAccount(
     const registry = loadRegistryStrict();
     const provider = registry.providers.find(p => p.id === id);
     if (!provider) return { updated: false, error: `Provider not found: ${id}` };
-    const name = account?.trim();
+    const name = account?.trim().toLowerCase();
     const previous = provider.activeAuthAccount?.trim() || undefined;
     const selectedSlot = name ? getOAuthAccountSlot(provider, name) : undefined;
     let selectionChanged = previous !== name;
@@ -143,6 +143,11 @@ export async function setActiveOAuthAccount(
         updated: false,
         error: `${provider.name} has no account named "${name}" (available: ${available}).`,
       };
+    }
+    if (name && provider.authType === 'oauth') {
+      // Park the provider default before replacing the top-level cache with the
+      // selected slot. Named-to-named switches leave that parked state intact.
+      storageChanged = storeActiveOAuthAccount(provider, name, selectedSlot!.authRef);
     }
     if (selectionChanged && provider.authType === 'oauth') {
       // Model availability is credential/account-specific. Park a named
@@ -165,9 +170,7 @@ export async function setActiveOAuthAccount(
         delete provider.refreshedAt;
       }
     }
-    if (name && provider.authType === 'oauth') {
-      storageChanged = storeActiveOAuthAccount(provider, name, selectedSlot!.authRef);
-    } else if (name) {
+    if (name && provider.authType !== 'oauth') {
       // Preserve PR #17's repairable dormant-selector state without routing a
       // non-OAuth provider through an OAuth slot credential.
       storageChanged = clearActiveOAuthAccount(provider) || storageChanged;
@@ -175,9 +178,9 @@ export async function setActiveOAuthAccount(
         provider.activeAuthAccount = name;
         storageChanged = true;
       }
-    } else if (previous !== undefined || provider.defaultAuthRef !== undefined) {
+    } else if (!name && (previous !== undefined || provider.defaultAuthRef !== undefined)) {
       storageChanged = clearActiveOAuthAccount(provider);
-    } else {
+    } else if (!name) {
       selectionChanged = false;
     }
     // A strict legacy load migrates in memory without changing schemaVersion.

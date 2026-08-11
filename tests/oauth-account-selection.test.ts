@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -47,7 +47,7 @@ const base: RegistryProvider = {
 const withSlots: RegistryProvider = {
   ...base,
   authAccounts: {
-    work: { authRef: 'keyring:oauth:provider:openai-oauth:account:work::credential::v1:w', addedAt: '2026-08-07T00:00:00.000Z', oauthAccountId: 'acct-work' },
+    work: { authRef: 'keyring:oauth:provider:openai-oauth:account:work::credential::v1:w', addedAt: '2026-08-07T00:00:00.000Z' },
     alt: { authRef: 'keyring:oauth:provider:openai-oauth:account:alt::credential::v1:a', addedAt: '2026-08-07T00:00:00.000Z' },
   },
 };
@@ -59,8 +59,8 @@ describe('applySelectedOAuthAccount', () => {
     expect(applySelectedOAuthAccount(withSlots, '   ')).toBe(withSlots);
   });
 
-  it('swaps the authRef for the selected slot without mutating the original', () => {
-    const selected = applySelectedOAuthAccount(withSlots, 'work');
+  it('normalizes and swaps the authRef for the selected slot without mutating the original', () => {
+    const selected = applySelectedOAuthAccount(withSlots, ' WORK ');
     expect(selected.authRef).toBe(withSlots.authAccounts!.work!.authRef);
     expect(selected).not.toBe(withSlots);
     expect(withSlots.authRef).toBe(base.authRef);
@@ -105,8 +105,12 @@ describe('applySelectedOAuthAccount', () => {
     )).toEqual([]);
   });
 
-  it('ignores the selector on providers without slots', () => {
-    expect(applySelectedOAuthAccount(base, 'work')).toBe(base);
+  it('warns and continues on providers without slots', () => {
+    const warn = vi.fn();
+    expect(applySelectedOAuthAccount(base, ' WORK ', warn)).toBe(base);
+    expect(warn).toHaveBeenCalledWith(
+      'CLODEX_OAUTH_ACCOUNT=work ignored for provider "openai-oauth" because it has no named account slots.',
+    );
   });
 
   it('ignores the selector on non-oauth providers', () => {

@@ -117,8 +117,9 @@ export function isLegacyAnonymousCustomEndpoint(
 export function applySelectedOAuthAccount(
   provider: RegistryProvider,
   selected: string | undefined = process.env[OAUTH_ACCOUNT_ENV],
+  warn?: (message: string) => void,
 ): RegistryProvider {
-  const requested = selected?.trim();
+  const requested = selected?.trim().toLowerCase();
   // The environment wins so a single command can borrow another identity
   // without disturbing the stored choice every other launch depends on.
   const fromEnvironment = Boolean(requested);
@@ -145,7 +146,12 @@ export function applySelectedOAuthAccount(
   // refuse. The environment cannot rescue a broken stored selection, because
   // with no slot table it has nothing to select either.
   if (!slots || Object.keys(slots).length === 0) {
-    if (stored === undefined || stored === '') return provider;
+    if (stored === undefined || stored === '') {
+      if (fromEnvironment) {
+        warn?.(`${OAUTH_ACCOUNT_ENV}=${requested} ignored for provider "${provider.id}" because it has no named account slots.`);
+      }
+      return provider;
+    }
     throw new Error(
       `Provider "${provider.id}" is set to use account "${stored}", but it has no named accounts. `
       + 'Re-add the account with: clodex providers auth openai --account ' + stored

@@ -145,22 +145,20 @@ async function main(): Promise<void> {
   }
   if (state && process.env[OAUTH_ACCOUNT_ENV]?.trim()) {
     process.stderr.write(
-      `clodex-claude: ${OAUTH_ACCOUNT_ENV} cannot override the credential snapshot of an already-running `
-      + 'standalone server; restart that server with the override and then launch without the variable, '
+      `clodex-claude: warning: ${OAUTH_ACCOUNT_ENV} is ignored by an already-running standalone server; `
+      + 'restart that server with the override and then launch without the variable, '
       + 'or use clodex claude --proxy\n',
     );
-    process.exit(1);
   }
   const providerCredentialOverride = state
     ? activeProviderCredentialOverride(process.env)
     : null;
   if (state && providerCredentialOverride) {
     process.stderr.write(
-      `clodex-claude: ${providerCredentialOverride} cannot override the credential snapshot of an already-running `
-      + 'standalone server; unset the process-only key to use the configured credential/catalog, or save that '
-      + 'credential as a provider or account, refresh its models, and restart the server\n',
+      `clodex-claude: warning: ${providerCredentialOverride} is ignored by an already-running standalone server; `
+      + 'unset the process-only key to use the configured credential/catalog, or save that credential as a '
+      + 'provider or account, refresh its models, and restart the server\n',
     );
-    process.exit(1);
   }
   const env = computeWrapperEnv(process.env, state);
 

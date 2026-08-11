@@ -386,7 +386,6 @@ describe('refreshProviderModels', () => {
         work: {
           authRef: 'keyring:provider:work',
           addedAt: '2026-08-09T00:00:00.000Z',
-          oauthAccountId: 'old-account',
         },
       },
       api: { npm: '@ai-sdk/groq', url: 'https://api.groq.com/openai/v1' },
@@ -400,7 +399,6 @@ describe('refreshProviderModels', () => {
           work: {
             authRef: 'keyring:provider:work',
             addedAt: '2026-08-09T01:00:00.000Z',
-            oauthAccountId: 'new-account',
           },
         },
       }],

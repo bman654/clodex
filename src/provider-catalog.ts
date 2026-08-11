@@ -6,7 +6,7 @@ import {
 import type { CompatibilityAgent } from './model-compatibility.js';
 import { oauthAuthRef } from './registry/import-build.js';
 import { loadRegistry } from './registry/io.js';
-import { loadRegistryProviders } from './registry/load.js';
+import { loadRegistryProviders, type LoadedRegistryProviders } from './registry/load.js';
 import { isAnonymousProvider, projectSelectedOAuthAccount } from './registry/materialize.js';
 import { OAUTH_ACCOUNT_ENV } from './oauth-account-selection.js';
 import { getTemplateById } from './provider-templates.js';
@@ -15,8 +15,9 @@ import type { ServerModelInfo } from './server/models.js';
 
 export async function fetchProviderCatalog(
   opts?: { agent?: CompatibilityAgent },
-): Promise<LocalProvider[]> {
-  return loadRegistryProviders(undefined, opts);
+): Promise<LoadedRegistryProviders> {
+  const warn = (message: string) => console.warn(message);
+  return loadRegistryProviders(warn, { ...opts, warn });
 }
 
 export function providersForPicker(providers: LocalProvider[]): LocalProvider[] {
@@ -156,7 +157,7 @@ export function resolveActiveAccount(
   const slots = provider.authAccounts ?? {};
   const has = (name: string) => Object.prototype.hasOwnProperty.call(slots, name);
   const stored = provider.activeAuthAccount?.trim();
-  const override = env[OAUTH_ACCOUNT_ENV]?.trim();
+  const override = env[OAUTH_ACCOUNT_ENV]?.trim().toLowerCase();
 
   const projectOAuthSelection = (environmentSelection: string | undefined): AccountSelection => {
     // Carried on whatever answer wins below: a stored selection that names no

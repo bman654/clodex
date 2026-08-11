@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   chmodSync,
   mkdtempSync,
@@ -16,9 +16,36 @@ import {
   loadPendingCredentialDeletes,
   queueCredentialDelete,
 } from '../src/registry/credential-cleanup-journal.js';
-import { emptyRegistry, saveRegistry } from '../src/registry/io.js';
+import { emptyRegistry, loadRegistryStrict, saveRegistry } from '../src/registry/io.js';
 import { withRegistryWriteLockSync } from '../src/registry/lock.js';
 import { getCredentialCleanupPath, getProvidersPath } from '../src/paths.js';
+
+vi.mock('../src/ui.js', () => ({ printOAuthStepsPanel: vi.fn() }));
+vi.mock('../src/oauth/openai.js', () => ({ runOpenAiDeviceCodeFlow: vi.fn() }));
+vi.mock('../src/env.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/env.js')>();
+  return {
+    ...actual,
+    probeProviderCredentialStore: vi.fn(async () => true),
+    provisionProviderCredential: vi.fn(async () => true),
+    saveProviderCredential: vi.fn(async () => true),
+    resolveProviderCredentialWithSource: vi.fn(async () => ({
+      credential: 'stored-access-token',
+      source: 'keyring' as const,
+    })),
+  };
+});
+vi.mock('../src/registry/refresh-models.js', () => ({
+  refreshProviderModelsWithCredential: vi.fn(async () => ({
+    id: 'openai-oauth',
+    name: 'OpenAI',
+    ok: true,
+  })),
+}));
+
+import { runOpenAiDeviceCodeFlow } from '../src/oauth/openai.js';
+import { authenticateProvider } from '../src/registry/provider-auth.js';
+import { setActiveOAuthAccount } from '../src/registry/crud.js';
 
 const TEST_HELPER_ID = 'a'.repeat(64);
 const helperRef = (account: string): string => `helper:v1:${TEST_HELPER_ID}:${account}`;
@@ -37,16 +64,24 @@ describe('isStoredCredentialRef named account slots', () => {
 
 describe('credential cleanup journal', () => {
   const previousHome = process.env.CLODEX_HOME;
+  const previousHelper = process.env.CLODEX_CREDENTIAL_HELPER;
+  const previousAccount = process.env.CLODEX_OAUTH_ACCOUNT;
   let home = '';
 
   beforeEach(() => {
     home = mkdtempSync(join(tmpdir(), 'clodex-cleanup-journal-'));
     process.env.CLODEX_HOME = home;
+    delete process.env.CLODEX_CREDENTIAL_HELPER;
+    delete process.env.CLODEX_OAUTH_ACCOUNT;
   });
 
   afterEach(() => {
     if (previousHome === undefined) delete process.env.CLODEX_HOME;
     else process.env.CLODEX_HOME = previousHome;
+    if (previousHelper === undefined) delete process.env.CLODEX_CREDENTIAL_HELPER;
+    else process.env.CLODEX_CREDENTIAL_HELPER = previousHelper;
+    if (previousAccount === undefined) delete process.env.CLODEX_OAUTH_ACCOUNT;
+    else process.env.CLODEX_OAUTH_ACCOUNT = previousAccount;
     rmSync(home, { recursive: true, force: true });
   });
 
@@ -75,6 +110,55 @@ describe('credential cleanup journal', () => {
 
     expect(persistedRegistry).toEqual({ schemaVersion: 1, providers: [] });
     expect(await loadPendingCredentialDeletes()).toEqual([authRef]);
+  });
+
+  it('completes sequential default and named sign-ins before persisting the named selection', async () => {
+    vi.mocked(runOpenAiDeviceCodeFlow)
+      .mockReset()
+      .mockResolvedValueOnce({
+        tokens: {
+          access_token: 'default-access-token',
+          refresh_token: 'default-refresh-token',
+          expires_in: 3600,
+        },
+        accountId: 'default-runtime-account',
+      })
+      .mockResolvedValueOnce({
+        tokens: {
+          access_token: 'work-access-token',
+          refresh_token: 'work-refresh-token',
+          expires_in: 3600,
+        },
+        accountId: 'work-runtime-account',
+      });
+
+    const defaultSignIn = await authenticateProvider('openai');
+    expect(defaultSignIn.registryProvider.authAccounts).toBeUndefined();
+    expect(await loadPendingCredentialDeletes()).toEqual([]);
+
+    const namedSignIn = await authenticateProvider('openai', { account: 'work' });
+    const namedRef = namedSignIn.registryProvider.authAccounts?.work?.authRef;
+    expect(namedRef).toMatch(/:account:work::credential::v1:/);
+    expect(await loadPendingCredentialDeletes()).toEqual([]);
+
+    await expect(setActiveOAuthAccount('openai-oauth', 'work')).resolves.toMatchObject({
+      updated: true,
+      changed: true,
+      account: 'work',
+    });
+    const persistedRegistry = loadRegistryStrict();
+    expect(persistedRegistry.schemaVersion).toBe(5);
+    expect(persistedRegistry.providers[0]).toMatchObject({
+      activeAuthAccount: 'work',
+      authRef: namedRef,
+      defaultAuthRef: defaultSignIn.registryProvider.authRef,
+    });
+    expect(JSON.parse(readFileSync(getCredentialCleanupPath(), 'utf8')))
+      .toEqual({ schemaVersion: 1, pendingCredentialDeletes: [] });
+    const serializedRegistry = readFileSync(getProvidersPath(), 'utf8');
+    expect(serializedRegistry).not.toContain('default-runtime-account');
+    expect(serializedRegistry).not.toContain('work-runtime-account');
+    expect(vi.mocked(runOpenAiDeviceCodeFlow)).toHaveBeenCalledTimes(2);
   });
 
   it('deduplicates managed references and persists cancellation atomically', async () => {

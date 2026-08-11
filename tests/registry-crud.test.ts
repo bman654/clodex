@@ -397,6 +397,45 @@ describe('setActiveOAuthAccount', () => {
       defaultAuthRef: 'keyring:oauth:provider:openai-oauth::credential::v1:default',
     });
     expect(registryState.current.providers[0]?.modelsCache).toBeUndefined();
+    expect(registryState.current.providers[0]?.defaultModelsCache?.models[0]?.id)
+      .toBe('default-only-model');
+  });
+
+  it('round-trips the provider-default catalog through a normalized named selection', async () => {
+    const provider = registryState.current.providers[0]!;
+    provider.modelsCache = {
+      fetchedAt: '2026-08-09T00:00:00.000Z',
+      models: [{
+        id: 'default-only-model',
+        name: 'Default-only model',
+        upstreamModelId: 'default-only-model',
+        modelFormat: 'openai',
+      }],
+    };
+    provider.authAccounts!.zachspartofaday!.modelsCache = {
+      fetchedAt: '2026-08-09T01:00:00.000Z',
+      models: [{
+        id: 'slot-only-model',
+        name: 'Slot-only model',
+        upstreamModelId: 'slot-only-model',
+        modelFormat: 'openai',
+      }],
+    };
+
+    expect(await setActiveOAuthAccount('openai-oauth', 'ZachSpartOfADay'))
+      .toMatchObject({ changed: true, account: 'zachspartofaday' });
+    let persisted = registryState.current.providers[0]!;
+    expect(persisted.modelsCache?.models.map(model => model.id)).toEqual(['slot-only-model']);
+    expect(persisted.defaultModelsCache?.models.map(model => model.id))
+      .toEqual(['default-only-model']);
+
+    expect(await setActiveOAuthAccount('openai-oauth', undefined))
+      .toMatchObject({ changed: true });
+    persisted = registryState.current.providers[0]!;
+    expect(persisted.modelsCache?.models.map(model => model.id)).toEqual(['default-only-model']);
+    expect(persisted.defaultModelsCache).toBeUndefined();
+    expect(persisted.authAccounts?.zachspartofaday?.modelsCache?.models.map(model => model.id))
+      .toEqual(['slot-only-model']);
   });
 
   it('reports an unchanged selection as a no-op', async () => {
@@ -444,6 +483,8 @@ describe('setActiveOAuthAccount', () => {
   it('parks the previous slot cache and restores only the selected slot cache', async () => {
     const provider = registryState.current.providers[0]!;
     provider.activeAuthAccount = 'zachspartofaday';
+    provider.defaultAuthRef = provider.authRef;
+    provider.authRef = provider.authAccounts!.zachspartofaday!.authRef;
     provider.authAccounts!.alt = {
       authRef: 'keyring:oauth:provider:openai-oauth:account:alt::credential::v1:a',
       addedAt: '2026-08-09T00:00:00.000Z',
