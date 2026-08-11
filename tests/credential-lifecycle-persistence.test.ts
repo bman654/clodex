@@ -88,6 +88,39 @@ describe('persisted credential cleanup recovery', () => {
     );
   });
 
+  it('retains a persisted provider default parked behind a selected OAuth slot', async () => {
+    const defaultRef = credentialAuthRef('oauth:provider:openai-oauth');
+    const selectedRef = credentialAuthRef('oauth:provider:openai-oauth:account:work');
+    await journalCredentialWrite(defaultRef);
+    expect(await saveProviderCredential(defaultRef, 'default-secret')).toBe(true);
+    expect(await saveProviderCredential(selectedRef, 'selected-secret')).toBe(true);
+    const registry = {
+      schemaVersion: 5,
+      providers: [{
+        id: 'openai-oauth',
+        templateId: 'openai',
+        name: 'OpenAI (ChatGPT)',
+        enabled: true,
+        authType: 'oauth' as const,
+        authRef: selectedRef,
+        defaultAuthRef: defaultRef,
+        activeAuthAccount: 'work',
+        authAccounts: {
+          work: { authRef: selectedRef, addedAt: '2026-08-09T00:00:00.000Z' },
+        },
+        api: {},
+        addedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    };
+    withRegistryWriteLockSync(() => saveRegistry(registry));
+
+    const cleanup = await reconcilePendingCredentialDeletes();
+
+    expect(cleanup.deleted).toEqual([]);
+    expect(cleanup.pending).toEqual([]);
+    expect(await resolveProviderCredential('openai-oauth', defaultRef)).toBe('default-secret');
+  });
+
   it('retains a persisted credential when the registry is malformed', async () => {
     const authRef = credentialAuthRef('provider:unreadable-registry');
     await journalCredentialWrite(authRef);

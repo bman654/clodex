@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as p from '@clack/prompts';
 import type { ModelInfo } from '../src/types.js';
 import type { ServerModelInfo } from '../src/server/models.js';
+import { loadRegistryProviders } from '../src/registry/load.js';
 
 const originalStdinIsTTY = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
 const originalSetRawMode = Object.getOwnPropertyDescriptor(process.stdin, 'setRawMode');
@@ -208,6 +209,48 @@ describe('runServerCommand', () => {
       pid: process.pid,
     }));
     expect(discovery.unregister).toHaveBeenCalledOnce();
+  });
+
+  it('starts with an unrelated provider when another provider catalog is blocked', async () => {
+    const catalog = Object.assign([
+      {
+        id: 'groq',
+        name: 'Groq',
+        apiKey: 'stored-groq-key',
+        authType: 'api' as const,
+        models: [{
+          id: 'llama-test',
+          name: 'Llama Test',
+          family: 'llama',
+          brand: 'Meta',
+          modelFormat: 'openai' as const,
+          upstreamModelId: 'llama-test',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    ], {
+      blockedProviders: new Map([
+        ['openai-oauth', 'CLODEX_KEY_OPENAI_OAUTH has no isolated model catalog'],
+      ]),
+    });
+
+    const loader = vi.mocked(loadRegistryProviders);
+    const previousImplementation = loader.getMockImplementation();
+    loader.mockResolvedValue(catalog);
+    try {
+      const { runServerCommand } = await import('../src/server/index.js');
+      const result = runServerCommand({ quick: true, noDiscovery: true });
+      await vi.waitFor(() => expect(state.startServerOptions).not.toBeNull());
+      process.emit('SIGINT');
+
+      await expect(result).resolves.toBe(0);
+      const exposed = state.startServerOptions.catalog.list() as ServerModelInfo[];
+      expect(exposed).toEqual([
+        expect.objectContaining({ providerId: 'groq', id: 'llama-test' }),
+      ]);
+    } finally {
+      if (previousImplementation) loader.mockImplementation(previousImplementation);
+    }
   });
 
   it('reports exact inactive aliases and passes only accepted names to the server', async () => {

@@ -10,7 +10,9 @@ import {
   providerKeyringAccount,
   clodexKeyEnvVar,
   resolveProviderCredential,
+  resolveProviderCredentialOverrideState,
 } from '../src/env.js';
+import { createHash } from 'node:crypto';
 
 const TEST_HELPER_ID = 'a'.repeat(64);
 import { CONFLICTING_ENV_VARS } from '../src/constants.js';
@@ -112,6 +114,66 @@ describe('provider credentials', () => {
     const key = await resolveProviderCredential('openai', 'keyring:provider:openai');
     expect(key).toBe('env-openai-key');
     delete process.env[clodexKeyEnvVar('openai')];
+  });
+
+  it('can resolve the configured credential while bypassing CLODEX_KEY_*', async () => {
+    const variable = clodexKeyEnvVar('openai');
+    const previousOverride = process.env[variable];
+    const previousStored = process.env.CLODEX_STORED_OPENAI_KEY;
+    process.env[variable] = 'temporary-provider-key';
+    process.env.CLODEX_STORED_OPENAI_KEY = 'stored-openai-key';
+    try {
+      await expect(resolveProviderCredential(
+        'openai',
+        'env:CLODEX_STORED_OPENAI_KEY',
+        undefined,
+        { ignoreProviderOverride: true },
+      )).resolves.toBe('stored-openai-key');
+      expect(resolveProviderCredentialOverrideState(
+        'openai',
+        process.env,
+        { ignoreProviderOverride: true },
+      )).toBeNull();
+    } finally {
+      if (previousOverride === undefined) delete process.env[variable];
+      else process.env[variable] = previousOverride;
+      if (previousStored === undefined) delete process.env.CLODEX_STORED_OPENAI_KEY;
+      else process.env.CLODEX_STORED_OPENAI_KEY = previousStored;
+    }
+  });
+
+  it('exposes only redaction-safe state for the usable provider override', async () => {
+    const providerId = 'source-state-test';
+    const variable = clodexKeyEnvVar(providerId);
+    const credential = 'super-secret-provider-override';
+    process.env[variable] = credential;
+    process.env.CLODEX_SOURCE_STATE_FALLBACK = 'stored-fallback';
+    try {
+      const state = resolveProviderCredentialOverrideState(providerId);
+      expect(state).toEqual({
+        variable,
+        fingerprint: createHash('sha256').update(credential).digest('hex'),
+      });
+      expect(JSON.stringify(state)).not.toContain(credential);
+
+      // The state inspector and credential resolver share the exact remembered
+      // rejection semantics: the same value remains unusable until it changes.
+      await expect(resolveProviderCredential(
+        providerId,
+        'env:CLODEX_SOURCE_STATE_FALLBACK',
+        undefined,
+        { rejectedAccessToken: credential },
+      )).resolves.toBe('stored-fallback');
+      expect(resolveProviderCredentialOverrideState(providerId)).toBeNull();
+
+      process.env[variable] = 'rotated-provider-override';
+      expect(resolveProviderCredentialOverrideState(providerId)).toMatchObject({ variable });
+    } finally {
+      delete process.env[variable];
+      delete process.env.CLODEX_SOURCE_STATE_FALLBACK;
+      // An absent value clears any remembered rejection for this test-only id.
+      resolveProviderCredentialOverrideState(providerId);
+    }
   });
 
   it('keeps explicit anonymous access authoritative over provider environment keys', async () => {
@@ -240,34 +302,38 @@ describe('buildChildEnv', () => {
 
 describe('buildHttpProxyChildEnv', () => {
   it('sets proxy trust without replacing normal Anthropic credentials or model', () => {
-    process.env['ANTHROPIC_API_KEY'] = 'normal-api-key';
-    process.env['ANTHROPIC_AUTH_TOKEN'] = 'normal-auth-token';
-    process.env['ANTHROPIC_MODEL'] = 'sonnet';
-    process.env['ANTHROPIC_BASE_URL'] = 'https://old-gateway.example';
-    process.env['CLAUDE_CODE_USE_VERTEX'] = '1';
-    process.env['NO_PROXY'] = 'localhost,api.anthropic.com,.internal.example';
-    try {
-      const env = buildHttpProxyChildEnv(18181, '/tmp/relay-ca.pem');
-      expect(env['HTTPS_PROXY']).toBe('http://127.0.0.1:18181');
-      expect(env['HTTP_PROXY']).toBe('http://127.0.0.1:18181');
-      expect(env['https_proxy']).toBe('http://127.0.0.1:18181');
-      expect(env['http_proxy']).toBe('http://127.0.0.1:18181');
-      expect(env['NODE_EXTRA_CA_CERTS']).toBe('/tmp/relay-ca.pem');
-      expect(env['ANTHROPIC_BASE_URL']).toBeUndefined();
-      expect(env['CLAUDE_CODE_USE_VERTEX']).toBeUndefined();
-      expect(env['ANTHROPIC_API_KEY']).toBe('normal-api-key');
-      expect(env['ANTHROPIC_AUTH_TOKEN']).toBe('normal-auth-token');
-      expect(env['ANTHROPIC_MODEL']).toBe('sonnet');
-      expect(env['NO_PROXY']).toBe('localhost,.internal.example');
-      expect(env['no_proxy']).toBe('localhost,.internal.example');
-    } finally {
-      delete process.env['ANTHROPIC_API_KEY'];
-      delete process.env['ANTHROPIC_AUTH_TOKEN'];
-      delete process.env['ANTHROPIC_MODEL'];
-      delete process.env['ANTHROPIC_BASE_URL'];
-      delete process.env['CLAUDE_CODE_USE_VERTEX'];
-      delete process.env['NO_PROXY'];
-    }
+    const env = buildHttpProxyChildEnv(18181, '/tmp/relay-ca.pem', {
+      ANTHROPIC_API_KEY: 'normal-api-key',
+      ANTHROPIC_AUTH_TOKEN: 'normal-auth-token',
+      ANTHROPIC_MODEL: 'sonnet',
+      ANTHROPIC_BASE_URL: 'https://old-gateway.example',
+      CLAUDE_CODE_USE_VERTEX: '1',
+      NO_PROXY: 'localhost,api.anthropic.com,.internal.example',
+    });
+
+    expect(env['HTTPS_PROXY']).toBe('http://127.0.0.1:18181');
+    expect(env['HTTP_PROXY']).toBe('http://127.0.0.1:18181');
+    expect(env['https_proxy']).toBe('http://127.0.0.1:18181');
+    expect(env['http_proxy']).toBe('http://127.0.0.1:18181');
+    expect(env['NODE_EXTRA_CA_CERTS']).toBe('/tmp/relay-ca.pem');
+    expect(env['ANTHROPIC_BASE_URL']).toBeUndefined();
+    expect(env['CLAUDE_CODE_USE_VERTEX']).toBeUndefined();
+    expect(env['ANTHROPIC_API_KEY']).toBe('normal-api-key');
+    expect(env['ANTHROPIC_AUTH_TOKEN']).toBe('normal-auth-token');
+    expect(env['ANTHROPIC_MODEL']).toBe('sonnet');
+    expect(env['NO_PROXY']).toBe('localhost,.internal.example');
+    expect(env['no_proxy']).toBe('localhost,.internal.example');
+    expect(JSON.parse(env['CLAUDE_CODE_CLODEX_NETWORK_ENV']!)).toMatchObject({
+      version: 1,
+      original: {
+        HTTPS_PROXY: null,
+        NO_PROXY: 'localhost,api.anthropic.com,.internal.example',
+      },
+      injected: {
+        HTTPS_PROXY: 'http://127.0.0.1:18181',
+        NO_PROXY: 'localhost,.internal.example',
+      },
+    });
   });
 });
 

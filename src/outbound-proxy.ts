@@ -8,16 +8,18 @@
 // global fetch dispatcher — but only when a proxy env var is actually set, so
 // proxy-less environments are completely unaffected.
 //
-// The OAuth Responses WebSocket transport (`ws` in oauth/responses-websocket.ts)
-// does not go through the undici dispatcher; outboundWsProxyAgent() builds an
-// https-proxy-agent CONNECT-tunnel agent for it from the same env vars.
+// The OAuth Responses WebSocket transport and raw first-party passthrough do
+// not go through the undici dispatcher. outboundHttpProxyAgent() builds an
+// https-proxy-agent CONNECT tunnel for those paths from the same env vars.
 //
-// Self-loop guard: clodex never sets proxy vars in its OWN process.env — proxy
-// bridge mode sets HTTPS_PROXY only in the CHILD's env (buildHttpProxyChildEnv
-// works on a copy of process.env). The dispatcher therefore only ever points at
-// a proxy the user configured for clodex, never at clodex's own MITM listener.
+// Proxy bridge mode sets HTTPS_PROXY only in the CHILD's env, but a server can
+// still inherit a previously exported bridge URL from its shell. Raw
+// passthrough checks that resolved URL against its bound listener before it
+// creates an agent, preventing a CONNECT loop through the same MITM.
 
 import type { Agent as HttpAgent } from 'node:http';
+import { networkInterfaces } from 'node:os';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 export function hasOutboundProxyEnv(env: NodeJS.ProcessEnv = process.env): boolean {
   return Boolean(
@@ -67,6 +69,43 @@ export function outboundProxyUrlForTarget(
   return proxy.trim();
 }
 
+/** Whether a proxy URL addresses the listener that would consume its CONNECT request. */
+export function proxyUrlTargetsListener(
+  proxyUrl: string,
+  listenerHost: string,
+  listenerPort: number,
+  localAddresses: ReadonlySet<string> = new Set(
+    Object.values(networkInterfaces()).flatMap(entries =>
+      (entries ?? []).map(entry => entry.address.toLowerCase())),
+  ),
+): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(proxyUrl);
+  } catch {
+    return false;
+  }
+  const proxyPort = parsed.port
+    ? Number(parsed.port)
+    : parsed.protocol === 'https:' ? 443 : parsed.protocol === 'http:' ? 80 : undefined;
+  if (proxyPort !== listenerPort) return false;
+
+  const normalizeHost = (host: string): string => host.toLowerCase().replace(/^\[|\]$/g, '');
+  const proxyHost = normalizeHost(parsed.hostname);
+  const boundHost = normalizeHost(listenerHost);
+  if (proxyHost === boundHost) return true;
+
+  const isLoopback = (host: string): boolean => host === 'localhost'
+    || host === '::1'
+    || /^127(?:\.\d{1,3}){3}$/.test(host);
+  const isWildcard = (host: string): boolean => host === '0.0.0.0' || host === '::';
+  if (isLoopback(proxyHost) && (isLoopback(boundHost) || isWildcard(boundHost))) return true;
+  return isWildcard(boundHost) && (
+    isWildcard(proxyHost)
+    || localAddresses.has(proxyHost)
+  );
+}
+
 let dispatcherInstalled = false;
 
 /** Reset the install-once latch (tests only). */
@@ -96,10 +135,32 @@ export async function installOutboundProxyDispatcher(): Promise<boolean> {
   }
 }
 
-/** CONNECT-tunnel agent for the `ws` OAuth WebSocket transport, or undefined when no proxy applies. */
-export async function outboundWsProxyAgent(wsUrl: string): Promise<HttpAgent | undefined> {
-  const proxyUrl = outboundProxyUrlForTarget(wsUrl);
+/** CONNECT-tunnel agent for a target URL, or undefined when no proxy applies. */
+export function outboundHttpProxyAgent(
+  targetUrl: string,
+  env: NodeJS.ProcessEnv = process.env,
+): HttpsProxyAgent<string> | undefined {
+  const proxyUrl = outboundProxyUrlForTarget(targetUrl, env);
   if (!proxyUrl) return undefined;
-  const { HttpsProxyAgent } = await import('https-proxy-agent');
-  return new HttpsProxyAgent(proxyUrl);
+  try {
+    const parsedProxy = new URL(proxyUrl);
+    if (!parsedProxy.hostname || !['http:', 'https:'].includes(parsedProxy.protocol)) {
+      throw new TypeError('Invalid proxy URL');
+    }
+    return new HttpsProxyAgent(parsedProxy, { keepAlive: true });
+  } catch (err) {
+    console.error(
+      'clodex: HTTP(S)_PROXY cannot be used for a CONNECT tunnel; '
+      + `using a direct connection (${err instanceof Error ? err.message : String(err)})`,
+    );
+    return undefined;
+  }
+}
+
+/** CONNECT-tunnel agent for the `ws` OAuth WebSocket transport. */
+export function outboundWsProxyAgent(
+  wsUrl: string,
+  env: NodeJS.ProcessEnv = process.env,
+): HttpAgent | undefined {
+  return outboundHttpProxyAgent(wsUrl, env);
 }

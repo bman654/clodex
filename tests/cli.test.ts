@@ -1,7 +1,24 @@
 // tests/cli.test.ts
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import * as p from '@clack/prompts';
 import { parseArgs, rootHelpText, claudeHelpText, serverHelpText, modelsHelpText, patchHelpText, main, runClaudeCommand } from '../src/cli.js';
 import { VERSION } from '../src/constants.js';
+import { fetchProviderCatalog } from '../src/provider-catalog.js';
+
+vi.mock('../src/launch.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/launch.js')>();
+  return { ...actual, findClaudeBinary: vi.fn(() => '/fake/claude') };
+});
+
+vi.mock('../src/patcher.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/patcher.js')>();
+  return { ...actual, runLaunchPatchCheck: vi.fn(async () => undefined) };
+});
+
+vi.mock('../src/provider-catalog.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/provider-catalog.js')>();
+  return { ...actual, fetchProviderCatalog: vi.fn() };
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -289,6 +306,49 @@ describe('main dispatch', () => {
     expect(code).toBe(1);
     expect(error.mock.calls.some(call => String(call[0]).includes('Unknown command: gemini'))).toBe(true);
     expect(log.mock.calls.some(call => String(call[0]).includes('clodex'))).toBe(true);
+  });
+
+  it('keeps an unrelated provider launchable while preserving a blocked provider diagnostic', async () => {
+    const blockedReason = 'CLODEX_KEY_OPENAI_OAUTH is a process-scoped credential with no isolated model catalog for provider "openai-oauth".';
+    const catalog = Object.assign([
+      {
+        id: 'groq',
+        name: 'Groq',
+        apiKey: 'stored-groq-key',
+        authType: 'api' as const,
+        models: [{
+          id: 'llama-test',
+          name: 'Llama Test',
+          family: 'llama',
+          brand: 'Meta',
+          modelFormat: 'openai' as const,
+          upstreamModelId: 'llama-test',
+          npm: '@ai-sdk/openai-compatible',
+        }],
+      },
+    ], { blockedProviders: new Map([['openai-oauth', blockedReason]]) });
+    vi.mocked(fetchProviderCatalog).mockResolvedValue(catalog);
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(main([
+      'claude',
+      '--endpoint',
+      '--dry-run',
+      '--provider', 'openai-oauth',
+      '--model', 'gpt-test',
+    ])).resolves.toBe(1);
+    expect(error).toHaveBeenCalledWith(blockedReason);
+    expect(error.mock.calls.flat().join('\n')).not.toContain('Provider/model not found');
+
+    await expect(main([
+      'claude',
+      '--endpoint',
+      '--dry-run',
+      '--provider', 'groq',
+      '--model', 'llama-test',
+    ])).resolves.toBe(0);
+    expect(log.mock.calls.flat().join('\n')).toContain('DRY RUN — would execute');
   });
 
   it('prints patch help', async () => {

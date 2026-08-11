@@ -113,6 +113,122 @@ describe('registry io', () => {
     expect(loaded.providers[0]?.id).toBe('groq');
   });
 
+  it('diagnoses an invalid top-level model cache while retaining the provider', () => {
+    const path = join(home, 'providers.json');
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: 'groq',
+        templateId: 'groq',
+        name: 'Groq',
+        enabled: true,
+        authRef: 'keyring:provider:groq',
+        authType: 'api',
+        api: { npm: '@ai-sdk/groq' },
+        addedAt: '2026-06-09T00:00:00.000Z',
+        modelsCache: { fetchedAt: 42, models: [] },
+      }],
+    }));
+    const diagnostics: string[] = [];
+
+    const loaded = loadRegistry(path, message => diagnostics.push(message));
+
+    expect(loaded.providers).toHaveLength(1);
+    expect(loaded.providers[0]?.modelsCache).toBeUndefined();
+    expect(diagnostics).toEqual([
+      'Provider registry dropped an invalid model cache for provider "groq".',
+    ]);
+  });
+
+  it('diagnoses an inconsistent materialized account instead of silently dropping it', () => {
+    const path = join(home, 'providers.json');
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 5,
+      providers: [{
+        id: 'openai-oauth',
+        templateId: 'openai',
+        name: 'OpenAI',
+        enabled: true,
+        authRef: 'keyring:provider:work',
+        defaultAuthRef: 'keyring:provider:default',
+        authType: 'oauth',
+        activeAuthAccount: 'work',
+        authAccounts: {
+          work: {
+            authRef: 'keyring:provider:work',
+            addedAt: '2026-08-09T00:00:00.000Z',
+            modelsCache: {
+              fetchedAt: '2026-08-09T00:00:00.000Z',
+              models: [{ id: 'work-model' }],
+            },
+          },
+        },
+        api: { npm: '@ai-sdk/openai' },
+        addedAt: '2026-08-09T00:00:00.000Z',
+        modelsCache: {
+          fetchedAt: '2026-08-09T00:00:00.000Z',
+          models: [{ id: 'different-model' }],
+        },
+      }],
+    }));
+    const diagnostics: string[] = [];
+
+    expect(loadRegistry(path, message => diagnostics.push(message)).providers).toEqual([]);
+    expect(diagnostics).toEqual([
+      'Provider registry dropped invalid provider "openai-oauth" because its OAuth account selection storage is inconsistent.',
+    ]);
+  });
+
+  it('diagnoses malformed registry JSON before falling back to empty', () => {
+    const path = join(home, 'providers.json');
+    writeFileSync(path, '{not-json');
+    const diagnostics: string[] = [];
+
+    expect(loadRegistry(path, message => diagnostics.push(message)).providers).toEqual([]);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain(`Could not read the provider registry at ${path}; treating it as empty:`);
+  });
+
+  it('loads both selected and parked provider-default catalogs from schema v5', () => {
+    const path = join(home, 'providers.json');
+    const workCache = {
+      fetchedAt: '2026-08-09T01:00:00.000Z',
+      models: [{ id: 'work-model' }],
+    };
+    const defaultCache = {
+      fetchedAt: '2026-08-09T00:00:00.000Z',
+      models: [{ id: 'default-model' }],
+    };
+    writeFileSync(path, JSON.stringify({
+      schemaVersion: 5,
+      providers: [{
+        id: 'openai-oauth',
+        templateId: 'openai',
+        name: 'OpenAI',
+        enabled: true,
+        authRef: 'keyring:provider:work',
+        defaultAuthRef: 'keyring:provider:default',
+        authType: 'oauth',
+        activeAuthAccount: 'work',
+        authAccounts: {
+          work: {
+            authRef: 'keyring:provider:work',
+            addedAt: '2026-08-09T00:00:00.000Z',
+            modelsCache: workCache,
+          },
+        },
+        api: { npm: '@ai-sdk/openai' },
+        addedAt: '2026-08-09T00:00:00.000Z',
+        modelsCache: workCache,
+        defaultModelsCache: defaultCache,
+      }],
+    }));
+
+    const provider = loadRegistryStrict(path).providers[0]!;
+    expect(provider.modelsCache?.models[0]?.id).toBe('work-model');
+    expect(provider.defaultModelsCache?.models[0]?.id).toBe('default-model');
+  });
+
   it('does not publish a migration from partially invalid registry data', () => {
     const path = join(home, 'providers.json');
     const raw = {

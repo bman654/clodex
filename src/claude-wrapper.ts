@@ -27,6 +27,7 @@
 import { spawn } from 'node:child_process';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { constants as osConstants } from 'node:os';
+import { OAUTH_ACCOUNT_ENV } from './oauth-account-selection.js';
 import { findClaudeBinary } from './launch.js';
 import { waitForTcpListenerCandidate } from './listener-ready.js';
 import {
@@ -47,6 +48,16 @@ function isExecutableFile(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+function activeProviderCredentialOverride(env: NodeJS.ProcessEnv): string | null {
+  const variablePattern = isWindows
+    ? /^CLODEX_KEY_[A-Z0-9_]+$/i
+    : /^CLODEX_KEY_[A-Z0-9_]+$/;
+  return Object.keys(env)
+    .sort()
+    .find(name => variablePattern.test(name) && Boolean(env[name]?.trim()))
+    ?? null;
 }
 
 /**
@@ -131,6 +142,23 @@ async function main(): Promise<void> {
   if (!state && wrapperRequiresServer(process.env)) {
     process.stderr.write('clodex-claude: no live clodex server is available\n');
     process.exit(1);
+  }
+  if (state && process.env[OAUTH_ACCOUNT_ENV]?.trim()) {
+    process.stderr.write(
+      `clodex-claude: warning: ${OAUTH_ACCOUNT_ENV} is ignored by an already-running standalone server; `
+      + 'restart that server with the override and then launch without the variable, '
+      + 'or use clodex claude --proxy\n',
+    );
+  }
+  const providerCredentialOverride = state
+    ? activeProviderCredentialOverride(process.env)
+    : null;
+  if (state && providerCredentialOverride) {
+    process.stderr.write(
+      `clodex-claude: warning: ${providerCredentialOverride} is ignored by an already-running standalone server; `
+      + 'unset the process-only key to use the configured credential/catalog, or save that credential as a '
+      + 'provider or account, refresh its models, and restart the server\n',
+    );
   }
   const env = computeWrapperEnv(process.env, state);
 

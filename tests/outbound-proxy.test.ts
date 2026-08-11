@@ -1,9 +1,12 @@
 // tests/outbound-proxy.test.ts
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   hasOutboundProxyEnv,
   noProxyBypasses,
+  outboundHttpProxyAgent,
   outboundProxyUrlForTarget,
+  outboundWsProxyAgent,
+  proxyUrlTargetsListener,
 } from '../src/outbound-proxy.js';
 
 const PROXY = 'http://127.0.0.1:8888';
@@ -54,6 +57,78 @@ describe('outboundProxyUrlForTarget', () => {
     const env = { HTTPS_PROXY: PROXY, NO_PROXY: 'api.openai.com' };
     expect(outboundProxyUrlForTarget('https://api.openai.com/v1', env)).toBeUndefined();
     expect(outboundProxyUrlForTarget('https://chatgpt.com/x', env)).toBe(PROXY);
+  });
+});
+
+describe('outboundHttpProxyAgent', () => {
+  it('builds an agent only when the target is not bypassed', async () => {
+    const direct = await outboundHttpProxyAgent('https://api.example.test', {
+      HTTPS_PROXY: PROXY,
+      NO_PROXY: 'api.example.test',
+    });
+    expect(direct).toBeUndefined();
+
+    const proxied = await outboundHttpProxyAgent('https://api.example.test', {
+      HTTPS_PROXY: PROXY,
+    });
+    expect(proxied).toBeDefined();
+    expect(proxied?.keepAlive).toBe(true);
+    proxied?.destroy();
+  });
+
+  it.each([
+    'localhost:3128',
+    'http://user:private-proxy-token@[invalid',
+  ])('warns and falls back to direct for malformed proxy URL %s', async proxyUrl => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const agent = await outboundHttpProxyAgent('https://api.example.test', {
+        HTTPS_PROXY: proxyUrl,
+      });
+
+      expect(agent).toBeUndefined();
+      expect(error).toHaveBeenCalledOnce();
+      expect(error.mock.calls.flat().join(' ')).toMatch(
+        /using a direct connection \(Invalid (?:proxy )?URL\)/,
+      );
+      expect(error.mock.calls.flat().join(' ')).not.toContain('private-proxy-token');
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('builds the WebSocket transport with the same keep-alive proxy agent', () => {
+    const agent = outboundWsProxyAgent('wss://api.example.test/responses', {
+      HTTPS_PROXY: PROXY,
+    });
+
+    expect(agent).toBeDefined();
+    expect(agent?.keepAlive).toBe(true);
+    agent?.destroy();
+  });
+});
+
+describe('proxyUrlTargetsListener', () => {
+  it('matches loopback aliases and wildcard listeners only on the bound port', () => {
+    expect(proxyUrlTargetsListener('http://127.0.0.1:17645', '127.0.0.1', 17645)).toBe(true);
+    expect(proxyUrlTargetsListener('http://localhost:17645', '127.0.0.1', 17645)).toBe(true);
+    expect(proxyUrlTargetsListener('http://127.0.0.2:17645', '0.0.0.0', 17645)).toBe(true);
+    expect(proxyUrlTargetsListener(
+      'http://192.0.2.10:17645',
+      '0.0.0.0',
+      17645,
+      new Set(['192.0.2.10']),
+    )).toBe(true);
+    expect(proxyUrlTargetsListener(
+      'http://192.0.2.11:17645',
+      '0.0.0.0',
+      17645,
+      new Set(['192.0.2.10']),
+    )).toBe(false);
+    expect(proxyUrlTargetsListener('http://127.0.0.1:17646', '127.0.0.1', 17645)).toBe(false);
+    expect(proxyUrlTargetsListener('http://proxy.example.test:17645', '127.0.0.1', 17645)).toBe(false);
+    expect(proxyUrlTargetsListener('not a URL', '127.0.0.1', 17645)).toBe(false);
   });
 });
 
