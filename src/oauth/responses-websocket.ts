@@ -1329,6 +1329,8 @@ function failContext(
     type: 'error',
     sequence_number: ctx.frameCount,
     error: {
+      // Synthetic `type` preserves plan identity while `code` preserves
+      // authoritative HTTP status.
       type: planLimitType
         ?? (statusCode === undefined ? 'transport_error' : anthropicErrorType(statusCode)),
       code: statusCode === undefined ? 'websocket_transport_error' : String(statusCode),
@@ -1668,6 +1670,7 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
     // plan-limit hint is more honest than claiming the 60s cap is its reset time.
     const statedRetryAfter = statusCode === 429 ? responseRetryAfterSeconds(event) : undefined;
     const retryAfterSeconds = statedRetryAfter !== undefined
+      && statedRetryAfter >= 0
       && (!usageLimited || statedRetryAfter <= MAX_RETRY_AFTER_SECONDS)
       ? clampRetryAfterSeconds(statedRetryAfter)
       : undefined;
@@ -1751,6 +1754,7 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
     // the same reason the status-carrying branch above spells it out.
     const statedRetryAfter = usageLimited ? responseRetryAfterSeconds(event) : undefined;
     const retryAfterSeconds = statedRetryAfter !== undefined
+      && statedRetryAfter >= 0
       && (!planLimited || statedRetryAfter <= MAX_RETRY_AFTER_SECONDS)
       ? clampRetryAfterSeconds(statedRetryAfter)
       : undefined;

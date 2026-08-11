@@ -108,12 +108,31 @@ describe('sdkUpstreamErrorDetails retry-after extraction', () => {
     expect(details?.retryAfterSeconds).toBeUndefined();
   });
 
+  it('omits the capped hint for a code-only plan-limit signal with no type discriminator', () => {
+    // `apiErrorIsPlanUsageLimit` accepts either the `type` or the `code`, so
+    // the code alone must be enough to trigger the omission — the plan-limit
+    // signal survives without any `type` on the payload.
+    const details = sdkUpstreamErrorDetails(apiCallError({
+      statusCode: 429,
+      data: {
+        error: {
+          code: 'usage_limit_reached',
+          message: 'Weekly usage limit reached',
+          retry_after_seconds: 21_600,
+        },
+      },
+    }));
+    expect(details).toMatchObject({ statusCode: 429, isRetryable: true });
+    expect(details?.retryAfterSeconds).toBeUndefined();
+  });
+
   it('detects a usage limit whose discriminator survives only in the serialized body', () => {
-    // The SDK may serialize the error body into responseBody without also
-    // populating `data`; the usage-limit signal then lives only in that JSON,
-    // so the classifier must read the same structured payload both consumers
-    // use. Misread, the oversized retry-after below would be clamped to 60s
-    // instead of omitted.
+    // The responseBody fallback exists for malformed or non-conforming bodies:
+    // the SDK's JSON error handler populates `data` for any schema-valid body,
+    // whose error schema requires the message. When the usage-limit signal does
+    // survive only in the serialized body, the classifier must still read the
+    // same structured payload both consumers use. Misread, the oversized
+    // retry-after below would be clamped to 60s instead of omitted.
     const details = sdkUpstreamErrorDetails(apiCallError({
       statusCode: 429,
       responseBody: JSON.stringify({
@@ -127,6 +146,25 @@ describe('sdkUpstreamErrorDetails retry-after extraction', () => {
     }));
     expect(details).toMatchObject({ statusCode: 429, isRetryable: true });
     expect(details?.retryAfterSeconds).toBeUndefined();
+  });
+
+  it('lets a parsed body retry hint win over a conflicting retry-after header', () => {
+    // numericRetryAfterSeconds reads the parsed body before the header, so the
+    // body's in-bounds plan-limit hint is kept (the exemption only omits hints
+    // above the cap) while the capped header is never consulted.
+    const details = sdkUpstreamErrorDetails(apiCallError({
+      statusCode: 429,
+      responseBody: JSON.stringify({
+        error: {
+          type: 'usage_limit_reached',
+          code: 'usage_limit_reached',
+          message: 'Weekly usage limit reached',
+          retry_after_seconds: 30,
+        },
+      }),
+      responseHeaders: { 'retry-after': '21600' },
+    }));
+    expect(details).toMatchObject({ statusCode: 429, isRetryable: true, retryAfterSeconds: 30 });
   });
 
   it('treats a malformed serialized body as absent instead of crashing the classifier', () => {
@@ -157,6 +195,29 @@ describe('usage-limit classification', () => {
       attemptCount: 1,
     });
     expect(anthropicErrorType(details!.statusCode!)).toBe('rate_limit_error');
+  });
+
+  it('omits the backoff hint for a raw usage-limit frame even when its prose carries one', () => {
+    // The plan-limit exemption applies on the frame path too: an oversized
+    // reset stated only in message prose is omitted, never clamped.
+    const details = sdkUpstreamErrorDetails({
+      type: 'usage_limit_reached',
+      code: 'usage_limit_reached',
+      message: 'Weekly usage limit reached; retry after 3600s',
+    });
+    expect(details).toMatchObject({ statusCode: 429, isRetryable: true });
+    expect(details?.retryAfterSeconds).toBeUndefined();
+  });
+
+  it('clamps the same oversized prose hint on an ordinary rate-limit frame', () => {
+    // The control: an equivalent plain rate limit with the same oversized hint
+    // is an ordinary throttle and still clamps to 60s.
+    const details = sdkUpstreamErrorDetails({
+      type: 'rate_limit_exceeded',
+      code: 'rate_limit_exceeded',
+      message: 'Rate limit reached; retry after 3600s',
+    });
+    expect(details).toMatchObject({ statusCode: 429, isRetryable: true, retryAfterSeconds: 60 });
   });
 });
 
