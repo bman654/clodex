@@ -24,9 +24,9 @@ export interface SdkUpstreamErrorDetails {
 /** Default downstream backoff hint when the upstream throttle gives none. */
 export const DEFAULT_RETRY_AFTER_SECONDS = 5;
 /**
- * Upper bound for any retry-after hint clodex produces or forwards. Keeps the
- * AI SDK's bounded backoff (default maxRetries=2) and downstream clients well
- * clear of clodex's 120s no-event stream abort.
+ * Upper bound for retry-after hints clodex produces or forwards. Ordinary
+ * throttle hints clamp here; a plan-level reset above the bound is omitted
+ * rather than misreported as this cap.
  */
 export const MAX_RETRY_AFTER_SECONDS = 60;
 
@@ -60,6 +60,13 @@ function numericRetryAfterSeconds(inner: InstanceType<typeof APICallError>): num
     if (fromText !== undefined) return fromText;
   }
   return undefined;
+}
+
+function apiErrorIsPlanUsageLimit(inner: InstanceType<typeof APICallError>): boolean {
+  const error = (inner.data as { error?: { type?: unknown; code?: unknown } } | undefined)?.error;
+  return [error?.type, error?.code].some(value => (
+    typeof value === 'string' && value.toLowerCase().includes('usage_limit')
+  ));
 }
 
 // ── Provider stream error frames ────────────────────────────────────────────
@@ -132,11 +139,11 @@ function errorCodeValue(record: Record<string, unknown>): string | undefined {
 /**
  * Real HTTP status behind a frame.
  *
- * Deliberately mirrors `@ai-sdk/openai`'s own `getStatusCode`: substring
- * discriminators rather than an exact-match table, and 500 when nothing
- * matches. That keeps a mid-stream frame classified IDENTICALLY to the same
- * frame arriving pre-output (which the SDK maps itself), and it degrades
- * gracefully as OpenAI adds codes instead of silently falling out of date.
+ * Mirrors `@ai-sdk/openai`'s own `getStatusCode`: substring discriminators
+ * rather than an exact-match table, and 500 when nothing matches. clodex adds
+ * the plan-level `usage_limit` term because the OAuth Responses transport uses
+ * it for a real rate-limit condition. Apart from that documented extension,
+ * matching the SDK prevents a pre/post-output classification split.
  *
  * Always returning a status also matters for correctness, not just tidiness:
  * an undefined result would send the recovered message on to the prose
@@ -155,10 +162,10 @@ export function frameStatusCode(code: string | undefined, discriminator: string)
   // before any auth check and so reports 400 here exactly as it does in the
   // SDK. Diverging would reintroduce the pre/post-output split this avoids,
   // and an auth failure cannot reach a mid-stream frame anyway.
-  // `usage_limit` alongside the quota/rate classes: an exhausted plan is a real
-  // 429, and without it the discriminator falls through to the 500 default —
-  // which `frameIsRetryable` treats as transient, so the client spends its whole
-  // retry budget re-asking a question upstream has already answered.
+  // `usage_limit` belongs alongside the quota/rate classes: it surfaces an
+  // exhausted plan as 429/rate_limit_error and lets downstream receive an
+  // honest backoff hint when the stated reset fits the bounded hint policy.
+  // Both 429 and the 500 fallback are retryable; this mapping saves no attempts.
   if (/insufficient_quota|rate_limit|usage_limit/.test(discriminator)) return 429;
   if (discriminator.includes('authentication')) return 401;
   if (discriminator.includes('permission')) return 403;
@@ -250,6 +257,10 @@ export function providerErrorFrame(err: unknown): ProviderErrorFrame | undefined
         ? payload.retry_after_seconds
         : retryAfterFromText(message))
     : undefined;
+  const retryAfterSeconds = rawRetryAfter !== undefined
+    && (!discriminator.includes('usage_limit') || rawRetryAfter <= MAX_RETRY_AFTER_SECONDS)
+    ? clampRetryAfterSeconds(rawRetryAfter)
+    : undefined;
 
   let serialized: string;
   try {
@@ -263,7 +274,7 @@ export function providerErrorFrame(err: unknown): ProviderErrorFrame | undefined
     message,
     statusCode,
     contextLengthExceeded: frameIsContextLengthExceeded(discriminator, message),
-    ...(rawRetryAfter !== undefined ? { retryAfterSeconds: clampRetryAfterSeconds(rawRetryAfter) } : {}),
+    ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
     ...(code === 'websocket_transport_error' ? { transportCode: 'websocket_transport_error' as const } : {}),
     serialized,
   };
@@ -313,9 +324,10 @@ export function sdkUpstreamErrorDetails(err: unknown): SdkUpstreamErrorDetails |
   }
 
   const rawRetryAfter = inner.statusCode === 429 ? numericRetryAfterSeconds(inner) : undefined;
-  const retryAfterSeconds = rawRetryAfter === undefined
-    ? undefined
-    : clampRetryAfterSeconds(rawRetryAfter);
+  const retryAfterSeconds = rawRetryAfter !== undefined
+    && (!apiErrorIsPlanUsageLimit(inner) || rawRetryAfter <= MAX_RETRY_AFTER_SECONDS)
+    ? clampRetryAfterSeconds(rawRetryAfter)
+    : undefined;
   const transportCode = boundedTransportCode(inner.data);
 
   return {

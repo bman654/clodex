@@ -12,7 +12,12 @@ import type { FetchFunction } from '@ai-sdk/provider-utils';
 import type { RawData, WebSocket as WsWebSocket } from 'ws';
 import { CODEX_RESPONSES_WEBSOCKETS_BETA } from '../constants.js';
 import { outboundWsProxyAgent } from '../outbound-proxy.js';
-import { anthropicErrorType, clampRetryAfterSeconds, frameStatusCode } from '../upstream-error.js';
+import {
+  anthropicErrorType,
+  clampRetryAfterSeconds,
+  frameStatusCode,
+  MAX_RETRY_AFTER_SECONDS,
+} from '../upstream-error.js';
 import { sanitizeToolInput } from '../tool-input-sanitize.js';
 
 const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite';
@@ -874,8 +879,9 @@ function responseErrorMessage(event: unknown): string | undefined {
 }
 
 function boundedDiagnosticIdentifier(value: unknown): string | undefined {
-  if (typeof value !== 'string') return undefined;
-  const normalized = value.trim();
+  const identifier = typeof value === 'number' && Number.isFinite(value) ? String(value) : value;
+  if (typeof identifier !== 'string') return undefined;
+  const normalized = identifier.trim();
   return normalized && /^[a-zA-Z0-9_.:/-]+$/.test(normalized)
     ? normalized.slice(0, 128)
     : undefined;
@@ -1640,21 +1646,24 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   }
 
   if (errorStatus !== undefined) {
+    const usageLimited = [responseErrorType(event), errorCode].some(value => (
+      typeof value === 'string' && value.toLowerCase().includes('usage_limit')
+    ));
+    // A generic 5xx field is only a fallback when a structured plan-limit class
+    // is present. Otherwise it masks the more specific 429 signal carried by the
+    // same frame. Explicit deterministic 4xx statuses remain authoritative.
+    const statusCode = usageLimited && errorStatus >= 500 ? 429 : errorStatus;
     // The AI SDK strips unknown frame fields, so a backoff hint survives only
     // baked into the message text — same reason the connection-limit branch
-    // above spells it out. Clamped, so a hostile hint cannot park a client past
-    // the 120s no-event stream abort.
-    // Only when upstream actually gave one. `clampRetryAfterSeconds` supplies a
-    // 5s DEFAULT for a missing hint, so clamping unconditionally would have
-    // every 429 assert a backoff upstream never stated — and that value becomes
-    // a real `retry-after` header downstream. Worse on a plan-level limit,
-    // where the reason says hours: a prose-only "retry after 1800s" would get
-    // "; retry after 5s" appended, and the client reads the first match.
-    const statedRetryAfter = errorStatus === 429 ? responseRetryAfterSeconds(event) : undefined;
-    const retryAfterSeconds = statedRetryAfter === undefined
-      ? undefined
-      : clampRetryAfterSeconds(statedRetryAfter);
-    const reason = responseErrorMessage(event) ?? `OpenAI rejected the request (HTTP ${errorStatus})`;
+    // above spells it out. Only forward a value upstream actually gave. An
+    // oversized ordinary rate-limit hint is capped, but omitting an oversized
+    // plan-limit hint is more honest than claiming the 60s cap is its reset time.
+    const statedRetryAfter = statusCode === 429 ? responseRetryAfterSeconds(event) : undefined;
+    const retryAfterSeconds = statedRetryAfter !== undefined
+      && (!usageLimited || statedRetryAfter <= MAX_RETRY_AFTER_SECONDS)
+      ? clampRetryAfterSeconds(statedRetryAfter)
+      : undefined;
+    const reason = responseErrorMessage(event) ?? `OpenAI rejected the request (HTTP ${statusCode})`;
     failContext(
       entry,
       ctx,
@@ -1669,10 +1678,10 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
         // file's diagnostics. The connection-limit branch can pass its code raw
         // only because it has just been compared `===` to a known constant.
         errorCode: boundedDiagnosticIdentifier(errorCode),
-        mappedStatusCode: errorStatus,
+        mappedStatusCode: statusCode,
         ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
       },
-      errorStatus,
+      statusCode,
       retryAfterSeconds,
     );
     return;
@@ -1720,19 +1729,20 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
     // `code: '401'` matches no rule, lands on the 500 default, and gets
     // rewritten as a retryable 502.
     const numericOrNamed = typeof details.errorCode === 'string' ? details.errorCode : undefined;
-    const classified = numericOrNamed !== undefined || discriminator
-      ? frameStatusCode(numericOrNamed, discriminator)
-      : 500;
+    const classified = frameStatusCode(numericOrNamed, discriminator);
     const statusCode = classified !== 500
       ? classified
       : settledReason ? 400 : 502;
     const usageLimited = statusCode === 429;
+    const planLimited = discriminator.includes('usage_limit');
     // Only when upstream stated one, and only baked into the TEXT: the AI SDK's
     // chunk schema is a closed zod object that strips `retry_after_seconds`, so
     // a hint carried only in the frame field never reaches the client. This is
     // the same reason the status-carrying branch above spells it out.
-    const retryAfterSeconds = usageLimited && responseRetryAfterSeconds(event) !== undefined
-      ? clampRetryAfterSeconds(responseRetryAfterSeconds(event))
+    const statedRetryAfter = usageLimited ? responseRetryAfterSeconds(event) : undefined;
+    const retryAfterSeconds = statedRetryAfter !== undefined
+      && (!planLimited || statedRetryAfter <= MAX_RETRY_AFTER_SECONDS)
+      ? clampRetryAfterSeconds(statedRetryAfter)
       : undefined;
     // The BOUNDED summary is the message, upstream's prose is not used at all.
     // A `response.failed` body can echo request content or backend detail, and
