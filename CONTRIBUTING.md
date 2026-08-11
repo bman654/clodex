@@ -2,11 +2,12 @@
 
 Contributions are welcome — bug reports, fixes, and features all.
 
-clodex bridges Claude Code to primarily OpenAI models, but community contributors have also
-added support for some other AI providers. A lot of its behavior encodes real production
-failures that aren't obvious from reading the code, so this guide is mostly about the
-context you can't infer from the diff. Please skim it before opening a PR; it should save
-you rework.
+clodex bridges Claude Code to OpenAI models today — an OpenAI API key, or a ChatGPT/Codex
+plan over OAuth. Community contributions have been broadening the groundwork so other
+providers can be added, and provider work is welcome. A lot of clodex's behavior encodes
+real production failures that aren't obvious from reading the code, so this guide is mostly
+about the context you can't infer from the diff. Please skim it before opening a PR; it
+should save you rework.
 
 ## Before you start
 
