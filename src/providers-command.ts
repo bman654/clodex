@@ -35,6 +35,7 @@ import { OAUTH_ACCOUNT_ENV } from './oauth-account-selection.js';
 import { loadPreferences } from './config.js';
 import type { LocalProvider } from './types.js';
 import { readLiveServerRuntimeStates } from './server-runtime.js';
+import { isProviderConfiguredForTemplate } from './registry/resolve-template.js';
 import {
   fmtEnabledStar,
   fmtProvider,
@@ -548,14 +549,19 @@ export async function runProvidersList(): Promise<number> {
   return 0;
 }
 
+function listRegistryAddableTemplates(providers: RegistryProvider[]) {
+  return listAddableTemplates().filter(template =>
+    !providers.some(provider => isProviderConfiguredForTemplate(provider, template.id)));
+}
+
 /** Add one API-key provider from a built-in template. */
 async function runTemplateAddFlow(
   templateId: string,
   cleanupState?: ProviderCommandCleanupState,
 ): Promise<number> {
   const registry = loadRegistry();
-  const configuredIds = registry.providers.map(provider => provider.id);
-  const template = listAddableTemplates(configuredIds).find(candidate => candidate.id === templateId);
+  const template = listRegistryAddableTemplates(registry.providers)
+    .find(candidate => candidate.id === templateId);
   if (!template) {
     const known = getTemplateById(templateId);
     p.log.info(known ? `${known.name} is already configured.` : `Unknown provider template: ${templateId}`);
@@ -602,7 +608,8 @@ async function runTemplateAddFlow(
 async function runProvidersAddWithCleanupState(
   cleanupState?: ProviderCommandCleanupState,
 ): Promise<number> {
-  const configuredIds = loadRegistry().providers.map(provider => provider.id);
+  const providers = loadRegistry().providers;
+  const configuredIds = providers.map(provider => provider.id);
   const options: Array<{ value: string; label: string; hint: string }> = [];
 
   if (!configuredIds.includes('openai-oauth')) {
@@ -612,7 +619,7 @@ async function runProvidersAddWithCleanupState(
       hint: 'OAuth device code — no API key needed',
     });
   }
-  for (const template of listAddableTemplates(configuredIds)) {
+  for (const template of listRegistryAddableTemplates(providers)) {
     options.push({
       value: `api:${template.id}`,
       label: `${template.name} API key`,

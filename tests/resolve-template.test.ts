@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { effectiveProviderBaseUrl, resolveProviderTemplate } from '../src/registry/resolve-template.js';
+import {
+  effectiveProviderBaseUrl,
+  isProviderConfiguredForTemplate,
+  isRetainedOpenCodeGoProvider,
+  resolveProviderTemplate,
+} from '../src/registry/resolve-template.js';
 import type { RegistryProvider } from '../src/registry/types.js';
 
 function stub(partial: Partial<RegistryProvider> & Pick<RegistryProvider, 'id' | 'templateId'>): RegistryProvider {
@@ -21,6 +26,28 @@ describe('resolveProviderTemplate', () => {
 
   it('returns undefined for unknown templates', () => {
     expect(resolveProviderTemplate(stub({ id: 'groq', templateId: 'groq' }))).toBeUndefined();
+  });
+});
+
+describe('configured built-in template identity', () => {
+  it('retains OpenCode Go across either canonical identity field', () => {
+    const canonicalId = stub({ id: 'opencode-go', templateId: 'custom-openai' });
+    const retainedTemplate = stub({ id: 'imported-opencode', templateId: 'opencode-go' });
+
+    expect(isRetainedOpenCodeGoProvider(canonicalId)).toBe(true);
+    expect(isRetainedOpenCodeGoProvider(retainedTemplate)).toBe(true);
+    expect(isProviderConfiguredForTemplate(canonicalId, 'opencode-go')).toBe(true);
+    expect(isProviderConfiguredForTemplate(retainedTemplate, 'opencode-go')).toBe(true);
+  });
+
+  it('keeps ordinary templates keyed only to their exact provider id', () => {
+    const custom = stub({ id: 'custom-openai-endpoint', templateId: 'openai' });
+
+    expect(isProviderConfiguredForTemplate(custom, 'openai')).toBe(false);
+    expect(isProviderConfiguredForTemplate(
+      stub({ id: 'openai', templateId: 'custom-openai' }),
+      'openai',
+    )).toBe(true);
   });
 });
 

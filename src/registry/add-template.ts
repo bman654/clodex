@@ -26,6 +26,7 @@ import {
   loadPricingCache,
   pricingPlatformForProvider,
 } from './pricing.js';
+import { isProviderConfiguredForTemplate } from './resolve-template.js';
 import type { RegistryProvider } from './types.js';
 
 export interface AddTemplateResult {
@@ -44,8 +45,8 @@ function existingProviderError(
   replaceExisting: boolean | undefined,
 ): AddTemplateResult | null {
   if (!existing) return null;
-  const removeFirst = `Remove it first with: clodex providers remove ${template.id}`;
-  if (!replaceExisting) {
+  const removeFirst = `Remove it first with: clodex providers remove ${existing.id}`;
+  if (!replaceExisting || existing.id !== template.id) {
     return {
       added: false,
       error: `${template.name} is already configured.`,
@@ -111,7 +112,8 @@ export async function addProviderFromTemplate(
 
   const existingState = await withRegistryWriteLock(() => {
     const registry = loadRegistryStrict();
-    const existing = registry.providers.find(p => p.id === template.id);
+    const existing = registry.providers.find(provider =>
+      isProviderConfiguredForTemplate(provider, template.id));
     const error = existingProviderError(template, existing, opts?.replaceExisting);
     if (error) {
       return {
@@ -171,7 +173,8 @@ export async function addProviderFromTemplate(
   const result: AddTemplateResult = await withProviderMutationLock(template.id, async () => {
     const currentState = await withRegistryWriteLock(() => {
       const registry = loadRegistryStrict();
-      const existing = registry.providers.find(p => p.id === template.id);
+      const existing = registry.providers.find(provider =>
+        isProviderConfiguredForTemplate(provider, template.id));
       const error = existingProviderError(template, existing, opts?.replaceExisting);
       if (error) {
         return {
@@ -202,7 +205,8 @@ export async function addProviderFromTemplate(
 
       return withRegistryWriteLock(async () => {
         const registry = loadRegistryStrict();
-        const existing = registry.providers.find(p => p.id === template.id);
+        const existing = registry.providers.find(provider =>
+          isProviderConfiguredForTemplate(provider, template.id));
         const existingError = existingProviderError(template, existing, opts?.replaceExisting);
         if (existingError) return existingError;
         if ((existing?.authRef ?? null) !== currentState.existingAuthRef) {

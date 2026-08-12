@@ -10,6 +10,7 @@ import { resolveModelSource } from './model-source.js';
 import { validateCustomEndpointUrl } from './url-security.js';
 import {
   effectiveProviderBaseUrl,
+  isRetainedOpenCodeGoProvider,
   resolveProviderTemplate,
   syntheticTemplate,
 } from './resolve-template.js';
@@ -40,7 +41,6 @@ import { getInstalledClaudeVersion } from '../launch.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 import {
   isLegacyAnonymousCustomEndpoint,
-  isRetainedOpenCodeGoProvider,
   openCodeGoPinnedApiUrl,
 } from './materialize.js';
 import { OPENCODE_GO_PROVIDER_NAME } from '../data/opencode-go-models.js';

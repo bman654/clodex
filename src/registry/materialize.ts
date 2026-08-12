@@ -8,13 +8,12 @@ import { normalizeGoogleDisplayName, normalizeGoogleModelId } from './google-mod
 import { findModelsDevModel } from './models-dev.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js';
 import { isValidProviderId } from './validate.js';
-import { resolveProviderTemplate } from './resolve-template.js';
+import { isRetainedOpenCodeGoProvider } from './resolve-template.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 import { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
 import {
   OPENCODE_GO_ANTHROPIC_BASE_URL,
   OPENCODE_GO_COMPLETIONS_BASE_URL,
-  OPENCODE_GO_PROVIDER_ID,
 } from '../data/opencode-go-models.js';
 
 export { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
@@ -46,28 +45,6 @@ export function resolveEndpoint(
 
 export interface MaterializeOptions {
   agent?: CompatibilityAgent;
-}
-
-/**
- * Recognize the retained OpenCode Go built-in by its canonical template
- * relationship rather than by one mutable field.
- *
- * The registry file is data, not an authority: `parseProvider` accepts `id`,
- * `templateId`, `api.npm`, and `api.url` as written, and nothing couples `id`
- * to `templateId`. So a persisted or imported record can drift its `id` while
- * keeping `templateId: 'opencode-go'` — and it keeps the OpenCode credential,
- * because `authRef` still names the keyring slot the user filled in for
- * OpenCode Go. Matching on `id` alone let exactly that record escape the
- * pinned endpoints and pair the secret with a stored address.
- *
- * `resolveProviderTemplate` is the existing resolver for that relationship
- * (it already understands the legacy alias table), and the explicit `id` arm
- * retains the original behaviour for a record that keeps the canonical id
- * while naming some other template.
- */
-export function isRetainedOpenCodeGoProvider(provider: RegistryProvider): boolean {
-  return provider.id === OPENCODE_GO_PROVIDER_ID
-    || resolveProviderTemplate(provider)?.id === OPENCODE_GO_PROVIDER_ID;
 }
 
 /**

@@ -268,6 +268,77 @@ describe('registry/add-template', () => {
     expect(res.error).toContain('is already configured');
   });
 
+  it('rejects a retained OpenCode template identity before probes, discovery, or credential writes', async () => {
+    const verifyCredential = vi.fn(async () => null);
+    const openCodeTemplate: ProviderTemplate = {
+      ...dummyTemplate,
+      id: 'opencode-go',
+      name: 'OpenCode Go',
+      verifyCredential,
+    };
+    registryState = {
+      schemaVersion: 1,
+      providers: [{
+        id: 'imported-opencode',
+        templateId: 'opencode-go',
+        name: 'Imported OpenCode Go',
+        enabled: true,
+        authType: 'api',
+        authRef: 'keyring:provider:imported-opencode',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://custom.invalid/v1' },
+        addedAt: '2026-08-11T00:00:00.000Z',
+      }],
+    };
+
+    const res = await addProviderFromTemplate(openCodeTemplate, 'new-key');
+    const replace = await addProviderFromTemplate(openCodeTemplate, 'replacement-key', {
+      replaceExisting: true,
+    });
+
+    expect(res).toMatchObject({ added: false, error: expect.stringContaining('already configured') });
+    expect(replace).toMatchObject({
+      added: false,
+      error: expect.stringContaining('already configured'),
+      hint: 'Remove it first with: clodex providers remove imported-opencode',
+    });
+    expect(verifyCredential).not.toHaveBeenCalled();
+    expect(fetchTemplate.fetchTemplateModels).not.toHaveBeenCalled();
+    expect(env.provisionProviderCredential).not.toHaveBeenCalled();
+    expect(env.saveProviderCredential).not.toHaveBeenCalled();
+    expect(io.saveRegistry).not.toHaveBeenCalled();
+  });
+
+  it('revalidates a retained OpenCode identity that appears during discovery', async () => {
+    const openCodeTemplate: ProviderTemplate = {
+      ...dummyTemplate,
+      id: 'opencode-go',
+      name: 'OpenCode Go',
+    };
+    vi.mocked(io.loadRegistryStrict)
+      .mockReturnValueOnce({ schemaVersion: 1, providers: [] })
+      .mockReturnValueOnce({
+        schemaVersion: 1,
+        providers: [{
+          id: 'imported-opencode',
+          templateId: 'opencode-go',
+          name: 'Concurrent imported OpenCode Go',
+          enabled: true,
+          authType: 'api',
+          authRef: 'keyring:provider:imported-opencode',
+          api: { npm: '@ai-sdk/openai-compatible', url: 'https://custom.invalid/v1' },
+          addedAt: '2026-08-11T00:00:00.000Z',
+        }],
+      });
+
+    const res = await addProviderFromTemplate(openCodeTemplate, 'new-key');
+
+    expect(res).toMatchObject({ added: false, error: expect.stringContaining('already configured') });
+    expect(fetchTemplate.fetchTemplateModels).toHaveBeenCalledOnce();
+    expect(env.provisionProviderCredential).not.toHaveBeenCalled();
+    expect(env.saveProviderCredential).not.toHaveBeenCalled();
+    expect(io.saveRegistry).not.toHaveBeenCalled();
+  });
+
   it('fails if fetching models returns an error', async () => {
     vi.mocked(fetchTemplate.fetchTemplateModels).mockResolvedValue({
       models: [],
