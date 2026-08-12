@@ -472,6 +472,108 @@ describe('main dispatch', () => {
     );
   });
 
+  it('routes an Anthropic provider with configured headers through the local proxy', async () => {
+    vi.clearAllMocks();
+    // A configured Anthropic-Beta is only emitted at clodex's own routed
+    // boundary. Launching direct would point the child at the provider base URL
+    // clodex never sees, so the configured contract would never be applied.
+    const model = {
+      id: 'anthropic-configured',
+      name: 'Anthropic Configured',
+      family: 'claude',
+      brand: 'Anthropic',
+      modelFormat: 'anthropic' as const,
+      upstreamModelId: 'anthropic-configured',
+      baseUrl: 'https://api.anthropic.com',
+    };
+    const provider = {
+      id: 'anthropic-api',
+      name: 'Anthropic API',
+      apiKey: 'anthropic-api-key',
+      authType: 'api' as const,
+      headers: { 'Anthropic-Beta': 'cfg-a', 'X-Plan': 'coding' },
+      models: [model],
+    };
+    const catalog = Object.assign([provider], { blockedProviders: new Map() });
+    const close = vi.fn();
+    vi.mocked(fetchProviderCatalog).mockResolvedValue(catalog);
+    vi.mocked(resolveLocalProviderApiKey).mockResolvedValue('anthropic-api-key');
+    vi.mocked(startProxy).mockResolvedValue({ port: 43123, token: 'proxy-token', close });
+    vi.mocked(launchClaude).mockResolvedValue(0);
+
+    const code = await runClaudeCommand(parseArgs([
+      'claude',
+      '--endpoint',
+      '--provider', 'anthropic-api',
+      '--model', 'anthropic-configured',
+    ]));
+
+    expect(code).toBe(0);
+    expect(startProxy).toHaveBeenCalledWith(
+      'https://api.anthropic.com',
+      'anthropic-configured',
+      false,
+      undefined,
+      expect.objectContaining({
+        authType: 'api',
+        modelFormat: 'anthropic',
+        // Configured headers reach the routed boundary intact.
+        headers: { 'Anthropic-Beta': 'cfg-a', 'X-Plan': 'coding' },
+      }),
+      'anthropic-api-key',
+    );
+    const [childEnv] = vi.mocked(launchClaude).mock.calls[0]!;
+    expect(childEnv).toMatchObject({
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:43123',
+      ANTHROPIC_API_KEY: 'proxy-token',
+    });
+    // Child suppression belongs to the DIRECT path only: on the proxy path it
+    // would disable the tool-search betas the local route depends on.
+    expect(childEnv).not.toHaveProperty('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS');
+  });
+
+  it.each(['oauth', 'none'] as const)(
+    'keeps %s Anthropic providers on the proxy path without child suppression',
+    async authType => {
+      vi.clearAllMocks();
+      const provider = {
+        id: `anthropic-${authType}`,
+        name: `Anthropic ${authType}`,
+        apiKey: authType === 'none' ? '' : 'provider-token',
+        authType,
+        models: [{
+          id: `anthropic-${authType}-model`,
+          name: 'Anthropic Model',
+          family: 'claude',
+          brand: 'Anthropic',
+          modelFormat: 'anthropic' as const,
+          upstreamModelId: `anthropic-${authType}-model`,
+          baseUrl: 'https://api.anthropic.com',
+        }],
+      };
+      const catalog = Object.assign([provider], { blockedProviders: new Map() });
+      const close = vi.fn();
+      vi.mocked(fetchProviderCatalog).mockResolvedValue(catalog);
+      vi.mocked(resolveLocalProviderApiKey).mockResolvedValue(
+        authType === 'none' ? '' : 'provider-token',
+      );
+      vi.mocked(startProxy).mockResolvedValue({ port: 43123, token: 'proxy-token', close });
+      vi.mocked(launchClaude).mockResolvedValue(0);
+
+      const code = await runClaudeCommand(parseArgs([
+        'claude',
+        '--endpoint',
+        '--provider', provider.id,
+        '--model', provider.models[0]!.id,
+      ]));
+
+      expect(code).toBe(0);
+      expect(startProxy).toHaveBeenCalledOnce();
+      const [childEnv] = vi.mocked(launchClaude).mock.calls[0]!;
+      expect(childEnv).not.toHaveProperty('CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS');
+    },
+  );
+
   it('prints patch help', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     const code = await main(['patch', '--help']);

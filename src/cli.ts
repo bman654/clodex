@@ -1365,8 +1365,13 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   const isOAuthAnthropic = selectedModel.modelFormat === 'anthropic' && activeProvider.authType === 'oauth';
   const requiresLocalCountEstimate = selectedModel.modelFormat === 'anthropic'
     && selectedModel.compatibility?.supportsCountTokens === false;
+  // Configured provider headers — including a configured Anthropic-Beta — are
+  // only applied at clodex's own routed boundary. Launching direct points the
+  // child straight at the provider base URL, where clodex never sees the
+  // request and the configured contract would silently never be honoured.
+  const hasConfiguredHeaders = Object.keys(activeProvider.headers ?? {}).length > 0;
   const usesAnthropicProxy = selectedModel.modelFormat === 'anthropic' &&
-    (isOAuthAnthropic || anonymousProvider || requiresLocalCountEstimate);
+    (isOAuthAnthropic || anonymousProvider || requiresLocalCountEstimate || hasConfiguredHeaders);
 
   if (dryRun) {
     const formatDesc = usesAnthropicProxy
