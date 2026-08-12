@@ -176,9 +176,10 @@ export function buildPatchModelConfig(
   aliases: unknown,
   modelMetaFor: (providerId: string, modelId: string) => PatchModelMeta | undefined,
   max = MAX_MODEL_CATALOG,
+  isFavoriteAvailable: (favorite: { providerId: string; modelId: string }) => boolean = () => true,
 ): DesiredPatchConfig {
   const projection = projectFavoriteExposure(favorites, { max });
-  const exposedFavorites = projection.exposedFavorites;
+  const exposedFavorites = projection.exposedFavorites.filter(isFavoriteAvailable);
   const config: PatchScriptModelConfig = {};
   const unknownWindows: string[] = [];
   const normalizedAliases = normalizeModelAliases(aliases);
@@ -311,16 +312,16 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
     }
   }
 
-  const projectedFavorites = favorites.filter(favorite => {
-    const provider = providerById.get(favorite.providerId);
-    if (!provider || !isRetainedOpenCodeGoProvider(provider)) return true;
-    return projectedModelsByProvider.get(provider.id)?.some(model => model.id === favorite.modelId) ?? false;
-  });
-
   return buildPatchModelConfig(
-    projectedFavorites,
+    favorites,
     aliases,
     (providerId, modelId) => meta.get(`${providerId}:${modelId}`),
+    MAX_MODEL_CATALOG,
+    favorite => {
+      const provider = providerById.get(favorite.providerId);
+      if (!provider || !isRetainedOpenCodeGoProvider(provider)) return true;
+      return projectedModelsByProvider.get(provider.id)?.some(model => model.id === favorite.modelId) ?? false;
+    },
   );
 }
 
