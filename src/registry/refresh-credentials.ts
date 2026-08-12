@@ -1,6 +1,10 @@
 // src/registry/refresh-credentials.ts — keys for refresh-models (OpenCode placeholders, env fallbacks)
 
-import { isAnonymousProvider, projectSelectedOAuthAccount } from './materialize.js';
+import {
+  isAnonymousProvider,
+  projectProviderCachedModels,
+  projectSelectedOAuthAccount,
+} from './materialize.js';
 import {
   resolveProviderCredentialOverrideState,
   type ProviderCredentialOverrideState,
@@ -125,7 +129,7 @@ export function isLikelyPlaceholderKey(key: string | null | undefined): boolean 
 }
 
 export function cachedModelCount(provider: RegistryProvider): number {
-  return provider.modelsCache?.models.length ?? 0;
+  return projectProviderCachedModels(provider).length;
 }
 
 export function skipWithCachedModels(

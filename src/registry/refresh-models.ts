@@ -520,7 +520,7 @@ export async function refreshProviderModels(
   }
 
   try {
-    const previousModelCount = cacheProvider.modelsCache?.models.length ?? 0;
+    const previousModelCount = cachedModelCount(cacheProvider);
     const hadPreviousRefresh = isTemporaryAccountSelection(credentialSnapshot)
       ? cacheProvider.modelsCache !== undefined
       : provider.refreshedAt !== undefined;

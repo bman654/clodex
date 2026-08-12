@@ -9,9 +9,13 @@ import type { ProviderRegistry } from '../src/registry/types.js';
 
 const providerMutationState = vi.hoisted(() => ({ active: false }));
 
-vi.mock('../src/registry/fetch-template-models.js', () => ({
-  fetchTemplateModels: vi.fn(),
-}));
+vi.mock('../src/registry/fetch-template-models.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/registry/fetch-template-models.js')>();
+  return {
+    ...actual,
+    fetchTemplateModels: vi.fn(),
+  };
+});
 vi.mock('../src/registry/custom-endpoint.js', () => ({
   fetchAnthropicModels: vi.fn(),
 }));
@@ -767,6 +771,74 @@ describe('refreshProviderModels', () => {
     expect(first).toMatchObject({ ok: true, modelCount: 2 });
     expect(first.previousModelCount).toBeUndefined();
     expect(second).toMatchObject({ ok: true, modelCount: 2, previousModelCount: 2 });
+  });
+
+  it('reports retained previous counts from the effective projected catalog', async () => {
+    const registry: ProviderRegistry = {
+      schemaVersion: 1,
+      providers: [{
+        id: 'opencode-go',
+        templateId: 'opencode-go',
+        name: 'OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:opencode-go',
+        authType: 'api',
+        preserveModelPricing: true,
+        api: { npm: '@ai-sdk/openai-compatible', url: OPENCODE_GO_COMPLETIONS_BASE_URL },
+        modelsCache: {
+          fetchedAt: '2026-08-11T00:00:00.000Z',
+          models: [
+            {
+              id: 'qwen3.8-max',
+              name: 'Qwen3.8 Max',
+              upstreamModelId: 'qwen3.8-max',
+              modelFormat: 'anthropic',
+              npm: '@ai-sdk/anthropic',
+            },
+            {
+              id: 'deepseek-v4-pro',
+              name: 'DeepSeek V4 Pro',
+              upstreamModelId: 'deepseek-v4-pro',
+              modelFormat: 'openai',
+              npm: '@ai-sdk/openai-compatible',
+            },
+            {
+              id: 'grok-4.5',
+              name: 'Withdrawn stale model',
+              upstreamModelId: 'grok-4.5',
+              modelFormat: 'openai',
+              npm: '@ai-sdk/openai-compatible',
+            },
+          ],
+        },
+        addedAt: '2026-08-10T00:00:00.000Z',
+        refreshedAt: '2026-08-11T00:00:00.000Z',
+      }],
+    };
+    vi.mocked(fetchTemplateModels).mockResolvedValue({
+      baseUrl: OPENCODE_GO_COMPLETIONS_BASE_URL,
+      models: [
+        {
+          id: 'qwen3.8-max',
+          name: 'Qwen3.8 Max',
+          upstreamModelId: 'qwen3.8-max',
+          modelFormat: 'anthropic',
+          npm: '@ai-sdk/anthropic',
+        },
+        {
+          id: 'deepseek-v4-pro',
+          name: 'DeepSeek V4 Pro',
+          upstreamModelId: 'deepseek-v4-pro',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+        },
+      ],
+    });
+    vi.mocked(loadRegistryStrict).mockReturnValue(registry);
+
+    const result = await refreshProviderModels('opencode-go', 'go-real-key', registry);
+
+    expect(result).toMatchObject({ ok: true, modelCount: 2, previousModelCount: 2 });
   });
 
   // The retained OpenCode Go built-in ships one immutable endpoint per SDK

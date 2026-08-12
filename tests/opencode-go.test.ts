@@ -22,11 +22,12 @@ import {
   materializeRegistry,
   projectProviderCachedModels,
 } from '../src/registry/materialize.js';
+import { cachedModelCount } from '../src/registry/refresh-credentials.js';
 import {
   getUserModelsDevCachePath,
   invalidateModelsDevCache,
 } from '../src/registry/models-dev.js';
-import type { CachedModel, ProviderRegistry } from '../src/registry/types.js';
+import type { CachedModel, ProviderRegistry, RegistryProvider } from '../src/registry/types.js';
 
 function liveModel(id: string): CachedModel {
   return {
@@ -221,6 +222,45 @@ describe('OpenCode Go catalog', () => {
         contextWindow: 1_000_000,
       });
     }
+  });
+
+  it('reports effective cached model counts for retained and ordinary providers', () => {
+    const retained: RegistryProvider = {
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      enabled: true,
+      authRef: 'keyring:provider:opencode-go',
+      authType: 'api',
+      api: { npm: '@ai-sdk/openai-compatible', url: OPENCODE_GO_COMPLETIONS_BASE_URL },
+      modelsCache: {
+        fetchedAt: '2026-08-12T00:00:00.000Z',
+        models: [liveModel('qwen3.8-max'), liveModel('deepseek-v4-pro'), liveModel('grok-4.5')],
+      },
+      addedAt: '2026-08-12T00:00:00.000Z',
+    };
+    const ordinary: RegistryProvider = {
+      id: 'ordinary-provider',
+      templateId: 'custom-openai',
+      name: 'Ordinary provider',
+      enabled: true,
+      authRef: 'keyring:provider:ordinary-provider',
+      authType: 'api',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://ordinary.invalid/v1' },
+      modelsCache: {
+        fetchedAt: '2026-08-12T00:00:00.000Z',
+        models: [
+          liveModel('ordinary-1'),
+          liveModel('ordinary-2'),
+          liveModel('ordinary-3'),
+          liveModel('ordinary-4'),
+        ],
+      },
+      addedAt: '2026-08-12T00:00:00.000Z',
+    };
+
+    expect(cachedModelCount(retained)).toBe(2);
+    expect(cachedModelCount(ordinary)).toBe(4);
   });
 
   it('ignores hostile models.dev capability rows for retained identities only', () => {
