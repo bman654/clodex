@@ -127,6 +127,32 @@ describe('OpenCode Go resolver snapshot generator', () => {
     const committed = JSON.parse(await readFile(CATALOG_PATH, 'utf8'));
     const { supported } = convertResolvedModels(snapshot.models);
     expect(committed).toEqual(supported);
+    // Byte-for-byte, not just deeply equal: the committed file is this exact
+    // serialization, so a hand-edit cannot survive `--check`.
+    expect(await readFile(CATALOG_PATH, 'utf8')).toBe(`${JSON.stringify(supported, null, 2)}\n`);
+  });
+
+  it('takes family and the interleaved reasoning field from the resolver, and nothing else', () => {
+    const resolvedById = new Map(snapshot.models.map(model => [model.id, model]));
+    const { supported } = convertResolvedModels(snapshot.models);
+    for (const model of supported as Array<Record<string, any>>) {
+      const resolved = resolvedById.get(model.id)!;
+      expect(model.family, model.id).toBe(resolved.family);
+      expect(model.interleavedReasoningField, model.id)
+        .toBe(resolved.capabilities.interleaved === false ? undefined : resolved.capabilities.interleaved.field);
+      // Metadata the resolver also publishes, conserved exactly.
+      expect(model.name, model.id).toBe(resolved.name);
+      expect(model.contextWindow, model.id).toBe(resolved.limit.context);
+      expect(model.cost.input, model.id).toBe(resolved.cost.input);
+      expect(model.cost.output, model.id).toBe(resolved.cost.output);
+      expect(model.cost.cache_read, model.id).toBe(resolved.cost.cache?.read || undefined);
+      expect(model.cost.cache_write, model.id).toBe(resolved.cost.cache?.write || undefined);
+      // Routing stays local. The resolver emits /zen/go/v1 for every row,
+      // including the Messages ones, which the Anthropic SDK must not be given.
+      expect(resolved.api.url, model.id).toBe('https://opencode.ai/zen/go/v1');
+      expect(model.apiUrl, model.id)
+        .toBe(model.modelFormat === 'anthropic' ? 'https://opencode.ai/zen/go' : 'https://opencode.ai/zen/go/v1');
+    }
   });
 
   it('accepts exactly the three reviewed transport divergences with their stated reasons', () => {

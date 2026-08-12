@@ -735,6 +735,11 @@ function toClodexModel(resolved) {
     ? { supportsCountTokens: false, supportsReasoningEffort: false, ...(PATCHES[id] ?? {}) }
     : PATCHES[id];
   const modalities = ['text', 'image'].filter(modality => resolved.capabilities?.input?.[modality] === true);
+  // Where the upstream streams its reasoning text. Previously left unset, so
+  // every consumer fell back to whatever the bundled models.dev cache happened
+  // to know — which is nothing at all for the newer ids. The resolver states it
+  // per model, so state it here and stop depending on that fallback.
+  const interleaved = resolved.capabilities?.interleaved;
 
   return {
     id,
@@ -745,10 +750,15 @@ function toClodexModel(resolved) {
     npm: anthropic ? '@ai-sdk/anthropic' : '@ai-sdk/openai-compatible',
     apiUrl: anthropic ? ANTHROPIC_BASE_URL : COMPLETIONS_BASE_URL,
     reasoning: resolved.capabilities?.reasoning === true,
+    ...(interleaved ? { interleavedReasoningField: interleaved.field } : {}),
     modalities,
     ...(compatibility ? { compatibility } : {}),
     upstreamModelId: id,
-    family: id.split('-')[0] ?? id,
+    // The resolver's own grouping ("kimi-k2", "qwen3.7-max") rather than the
+    // first id segment. `deriveBrand` prefix-matches, so every brand is
+    // unchanged; what improves is that models sharing a deployment now share a
+    // family name instead of collapsing a whole vendor into one bucket.
+    family: resolved.family,
   };
 }
 
