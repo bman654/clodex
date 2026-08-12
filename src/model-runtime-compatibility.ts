@@ -101,9 +101,25 @@ export function transformOpenAiCompatibleRequestBody(
 ): OpenAiCompatibleRequestBody {
   const transformed = { ...body };
 
+  const reasoningEffort = transformed.reasoning_effort;
+  const reasoningEffortMap = compatibility.reasoningEffortMap;
+  if (compatibility.supportsReasoningEffort === false) {
+    delete transformed.reasoning_effort;
+  } else if (
+    typeof reasoningEffort === 'string'
+    && reasoningEffortMap !== undefined
+    && Object.prototype.hasOwnProperty.call(reasoningEffortMap, reasoningEffort)
+  ) {
+    const mapped = reasoningEffortMap[reasoningEffort];
+    if (mapped === null) {
+      delete transformed.reasoning_effort;
+    } else {
+      transformed.reasoning_effort = mapped;
+    }
+  }
+
   if (compatibility.supportsStore === false) delete transformed.store;
   if (compatibility.supportsTemperature === false) delete transformed.temperature;
-  if (compatibility.supportsReasoningEffort === false) delete transformed.reasoning_effort;
   if (compatibility.supportsLongCacheRetention === false) {
     delete transformed.prompt_cache_retention;
     delete transformed.promptCacheRetention;
