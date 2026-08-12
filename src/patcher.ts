@@ -51,6 +51,8 @@ import {
   type BuiltInPatchProof,
 } from './built-in-patch-proofs.js';
 import { loadRegistry } from './registry/io.js';
+import { projectProviderCachedModels } from './registry/materialize.js';
+import { isRetainedOpenCodeGoProvider } from './registry/resolve-template.js';
 import { findModelsDevModel } from './registry/models-dev.js';
 import { findClaudeBinary, getClaudeVersionForBinary } from './launch.js';
 import {
@@ -265,9 +267,13 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
   const aliases = prefs.modelAliases;
   const registry = loadRegistry();
 
+  const providerById = new Map(registry.providers.map(provider => [provider.id, provider]));
+  const projectedModelsByProvider = new Map<string, ReturnType<typeof projectProviderCachedModels>>();
   const meta = new Map<string, PatchModelMeta>();
   for (const provider of registry.providers) {
-    for (const model of provider.modelsCache?.models ?? []) {
+    const projectedModels = projectProviderCachedModels(provider);
+    projectedModelsByProvider.set(provider.id, projectedModels);
+    for (const model of projectedModels) {
       const npm = model.npm ?? provider.api.npm ?? '';
       const upstreamModelId = model.upstreamModelId ?? model.id;
       const modelsDev = findModelsDevModel(provider.id, model.id);
@@ -292,8 +298,14 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
     }
   }
 
+  const projectedFavorites = favorites.filter(favorite => {
+    const provider = providerById.get(favorite.providerId);
+    if (!provider || !isRetainedOpenCodeGoProvider(provider)) return true;
+    return projectedModelsByProvider.get(provider.id)?.some(model => model.id === favorite.modelId) ?? false;
+  });
+
   return buildPatchModelConfig(
-    favorites,
+    projectedFavorites,
     aliases,
     (providerId, modelId) => meta.get(`${providerId}:${modelId}`),
   );

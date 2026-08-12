@@ -6,11 +6,13 @@ import { resolveContextWindow } from '../context-window.js';
 import type { LocalProvider, LocalProviderModel } from '../types.js';
 import { normalizeGoogleDisplayName, normalizeGoogleModelId } from './google-model-id.js';
 import { findModelsDevModel } from './models-dev.js';
+import { applyTemplateModelMetadata } from './fetch-template-models.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js';
 import { isValidProviderId } from './validate.js';
 import {
   isRetainedOpenCodeGoProvider,
   openCodeGoPinnedApiUrl,
+  retainedOpenCodeGoTemplate,
 } from './resolve-template.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 import { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
@@ -47,6 +49,18 @@ export interface MaterializeOptions {
 }
 
 export { openCodeGoPinnedApiUrl } from './resolve-template.js';
+
+/**
+ * Project persisted model caches onto the authority that owns their provider identity.
+ * Ordinary and custom providers retain their cache array unchanged; retained OpenCode
+ * identities are fail-closed against the committed template catalog.
+ */
+export function projectProviderCachedModels(provider: RegistryProvider): CachedModel[] {
+  const cached = provider.modelsCache?.models ?? [];
+  if (!isRetainedOpenCodeGoProvider(provider)) return cached;
+  const template = retainedOpenCodeGoTemplate();
+  return template ? applyTemplateModelMetadata(template, cached) : [];
+}
 
 function resolveMaterializedApiUrl(
   cached: CachedModel,
@@ -240,7 +254,7 @@ function materializeOne(
   const anonymous = explicitAnonymous || legacyAnonymous;
   const apiKey = anonymous ? '' : credential ?? '';
   const models: LocalProviderModel[] = [];
-  for (const cached of provider.modelsCache?.models ?? []) {
+  for (const cached of projectProviderCachedModels(provider)) {
     const freeStatus = classifyFreeStatus({
       model: cached,
       providerId: provider.id,

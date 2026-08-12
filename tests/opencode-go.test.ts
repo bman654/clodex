@@ -13,7 +13,10 @@ import { effortProviderOptions, getPatchReasoningCapabilities } from '../src/pro
 import { transformOpenAiCompatibleRequestBody } from '../src/model-runtime-compatibility.js';
 import { projectNativeEffort } from '../src/patch-transforms.js';
 import { applyTemplateModelMetadata } from '../src/registry/fetch-template-models.js';
-import { materializeRegistry } from '../src/registry/materialize.js';
+import {
+  materializeRegistry,
+  projectProviderCachedModels,
+} from '../src/registry/materialize.js';
 import type { CachedModel, ProviderRegistry } from '../src/registry/types.js';
 
 function liveModel(id: string): CachedModel {
@@ -160,6 +163,96 @@ describe('OpenCode Go catalog', () => {
       baseURL: OPENCODE_GO_COMPLETIONS_BASE_URL,
       apiKey: 'go-key',
     });
+  });
+
+  it('projects both retained identities onto curated mixed-protocol authority', () => {
+    const cached = [
+      liveModel('qwen3.8-max'),
+      liveModel('deepseek-v4-pro'),
+      liveModel('grok-4.5'),
+      liveModel('unknown-future-model'),
+    ];
+    const providers = [
+      {
+        id: 'opencode-go',
+        templateId: 'opencode-go',
+      },
+      {
+        id: 'imported-opencode',
+        templateId: 'opencode-go',
+      },
+    ];
+
+    for (const identity of providers) {
+      const projected = projectProviderCachedModels({
+        ...identity,
+        name: 'OpenCode Go',
+        enabled: true,
+        authRef: `keyring:provider:${identity.id}`,
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: OPENCODE_GO_COMPLETIONS_BASE_URL },
+        modelsCache: { fetchedAt: '2026-08-12T00:00:00.000Z', models: cached },
+        addedAt: '2026-08-12T00:00:00.000Z',
+      });
+
+      expect(projected.map(model => model.id)).toEqual(['qwen3.8-max', 'deepseek-v4-pro']);
+      expect(projected[0]).toMatchObject({
+        modelFormat: 'anthropic',
+        npm: '@ai-sdk/anthropic',
+        apiUrl: OPENCODE_GO_ANTHROPIC_BASE_URL,
+        contextWindow: 1_000_000,
+      });
+      expect(projected[1]).toMatchObject({
+        modelFormat: 'openai',
+        npm: '@ai-sdk/openai-compatible',
+        apiUrl: OPENCODE_GO_COMPLETIONS_BASE_URL,
+        contextWindow: 1_000_000,
+      });
+    }
+  });
+
+  it('fails closed for unknown-only retained caches without a provider or route', () => {
+    const registry: ProviderRegistry = {
+      schemaVersion: 1,
+      providers: [{
+        id: 'imported-opencode',
+        templateId: 'opencode-go',
+        name: 'Imported OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:imported-opencode',
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: OPENCODE_GO_COMPLETIONS_BASE_URL },
+        modelsCache: {
+          fetchedAt: '2026-08-12T00:00:00.000Z',
+          models: [liveModel('unknown-future-model')],
+        },
+        addedAt: '2026-08-12T00:00:00.000Z',
+      }],
+    };
+
+    expect(projectProviderCachedModels(registry.providers[0]!)).toEqual([]);
+    const providers = materializeRegistry(registry, () => 'go-key');
+    expect(providers).toEqual([]);
+    expect(buildHttpProxyRoutes(providers, [
+      { providerId: 'imported-opencode', modelId: 'unknown-future-model' },
+    ]).routes).toEqual([]);
+  });
+
+  it('leaves ordinary custom cached models unchanged', () => {
+    const cached = [liveModel('unknown-custom-model')];
+    const provider: RegistryProvider = {
+      id: 'custom-provider',
+      templateId: 'custom-openai',
+      name: 'Custom provider',
+      enabled: true,
+      authRef: 'keyring:provider:custom-provider',
+      authType: 'api',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://custom.invalid/v1' },
+      modelsCache: { fetchedAt: '2026-08-12T00:00:00.000Z', models: cached },
+      addedAt: '2026-08-12T00:00:00.000Z',
+    };
+
+    expect(projectProviderCachedModels(provider)).toBe(cached);
   });
 
   it('returns isolated catalog copies', () => {

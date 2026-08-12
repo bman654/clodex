@@ -30,7 +30,11 @@ import { refreshAllProviderModels, refreshProviderModelsWithCredential } from '.
 import { authenticateProvider, providerAuthHelpText, validateOAuthAccountName, type ProviderAuthMethod } from './registry/provider-auth.js';
 import { supportsNativeOAuth } from './oauth/types.js';
 import { browseAllModels } from './prompts.js';
-import { cachedModelToLocal, projectSelectedOAuthAccount } from './registry/materialize.js';
+import {
+  cachedModelToLocal,
+  projectProviderCachedModels,
+  projectSelectedOAuthAccount,
+} from './registry/materialize.js';
 import { OAUTH_ACCOUNT_ENV } from './oauth-account-selection.js';
 import { loadPreferences } from './config.js';
 import type { LocalProvider } from './types.js';
@@ -731,7 +735,7 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
     delete modelProvider.modelsCache;
     delete modelProvider.refreshedAt;
   }
-  const modelCount = modelProvider.modelsCache?.models.length ?? 0;
+  const modelCount = projectProviderCachedModels(modelProvider).length;
   const authLabel = (await resolveProvidersForDisplay()).find(entry => entry.id === id)?.authLabel
     ?? formatRegistryAuthLabel(provider);
   printProviderDetailPanel(provider.name, modelCount, authLabel);
@@ -793,7 +797,7 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
   if (p.isCancel(action) || action === 'back') return 'back';
 
   if (action === 'browse') {
-    const cachedModels = modelProvider.modelsCache?.models ?? [];
+    const cachedModels = projectProviderCachedModels(modelProvider);
     const localModels = cachedModels
       .map(m => cachedModelToLocal(m, modelProvider))
       .filter((m): m is NonNullable<typeof m> => m !== null);
@@ -883,7 +887,7 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
         result.account,
         resolveActiveAccount(currentProvider),
       );
-      const selectedCatalogReady = Boolean(currentProvider.modelsCache?.models.length);
+      const selectedCatalogReady = projectProviderCachedModels(currentProvider).length > 0;
       if (
         outcome.ok
         && currentProvider.enabled

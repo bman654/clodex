@@ -266,6 +266,113 @@ describe('buildDesiredPatchConfig', () => {
     );
   }
 
+  it('filters only stale retained favorites while preserving ordinary unknowns and input order', () => {
+    const favorites = [
+      { providerId: 'opencode-go', modelId: 'stale-future-model' },
+      { providerId: 'imported-opencode', modelId: 'deepseek-v4-pro' },
+      { providerId: 'custom-provider', modelId: 'custom-unknown-model' },
+      { providerId: 'imported-opencode', modelId: 'stale-future-model' },
+      { providerId: 'opencode-go', modelId: 'qwen3.8-max' },
+    ];
+    const aliases = [
+      { name: 'stale', providerId: 'opencode-go', modelId: 'stale-future-model' },
+      { name: 'deep', providerId: 'imported-opencode', modelId: 'deepseek-v4-pro' },
+      { name: 'custom', providerId: 'custom-provider', modelId: 'custom-unknown-model' },
+      { name: 'stale-imported', providerId: 'imported-opencode', modelId: 'stale-future-model' },
+      { name: 'qwen', providerId: 'opencode-go', modelId: 'qwen3.8-max' },
+    ];
+    writeFileSync(join(home, 'config.json'), JSON.stringify({ favoriteModels: favorites, modelAliases: aliases }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: 'opencode-go',
+        templateId: 'opencode-go',
+        name: 'OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:opencode-go',
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-12T00:00:00.000Z',
+          models: [{
+            id: 'qwen3.8-max',
+            upstreamModelId: 'qwen3.8-max',
+            name: 'Qwen 3.8 Max',
+            modelFormat: 'openai',
+          }, {
+            id: 'stale-future-model',
+            upstreamModelId: 'stale-future-model',
+            name: 'Stale future model',
+            modelFormat: 'openai',
+          }],
+        },
+        addedAt: '2026-08-12T00:00:00.000Z',
+      }, {
+        id: 'imported-opencode',
+        templateId: 'opencode-go',
+        name: 'Imported OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:imported-opencode',
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-12T00:00:00.000Z',
+          models: [{
+            id: 'deepseek-v4-pro',
+            upstreamModelId: 'deepseek-v4-pro',
+            name: 'DeepSeek V4 Pro',
+            modelFormat: 'openai',
+          }, {
+            id: 'stale-future-model',
+            upstreamModelId: 'stale-future-model',
+            name: 'Stale future model',
+            modelFormat: 'openai',
+          }],
+        },
+        addedAt: '2026-08-12T00:00:00.000Z',
+      }, {
+        id: 'custom-provider',
+        templateId: 'custom-openai',
+        name: 'Custom provider',
+        enabled: true,
+        authRef: 'keyring:provider:custom-provider',
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://custom.invalid/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-12T00:00:00.000Z',
+          models: [{
+            id: 'custom-unknown-model',
+            upstreamModelId: 'custom-unknown-model',
+            name: 'Custom unknown model',
+            modelFormat: 'openai',
+          }],
+        },
+        addedAt: '2026-08-12T00:00:00.000Z',
+      }],
+    }));
+    const configBefore = readFileSync(join(home, 'config.json'), 'utf8');
+    const providersBefore = readFileSync(join(home, 'providers.json'), 'utf8');
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(Object.keys(desired.config)).toEqual([
+      'clodex:imported-opencode:deepseek-v4-pro',
+      'clodex:custom-provider:custom-unknown-model',
+      'clodex:opencode-go:qwen3.8-max',
+    ]);
+    expect(desired.config['clodex:imported-opencode:deepseek-v4-pro']?.alias).toBe('deep');
+    expect(desired.config['clodex:custom-provider:custom-unknown-model']?.alias).toBe('custom');
+    expect(desired.config['clodex:opencode-go:qwen3.8-max']?.alias).toBe('qwen');
+    expect(desired.config['clodex:opencode-go:stale-future-model']).toBeUndefined();
+    expect(desired.config['clodex:imported-opencode:stale-future-model']).toBeUndefined();
+    expect(desired.rejectedAliases).toEqual(expect.arrayContaining([
+      aliases[0],
+      aliases[3],
+    ]));
+    expect(readFileSync(join(home, 'config.json'), 'utf8')).toBe(configBefore);
+    expect(readFileSync(join(home, 'providers.json'), 'utf8')).toBe(providersBefore);
+  });
+
   it('preserves the native high default when provider metadata defaults to medium', () => {
     writeInputs({
       id: 'gpt-5.6-sol',
