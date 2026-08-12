@@ -13,11 +13,23 @@ const NPM_DEFAULT_BASE_URL: Record<string, string> = {
   '@ai-sdk/anthropic': 'https://api.anthropic.com',
 };
 
-export function resolveProviderTemplate(provider: RegistryProvider): ProviderTemplate | undefined {
+/**
+ * The identity fields template resolution reads.
+ *
+ * Accepting this pair instead of a whole `RegistryProvider` lets a caller that
+ * only holds the persisted policy fields — pricing's
+ * `providerPreservesModelPricing` — ask the SAME identity question. The
+ * alternative was a second, partial predicate keyed on `templateId` alone,
+ * which is exactly the drift this module exists to prevent.
+ */
+export type ProviderTemplateIdentity = Pick<RegistryProvider, 'templateId'>
+  & Partial<Pick<RegistryProvider, 'id'>>;
+
+export function resolveProviderTemplate(provider: ProviderTemplateIdentity): ProviderTemplate | undefined {
   const candidates = [
     TEMPLATE_ID_ALIASES[provider.templateId],
     provider.templateId,
-    TEMPLATE_ID_ALIASES[provider.id],
+    provider.id ? TEMPLATE_ID_ALIASES[provider.id] : undefined,
     provider.id,
   ].filter(Boolean) as string[];
 
@@ -39,9 +51,22 @@ export function resolveProviderTemplate(provider: RegistryProvider): ProviderTem
  * to ordinary providers: custom records may name an ordinary template without
  * occupying that built-in's add slot.
  */
-export function isRetainedOpenCodeGoProvider(provider: RegistryProvider): boolean {
+export function isRetainedOpenCodeGoProvider(provider: ProviderTemplateIdentity): boolean {
   return provider.id === OPENCODE_GO_PROVIDER_ID
     || resolveProviderTemplate(provider)?.id === OPENCODE_GO_PROVIDER_ID;
+}
+
+/**
+ * The retained built-in's own template, for callers that must discover or
+ * price a record by its real identity rather than the template it names.
+ *
+ * A retained record whose `templateId` drifted resolves to somebody else's
+ * template, and that template carries the wrong catalog: OpenCode's committed
+ * allowlist, its bare-array parse, and its curated costs all hang off THIS
+ * entry. Callers pair it with `isRetainedOpenCodeGoProvider`.
+ */
+export function retainedOpenCodeGoTemplate(): ProviderTemplate | undefined {
+  return getTemplateById(OPENCODE_GO_PROVIDER_ID);
 }
 
 /** Whether a configured record occupies a built-in template's add slot. */

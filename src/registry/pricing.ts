@@ -21,6 +21,7 @@ import { dirname, join } from 'node:path';
 import bundledPricing from '../data/pricing-cache.json';
 import { getAppHome } from '../paths.js';
 import { getTemplateById } from '../provider-templates.js';
+import { isRetainedOpenCodeGoProvider, retainedOpenCodeGoTemplate } from './resolve-template.js';
 import type { CachedModel, RegistryModelsCache, RegistryProvider } from './types.js';
 import { loadRegistryStrict, saveRegistry } from './io.js';
 import { withRegistryWriteLock, withRegistryWriteLockSync } from './lock.js';
@@ -81,13 +82,27 @@ export const TEMPLATE_TO_PRICING_PLATFORM: Record<string, string> = {
  * write and a curated price is silently replaced by a cache guess. The
  * consequence is cost display only, which is exactly why it would go
  * unnoticed; reading through to the template makes the flag idempotent.
+ *
+ * The fallback resolves the retained OpenCode built-in by its COMPLETE
+ * identity, not by `templateId` alone. A record that keeps the canonical id
+ * while naming another template is still that built-in — same credential
+ * lineage, same curated catalog — but `getTemplateById` would answer for a
+ * provider that never asked to keep its prices, and the curated costs would be
+ * overwritten by a cache guess.
+ *
+ * An explicit persisted value always wins, in both directions: this decides
+ * only what an ABSENT flag means, so a user who deliberately opted a retained
+ * record back into cache pricing keeps that choice.
  */
 export function providerPreservesModelPricing(
-  provider: Pick<RegistryProvider, 'preserveModelPricing' | 'templateId'>,
+  provider: Pick<RegistryProvider, 'preserveModelPricing' | 'templateId'>
+    & Partial<Pick<RegistryProvider, 'id'>>,
 ): boolean {
-  return provider.preserveModelPricing
-    ?? getTemplateById(provider.templateId)?.preserveModelPricing
-    ?? false;
+  if (provider.preserveModelPricing !== undefined) return provider.preserveModelPricing;
+  if (isRetainedOpenCodeGoProvider(provider)) {
+    return retainedOpenCodeGoTemplate()?.preserveModelPricing ?? false;
+  }
+  return getTemplateById(provider.templateId)?.preserveModelPricing ?? false;
 }
 
 export function loadBundledPricingCache(): PricingCacheFile {

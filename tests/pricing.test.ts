@@ -306,4 +306,49 @@ describe('providerPreservesModelPricing', () => {
     expect(providerPreservesModelPricing({ templateId: 'openai' })).toBe(false);
     expect(providerPreservesModelPricing({ templateId: 'no-such-template' })).toBe(false);
   });
+
+  // The template fallback above reads ONE mutable field. A record that keeps
+  // the canonical OpenCode id while naming another template is still the
+  // retained built-in — same credential lineage, same curated catalog — but
+  // `getTemplateById('openai')` answers for a provider that never asked to
+  // keep its prices, so the curated OpenCode costs are overwritten by a cache
+  // guess. Identity has to be the complete one the rest of the registry uses.
+  it('keeps curated prices for a retained OpenCode record that names another template', () => {
+    expect(providerPreservesModelPricing({ id: 'opencode-go', templateId: 'openai' })).toBe(true);
+  });
+
+  it('keeps curated prices for a retained OpenCode record whose id drifted on import', () => {
+    expect(providerPreservesModelPricing({ id: 'opencode-go-mirror', templateId: 'opencode-go' })).toBe(true);
+  });
+
+  // Explicit policy outranks identity in BOTH directions: the fallback only
+  // decides what an absent flag means, so a user who deliberately opted a
+  // retained record back into cache pricing keeps that choice.
+  it('lets an explicit false outrank retained OpenCode identity', () => {
+    expect(providerPreservesModelPricing({
+      id: 'opencode-go',
+      templateId: 'openai',
+      preserveModelPricing: false,
+    })).toBe(false);
+    expect(providerPreservesModelPricing({
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      preserveModelPricing: false,
+    })).toBe(false);
+  });
+
+  it('lets an explicit true outrank an ordinary template that does not preserve', () => {
+    expect(providerPreservesModelPricing({
+      id: 'ordinary',
+      templateId: 'openai',
+      preserveModelPricing: true,
+    })).toBe(true);
+  });
+
+  // Negative: complete identity must not generalize to ordinary providers.
+  it('does not preserve prices for ordinary providers or partial records', () => {
+    expect(providerPreservesModelPricing({ id: 'my-openai', templateId: 'openai' })).toBe(false);
+    expect(providerPreservesModelPricing({ id: 'my-custom', templateId: '' })).toBe(false);
+    expect(providerPreservesModelPricing({ id: 'opencode-go-lookalike', templateId: 'no-such-template' })).toBe(false);
+  });
 });

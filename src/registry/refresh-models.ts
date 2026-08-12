@@ -12,6 +12,7 @@ import {
   effectiveProviderBaseUrl,
   isRetainedOpenCodeGoProvider,
   resolveProviderTemplate,
+  retainedOpenCodeGoTemplate,
   syntheticTemplate,
 } from './resolve-template.js';
 import {
@@ -255,7 +256,15 @@ async function refreshApiListProvider(
   apiKey: string,
 ): Promise<{ models: CachedModel[]; baseUrl?: string; error?: string }> {
   const npm = provider.api.npm ?? '@ai-sdk/openai-compatible';
-  const catalogTemplate = resolveProviderTemplate(provider);
+  // Resolve the retained built-in's OWN template first. `resolveProviderTemplate`
+  // reads `templateId` ahead of `id`, so a retained record that names another
+  // template resolves to that stranger's entry — and the entry is what carries
+  // OpenCode's committed allowlist, its bare-array parse flag, and the default
+  // URL the pin below compares against. Resolving it here also keeps a drifted
+  // record from being refused for a base URL its real template does allow.
+  const retained = isRetainedOpenCodeGoProvider(provider);
+  const catalogTemplate = (retained ? retainedOpenCodeGoTemplate() : undefined)
+    ?? resolveProviderTemplate(provider);
   const baseUrl = effectiveProviderBaseUrl(provider, catalogTemplate);
 
   if (!baseUrl) {
@@ -274,7 +283,7 @@ async function refreshApiListProvider(
   //
   // Refuse rather than silently substitute the pinned URL: a caller that
   // believed it had redirected discovery should find out that it had not.
-  if (isRetainedOpenCodeGoProvider(provider)) {
+  if (retained) {
     const pinned = openCodeGoPinnedApiUrl(npm);
     if (!pinned) {
       return {
@@ -305,7 +314,15 @@ async function refreshApiListProvider(
 
   const template = catalogTemplate ?? syntheticTemplate(provider, safeBaseUrl);
 
-  if (npm === '@ai-sdk/anthropic') {
+  // The pin above decides WHERE the key goes; it says nothing about which
+  // routine reads the answer. A retained record storing
+  // `api.npm: '@ai-sdk/anthropic'` at the pinned OpenCode Anthropic address
+  // clears the pin and then falls in here, where `fetchAnthropicModels`
+  // expects an Anthropic `{ data: [...] }` envelope that OpenCode does not
+  // send and applies none of the committed allowlist/metadata overlay. The
+  // retained built-in discovers through its template whatever npm it names;
+  // ordinary Anthropic providers keep this branch unchanged.
+  if (!retained && npm === '@ai-sdk/anthropic') {
     const fetched = await fetchAnthropicModels(safeBaseUrl, apiKey);
     if (fetched.error || fetched.models.length === 0) {
       return { models: [], error: fetched.error ?? 'No models returned.', baseUrl: fetched.baseUrl };

@@ -35,7 +35,10 @@ vi.mock('../src/registry/lock.js', () => ({
 import { fetchTemplateModels } from '../src/registry/fetch-template-models.js';
 import { fetchAnthropicModels } from '../src/registry/custom-endpoint.js';
 import { loadRegistryStrict, saveRegistry } from '../src/registry/io.js';
-import { OPENCODE_GO_COMPLETIONS_BASE_URL } from '../src/data/opencode-go-models.js';
+import {
+  OPENCODE_GO_ANTHROPIC_BASE_URL,
+  OPENCODE_GO_COMPLETIONS_BASE_URL,
+} from '../src/data/opencode-go-models.js';
 
 describe('refreshProviderModels', () => {
   beforeEach(() => {
@@ -778,13 +781,14 @@ describe('refreshProviderModels', () => {
 
   const openCodeRegistry = (overrides: {
     id?: string;
+    templateId?: string;
     npm?: string;
     url?: string;
   } = {}): ProviderRegistry => ({
     version: 1,
     providers: [{
       id: overrides.id ?? 'opencode-go',
-      templateId: 'opencode-go',
+      templateId: overrides.templateId ?? 'opencode-go',
       name: 'OpenCode Go',
       enabled: true,
       authRef: 'keyring:provider:opencode-go',
@@ -892,5 +896,103 @@ describe('refreshProviderModels', () => {
 
     expect(result).toMatchObject({ ok: true, modelCount: 1 });
     expect(fetchAnthropicModels).toHaveBeenCalledWith('https://192.0.2.2/v1', 'sk-ant-real-key');
+  });
+
+  // The destination pin above only decides WHERE the key goes. It says nothing
+  // about which discovery routine reads the answer, and a record storing
+  // `api.npm: '@ai-sdk/anthropic'` at the pinned OpenCode Anthropic address
+  // clears the pin and then falls into the ordinary Anthropic npm branch.
+  // `fetchAnthropicModels` expects an Anthropic `{ data: [...] }` envelope,
+  // while OpenCode answers a bare array, and it applies none of the committed
+  // allowlist/metadata overlay — so the retained catalog silently degrades.
+  // Retained identity has to pick the discovery route before npm does.
+  const openCodeTemplateModels = [{
+    id: 'oc-model',
+    name: 'OC Model',
+    upstreamModelId: 'oc-model',
+    modelFormat: 'openai' as const,
+  }];
+
+  it('routes a retained OpenCode record with Anthropic npm through template discovery', async () => {
+    const registry = openCodeRegistry({
+      npm: '@ai-sdk/anthropic',
+      url: OPENCODE_GO_ANTHROPIC_BASE_URL,
+    });
+    vi.mocked(fetchTemplateModels).mockResolvedValue({
+      baseUrl: OPENCODE_GO_ANTHROPIC_BASE_URL,
+      models: openCodeTemplateModels,
+    });
+    vi.mocked(loadRegistryStrict).mockReturnValue(registry);
+
+    const result = await refreshProviderModels('opencode-go', 'oc-real-key', registry);
+
+    // Naming the wrong collaborator first: this is the assertion that fails
+    // when the npm branch wins, and it says which routine read the catalog.
+    expect(fetchAnthropicModels).not.toHaveBeenCalled();
+    expect(fetchTemplateModels).toHaveBeenCalled();
+    // The template carries the allowlist and the bare-array parse flag, so the
+    // retained template — not the record's named one — must be what is passed.
+    expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[0]?.id).toBe('opencode-go');
+    expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[0]?.staticModelPolicy).toBe('allowlist');
+    expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[2]).toBe(OPENCODE_GO_ANTHROPIC_BASE_URL);
+    expect(result).toMatchObject({ ok: true, modelCount: 1 });
+  });
+
+  it('routes a retained OpenCode record that names another template through the retained template', async () => {
+    const registry = openCodeRegistry({
+      templateId: 'openai',
+      url: OPENCODE_GO_COMPLETIONS_BASE_URL,
+    });
+    vi.mocked(fetchTemplateModels).mockResolvedValue({
+      baseUrl: OPENCODE_GO_COMPLETIONS_BASE_URL,
+      models: openCodeTemplateModels,
+    });
+    vi.mocked(loadRegistryStrict).mockReturnValue(registry);
+
+    const result = await refreshProviderModels('opencode-go', 'oc-real-key', registry);
+
+    // Without complete identity the OpenAI template is resolved instead: its
+    // absent staticModels turn the committed allowlist into a no-op overlay
+    // and `fetchTemplateModels`'s own OpenCode pin re-check never fires.
+    expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[0]?.id).toBe('opencode-go');
+    expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[0]?.staticModelPolicy).toBe('allowlist');
+    expect(result).toMatchObject({ ok: true, modelCount: 1 });
+  });
+
+  it('routes a retained OpenCode record whose id drifted with Anthropic npm through template discovery', async () => {
+    const registry = openCodeRegistry({
+      id: 'opencode-go-mirror',
+      npm: '@ai-sdk/anthropic',
+      url: OPENCODE_GO_ANTHROPIC_BASE_URL,
+    });
+    vi.mocked(fetchTemplateModels).mockResolvedValue({
+      baseUrl: OPENCODE_GO_ANTHROPIC_BASE_URL,
+      models: openCodeTemplateModels,
+    });
+    vi.mocked(loadRegistryStrict).mockReturnValue(registry);
+
+    const result = await refreshProviderModels('opencode-go-mirror', 'oc-real-key', registry);
+
+    expect(fetchAnthropicModels).not.toHaveBeenCalled();
+    expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[0]?.id).toBe('opencode-go');
+    expect(result).toMatchObject({ ok: true, modelCount: 1 });
+  });
+
+  // Ordering conservation: complete identity must not weaken the refusal, and
+  // the refusal must still land before anything reaches the network.
+  it('still refuses a forged endpoint on a retained record that names another template', async () => {
+    const registry = openCodeRegistry({
+      templateId: 'openai',
+      npm: '@ai-sdk/anthropic',
+      url: OPENCODE_EXFIL_URL,
+    });
+
+    const result = await refreshProviderModels('opencode-go', 'oc-real-key', registry);
+
+    expect(fetchAnthropicModels).not.toHaveBeenCalled();
+    expect(fetchTemplateModels).not.toHaveBeenCalled();
+    expect(saveRegistry).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/does not support a custom API base URL/i);
   });
 });
