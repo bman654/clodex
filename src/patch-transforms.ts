@@ -38,7 +38,7 @@ import {
  * hash of the transform inputs to force that decision to be made rather than
  * forgotten.
  */
-export const PATCH_TRANSFORMS_VERSION = 5;
+export const PATCH_TRANSFORMS_VERSION = 6;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -554,6 +554,13 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // revert a key only while its live value still equals the Clodex injection.
   // Settings-level overrides therefore remain authoritative, and the builder's
   // existing filtering continues against the resulting copy.
+  //
+  // The anchor tolerates extra declarators between the first `Object.keys(...)
+  // .length>0` binding and the `CLAUDE_CODE_REMOTE` ternary: Claude Code 2.1.228
+  // hoisted the settings-colour env into one (`r=<mod>.settingsColorEnv`), which
+  // a fixed declarator count would have read as a missing anchor. `[^;{}]` keeps
+  // the run inside the same `let` statement, and the literal + nested-function
+  // checks below still prove the target really is the child-env builder.
   // ---------------------------------------------------------------------------
   {
     const patchName = 'PATCH 10: child network environment';
@@ -571,7 +578,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     ];
     applyOnce(
       patchName,
-      /(function [\w$]+\(\)\{)(let [\w$]+=[\w$]+\(\),[\w$]+=Object\.keys\([\w$]+\)\.length>0,[\w$]+=Object\.keys\([\w$]+\)\.length>0,[\w$]+=[\w$]+\(process\.env\.CLAUDE_CODE_REMOTE\)\?(?:(?!\}\s*function )[\s\S])*?for\(let [\w$]+ of [\w$]+\)delete [\w$]+\[[\w$]+\],delete [\w$]+\[`INPUT_\$\{[\w$]+\}`\];return [\w$]+)(\})/,
+      /(function [\w$]+\(\)\{)(let [\w$]+=[\w$]+\(\),[\w$]+=Object\.keys\([\w$]+\)\.length>0,[^;{}]*?[\w$]+=[\w$]+\(process\.env\.CLAUDE_CODE_REMOTE\)\?(?:(?!\}\s*function )[\s\S])*?for\(let [\w$]+ of [\w$]+\)delete [\w$]+\[[\w$]+\],delete [\w$]+\[`INPUT_\$\{[\w$]+\}`\];return [\w$]+)(\})/,
       (_match, head, body, tail) => {
         const targetIsValid = requiredBodyLiterals.every(literal => body!.includes(literal))
           && !/\bfunction\s*[\w$]*\(/.test(body!);

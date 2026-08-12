@@ -58,6 +58,13 @@ only behavioural gate — but the bundle already renders `model-default` as a fi
 `pH()` is the shared child-env builder, with 14 call sites. The split that matters for bridge
 isolation:
 
+**Its minified name and declarator list change release to release** — `pH()` in 2.1.221, `XH()` in
+2.1.224, `$M()` in 2.1.226, `o1()` in 2.1.228, which also hoisted the settings-colour env into its
+own binding (`r=<mod>.settingsColorEnv`) inside the opening `let`. That is why PATCH 10's anchor
+identifies the function by the landmarks inside its body — the `CLAUDE_CODE_REMOTE` ternary, the
+`INPUT_${…}` deletion tail, and the required-literal check — and tolerates declarator drift ahead of
+the ternary rather than counting bindings.
+
 - **Shell-mediated** (reachable from a `.zshenv`-style user snippet): the Bash tool, hooks, subagent
   status line, the shell snapshot/env probe.
 - **Direct binary spawns** (no shell, unreachable from any rc file): stdio MCP servers, LSP servers,

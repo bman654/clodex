@@ -456,8 +456,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 5,
-      digest: 'aa9880c15a84007512c700c6a9a0d52975fded04145bb691254e216cf131d0ad',
+      version: 6,
+      digest: 'c2abf1d2b334562c3b3b3e2158d44c9986001c0401415912ef7dd450137eab3e',
     });
   });
 });
@@ -991,12 +991,15 @@ function executeChildEnv(
     'extra',
     'flag',
     'remote',
+    // Only the 2.1.228-shaped fixture reads this; the base fixture ignores it.
+    'settings',
     `${declaration};return childEnv;`,
   )(
     { env },
     () => extraEnv,
     () => false,
     () => ({}),
+    { settingsColorEnv: {} },
   ) as () => NodeJS.ProcessEnv;
   return childEnv();
 }
@@ -1251,6 +1254,60 @@ describe('patch script identity naming', () => {
 
   it('falls through to the native default for an unconfigured identity', () => {
     expect(executeDefaultEffort(runPatchScript(config), 'unconfigured', 'medium')).toBe('medium');
+  });
+
+  // Claude Code 2.1.228 hoisted the settings-colour env into its own declarator
+  // inside the child builder's `let` statement, between the first
+  // `Object.keys(...).length>0` binding and the CLAUDE_CODE_REMOTE ternary. An
+  // anchor that counted declarators reported "anchor not found", and because
+  // PATCH 10 is required, `clodex patch` refused to patch 2.1.228 at all.
+  const CLAUDE_FIXTURE_228 = CLAUDE_FIXTURE.replace(
+    'let e=extra(),t=Object.keys(e).length>0,n=Object.keys(e).length>0,',
+    'let e=extra(),t=Object.keys(e).length>0,c=settings.settingsColorEnv,n=Object.keys(c).length>0,',
+  );
+
+  it('patches a child builder that declares extra bindings before the remote check', () => {
+    expect(CLAUDE_FIXTURE_228, 'fixture drifted from the shape this test mutates')
+      .not.toBe(CLAUDE_FIXTURE);
+
+    const result = applyClodexPatches(CLAUDE_FIXTURE_228, config);
+
+    expect(result.results.at(-1)).toEqual({
+      status: 'OK',
+      name: 'PATCH 10: child network environment',
+    });
+    expect(result.content.match(/\/\*ccpatch:child-network-env\*\//g)).toHaveLength(1);
+    expect(result.content).toContain('function childEnv(){/*ccpatch:child-network-env*/');
+    // The added declarator survives, and the body still reads the local copy.
+    expect(result.content).toContain('c=settings.settingsColorEnv');
+    expect(result.content).toContain('let v={..._clodexChildEnv,...e,...s}');
+  });
+
+  it('restores the original network environment through the extra-binding builder', () => {
+    const out = runPatchScript(config, CLAUDE_FIXTURE_228);
+    const env = executeChildEnv(out, {
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://127.0.0.1:3457',
+      NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
+      [NETWORK_ENV_CONTRACT_VAR]: JSON.stringify({
+        version: 1,
+        original: {
+          HTTPS_PROXY: 'http://corp-proxy.example:8080',
+          NODE_EXTRA_CA_CERTS: null,
+        },
+        injected: {
+          HTTPS_PROXY: 'http://127.0.0.1:3457',
+          NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
+        },
+      }),
+    });
+
+    expect(env).toMatchObject({
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://corp-proxy.example:8080',
+    });
+    expect(env['NODE_EXTRA_CA_CERTS']).toBeUndefined();
+    expect(env[NETWORK_ENV_CONTRACT_VAR]).toBeUndefined();
   });
 
   it('targets the child builder when a token-bearing function follows it', () => {
