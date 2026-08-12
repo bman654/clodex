@@ -1,10 +1,10 @@
 // src/effort-policy.ts — one global effort vocabulary, one resolution.
 //
 // Every client-facing surface speaks the same eight levels. What a given model
-// can actually run is its EFFORT PROFILE: the reviewed intersection of what the
-// provider advertises and what clodex's own wire map executes, generated at
-// build time (see `scripts/update-opencode-go-models.mjs`). This module owns the
-// question of what to do when a client asks for a level a profile does not
+// can actually run is its EFFORT PROFILE: the reviewed wire map for clodex's
+// validated route, generated at build time with resolver variants retained only
+// as cross-check evidence (see `scripts/update-opencode-go-models.mjs`). This
+// module owns the question of what to do when a client asks for a level a profile does not
 // carry, and nothing else — it reads no config, touches no request body, and
 // picks no defaults of its own.
 
@@ -128,8 +128,20 @@ export function profileLevels(profile: EffortProfile): CanonicalEffortLevel[] {
   return profile.levels.map(entry => entry.level);
 }
 
-function profileSupportsLevel(profile: EffortProfile, level: CanonicalEffortLevel): boolean {
-  return profile.levels.some(entry => entry.level === level);
+function supportedProfileLevel(
+  profile: EffortProfile,
+  requested: CanonicalEffortLevel,
+): CanonicalEffortLevel | undefined {
+  if (profile.levels.some(entry => entry.level === requested)) return requested;
+
+  // Providers use both names for the same zero-reasoning state. Canonicalize
+  // that equivalence before policy selection so `exact` cannot reject it and
+  // `provider-default` cannot silently omit it on only one request path.
+  if (requested === 'off' || requested === 'none') {
+    const equivalent = requested === 'off' ? 'none' : 'off';
+    if (profile.levels.some(entry => entry.level === equivalent)) return equivalent;
+  }
+  return undefined;
 }
 
 /**
@@ -194,8 +206,9 @@ export function resolveEffort(
   if (profile.levels.length === 0) {
     return { requested, outcome: 'no-effort-control' };
   }
-  if (profileSupportsLevel(profile, requested)) {
-    return { requested, resolved: requested, outcome: 'exact' };
+  const supported = supportedProfileLevel(profile, requested);
+  if (supported !== undefined) {
+    return { requested, resolved: supported, outcome: 'exact' };
   }
 
   if (policy === 'exact') {

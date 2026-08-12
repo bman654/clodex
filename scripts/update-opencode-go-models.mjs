@@ -513,8 +513,18 @@ function assertModelSchema(model, index, seen, errors) {
     if (!isPlainObject(model.variants)) errors.push(`${label}.variants: expected an object`);
     else {
       for (const [name, variant] of Object.entries(model.variants)) {
-        if (!isPlainObject(variant)) errors.push(`${label}.variants.${name}: expected an object`);
-        else assertKnownKeys(`${label}.variants.${name}`, variant, SNAPSHOT_VARIANT_KEYS, errors);
+        if (!isPlainObject(variant)) {
+          errors.push(`${label}.variants.${name}: expected an object`);
+        } else {
+          assertKnownKeys(`${label}.variants.${name}`, variant, SNAPSHOT_VARIANT_KEYS, errors);
+          const hasReasoningEffort = typeof variant.reasoningEffort === 'string'
+            && variant.reasoningEffort.trim() !== '';
+          if (hasReasoningEffort && isPlainObject(variant.thinking)) {
+            errors.push(
+              `${label}.variants.${name}: reasoningEffort and thinking cannot both be declared`,
+            );
+          }
+        }
       }
     }
   }
@@ -930,15 +940,15 @@ function advertisedVariantRepresentation(variant) {
 }
 
 /**
- * Project the executable intersection of the resolver's advertised variants and
- * the reviewed wire maps.
+ * Project executable effort profiles from the reviewed wire maps, using the
+ * resolver's advertised variants only as disagreement evidence.
  *
- * The two inputs answer different questions and only one of them is authority.
- * The snapshot says which reasoning variants OpenCode's own resolver advertises;
- * `PATCHES` says what clodex has actually exercised on the wire for the route it
- * runs. This table exposes a level only when the reviewed map can execute it, so
- * a snapshot variant can never widen what goes upstream — the worst a changed
- * capture can do is add a line to `disagreements`.
+ * The two inputs answer different questions and only the validated map is
+ * authority. The snapshot says which reasoning variants OpenCode's own resolver
+ * advertises; `PATCHES` says what clodex has actually exercised on the wire for
+ * the route it runs. Every non-null reviewed map entry reaches the profile even
+ * when the snapshot does not advertise it; snapshot agreement and disagreement
+ * are recorded as cross-check evidence and can never widen or narrow the ladder.
  *
  * Both directions of disagreement are recorded rather than resolved:
  * a variant the map cannot execute (deepseek-v4-flash advertises `low`, the

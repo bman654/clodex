@@ -2185,6 +2185,27 @@ describe('global effort policy at the request boundary', () => {
     return { server, upstream };
   }
 
+  async function translatedServer(
+    profile: 'sparse' | 'renaming',
+    effortPolicy: 'provider-default' | 'up' | 'down' | 'exact' | undefined,
+  ) {
+    const id = `translated-${profile}-model`;
+    const compatibility = profile === 'sparse' ? SPARSE_COMPATIBILITY : RENAMING_COMPATIBILITY;
+    const effortProfile = profile === 'sparse' ? SPARSE_PROFILE : RENAMING_PROFILE;
+    return startTestServer({
+      effortPolicy,
+      catalog: createGatewayModelCatalog([{
+        ...model(id, 'openai', 'go'),
+        npm: '@ai-sdk/openai-compatible',
+        apiBaseUrl: 'https://example.invalid/v1',
+        apiKey: 'provider-key',
+        providerId: 'go',
+        compatibility,
+        effortProfile: { ...effortProfile, modelId: id },
+      }]),
+    });
+  }
+
   async function post(server: ServerHandle, body: Record<string, unknown>) {
     return fetch(`${server.url}/openai/v1/chat/completions`, {
       method: 'POST',
@@ -2222,6 +2243,29 @@ describe('global effort policy at the request boundary', () => {
     expect(upstream.requests).toHaveLength(0);
   });
 
+  it('maps translated exact refusal to HTTP 400 before SDK dispatch', async () => {
+    const server = await translatedServer('sparse', 'exact');
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'translated-sparse-model',
+        max_tokens: 32,
+        messages: [{ role: 'user', content: 'hi' }],
+        output_config: { effort: 'low' },
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: {
+        message: 'Effort "low" is not supported by translated-sparse-model. Supported levels: high, max.',
+      },
+    });
+    expect(generateAnthropicResponse).not.toHaveBeenCalled();
+    expect(createLanguageModel).not.toHaveBeenCalled();
+  });
+
   it('sends the native spelling for a supported level', async () => {
     const { server, upstream } = await directServer('provider-default');
     expect((await post(server, { model: 'renaming-model', reasoning_effort: 'off' })).status).toBe(200);
@@ -2235,6 +2279,36 @@ describe('global effort policy at the request boundary', () => {
     const { server, upstream } = await directServer('up');
     expect((await post(server, { model: 'renaming-model', reasoning_effort: 'none' })).status).toBe(200);
     expect(upstream.requests[0]!.body.reasoning_effort).toBe('none');
+  });
+
+  it('treats off and none equivalently on translated and direct paths under default and exact policy', async () => {
+    for (const policy of ['provider-default', 'exact'] as const) {
+      const translated = await translatedServer('renaming', policy);
+      for (const effort of ['off', 'none'] as const) {
+        const response = await fetch(`${translated.url}/anthropic/v1/messages`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'translated-renaming-model',
+            max_tokens: 32,
+            messages: [{ role: 'user', content: 'hi' }],
+            output_config: { effort },
+          }),
+        });
+        expect(response.status, `translated ${policy}/${effort}`).toBe(200);
+        const params = vi.mocked(generateAnthropicResponse).mock.calls.at(-1)?.[1] as {
+          providerOptions?: Record<string, Record<string, unknown>>;
+        };
+        expect(params.providerOptions?.go?.reasoningEffort, `translated ${policy}/${effort}`).toBe('none');
+      }
+
+      const direct = await directServer(policy);
+      for (const effort of ['off', 'none'] as const) {
+        const response = await post(direct.server, { model: 'renaming-model', reasoning_effort: effort });
+        expect(response.status, `direct ${policy}/${effort}`).toBe(200);
+        expect(direct.upstream.requests.at(-1)!.body.reasoning_effort, `direct ${policy}/${effort}`).toBe('none');
+      }
+    }
   });
 
   it('leaves a model without a reviewed profile on its existing behavior', async () => {
@@ -2253,6 +2327,31 @@ describe('global effort policy at the request boundary', () => {
     });
     expect(response.status).toBe(200);
     expect(upstream.requests[0]!.body.reasoning_effort).toBe('high');
+    expect(upstream.requests[0]!.body.reasoning).toEqual({ summary: 'auto' });
+  });
+
+  it('normalizes a nested already-native effort before direct forwarding', async () => {
+    const { server, upstream } = await directServer('exact');
+    const response = await post(server, {
+      model: 'renaming-model',
+      reasoning: { effort: 'none', summary: 'auto' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests[0]!.body.reasoning_effort).toBe('none');
+    expect(upstream.requests[0]!.body.reasoning).toEqual({ summary: 'auto' });
+  });
+
+  it('normalizes conflicting direct spellings with top-level precedence', async () => {
+    const { server, upstream } = await directServer('exact');
+    const response = await post(server, {
+      model: 'renaming-model',
+      reasoning_effort: 'none',
+      reasoning: { effort: 'high', summary: 'auto' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests[0]!.body.reasoning_effort).toBe('none');
     expect(upstream.requests[0]!.body.reasoning).toEqual({ summary: 'auto' });
   });
 

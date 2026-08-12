@@ -435,23 +435,30 @@ async function handleAnthropicMessages(
       plog(`tools truncated: ${toolCount} → ${npmMaxTools} (provider limit)`);
     }
     const openAiOAuth = isOpenAiOAuthRoute(model);
-    const params = sdkTranslateRequest(body as unknown as AnthropicRequest, model.npm!, {
-      defaultEffort: anthropicEffortFromRequest(body as AnthropicRequest) ? undefined : model.defaultEffort,
-      openAiOAuth,
-      claudeSessionId,
-      effortPolicy: options.effortPolicy,
-      reasoningMetadata: {
-        providerId: model.providerId,
-        apiBaseUrl: model.apiBaseUrl,
-        supportedParameters: model.supportedParameters,
-        reasoning: model.reasoning,
-        interleavedReasoningField: model.interleavedReasoningField,
-        compatibility: model.compatibility,
-        effortProfile: model.effortProfile,
-        upstreamModelId: upstreamModelId(model),
-      },
-      maxTools: npmMaxTools,
-    });
+    let params: ReturnType<typeof sdkTranslateRequest>;
+    try {
+      params = sdkTranslateRequest(body as unknown as AnthropicRequest, model.npm!, {
+        defaultEffort: anthropicEffortFromRequest(body as AnthropicRequest) ? undefined : model.defaultEffort,
+        openAiOAuth,
+        claudeSessionId,
+        effortPolicy: options.effortPolicy,
+        reasoningMetadata: {
+          providerId: model.providerId,
+          apiBaseUrl: model.apiBaseUrl,
+          supportedParameters: model.supportedParameters,
+          reasoning: model.reasoning,
+          interleavedReasoningField: model.interleavedReasoningField,
+          compatibility: model.compatibility,
+          effortProfile: model.effortProfile,
+          upstreamModelId: upstreamModelId(model),
+        },
+        maxTools: npmMaxTools,
+      });
+    } catch (err) {
+      if (!(err instanceof EffortResolutionError)) throw err;
+      sendJson(res, err.statusCode, { error: { message: err.message } });
+      return;
+    }
     const clientWantsStream = Boolean(body.stream);
     // Use the display name in the response model field when masking is on — Claude
     // Desktop shows the response model field in its status bar chip, so this surfaces
@@ -682,7 +689,22 @@ function applyDirectEffortPolicy(
   const profile = model.effortProfile;
   if (!profile) return body;
   const requested = openAiEffort(body);
-  if (requested !== undefined && nativeEffortLevel(profile, requested) !== undefined) return body;
+
+  // Top-level spelling keeps its existing precedence when both are present.
+  // Strip both representations before either native forwarding or policy
+  // resolution so no conflicting nested value can survive the final body.
+  const normalized: JsonBody = { ...body };
+  delete normalized.reasoning_effort;
+  if (normalized.reasoning && typeof normalized.reasoning === 'object' && !Array.isArray(normalized.reasoning)) {
+    const { effort: _effort, ...rest } = normalized.reasoning as Record<string, unknown>;
+    if (Object.keys(rest).length > 0) normalized.reasoning = rest;
+    else delete normalized.reasoning;
+  }
+
+  if (requested !== undefined && nativeEffortLevel(profile, requested) !== undefined) {
+    normalized.reasoning_effort = requested;
+    return normalized;
+  }
 
   const resolution = resolveRequestEffort(
     requested,
@@ -690,17 +712,8 @@ function applyDirectEffortPolicy(
     policy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY,
   );
   if (resolution === undefined) return body;
-  const next: JsonBody = { ...body };
-  // `reasoning.effort` is the other accepted spelling; both are dropped so the
-  // resolved decision cannot be contradicted by a leftover field.
-  delete next.reasoning_effort;
-  if (next.reasoning && typeof next.reasoning === 'object' && !Array.isArray(next.reasoning)) {
-    const { effort: _effort, ...rest } = next.reasoning as Record<string, unknown>;
-    if (Object.keys(rest).length > 0) next.reasoning = rest;
-    else delete next.reasoning;
-  }
-  if (resolution.resolved !== undefined) next.reasoning_effort = resolution.resolved;
-  return next;
+  if (resolution.resolved !== undefined) normalized.reasoning_effort = resolution.resolved;
+  return normalized;
 }
 
 async function handleOpenAIChatCompletions(

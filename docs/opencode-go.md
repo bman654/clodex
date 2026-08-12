@@ -29,7 +29,7 @@ Live `/models` results are treated as availability data. Clodex layers its commi
 
 Alongside the catalog, the updater generates `src/data/opencode-go-effort-profiles.json`: per model, the reasoning-effort levels that route can actually execute, the exact value each puts on the wire, and whether the provider declares a default.
 
-The table is an intersection, not a copy. The committed resolver snapshot advertises reasoning variants; the reviewed per-model wire maps in the updater say what clodex has exercised on the route it runs. A level is exposed only when both agree, so a changed capture can never widen what goes upstream. Disagreements are recorded in the same file rather than resolved:
+The reviewed per-model wire maps in the updater are the authority for every executable level and native spelling in this table. The committed resolver snapshot's reasoning variants are a cross-check only: agreement and disagreement are recorded as evidence, but a snapshot variant can neither widen nor narrow the validated map. Disagreements include:
 
 - `deepseek-v4-flash` advertises a `low` variant that the reviewed map sends nothing for, so `low` is not exposed.
 - `qwen3.6-plus` advertises Anthropic thinking budgets, but clodex routes it over Chat Completions, so that representation is denied and the reviewed effort map governs the route.
@@ -41,7 +41,7 @@ No model declares a default effort, so `defaultLevel` is `null` throughout and a
 
 Profiles are runtime-only. They are attached by retained provider identity after model projection, never stored in a model cache, so a stale cache cannot state what a model's effort control is. What a request does with an unsupported level is the user's global `clodex models --effort-policy` setting; see the README.
 
-The patched Claude Code client's native effort picker needs a dense low/medium/high ladder, so only `gpt-5.6-luna` and `qwen3.6-plus` reach it. The other reviewed ladders are sparse and correctly appear with no effort control; representing them needs a new patch-transform version and is deliberately out of scope here.
+The historical native interactive selector uses a dense low/medium/high picker, so only `gpt-5.6-luna` and `qwen3.6-plus` reach it. Under the settled `PATCH_TRANSFORMS_VERSION = 6` conservation decision, sparse-picker work is explicitly deferred: the other reviewed ladders correctly appear with no native picker rather than changing protected patch transforms in this slice. The CLI `clodex models --effort-policy` setting remains supported for every routed request regardless of whether that model has a native interactive picker.
 
 ## Updating the catalog
 

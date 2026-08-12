@@ -113,15 +113,25 @@ describe('resolveEffort', () => {
     });
   });
 
-  it('treats off and none as one level when rounding', () => {
+  it('treats off and none as one level before selecting any policy', () => {
     // Luna spells "no reasoning" as `none` on the wire but exposes it as `off`.
-    // Asking for `none` must not round past it to `low`.
-    expect(resolveEffort('none', FULL, 'down')).toMatchObject({
-      resolved: 'off',
-      outcome: 'rounded-down',
-      saturated: false,
-    });
-    expect(resolveEffort('none', FULL, 'up')).toMatchObject({ resolved: 'off', saturated: false });
+    // Asking for either spelling is exact equivalence, never unsupported effort.
+    for (const policy of UNSUPPORTED_EFFORT_POLICIES) {
+      expect(resolveEffort('none', FULL, policy), policy).toEqual({
+        requested: 'none',
+        resolved: 'off',
+        outcome: 'exact',
+      });
+    }
+
+    const noneProfile = profile('none-model', [['none', 'none'], ['low', 'low']]);
+    for (const policy of UNSUPPORTED_EFFORT_POLICIES) {
+      expect(resolveEffort('off', noneProfile, policy), policy).toEqual({
+        requested: 'off',
+        resolved: 'none',
+        outcome: 'exact',
+      });
+    }
   });
 
   it('refuses an unsupported level under exact instead of substituting', () => {

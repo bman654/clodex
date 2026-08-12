@@ -240,6 +240,9 @@ describe('OpenCode Go resolver snapshot generator', () => {
     ['a string cost', (model: ResolvedModel) => { model.cost.input = '1'; }, /non-negative finite number/],
     ['a control-character id', (model: ResolvedModel) => { model.id = 'bad\nid'; model.api.id = 'bad\nid'; }, /printable non-empty string/],
     ['a row with a malformed tool capability', (model: ResolvedModel) => { model.capabilities.toolcall = 'false'; }, /capabilities\.toolcall: expected a boolean/],
+    ['a dual-representation effort variant', (model: ResolvedModel) => {
+      model.variants.both = { reasoningEffort: 'high', thinking: { type: 'enabled' } };
+    }, /variants\.both: reasoningEffort and thinking cannot both be declared/],
     ['a duplicate id', (model: ResolvedModel) => { model.id = 'kimi-k3'; model.api.id = 'kimi-k3'; }, /duplicate id kimi-k3/],
   ])('rejects %s at the committed snapshot boundary', (_label, mutate, expected) => {
     const rows = snapshot.models.map(model => structuredClone(model) as ResolvedModel);
@@ -498,7 +501,7 @@ describe('OpenCode Go resolver snapshot generator', () => {
 });
 
 /**
- * The executable intersection, one row per reviewed model: id, the route clodex
+ * The validated effort table, one row per reviewed model: id, the route clodex
  * runs, and every global effort level that route can actually execute paired
  * with the exact value it puts on the wire.
  *
@@ -554,7 +557,7 @@ function generatedProfiles(): EffortProfileTable {
   return convertResolvedModels(snapshot.models).effortProfiles as EffortProfileTable;
 }
 
-describe('OpenCode Go executable effort intersection', () => {
+describe('OpenCode Go validated effort profiles', () => {
   it('regenerates the committed profile table byte for byte', async () => {
     const committed = await readFile(EFFORT_PROFILES_PATH, 'utf8');
     expect(committed).toBe(`${JSON.stringify(generatedProfiles(), null, 2)}\n`);
