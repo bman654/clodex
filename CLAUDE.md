@@ -14,7 +14,7 @@ restructuring.
 
 | Load this | When |
 | --- | --- |
-| `.claude/skills/pr-verification/SKILL.md` | Preparing a change: the bar it must clear before you open the PR. |
+| `.claude/skills/pr-verification/SKILL.md` | **Before the first `git push` of any change** — the gate it must clear, and why pushing before your review reports costs more than it saves. Load it when you start preparing the change, not when you are about to open the PR. |
 | `.claude/skills/pr-review/SKILL.md` | Reviewing someone else's PR: panels, proof techniques, verdicts, merging. |
 | `.claude/docs/claude-code-internals.md` | Before asserting how Claude Code itself behaves, or re-deriving it. |
 | `.claude/docs/patcher.md` | Changing `clodex patch`, patch transforms, or backups. |

@@ -9,6 +9,18 @@ Your change will be held to a higher bar than "the suite is green." Across ~100 
 PRs, three failures dominate — in this order. They are what most review rounds are spent on, and
 every one of them is cheaper to catch now than after a reviewer finds it.
 
+**This file is a gate, not a checklist to run alongside the PR.** Nothing is pushed and no PR is
+opened until every item below has been done and your local adversarial review has reported and its
+findings are resolved. Running the review in parallel with `git push` looks like free wall-clock and
+is not: a finding that lands after the branch is public costs a force-push or a second PR, it can
+reach a reviewer or a merge first, and it arrives already framed as follow-up — which is how a
+should-fix becomes a won't-fix. "Quick PR" is a reason to keep the change small, never a reason to
+open it before the gate closes.
+
+A review that reports "nothing to fix" still has to report *before* the push. The point is not that
+findings are likely; it is that the branch going public is the irreversible step, and the review is
+what tells you whether it should.
+
 ## 1. Tests must discriminate. Green is not evidence.
 
 The single most common defect. Tests pass; the behavior they claim to pin is absent, unreachable,
