@@ -145,6 +145,26 @@ describe('provider-catalog-display', () => {
     expect(models[0]?.authRef).toBe(TEST_HELPER_REF);
   });
 
+  it('propagates count-token compatibility to standalone server models', () => {
+    const models = localProvidersToServerModels([{
+      id: 'anthropic-compatible',
+      name: 'Anthropic Compatible',
+      apiKey: 'api-key',
+      models: [{
+        id: 'claude-count-tokens-disabled',
+        name: 'Claude Count Tokens Disabled',
+        family: 'claude',
+        brand: 'Anthropic',
+        modelFormat: 'anthropic',
+        upstreamModelId: 'claude-count-tokens-disabled',
+        compatibility: { supportsCountTokens: false },
+      }],
+    }]);
+
+    expect(models[0]?.compatibility).toEqual({ supportsCountTokens: false });
+    expect(models[0]?.id).toBe('claude-count-tokens-disabled');
+  });
+
   describe('formatRegistryAuthLabel', () => {
     it('distinguishes OAuth, API key, and env refs', () => {
       expect(formatRegistryAuthLabel({
