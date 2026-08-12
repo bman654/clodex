@@ -109,7 +109,7 @@ export function resolveCatalogModelAliases(
       else if (capacitySkippedTargets?.has(target)) rejectionReason = 'target-not-exposed';
       else if (favoriteTargets !== undefined && !favoriteTargets.has(target)) {
         rejectionReason = 'target-not-favorite';
-      } else rejectionReason = 'target-unavailable';
+      } else if (availability !== undefined) rejectionReason = 'target-unavailable';
       const sourceNames = [...new Set(sources.map(entry => entry.name))];
       return {
         name: alias.name,

@@ -946,7 +946,24 @@ describe('selective HTTP proxy', () => {
         displayName: 'Llama 3.3 70B (Groq)',
         sourceNames: ['LLaMa', 'LLAMA'],
       }],
-      reservedModelIds: ['missing-route', 'orbit', 'Orbit', 'ORBIT'],
+      modelAliasRejections: [
+        {
+          alias: { name: 'orbit', providerId: 'test', modelId: 'later-model' },
+          reason: 'target-not-exposed',
+        },
+        {
+          alias: { name: 'Orbit', providerId: 'test', modelId: 'later-model' },
+          reason: 'target-not-exposed',
+        },
+        {
+          alias: { name: 'ORBIT', providerId: 'test', modelId: 'later-model' },
+          reason: 'target-not-exposed',
+        },
+        {
+          alias: { name: 'missing-route', providerId: 'test', modelId: 'missing-model' },
+          reason: 'target-unavailable',
+        },
+      ],
       adapterHandle: {
         port: adapterPort,
         token: 'adapter-local-token',
@@ -1085,13 +1102,37 @@ describe('selective HTTP proxy', () => {
         { model: 'clodex:groq:typo', path: '/v1/messages' },
         { model: 'LLaMa', path: '/v1/messages' },
         { model: 'LLAMA', path: '/v1/messages' },
-        { model: 'orbit', path: '/v1/messages' },
-        { model: 'missing-route', path: '/v1/messages' },
-        { model: 'missing-route[1m]', path: '/v1/messages' },
-        { model: 'missing-route[1M]', path: '/v1/messages' },
-        { model: 'models/missing-route[1m]', path: '/v1/messages' },
+        {
+          model: 'orbit',
+          path: '/v1/messages',
+          expectedReason: 'target is outside the active Claude Code catalog',
+        },
+        {
+          model: 'missing-route',
+          path: '/v1/messages',
+          expectedReason: 'target is unavailable or unsupported',
+        },
+        {
+          model: 'missing-route[1m]',
+          path: '/v1/messages',
+          expectedReason: 'target is unavailable or unsupported',
+        },
+        {
+          model: 'missing-route[1M]',
+          path: '/v1/messages',
+          expectedReason: 'target is unavailable or unsupported',
+        },
+        {
+          model: 'models/missing-route[1m]',
+          path: '/v1/messages',
+          expectedReason: 'target is unavailable or unsupported',
+        },
         { model: 'models/clodex:test:unavailable-model[1M]', path: '/v1/messages' },
-        { model: 'missing-route', path: '/v1/messages/count_tokens' },
+        {
+          model: 'missing-route',
+          path: '/v1/messages/count_tokens',
+          expectedReason: 'target is unavailable or unsupported',
+        },
         { model: 'models/clodex:test:unavailable-model[1M]', path: '/v1/messages/count_tokens' },
       ];
       for (const testCase of rejectedCases) {
@@ -1104,6 +1145,7 @@ describe('selective HTTP proxy', () => {
         expect(response, `${testCase.path} ${testCase.model}`).toContain('400 Bad Request');
         expect(response).toContain('invalid_request_error');
         expect(response).toContain('clodex models --list');
+        if (testCase.expectedReason) expect(response).toContain(testCase.expectedReason);
         expect(response).not.toContain('clodex patch');
       }
 

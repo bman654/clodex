@@ -150,14 +150,14 @@ export function buildConfiguredHttpProxyOptions(
     port,
     routes: loaded.routes,
     modelAliases: loaded.aliases,
-    reservedModelIds: [...new Set([
-      ...loaded.aliases.flatMap(alias => alias.sourceNames ?? []),
-      ...loaded.unavailableAliasRejections.map(rejection => rejection.alias.name),
-    ].flatMap(name => {
-      const trimmedName = name.trim();
-      const canonicalName = canonicalModelAliasName(name);
-      return [name, trimmedName, canonicalName].filter(Boolean);
-    }))],
+    modelAliasRejections: loaded.unavailableAliasRejections,
+    reservedModelIds: [...new Set(
+      loaded.aliases.flatMap(alias => alias.sourceNames ?? []).flatMap(name => {
+        const trimmedName = name.trim();
+        const canonicalName = canonicalModelAliasName(name);
+        return [name, trimmedName, canonicalName].filter(Boolean);
+      }),
+    )],
     debug,
     debugLogPath,
     inferenceLogPath,

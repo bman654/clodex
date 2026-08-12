@@ -89,7 +89,7 @@ describe('HTTP proxy startup model list', () => {
       rmSync(home, { recursive: true, force: true });
     }
   }, 20_000);
-  it('reserves canonical and exact stored names for inactive configured aliases', () => {
+  it('threads structured inactive alias rejections without reducing them to reserved names', () => {
     const loaded: LoadedHttpProxyRoutes = {
       routes: [],
       aliases: [],
@@ -131,10 +131,8 @@ describe('HTTP proxy startup model list', () => {
       modelAliases: [],
       inferenceLogPath: '/tmp/inference.jsonl',
     });
-    expect(options.reservedModelIds).toHaveLength(4);
-    expect(new Set(options.reservedModelIds)).toEqual(
-      new Set([' Orbit ', 'orbit', 'Orbit', 'ORBIT']),
-    );
+    expect(options.modelAliasRejections).toEqual(loaded.unavailableAliasRejections);
+    expect(options.reservedModelIds).toEqual([]);
   });
 
   it('reserves every exact source spelling for an active canonical alias', () => {
@@ -196,9 +194,8 @@ describe('HTTP proxy startup model list', () => {
         false,
         '/tmp/inference.jsonl',
       );
-      expect(new Set(options.reservedModelIds)).toEqual(
-        new Set(['luna', 'LuNa', 'LUNA']),
-      );
+      expect(options.modelAliasRejections).toEqual(loaded.unavailableAliasRejections);
+      expect(options.reservedModelIds).toEqual([]);
     } finally {
       if (previousHome === undefined) delete process.env['CLODEX_HOME'];
       else process.env['CLODEX_HOME'] = previousHome;

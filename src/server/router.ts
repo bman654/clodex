@@ -62,6 +62,12 @@ import {
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
 import { listenTcpServer, tcpListenerUrlHost } from '../listener-ready.js';
+import {
+  describeModelAliasRejection,
+  modelAliasMatchesStoredName,
+  type ModelAliasRejection,
+} from '../model-aliases.js';
+import { routeUnavailableMessage } from '../route-unavailable.js';
 
 export interface ServerOptions {
   host: string;
@@ -77,6 +83,8 @@ export interface ServerOptions {
    * auto-compaction/context-window echo invariant).
    */
   aliasNames?: ReadonlySet<string>;
+  /** Saved configured aliases rejected before catalog construction. */
+  modelAliasRejections?: readonly ModelAliasRejection[];
   /** When set, append structured debug lines to this file path. */
   debugLogPath?: string;
   /** When set, append privacy-minimal inference routing records as JSONL. */
@@ -274,7 +282,7 @@ async function handleAnthropicMessages(
     return;
   }
 
-  const model = lookupModel(res, options.catalog, body.model);
+  const model = lookupModel(res, options, body.model);
   if (!model) {
     plog(`model not found: ${body.model}`);
     return;
@@ -559,7 +567,7 @@ async function handleAnthropicCountTokens(
     return;
   }
 
-  const model = lookupModel(res, options.catalog, body.model);
+  const model = lookupModel(res, options, body.model);
   if (!model) {
     plog(`model not found: ${body.model}`);
     return;
@@ -637,7 +645,7 @@ async function handleOpenAIChatCompletions(
     return;
   }
 
-  const model = lookupModel(res, options.catalog, body.model);
+  const model = lookupModel(res, options, body.model);
   if (!model) return;
 
   if (supportsDirectOpenAIChatCompletions(model)) {
@@ -791,15 +799,21 @@ async function handleOpenAIChatCompletions(
   }
 }
 
-function lookupModel(res: ServerResponse, catalog: ModelCatalog, modelId: unknown): ServerModelInfo | null {
+function lookupModel(res: ServerResponse, options: ServerOptions, modelId: unknown): ServerModelInfo | null {
   if (typeof modelId !== 'string') {
     sendJson(res, 400, { error: { message: 'Request body must include a model string' } });
     return null;
   }
 
-  const model = catalog.get(modelId);
+  const model = options.catalog.get(modelId);
   if (!model) {
-    sendJson(res, 400, { error: { message: `Unknown model: ${modelId}` } });
+    const rejection = options.modelAliasRejections?.find(candidate => (
+      modelAliasMatchesStoredName(candidate.alias, modelId)
+    ));
+    const message = rejection === undefined
+      ? `Unknown model: ${modelId}`
+      : routeUnavailableMessage(modelId, describeModelAliasRejection(rejection.reason));
+    sendJson(res, 400, { error: { message } });
     return null;
   }
 

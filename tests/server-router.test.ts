@@ -1358,6 +1358,16 @@ describe('server router', () => {
         ),
         gateway,
         aliasNames: new Set(),
+        modelAliasRejections: [
+          {
+            alias: conflictingAliases[0]!,
+            reason: 'conflicting-targets',
+          },
+          {
+            alias: conflictingAliases[1]!,
+            reason: 'conflicting-targets',
+          },
+        ],
       });
       await vi.waitFor(async () => {
         const health = await fetch(`${server.url}/health`);
@@ -1380,7 +1390,9 @@ describe('server router', () => {
 
         expect(response.status, path).toBe(400);
         expect(await response.json()).toMatchObject({
-          error: { message: 'Unknown model: orbit' },
+          error: {
+            message: "Clodex model route 'orbit' is unavailable: conflicting targets. Run `clodex models --list` to inspect saved routes and aliases.",
+          },
         });
       }
 
@@ -1389,6 +1401,53 @@ describe('server router', () => {
       expect(streamAnthropicResponse).not.toHaveBeenCalled();
       expect(generateOpenAiResponse).not.toHaveBeenCalled();
       expect(streamOpenAiResponse).not.toHaveBeenCalled();
+    });
+
+    it('distinguishes capacity-skipped and unavailable configured aliases at request time', async () => {
+      const server = await startTestServer({
+        catalog: createGatewayModelCatalog([lunaModel], gateway),
+        gateway,
+        aliasNames: new Set(),
+        modelAliasRejections: [
+          {
+            alias: { name: 'LaterAlias', providerId: 'openai-oauth', modelId: 'gpt-later' },
+            reason: 'target-not-exposed',
+          },
+          {
+            alias: { name: 'MissingAlias', providerId: 'openai-oauth', modelId: 'gpt-missing' },
+            reason: 'target-unavailable',
+          },
+        ],
+      });
+
+      for (const path of [
+        '/anthropic/v1/messages',
+        '/openai/v1/chat/completions',
+      ]) {
+        for (const testCase of [
+          {
+            model: 'LaterAlias',
+            reason: 'target is outside the active Claude Code catalog',
+          },
+          {
+            model: 'MissingAlias',
+            reason: 'target is unavailable or unsupported',
+          },
+        ]) {
+          const response = await fetch(`${server.url}${path}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: testCase.model, messages: [] }),
+          });
+
+          expect(response.status, `${path} ${testCase.model}`).toBe(400);
+          expect(await response.json()).toMatchObject({
+            error: {
+              message: `Clodex model route '${testCase.model}' is unavailable: ${testCase.reason}. Run \`clodex models --list\` to inspect saved routes and aliases.`,
+            },
+          });
+        }
+      }
     });
 
     it('still rejects unknown model ids with 400', async () => {

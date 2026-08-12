@@ -284,6 +284,14 @@ describe('runServerCommand', () => {
         + '  "CLAUDE-TEST" — conflicts with a catalog model id',
       );
       expect(state.startServerOptions.aliasNames).toEqual(new Set(['active']));
+      expect(state.startServerOptions.modelAliasRejections).toEqual([
+        { alias: state.modelAliases[1], reason: 'conflicting-targets' },
+        { alias: state.modelAliases[2], reason: 'conflicting-targets' },
+        { alias: state.modelAliases[3], reason: 'reserved-name' },
+        { alias: state.modelAliases[4], reason: 'target-unavailable' },
+        { alias: state.modelAliases[5], reason: 'target-unavailable' },
+        { alias: state.modelAliases[6], reason: 'catalog-id-collision' },
+      ]);
       expect(state.startServerOptions.catalog.get('active')).toMatchObject({
         id: 'claude-test',
         providerId: 'zen',

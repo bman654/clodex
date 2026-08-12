@@ -534,6 +534,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     catalog: createGatewayModelCatalog(models, gateway, modelAliases),
     gateway,
     aliasNames: new Set(modelAliases.map(alias => alias.name)),
+    modelAliasRejections: aliasRejections,
     inferenceLogPath,
     webSocketDiagnosticsLogPath,
   });

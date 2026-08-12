@@ -150,7 +150,12 @@ describe('resolveCatalogModelAliases', () => {
       modelId: 'missing-model',
     };
 
-    expect(resolveCatalogModelAliases([alias], makeRouteResolver([]))).toEqual([{
+    expect(resolveCatalogModelAliases(
+      [alias],
+      makeRouteResolver([]),
+      undefined,
+      { favorites: [alias], capacitySkippedFavorites: [] },
+    )).toEqual([{
       name: 'archived',
       routeId: modelAliasTarget(alias),
       rejectionReason: 'target-unavailable',
@@ -165,7 +170,15 @@ describe('resolveCatalogModelAliases', () => {
       { name: 'ARCHIVED', providerId: 'missing-provider', modelId: 'missing-model' },
     ];
 
-    expect(resolveCatalogModelAliases(aliases, makeRouteResolver([]))).toEqual([
+    expect(resolveCatalogModelAliases(
+      aliases,
+      makeRouteResolver([]),
+      undefined,
+      {
+        favorites: [{ providerId: 'missing-provider', modelId: 'missing-model' }],
+        capacitySkippedFavorites: [],
+      },
+    )).toEqual([
       {
         name: 'archived',
         savedName: 'ArChIvEd',
@@ -222,7 +235,7 @@ describe('resolveCatalogModelAliases', () => {
     ]);
   });
 
-  it('keeps an alias inactive when its favorite target is outside the exposed catalog', () => {
+  it('does not guess that a target is unavailable when availability metadata is omitted', () => {
     const targetRoute = {
       aliasId: 'anthropic-other__model-b',
       realModelId: 'model-b',
@@ -239,7 +252,6 @@ describe('resolveCatalogModelAliases', () => {
     )).toEqual([{
       name: 'later',
       routeId: targetRoute.aliasId,
-      rejectionReason: 'target-unavailable',
     }]);
   });
 
