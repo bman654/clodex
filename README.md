@@ -229,7 +229,22 @@ Manage up to 100 favorite models and short aliases. Up to the first 20 favorites
 | `--list` | Print the exact `clodex:<provider-id>:<model-id>` names (and aliases) without opening the manager |
 | `--alias <name=target>` | Save a short name for a favorite, e.g. `--alias sol=clodex:openai-oauth:gpt-5.6-sol` (the `clodex:` prefix is optional in the target) |
 | `--unalias <name>` | Remove a saved short name |
+| `--effort-policy <mode>` | Choose what happens when a model cannot run the requested reasoning effort |
 | `--help`, `--version` | Help / version |
+
+Not every model accepts every reasoning effort — some offer only `high` and
+`max`, and some cannot be graded at all. `--effort-policy` sets one global rule
+for requests that ask for a level the target model does not support:
+
+| Mode | Effect |
+| --- | --- |
+| `provider-default` | Send no effort and let the provider choose (**default**) |
+| `up` / `down` | Use the nearest level the model does support |
+| `exact` | Refuse the request rather than quietly substitute another level |
+
+Models that cannot be graded at all are unaffected by every mode — there is no
+substitution to make — and a running `clodex claude` or `clodex server` keeps
+the policy it started with, so restart it after changing this.
 
 ### `clodex providers [subcommand]`
 

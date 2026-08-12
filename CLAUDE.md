@@ -207,5 +207,13 @@ Interactive launch flow and real-provider behavior are verified manually.
   order and reports exact capacity omissions; an endpoint launch's separately exposed starting model
   consumes one catalog slot.
 - OpenAI catalog ids may differ from upstream API ids — `upstreamModelId` carries the real API id.
+- **Reasoning effort is resolved once, and both request paths must agree.** `src/effort-policy.ts`
+  resolves a requested global level against the model's generated effort profile before anything is
+  serialized; the SDK path and the direct chat-completions forward then hand that same level to the
+  same `reasoningEffortMap`. The updater enforces that every map is a fixed point on its own output
+  and one-to-one, which is what stops a value being translated twice and lets the direct path
+  forward an already-native value untouched. A profile is attached by retained provider identity
+  after model projection — never from a persisted cache row, and never from models.dev — and
+  `defaultLevel: null` means the provider declares no default, so clodex sends none.
 - Never commit `dist/` (gitignored, rebuilt by CI), never hardcode a version string
   (`package.json` is the source of truth), and never run `npm publish` locally.
