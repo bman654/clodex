@@ -487,9 +487,11 @@ function assertModelSchema(model, index, seen, errors) {
         assertPrintable(`${label}.capabilities.interleaved.field`, interleaved.field, errors);
       }
     }
-    // Every catalog entry is a coding model behind a patched Claude Code, so a
-    // row that cannot take text in, emit text, or call a tool has no route.
-    if (capabilities.input?.text !== true || capabilities.output?.text !== true || capabilities.toolcall !== true) {
+    // Every transport-mapped catalog entry is a coding model behind a patched Claude Code, so a
+    // mapped row that cannot take text in, emit text, or call a tool has no route. Unmapped
+    // resolver rows are still structurally checked above and reported rather than shipped.
+    if (Object.hasOwn(TRANSPORTS, id)
+      && (capabilities.input?.text !== true || capabilities.output?.text !== true || capabilities.toolcall !== true)) {
       errors.push(`${label}: supported models must declare text input, text output, and tool calls`);
     }
   }

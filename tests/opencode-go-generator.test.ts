@@ -236,13 +236,49 @@ describe('OpenCode Go resolver snapshot generator', () => {
     ['a withdrawn status', (model: ResolvedModel) => { model.status = 'deprecated'; }, /status must be active/],
     ['a string cost', (model: ResolvedModel) => { model.cost.input = '1'; }, /non-negative finite number/],
     ['a control-character id', (model: ResolvedModel) => { model.id = 'bad\nid'; model.api.id = 'bad\nid'; }, /printable non-empty string/],
-    ['a row that cannot call tools', (model: ResolvedModel) => { model.capabilities.toolcall = false; }, /text input, text output, and tool calls/],
+    ['a row with a malformed tool capability', (model: ResolvedModel) => { model.capabilities.toolcall = 'false'; }, /capabilities\.toolcall: expected a boolean/],
     ['a duplicate id', (model: ResolvedModel) => { model.id = 'kimi-k3'; model.api.id = 'kimi-k3'; }, /duplicate id kimi-k3/],
   ])('rejects %s at the committed snapshot boundary', (_label, mutate, expected) => {
     const rows = snapshot.models.map(model => structuredClone(model) as ResolvedModel);
     const extra = resolvedModel('unreviewed-row', '@ai-sdk/openai-compatible');
     mutate(extra);
     expect(() => assertResolvedModels([...rows, extra])).toThrow(expected);
+  });
+
+  it.each([
+    ['text input', (model: ResolvedModel) => { model.capabilities.input.text = false; }],
+    ['text output', (model: ResolvedModel) => { model.capabilities.output.text = false; }],
+    ['tool calls', (model: ResolvedModel) => { model.capabilities.toolcall = false; }],
+  ])('rejects a mapped row without %s', (_label, mutate) => {
+    const rows = snapshot.models.map(model => structuredClone(model) as ResolvedModel);
+    const mapped = rows.find(model => model.id === 'deepseek-v4-flash')!;
+    mutate(mapped);
+    expect(() => convertResolvedModels(rows))
+      .toThrow(/deepseek-v4-flash: supported models must declare text input, text output, and tool calls/);
+  });
+
+  it.each([
+    ['text/tool-capable', resolvedModel('unmapped-text-tools', '@ai-sdk/openai-compatible')],
+    ['audio/image/non-tool', resolvedModel('unmapped-audio-image', '@ai-sdk/openai-compatible', {
+      capabilities: {
+        attachment: false,
+        input: { audio: true, image: true, pdf: false, text: false, video: false },
+        interleaved: false,
+        output: { audio: true, image: true, pdf: false, text: false, video: false },
+        reasoning: false,
+        temperature: false,
+        toolcall: false,
+      },
+    })],
+  ])('reports a valid unmapped %s row without generating it', (_label, extra) => {
+    const rows = [
+      ...snapshot.models.map(model => structuredClone(model) as ResolvedModel),
+      extra,
+    ];
+    const { supported, unmapped } = convertResolvedModels(rows);
+    expect(supported.map((model: { id: string }) => model.id)).toEqual(REVIEWED_IDS);
+    expect(unmapped).toEqual(['grok-4.5', extra.id]);
+    expect(supported.map((model: { id: string }) => model.id)).not.toContain(extra.id);
   });
 
   it('rejects a capture whose release tag and version disagree', () => {
