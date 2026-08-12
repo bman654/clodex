@@ -134,14 +134,20 @@ export interface RelayAnthropicOptions {
    */
   extraHeaders?: Record<string, string>;
   /**
-   * Route facts for capability-beta admission on a raw Anthropic route.
+   * Route facts for capability-beta admission on an Anthropic-protocol route.
+   *
+   * "Anthropic-protocol" names the wire format, not the host: a third-party
+   * provider clodex forwards to over the Anthropic Messages/count_tokens
+   * endpoints is included on purpose, because those routes serve the same
+   * beta-gated request shapes.
    *
    * Supplying this does NOT allow anything: it hands the policy the inbound
    * tokens and the route's own advertised id/window so the boundary can decide.
    * The destination URL and the exact forwarded body are taken from what this
    * relay is actually sending, not from the caller, and the whole set is
    * recomputed on every attempt including the OAuth-refresh retry. Omit it on a
-   * translated or non-Anthropic route to keep the configured-only behaviour.
+   * translated route — one this relay sends in another wire format — to keep
+   * the configured-only behaviour.
    */
   capability?: AnthropicCapabilityRouteFacts;
   refreshToken?: (rejectedAccessToken: string) => Promise<string | null>;

@@ -1950,7 +1950,14 @@ describe('endpoint-mode Anthropic beta and identity are negative-only', () => {
   });
 
   it.each([
-    ['the route does not advertise 1M', 'claude-cap[1m]', undefined],
+    // Setup adapted (was `undefined`): with no configured window this id
+    // resolves to 1M through the same heuristic the advertisement surface uses,
+    // so the route DID advertise 1M and the old fixture only refused because
+    // the predicate resolved the window differently than advertisement did. An
+    // explicit 200K makes the label true again and keeps the property — the
+    // window decides, not the `[1m]` spelling. The admitted direction is
+    // covered by "carries the earned [1m] beta from the advertised id alone".
+    ['the route does not advertise 1M', 'claude-cap[1m]', 200_000],
     ['the request is not on the [1m] surface', 'claude-cap', 1_000_000],
   ])('refuses the [1m] beta when %s', async (_label, modelId, contextWindow) => {
     const upstream = await startHeaderCapturingUpstream({
@@ -1972,6 +1979,29 @@ describe('endpoint-mode Anthropic beta and identity are negative-only', () => {
 
     expect(response.status).toBe(200);
     expect(upstream.requests[0]!.headers['anthropic-beta']).toBeUndefined();
+  });
+
+  it('carries the earned [1m] beta from the advertised id alone', async () => {
+    // No configured context window: the id is the only evidence, and the
+    // predicate must read it exactly as the advertisement surface does.
+    const upstream = await startHeaderCapturingUpstream({
+      id: 'msg-idonly', type: 'message', role: 'assistant', model: 'claude-idonly', content: [],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        model('claude-idonly[1m]', 'anthropic', 'zen', { baseUrl: upstream.baseUrl }),
+      ]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'anthropic-beta': ONE_M_BETA },
+      body: JSON.stringify({ model: 'claude-idonly[1m]', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests[0]!.headers['anthropic-beta']).toBe(ONE_M_BETA);
   });
 
   it('refuses both tool-search betas for an ordinary tool request', async () => {

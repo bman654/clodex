@@ -18,6 +18,8 @@ import {
   resolveOutboundBeta,
   type AnthropicCapabilityRequest,
 } from '../src/anthropic-beta-policy.js';
+import { stripOneMContextSuffix } from '../src/context-model-id.js';
+import { resolveContextWindow } from '../src/context-window.js';
 
 const [TOOL_SEARCH_FIRST_PARTY_BETA, TOOL_SEARCH_GATEWAY_BETA] = TOOL_SEARCH_BETAS as [string, string];
 
@@ -262,6 +264,61 @@ describe('capability betas are earned per request, never allowlisted', () => {
       }],
     ])('refuses with %s', (_label, over) => {
       expect(resolveCapabilityBetaTokens(capability(over))).toEqual([]);
+    });
+
+    describe('with no configured window, resolves the id exactly as advertisement does', () => {
+      // A synthetic id, so no OpenCode cache entry can decide it and the
+      // heuristics in `context-window` are provably the only authority.
+      const ADVERTISED_1M_ID = 'claude-sonnet-4-5-clodex-test[1m]';
+
+      it('pins the asymmetry this parity depends on', () => {
+        // The advertisement surfaces resolve from the FULL id, and a heuristic
+        // fires only on a full `[1m]` id. Stripping first therefore resolves a
+        // DIFFERENT window than the one advertised — exactly the divergence the
+        // predicate must not reintroduce.
+        expect(resolveContextWindow(ADVERTISED_1M_ID)).toBeGreaterThanOrEqual(1_000_000);
+        expect(resolveContextWindow(stripOneMContextSuffix(ADVERTISED_1M_ID)))
+          .toBeLessThan(1_000_000);
+      });
+
+      it('admits the token for a route the advertisement calls 1M', () => {
+        expect(resolveCapabilityBetaTokens(capability({
+          clientBeta: [CONTEXT_1M_BETA],
+          requestedModelId: ADVERTISED_1M_ID,
+          advertisedModelId: ADVERTISED_1M_ID,
+          advertisedContextWindow: undefined,
+        }))).toEqual([CONTEXT_1M_BETA]);
+      });
+
+      it('refuses when the advertised id itself resolves below the threshold', () => {
+        // The requested id carries `[1m]`, but the route's own id does not and
+        // resolves to 200K — that surface was never advertised as 1M.
+        expect(resolveCapabilityBetaTokens(capability({
+          clientBeta: [CONTEXT_1M_BETA],
+          requestedModelId: 'claude-haiku-4-5-clodex-test[1m]',
+          advertisedModelId: 'claude-haiku-4-5-clodex-test',
+          advertisedContextWindow: undefined,
+        }))).toEqual([]);
+      });
+
+      it('still lets a configured window win over the id in both directions', () => {
+        // Only the FALLBACK reads the id. A configured window below the
+        // threshold refuses even a `[1m]` id...
+        expect(resolveCapabilityBetaTokens(capability({
+          clientBeta: [CONTEXT_1M_BETA],
+          requestedModelId: ADVERTISED_1M_ID,
+          advertisedModelId: ADVERTISED_1M_ID,
+          advertisedContextWindow: 200_000,
+        }))).toEqual([]);
+        // ...and a configured 1M window admits on an id the heuristics would
+        // have resolved to 200K.
+        expect(resolveCapabilityBetaTokens(capability({
+          clientBeta: [CONTEXT_1M_BETA],
+          requestedModelId: 'claude-haiku-4-5-clodex-test[1m]',
+          advertisedModelId: 'claude-haiku-4-5-clodex-test',
+          advertisedContextWindow: 1_000_000,
+        }))).toEqual([CONTEXT_1M_BETA]);
+      });
     });
 
     it('is decided by the route, not by the credential scheme or provider label', () => {

@@ -25,7 +25,6 @@
 import {
   ONE_M_CONTEXT_WINDOW,
   hasOneMContextSuffix,
-  stripOneMContextSuffix,
 } from './context-model-id.js';
 import { resolveContextWindow } from './context-window.js';
 import { TOOL_SEARCH_TYPE_PREFIX } from './tool-search.js';
@@ -195,7 +194,7 @@ export function extractConfiguredBetaTokens(
 
 // ── Capability betas ────────────────────────────────────────────────────────
 //
-// A routed raw-Anthropic request can legitimately REQUIRE a per-request beta.
+// A routed Anthropic-protocol request can legitimately REQUIRE a per-request beta.
 // Claude Code emits `context-1m-2025-08-07` whenever the model id clodex handed
 // it carries the `[1m]` suffix, and one of the two tool-search betas whenever it
 // sends a tool-search / deferred-tool request. Dropping those made clodex
@@ -205,11 +204,16 @@ export function extractConfiguredBetaTokens(
 //
 // This is NOT a token allowlist, and a token name alone admits nothing. Each
 // token is admitted only when the request independently proves the feature is
-// in use: the EXACT inbound token, a raw Anthropic Messages/count_tokens
-// destination recomputed from the URL actually being called, and a per-token
-// predicate over the resolved route and the exact forwarded body. A token whose
-// predicate is false is dropped exactly like an arbitrary one. An unknown or
-// version-drifted token has no predicate at all and therefore fails closed.
+// in use: the EXACT inbound token, an Anthropic-protocol Messages/count_tokens
+// ENDPOINT PATH recomputed from the URL actually being called, and a per-token
+// predicate over the resolved route and the exact forwarded body. The check is
+// on the path, not the host: any third-party provider clodex routes to over the
+// Anthropic protocol qualifies, which is deliberate — those routes serve the
+// same beta-gated request shapes. (Host is a separate question, and it is
+// answered separately by the native-identity suppression above, which grants
+// nothing either way.) A token whose predicate is false is dropped exactly like
+// an arbitrary one. An unknown or version-drifted token has no predicate at all
+// and therefore fails closed.
 //
 // Adding a token here requires a named supported feature, an exact
 // route/request predicate, and tests for the positive and every negative.
@@ -233,7 +237,7 @@ export const TOOL_SEARCH_BETAS: readonly string[] = [
   'tool-search-tool-2025-10-19',
 ];
 
-/** The raw Anthropic endpoints a capability beta may ride on. */
+/** The Anthropic-protocol endpoint paths a capability beta may ride on. */
 export type AnthropicCapabilityEndpoint = 'messages' | 'count_tokens';
 
 /**
@@ -297,8 +301,14 @@ export interface AnthropicCapabilityRequest extends AnthropicCapabilityRouteFact
  */
 function requestUsesOneMContext(capability: AnthropicCapabilityRequest): boolean {
   if (!hasOneMContextSuffix(capability.requestedModelId ?? '')) return false;
+  // Resolved from the UNSTRIPPED advertised id, exactly as the advertisement
+  // surfaces do. With no configured window the id is the only evidence, and
+  // `context-window` carries a heuristic that fires only on a full `[1m]` id —
+  // so stripping first resolved a different window than the one advertised and
+  // denied the beta on a route that had genuinely advertised 1M. A configured
+  // window still wins outright; only this fallback reads the id.
   const window = resolveContextWindow(
-    stripOneMContextSuffix(capability.advertisedModelId),
+    capability.advertisedModelId,
     capability.advertisedContextWindow,
   );
   return window >= ONE_M_CONTEXT_WINDOW;
@@ -329,9 +339,10 @@ function requestUsesToolSearch(body: unknown): boolean {
 /**
  * The capability tokens this exact request has earned, in fixed policy order.
  *
- * Returns the empty list for a destination that is not raw Anthropic
- * Messages/count_tokens, for a token that is not one of the fixed capability
- * literals, and for a capability literal whose request predicate is false.
+ * Returns the empty list for a URL whose path is not the Anthropic-protocol
+ * Messages/count_tokens path, for a token that is not one of the fixed
+ * capability literals, and for a capability literal whose request predicate is
+ * false. Host is not part of this decision.
  */
 export function resolveCapabilityBetaTokens(
   capability: AnthropicCapabilityRequest,
