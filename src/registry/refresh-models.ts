@@ -11,6 +11,7 @@ import { validateCustomEndpointUrl } from './url-security.js';
 import {
   effectiveProviderBaseUrl,
   isRetainedOpenCodeGoProvider,
+  openCodeGoPinnedApiUrl,
   resolveProviderTemplate,
   retainedOpenCodeGoTemplate,
   syntheticTemplate,
@@ -40,10 +41,7 @@ import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
 import { getInstalledClaudeVersion } from '../launch.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
-import {
-  isLegacyAnonymousCustomEndpoint,
-  openCodeGoPinnedApiUrl,
-} from './materialize.js';
+import { isLegacyAnonymousCustomEndpoint } from './materialize.js';
 import { OPENCODE_GO_PROVIDER_NAME } from '../data/opencode-go-models.js';
 
 export interface RefreshProviderResult {
@@ -312,7 +310,9 @@ async function refreshApiListProvider(
     safeBaseUrl = urlCheck.normalizedUrl;
   }
 
-  const template = catalogTemplate ?? syntheticTemplate(provider, safeBaseUrl);
+  const template = catalogTemplate
+    ? (retained ? { ...catalogTemplate, npm } : catalogTemplate)
+    : syntheticTemplate(provider, safeBaseUrl);
 
   // The pin above decides WHERE the key goes; it says nothing about which
   // routine reads the answer. A retained record storing

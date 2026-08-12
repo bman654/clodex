@@ -1,6 +1,10 @@
 // src/registry/resolve-template.ts — map imported OpenCode ids to builtin templates + default URLs
 
-import { OPENCODE_GO_PROVIDER_ID } from '../data/opencode-go-models.js';
+import {
+  OPENCODE_GO_ANTHROPIC_BASE_URL,
+  OPENCODE_GO_COMPLETIONS_BASE_URL,
+  OPENCODE_GO_PROVIDER_ID,
+} from '../data/opencode-go-models.js';
 import { getTemplateById, type ProviderTemplate } from '../provider-templates.js';
 import type { RegistryProvider } from './types.js';
 
@@ -67,6 +71,16 @@ export function isRetainedOpenCodeGoProvider(provider: ProviderTemplateIdentity)
  */
 export function retainedOpenCodeGoTemplate(): ProviderTemplate | undefined {
   return getTemplateById(OPENCODE_GO_PROVIDER_ID);
+}
+
+/**
+ * The one immutable destination allowed for each SDK package served by the
+ * retained built-in. `null` means the package is not part of that product.
+ */
+export function openCodeGoPinnedApiUrl(npm: string): string | null {
+  if (npm === '@ai-sdk/openai-compatible') return OPENCODE_GO_COMPLETIONS_BASE_URL;
+  if (npm === '@ai-sdk/anthropic') return OPENCODE_GO_ANTHROPIC_BASE_URL;
+  return null;
 }
 
 /** Whether a configured record occupies a built-in template's add slot. */

@@ -848,6 +848,21 @@ describe('refreshProviderModels', () => {
     expect(result.reason).toMatch(/does not support the @ai-sdk\/openai SDK package/i);
   });
 
+  it.each([
+    ['@ai-sdk/openai-compatible', OPENCODE_GO_ANTHROPIC_BASE_URL],
+    ['@ai-sdk/anthropic', OPENCODE_GO_COMPLETIONS_BASE_URL],
+  ])('refuses mismatched OpenCode package/destination pair %s before network or writes', async (npm, url) => {
+    const registry = openCodeRegistry({ npm, url });
+
+    const result = await refreshProviderModels('opencode-go', 'oc-real-key', registry);
+
+    expect(fetchAnthropicModels).not.toHaveBeenCalled();
+    expect(fetchTemplateModels).not.toHaveBeenCalled();
+    expect(saveRegistry).not.toHaveBeenCalled();
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/does not support a custom API base URL/i);
+  });
+
   it('still refreshes an unmodified OpenCode record against its pinned endpoint', async () => {
     const registry = openCodeRegistry();
     vi.mocked(fetchTemplateModels).mockResolvedValue({
@@ -934,6 +949,7 @@ describe('refreshProviderModels', () => {
     // retained template — not the record's named one — must be what is passed.
     expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[0]?.id).toBe('opencode-go');
     expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[0]?.staticModelPolicy).toBe('allowlist');
+    expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[0]?.npm).toBe('@ai-sdk/anthropic');
     expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[2]).toBe(OPENCODE_GO_ANTHROPIC_BASE_URL);
     expect(result).toMatchObject({ ok: true, modelCount: 1 });
   });
@@ -959,14 +975,38 @@ describe('refreshProviderModels', () => {
     expect(result).toMatchObject({ ok: true, modelCount: 1 });
   });
 
-  it('routes a retained OpenCode record whose id drifted with Anthropic npm through template discovery', async () => {
-    const registry = openCodeRegistry({
-      id: 'opencode-go-mirror',
-      npm: '@ai-sdk/anthropic',
-      url: OPENCODE_GO_ANTHROPIC_BASE_URL,
-    });
+  it.each([
+    ['@ai-sdk/openai-compatible', OPENCODE_GO_COMPLETIONS_BASE_URL],
+    ['@ai-sdk/anthropic', OPENCODE_GO_ANTHROPIC_BASE_URL],
+  ])(
+    'refreshes canonical OpenCode identity with %s before a foreign manual-only template can preempt it',
+    async (npm, url) => {
+      const registry = openCodeRegistry({ templateId: 'bedrock', npm, url });
+      vi.mocked(fetchTemplateModels).mockResolvedValue({
+        baseUrl: url,
+        models: openCodeTemplateModels,
+      });
+      vi.mocked(loadRegistryStrict).mockReturnValue(registry);
+
+      const result = await refreshProviderModels('opencode-go', 'oc-real-key', registry);
+
+      expect(fetchTemplateModels).toHaveBeenCalledOnce();
+      expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[0]).toMatchObject({
+        id: 'opencode-go',
+        npm,
+      });
+      expect(saveRegistry).toHaveBeenCalledOnce();
+      expect(result).toMatchObject({ ok: true, modelCount: 1 });
+    },
+  );
+
+  it.each([
+    ['@ai-sdk/openai-compatible', OPENCODE_GO_COMPLETIONS_BASE_URL],
+    ['@ai-sdk/anthropic', OPENCODE_GO_ANTHROPIC_BASE_URL],
+  ])('routes a retained OpenCode template migration with %s through template discovery', async (npm, url) => {
+    const registry = openCodeRegistry({ id: 'opencode-go-mirror', npm, url });
     vi.mocked(fetchTemplateModels).mockResolvedValue({
-      baseUrl: OPENCODE_GO_ANTHROPIC_BASE_URL,
+      baseUrl: url,
       models: openCodeTemplateModels,
     });
     vi.mocked(loadRegistryStrict).mockReturnValue(registry);
@@ -974,7 +1014,10 @@ describe('refreshProviderModels', () => {
     const result = await refreshProviderModels('opencode-go-mirror', 'oc-real-key', registry);
 
     expect(fetchAnthropicModels).not.toHaveBeenCalled();
-    expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[0]?.id).toBe('opencode-go');
+    expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[0]).toMatchObject({
+      id: 'opencode-go',
+      npm,
+    });
     expect(result).toMatchObject({ ok: true, modelCount: 1 });
   });
 

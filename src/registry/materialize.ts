@@ -8,13 +8,12 @@ import { normalizeGoogleDisplayName, normalizeGoogleModelId } from './google-mod
 import { findModelsDevModel } from './models-dev.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js';
 import { isValidProviderId } from './validate.js';
-import { isRetainedOpenCodeGoProvider } from './resolve-template.js';
+import {
+  isRetainedOpenCodeGoProvider,
+  openCodeGoPinnedApiUrl,
+} from './resolve-template.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 import { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
-import {
-  OPENCODE_GO_ANTHROPIC_BASE_URL,
-  OPENCODE_GO_COMPLETIONS_BASE_URL,
-} from '../data/opencode-go-models.js';
 
 export { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
 
@@ -47,16 +46,7 @@ export interface MaterializeOptions {
   agent?: CompatibilityAgent;
 }
 
-/**
- * The single immutable endpoint the retained built-in allows for an SDK
- * package. `null` means the package is not one OpenCode Go serves, and every
- * caller must fail closed rather than fall back to a stored address.
- */
-export function openCodeGoPinnedApiUrl(npm: string): string | null {
-  if (npm === '@ai-sdk/openai-compatible') return OPENCODE_GO_COMPLETIONS_BASE_URL;
-  if (npm === '@ai-sdk/anthropic') return OPENCODE_GO_ANTHROPIC_BASE_URL;
-  return null;
-}
+export { openCodeGoPinnedApiUrl } from './resolve-template.js';
 
 function resolveMaterializedApiUrl(
   cached: CachedModel,

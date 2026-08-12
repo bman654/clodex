@@ -5,6 +5,10 @@ import { join } from 'node:path';
 import { fetchTemplateModels } from '../src/registry/fetch-template-models.js';
 import { getTemplateById, type ProviderTemplate } from '../src/provider-templates.js';
 import { clearTraceSecrets, getProviderDebugLogPath } from '../src/trace-log.js';
+import {
+  OPENCODE_GO_ANTHROPIC_BASE_URL,
+  OPENCODE_GO_COMPLETIONS_BASE_URL,
+} from '../src/data/opencode-go-models.js';
 
 function template(partial: Partial<ProviderTemplate> & Pick<ProviderTemplate, 'id' | 'name' | 'npm'>): ProviderTemplate {
   return {
@@ -395,6 +399,58 @@ describe('fetchTemplateModels fixed OpenCode Go destination', () => {
         }),
       );
     }
+  });
+
+  it('discovers and overlays the allowlist at the approved Anthropic destination', async () => {
+    const anthropicOpenCodeGo = {
+      ...openCodeGo(),
+      npm: '@ai-sdk/anthropic',
+    };
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([
+        { id: 'qwen3.8-max', name: 'live qwen' },
+        { id: 'grok-4.5', name: 'responses only' },
+      ]),
+    } as Response);
+
+    const result = await fetchTemplateModels(
+      anthropicOpenCodeGo,
+      'go-key',
+      OPENCODE_GO_ANTHROPIC_BASE_URL,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.models.map(model => model.id)).toEqual(['qwen3.8-max']);
+    expect(result.models[0]).toMatchObject({
+      name: 'Qwen3.8 Max',
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      apiUrl: OPENCODE_GO_ANTHROPIC_BASE_URL,
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      `${OPENCODE_GO_ANTHROPIC_BASE_URL}/models`,
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'x-api-key': 'go-key',
+          'anthropic-version': '2023-06-01',
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    ['@ai-sdk/openai-compatible', OPENCODE_GO_ANTHROPIC_BASE_URL],
+    ['@ai-sdk/anthropic', OPENCODE_GO_COMPLETIONS_BASE_URL],
+    ['@ai-sdk/openai', OPENCODE_GO_COMPLETIONS_BASE_URL],
+    ['', OPENCODE_GO_COMPLETIONS_BASE_URL],
+  ])('refuses the OpenCode package/destination mismatch %s at %s before fetch', async (npm, url) => {
+    const result = await fetchTemplateModels({ ...openCodeGo(), npm }, 'go-key', url);
+
+    expect(result.models).toEqual([]);
+    expect(result.error).toMatch(/does not support/i);
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it('leaves every other template free to use a caller-supplied base URL', async () => {
