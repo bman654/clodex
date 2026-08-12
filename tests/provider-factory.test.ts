@@ -626,7 +626,11 @@ describe('createLanguageModel', () => {
     vi.doUnmock('@ai-sdk/anthropic');
   });
 
-  it('routes Claude Code Anthropic OAuth through Bearer auth with compatibility headers', async () => {
+  // Supersedes the "compatibility headers" half of this case: the UA/x-app/session
+  // trio simulated a native client clodex has no supported producer for. The
+  // retained property — OAuth uses authToken (Bearer), never apiKey — is asserted
+  // here unchanged, and the removed synthesis is now asserted absent.
+  it('routes Claude Code Anthropic OAuth through Bearer auth with no synthesized identity', async () => {
     const anthropicFactory = vi.fn((modelId: string) => ({ modelId, provider: 'anthropic-oauth' }));
     const createAnthropic = vi.fn(() => anthropicFactory);
     vi.doMock('@ai-sdk/anthropic', () => ({ createAnthropic }));
@@ -637,22 +641,54 @@ describe('createLanguageModel', () => {
       modelId: 'claude-sonnet-4-6',
       apiKey: 'oauth-token',
       authType: 'oauth',
+      // Every tempting label at once: the claude-code provider id, the exact
+      // canonical destination, and a hand-built providerData full of identity.
       providerId: 'claude-code',
+      baseURL: 'https://api.anthropic.com',
       oauthAccountId: '11111111-1111-4111-8111-111111111111',
+      providerData: {
+        cliUserID: 'a'.repeat(64),
+        accountUUID: '11111111-1111-4111-8111-111111111111',
+        nativeClaude: true,
+      },
+    });
+
+    expect(createAnthropic).toHaveBeenCalledWith({ authToken: 'oauth-token' });
+    expect(createAnthropic).not.toHaveBeenCalledWith(
+      expect.objectContaining({ apiKey: 'oauth-token' }),
+    );
+    const [options] = vi.mocked(createAnthropic).mock.calls[0]!;
+    expect(options).not.toHaveProperty('headers');
+    expect(JSON.stringify(options)).not.toContain('claude-cli');
+    // The canonical destination is the SDK default, so no baseURL is forced.
+    expect(options).not.toHaveProperty('baseURL');
+    expect(anthropicFactory).toHaveBeenCalledWith('claude-sonnet-4-6');
+    vi.doUnmock('@ai-sdk/anthropic');
+  });
+
+  it('keeps configured provider headers on an Anthropic OAuth route without synthesis', async () => {
+    const anthropicFactory = vi.fn((modelId: string) => ({ modelId }));
+    const createAnthropic = vi.fn(() => anthropicFactory);
+    vi.doMock('@ai-sdk/anthropic', () => ({ createAnthropic }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/anthropic',
+      modelId: 'claude-sonnet-4-6',
+      apiKey: 'oauth-token',
+      authType: 'oauth',
+      providerId: 'claude-code',
+      headers: { 'Anthropic-Beta': 'alpha-2026-01-01', 'X-Plan': 'coding' },
     });
 
     expect(createAnthropic).toHaveBeenCalledWith({
       authToken: 'oauth-token',
-      headers: expect.objectContaining({
-        'User-Agent': 'claude-cli/2.1.195 (external, cli)',
-        'x-app': 'cli',
-        'X-Claude-Code-Session-Id': expect.any(String),
-      }),
+      headers: { 'Anthropic-Beta': 'alpha-2026-01-01', 'X-Plan': 'coding' },
     });
-    expect(createAnthropic).not.toHaveBeenCalledWith(
-      expect.objectContaining({ apiKey: 'oauth-token' }),
-    );
-    expect(anthropicFactory).toHaveBeenCalledWith('claude-sonnet-4-6');
+    const [options] = vi.mocked(createAnthropic).mock.calls[0]!;
+    for (const name of ['User-Agent', 'x-app', 'X-Claude-Code-Session-Id']) {
+      expect(options!.headers).not.toHaveProperty(name);
+    }
     vi.doUnmock('@ai-sdk/anthropic');
   });
 

@@ -1572,7 +1572,11 @@ describe('anthropic passthrough debug logging', () => {
     expect(log).toContain('rate limit exceeded');
   });
 
-  it('forwards matching Claude Code OAuth session id in body metadata and header', async () => {
+  // Supersedes "forwards matching Claude Code OAuth session id in body metadata
+  // and header". A `claude-code` provider id and a hand-built providerData are
+  // route labels, not credential lineage, so the routed boundary synthesizes no
+  // native-client identity headers for them.
+  it('sends no synthesized native identity headers on an OAuth passthrough', async () => {
     const route: ProxyRoute = {
       aliasId: 'claude-sonnet-4-6',
       realModelId: 'claude-sonnet-4-6',
@@ -1606,9 +1610,13 @@ describe('anthropic passthrough debug logging', () => {
     handle.close();
     const [, init] = vi.mocked(fetch).mock.calls[0]!;
     const headers = init?.headers as Record<string, string>;
-    const body = JSON.parse(String(init?.body)) as { metadata?: { user_id?: string } };
-    const userId = JSON.parse(body.metadata!.user_id!) as { session_id: string };
-    expect(headers['X-Claude-Code-Session-Id']).toBe(userId.session_id);
+    // The OAuth credential scheme is retained; the simulated client is not.
+    expect(headers.Authorization).toBe('Bearer oauth-token');
+    expect(headers).not.toHaveProperty('x-api-key');
+    for (const name of ['User-Agent', 'x-app', 'X-Claude-Code-Session-Id']) {
+      expect(headers).not.toHaveProperty(name);
+    }
+    expect(JSON.stringify(headers)).not.toContain('claude-cli');
   });
 
   it('prepends Claude Code OAuth billing line to upstream system prompt', async () => {

@@ -7,6 +7,10 @@ import {
   makeRouteResolver,
   resolveCatalogModelAliases,
 } from '../src/catalog.js';
+import {
+  classifyAnthropicDestination,
+  resolveNativeIdentitySuppression,
+} from '../src/anthropic-beta-policy.js';
 import * as env from '../src/env.js';
 import { modelAliasTarget } from '../src/model-aliases.js';
 import type { ModelInfo } from '../src/types.js';
@@ -491,5 +495,92 @@ describe('localModelToRoute', () => {
       npm: '@ai-sdk/cerebras',
       upstreamUrl: '',
     });
+  });
+});
+
+describe('negative-only Anthropic destination and identity policy', () => {
+  it('classifies only the exact canonical native origin as canonical', () => {
+    for (const raw of [
+      'https://api.anthropic.com',
+      'https://api.anthropic.com/',
+      'https://api.anthropic.com:443/',
+      'https://API.ANTHROPIC.COM/',
+    ]) {
+      expect(classifyAnthropicDestination(raw)).toEqual({
+        kind: 'canonical-native',
+        normalized: 'https://api.anthropic.com',
+      });
+    }
+  });
+
+  it.each([
+    ['userinfo', 'https://user:pass@api.anthropic.com/', 'userinfo'],
+    ['query', 'https://api.anthropic.com/?x=1', 'query'],
+    ['fragment', 'https://api.anthropic.com/#frag', 'fragment'],
+    ['non-root path', 'https://api.anthropic.com/v1', 'non-root-path'],
+    ['non-default port', 'https://api.anthropic.com:8443/', 'non-default-port'],
+    ['trailing-dot host', 'https://api.anthropic.com./', 'host-mismatch'],
+    ['suffix host alias', 'https://api.anthropic.com.example.test/', 'host-mismatch'],
+    ['subdomain alias', 'https://eu.api.anthropic.com/', 'host-mismatch'],
+    ['bare-domain alias', 'https://anthropic.com/', 'host-mismatch'],
+    ['plaintext scheme', 'http://api.anthropic.com/', 'non-https'],
+    ['malformed', 'not a url', 'malformed'],
+    ['empty', '', 'malformed'],
+  ])('rejects %s', (_label, raw, rejection) => {
+    expect(classifyAnthropicDestination(raw)).toEqual({ kind: 'other', rejection });
+    expect(classifyAnthropicDestination(undefined)).toEqual({ kind: 'other', rejection: 'malformed' });
+  });
+
+  it('suppresses native identity for every destination, canonical included', () => {
+    expect(resolveNativeIdentitySuppression('https://api.anthropic.com'))
+      .toEqual({ reason: 'no-supported-native-credential-producer' });
+    expect(resolveNativeIdentitySuppression('https://gateway.example.test'))
+      .toEqual({ reason: 'destination-not-canonical-native' });
+    expect(resolveNativeIdentitySuppression(undefined))
+      .toEqual({ reason: 'destination-not-canonical-native' });
+  });
+
+  it('produces no provenance field and no synthesis for the most tempting route', () => {
+    // Every label an attacker or a well-meaning refactor might read as lineage:
+    // the claude-code provider id, oauth auth, the exact canonical destination,
+    // and a hand-built providerData carrying plausible identity values.
+    const provider: LocalProvider = {
+      id: 'claude-code',
+      name: 'Claude Code',
+      apiKey: 'oauth-token',
+      authType: 'oauth',
+      providerData: {
+        cliUserID: 'a'.repeat(64),
+        accountUUID: '11111111-1111-4111-8111-111111111111',
+        nativeClaude: true,
+        trusted: 'yes',
+      },
+      models: [{
+        id: 'claude-sonnet-4-6',
+        name: 'Claude Sonnet',
+        family: 'claude',
+        brand: 'Claude',
+        modelFormat: 'anthropic',
+        upstreamModelId: 'claude-sonnet-4-6',
+        baseUrl: 'https://api.anthropic.com',
+      }],
+    };
+    const route = localModelToRoute(provider, provider.models[0]!)!;
+
+    // Route shape gained nothing: no provenance, lineage, or allow-style field.
+    expect(Object.keys(route).filter(key =>
+      /provenance|lineage|native|identity|allow|trusted|beta/i.test(key),
+    )).toEqual([]);
+
+    // And the policy still refuses, for every mutation of the tempting labels.
+    for (const mutated of [
+      route,
+      { ...route, providerId: 'anthropic' },
+      { ...route, authType: 'api' as const },
+      { ...route, providerData: { ...route.providerData, nativeClaude: true } },
+    ]) {
+      expect(resolveNativeIdentitySuppression(mutated.upstreamUrl).reason)
+        .toBe('no-supported-native-credential-producer');
+    }
   });
 });

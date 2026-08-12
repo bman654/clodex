@@ -516,7 +516,6 @@ export async function startProxyCatalog(
         const isOAuth = routeAuthType === 'oauth';
         try {
           await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, false, {
-            inboundBeta,
             authType: routeAuthType,
             log: message => plog(message),
             extraHeaders: route.headers,
@@ -565,10 +564,8 @@ export async function startProxyCatalog(
 
         try {
           await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, clientWantsStream, {
-            inboundBeta: effectiveBeta,
             authType: routeAuthType,
             log: message => plog(message),
-            claudeCodeSessionId,
             extraHeaders: route.headers,
             refreshToken: route.refreshToken,
             onTokenRefreshed: refreshed => { route.apiKey = refreshed; },

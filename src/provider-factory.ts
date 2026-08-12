@@ -9,10 +9,6 @@ import {
   createResponsesWebSocketFetch,
   type ResponsesWebSocketDiagnosticEvent,
 } from './oauth/responses-websocket.js';
-import {
-  CLAUDE_CODE_USER_AGENT,
-  injectClaudeIdentity,
-} from './oauth/claude-identity.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
 import {
   transformOpenAiCompatibleRequestBody,
@@ -105,6 +101,11 @@ export interface ProviderModelSpec {
   /** Registry authentication mode. OpenAI OAuth uses the ChatGPT Codex backend. */
   authType?: 'api' | 'oauth' | 'none';
   oauthAccountId?: string;
+  /**
+   * Stored per-provider registry data. Non-authoritative and deliberately
+   * unread here: it cannot select a destination, an auth scheme, or an
+   * identity, so no value a caller places in it can enable synthesis.
+   */
   providerData?: Record<string, unknown>;
   /** Google Vertex AI — uses Application Default Credentials, not apiKey. */
   vertex?: VertexProviderConfig;
@@ -216,23 +217,12 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
   if (npm === '@ai-sdk/anthropic') {
     const { createAnthropic } = await import('@ai-sdk/anthropic');
     const root = baseURL?.replace(/\/v1\/?$/, '').replace(/\/$/, '');
+    // OAuth keeps its Bearer credential scheme (authToken, never apiKey) and
+    // gains no synthesized native-client identity: a `claude-code` provider id
+    // is a route label, not proof of credential lineage, and clodex has no
+    // supported producer of native Claude credentials for it to stand for.
     const anthropicOptions: Parameters<typeof createAnthropic>[0] = spec.authType === 'oauth'
-      ? {
-          authToken: apiKey,
-          ...(spec.providerId === 'claude-code'
-            ? {
-                headers: {
-                  'User-Agent': CLAUDE_CODE_USER_AGENT,
-                  'x-app': 'cli',
-                  'X-Claude-Code-Session-Id': injectClaudeIdentity(
-                    {},
-                    spec.providerData,
-                    spec.oauthAccountId ?? apiKey,
-                  ).sessionId,
-                },
-              }
-            : {}),
-        }
+      ? { authToken: apiKey }
       : spec.authType === 'none'
         ? { apiKey: '', fetch: fetchWithoutCredentialHeaders }
         : { apiKey };

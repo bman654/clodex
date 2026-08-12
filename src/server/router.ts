@@ -362,10 +362,8 @@ async function handleAnthropicMessages(
 
     plog(() => `anthropic-passthrough → ${messagesUrl} oauth=${isOAuth} stream=${clientWantsStream}`);
     await relayAnthropicMessages(res, messagesUrl, forwardBody, apiKey, clientWantsStream, {
-      inboundBeta: effectiveBeta,
       authType,
       log: message => plog(message),
-      claudeCodeSessionId,
       extraHeaders: model.headers,
       refreshToken,
       onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
@@ -624,7 +622,6 @@ async function handleAnthropicCountTokens(
   const countTokensUrl = `${model.baseUrl}/v1/messages/count_tokens`;
   plog(() => `anthropic-count-tokens → ${countTokensUrl} oauth=${isOAuth}`);
   await relayAnthropicMessages(res, countTokensUrl, forwardBody, apiKey, false, {
-    inboundBeta,
     authType,
     log: message => plog(message),
     extraHeaders: model.headers,
