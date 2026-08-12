@@ -1619,7 +1619,11 @@ describe('anthropic passthrough debug logging', () => {
     expect(JSON.stringify(headers)).not.toContain('claude-cli');
   });
 
-  it('prepends Claude Code OAuth billing line to upstream system prompt', async () => {
+  // Supersedes "prepends Claude Code OAuth billing line to upstream system
+  // prompt". The billing line and the metadata user identity both asserted a
+  // native-client lineage clodex cannot produce; the client's own system prompt
+  // must reach the upstream unmodified instead.
+  it('forwards the client system prompt and body verbatim, with no injected identity', async () => {
     const route: ProxyRoute = {
       aliasId: 'claude-sonnet-4-6',
       realModelId: 'claude-sonnet-4-6',
@@ -1654,9 +1658,14 @@ describe('anthropic passthrough debug logging', () => {
 
     handle.close();
     const [, init] = vi.mocked(fetch).mock.calls[0]!;
-    const body = JSON.parse(String(init?.body)) as { system?: Array<{ type: string; text: string }> };
-    expect(body.system?.[0]?.text).toBe('x-anthropic-billing-header: cc_version=2.1.195.0; cc_entrypoint=cli;');
-    expect(body.system?.[1]?.text).toBe('You are helpful.');
+    const body = JSON.parse(String(init?.body)) as {
+      system?: Array<{ type: string; text: string }>;
+      metadata?: unknown;
+    };
+    expect(body.system).toEqual([{ type: 'text', text: 'You are helpful.' }]);
+    expect(body).not.toHaveProperty('metadata');
+    expect(JSON.stringify(body)).not.toContain('x-anthropic-billing-header');
+    expect(JSON.stringify(body)).not.toContain('cc_entrypoint');
   });
 });
 
@@ -1868,5 +1877,181 @@ describe('OAuth route credential resolution', () => {
     } finally {
       handle.close();
     }
+  });
+});
+
+describe('routed Anthropic beta and identity are negative-only', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  /** POST with caller-chosen client headers, including duplicate anthropic-beta. */
+  function postWithHeaders(
+    port: number,
+    token: string,
+    body: unknown,
+    extraHeaders: Array<[string, string]>,
+    path = '/v1/messages',
+  ): Promise<{ status: number }> {
+    return new Promise((resolve, reject) => {
+      const payload = JSON.stringify(body);
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+            'Content-Length': Buffer.byteLength(payload),
+          },
+        },
+        res => {
+          res.resume();
+          res.on('end', () => resolve({ status: res.statusCode ?? 0 }));
+        },
+      );
+      for (const [name, value] of extraHeaders) req.setHeader(name, value);
+      req.on('error', reject);
+      req.write(payload);
+      req.end();
+    });
+  }
+
+  const anthropicRoute = (over: Partial<ProxyRoute> = {}): ProxyRoute => ({
+    aliasId: 'claude-sonnet-4-6',
+    realModelId: 'claude-sonnet-4-6',
+    displayName: 'Claude Sonnet',
+    upstreamUrl: 'https://api.anthropic.com',
+    apiKey: 'route-key',
+    modelFormat: 'anthropic',
+    providerId: 'claude-code',
+    authType: 'api',
+    ...over,
+  });
+
+  const stubJson = () => vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/json' },
+    text: async () => JSON.stringify({ type: 'message', model: 'claude-sonnet-4-6', content: [] }),
+  }));
+
+  const sentHeaders = () =>
+    (vi.mocked(fetch).mock.calls[0]![1]?.headers ?? {}) as Record<string, string>;
+
+  it.each([
+    ['api key', { authType: 'api' as const }],
+    ['oauth', { authType: 'oauth' as const, apiKey: 'oauth-token' }],
+    ['anonymous', { authType: 'none' as const, apiKey: '' }],
+  ])('drops a duplicated client beta on %s Messages', async (_label, over) => {
+    stubJson();
+    const route = anthropicRoute(over);
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+    await postWithHeaders(
+      handle.port,
+      handle.token,
+      { model: 'claude-sonnet-4-6', max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] },
+      [['anthropic-beta', 'client-alpha,client-beta'], ['Anthropic-Beta', 'client-gamma']],
+    );
+    handle.close();
+
+    const headers = sentHeaders();
+    expect(headers).not.toHaveProperty('anthropic-beta');
+    expect(JSON.stringify(headers)).not.toContain('client-');
+  });
+
+  it.each([
+    ['/v1/messages', 'https://api.anthropic.com/v1/messages'],
+    ['/v1/messages/count_tokens', 'https://api.anthropic.com/v1/messages/count_tokens'],
+  ])('emits only the configured beta on %s', async (path, expectedUrl) => {
+    stubJson();
+    const route = anthropicRoute({
+      authType: 'oauth',
+      apiKey: 'oauth-token',
+      headers: { 'ANTHROPIC-BETA': 'cfg-a , cfg-b', 'anthropic-beta': 'cfg-b', 'X-Plan': 'coding' },
+    });
+    const handle = await startProxyCatalog([route], route.aliasId, false);
+    await postWithHeaders(
+      handle.port,
+      handle.token,
+      { model: 'claude-sonnet-4-6', max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] },
+      [['anthropic-beta', 'client-alpha']],
+      path,
+    );
+    handle.close();
+
+    const [url] = vi.mocked(fetch).mock.calls[0]!;
+    const headers = sentHeaders();
+    // Destination and count routing conserved.
+    expect(url).toBe(expectedUrl);
+    // Configured beta wins outright; the client's never appears.
+    expect(headers['anthropic-beta']).toBe('cfg-a,cfg-b');
+    expect(headers['X-Plan']).toBe('coding');
+    expect(JSON.stringify(headers)).not.toContain('client-alpha');
+    for (const name of ['User-Agent', 'x-app', 'X-Claude-Code-Session-Id']) {
+      expect(headers).not.toHaveProperty(name);
+    }
+  });
+
+  it('keeps the streaming path negative and logs the suppression reason', async () => {
+    const sse = 'event: message_stop\ndata: {"type":"message_stop"}\n\n';
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => 'text/event-stream' },
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(sse));
+          controller.close();
+        },
+      }),
+    }));
+    const route = anthropicRoute({ authType: 'oauth', apiKey: 'oauth-token' });
+    const handle = await startProxyCatalog([route], route.aliasId, true);
+    await postWithHeaders(
+      handle.port,
+      handle.token,
+      {
+        model: 'claude-sonnet-4-6',
+        max_tokens: 10,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      },
+      [['anthropic-beta', 'client-alpha']],
+    );
+    handle.close();
+
+    const headers = sentHeaders();
+    expect(headers.Accept).toBe('text/event-stream');
+    expect(headers).not.toHaveProperty('anthropic-beta');
+    const log = readFileSync(getProxyDebugLogPath(), 'utf8');
+    // The suppression is observable, and it is a reason — never an allow.
+    expect(log).toContain('native-identity=suppressed');
+    expect(log).toContain('no-supported-native-credential-producer');
+  });
+
+  it('reports the destination reason for a non-canonical upstream', async () => {
+    stubJson();
+    const route = anthropicRoute({
+      authType: 'oauth',
+      apiKey: 'oauth-token',
+      upstreamUrl: 'https://gateway.example.test',
+    });
+    const handle = await startProxyCatalog([route], route.aliasId, true);
+    await postWithHeaders(
+      handle.port,
+      handle.token,
+      { model: 'claude-sonnet-4-6', max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] },
+      [],
+    );
+    handle.close();
+
+    const [url] = vi.mocked(fetch).mock.calls[0]!;
+    expect(url).toBe('https://gateway.example.test/v1/messages');
+    expect(readFileSync(getProxyDebugLogPath(), 'utf8'))
+      .toContain('destination-not-canonical-native');
   });
 });

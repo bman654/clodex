@@ -25,6 +25,7 @@ import {
 import { HTTP_PROXY_MODEL_PREFIX, type ResolvedHttpProxyAlias } from './routes.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
+import { ANTHROPIC_BETA_HEADER, normalizeBetaTokens } from '../anthropic-beta-policy.js';
 import { isOpenAiOAuthRoute, oauthServiceTier } from '../sdk-adapter.js';
 import {
   getLatestMessagePreview,
@@ -595,6 +596,14 @@ function forwardToAdapter(
       resolve();
     };
 
+    // The client's beta travels this internal hop as NON-AUTHORITATIVE context,
+    // normalized to one deduped stable-order value so a duplicated or list-form
+    // client header cannot arrive as two case-variant keys. The adapter is the
+    // final routed boundary and recomputes the outbound set from the provider's
+    // configured headers, dropping this one. Client credentials and identity are
+    // never forwarded: the adapter is authenticated by clodex's own loopback
+    // token and nothing else.
+    const clientBeta = normalizeBetaTokens(req.headers['anthropic-beta']);
     upstream = adapterRequest({
       hostname: '127.0.0.1',
       port: adapter.port,
@@ -605,6 +614,7 @@ function forwardToAdapter(
         'Content-Type': 'application/json',
         'Content-Length': String(rawBody.length),
         'x-api-key': adapter.token,
+        ...(clientBeta.length > 0 ? { [ANTHROPIC_BETA_HEADER]: clientBeta.join(',') } : {}),
         ...(typeof req.headers['x-claude-code-session-id'] === 'string'
           ? { 'x-claude-code-session-id': req.headers['x-claude-code-session-id'] }
           : {}),
