@@ -1266,6 +1266,32 @@ describe('patch script identity naming', () => {
     'let e=extra(),t=Object.keys(e).length>0,c=settings.settingsColorEnv,n=Object.keys(c).length>0,',
   );
 
+  // The tolerated run is bounded to `[^;{}]` so it cannot reach out of the `let`
+  // statement it starts in. Widen it to `[\s\S]` and the anchor starts at the
+  // NEAREST preceding function whose head happens to fit, swallowing everything
+  // up to the real builder's tail — so a decoy that opens with the same two
+  // bindings must not be able to steal the match. Without this fixture the only
+  // test that reddens on that mutation is the sha256 transform-source pin, which
+  // is a tripwire, not a behavioural test.
+  const CLAUDE_FIXTURE_DECOY = CLAUDE_FIXTURE_228.replace(
+    'function childEnv(){',
+    'function zzDecoy(){let q=extra(),w=Object.keys(q).length>0,z=w?1:2;return z}'
+    + 'function childEnv(){',
+  );
+
+  it('does not let a preceding decoy with the same opening bindings steal the match', () => {
+    expect(CLAUDE_FIXTURE_DECOY, 'fixture drifted from the shape this test mutates')
+      .not.toBe(CLAUDE_FIXTURE_228);
+
+    const out = runPatchScript(config, CLAUDE_FIXTURE_DECOY);
+
+    expect(out.match(/\/\*ccpatch:child-network-env\*\//g)).toHaveLength(1);
+    expect(out).toContain('function childEnv(){/*ccpatch:child-network-env*/');
+    expect(out, 'the decoy is left exactly as it was').toContain(
+      'function zzDecoy(){let q=extra(),w=Object.keys(q).length>0,z=w?1:2;return z}',
+    );
+  });
+
   it('patches a child builder that declares extra bindings before the remote check', () => {
     expect(CLAUDE_FIXTURE_228, 'fixture drifted from the shape this test mutates')
       .not.toBe(CLAUDE_FIXTURE);

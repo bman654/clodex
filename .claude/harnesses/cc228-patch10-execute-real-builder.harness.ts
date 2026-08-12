@@ -118,6 +118,16 @@ const CONTRACT = JSON.stringify({
   injected: { HTTPS_PROXY: 'http://127.0.0.1:49653', NODE_EXTRA_CA_CERTS: '/home/u/.clodex/ca.pem' },
 });
 
+// Without REVIEW_BUNDLE_DIR the whole suite skips, which is the intended way to
+// run the rest of the folder. But a dir that is SET and holds no 2.1.228 bundle
+// is a mistake — skipping there reports 19 green-looking skips for a proof that
+// never ran.
+describe.runIf(BUNDLE_DIR)('bundle availability', () => {
+  it('finds a 2.1.228 bundle in REVIEW_BUNDLE_DIR', () => {
+    expect(BUNDLE, `no *2.1.228*.js in ${BUNDLE_DIR}`).toBeTruthy();
+  });
+});
+
 describe.skipIf(!pristine)('Claude Code 2.1.228 — the patched builder, executed', () => {
   it('applies every patch site, PATCH 10 included', () => {
     const out = applyClodexPatches(pristine, CONFIG);
