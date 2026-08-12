@@ -1383,6 +1383,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
       console.log(`  ${pc.bold('Provider:')}      ${activeProvider.name}`);
       console.log(`  ${pc.bold('Starting model:')} ${selectedModel.id}`);
       console.log(`  ${pc.bold('Endpoint:')}      ${endpoint}`);
+      console.log(`  Effort policy: ${unsupportedEffortPolicy}`);
       console.log(`  ${pc.bold('/model catalog:')} ${catalogRoutes.length} model(s)`);
       catalogRoutes.forEach(r => console.log(`    ${pc.dim(r.displayName)}`));
       console.log('');
@@ -1437,6 +1438,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     console.log(`  ${pc.bold('Model:')}     ${selectedModel.id}`);
     console.log(`  ${pc.bold('Format:')}    ${selectedModel.modelFormat} (${formatDesc})`);
     console.log(`  ${pc.bold(selectedModel.modelFormat === 'anthropic' ? 'Endpoint:' : 'SDK npm:')} ${endpoint}`);
+    console.log(`  Effort policy: ${unsupportedEffortPolicy}`);
     console.log(`  ${pc.bold('Key:')}       ${activeProvider.name} provider key`);
     console.log('');
     console.log(pc.dim('  (dry run complete — Claude Code was NOT launched)'));
