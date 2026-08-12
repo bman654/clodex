@@ -2355,6 +2355,19 @@ describe('global effort policy at the request boundary', () => {
     expect(upstream.requests[0]!.body.reasoning).toEqual({ summary: 'auto' });
   });
 
+  it('strips blank direct effort spellings while preserving nested reasoning members', async () => {
+    const { server, upstream } = await directServer(undefined);
+    const response = await post(server, {
+      model: 'sparse-model',
+      reasoning_effort: '  ',
+      reasoning: { effort: '\t', summary: 'auto' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests[0]!.body).not.toHaveProperty('reasoning_effort');
+    expect(upstream.requests[0]!.body.reasoning).toEqual({ summary: 'auto' });
+  });
+
   it('never invents a reasoning field on the token-count path', async () => {
     const upstream = await startUpstream({ input_tokens: 42 });
     handles.push(upstream);

@@ -516,12 +516,17 @@ function assertModelSchema(model, index, seen, errors) {
         if (!isPlainObject(variant)) {
           errors.push(`${label}.variants.${name}: expected an object`);
         } else {
-          assertKnownKeys(`${label}.variants.${name}`, variant, SNAPSHOT_VARIANT_KEYS, errors);
-          const hasReasoningEffort = typeof variant.reasoningEffort === 'string'
-            && variant.reasoningEffort.trim() !== '';
-          if (hasReasoningEffort && isPlainObject(variant.thinking)) {
+          const variantWhere = `${label}.variants.${name}`;
+          assertKnownKeys(variantWhere, variant, SNAPSHOT_VARIANT_KEYS, errors);
+          const hasReasoningEffort = Object.hasOwn(variant, 'reasoningEffort');
+          const hasThinking = Object.hasOwn(variant, 'thinking');
+          if (hasReasoningEffort) assertPrintable(`${variantWhere}.reasoningEffort`, variant.reasoningEffort, errors);
+          if (hasThinking && !isPlainObject(variant.thinking)) {
+            errors.push(`${variantWhere}.thinking: expected an object`);
+          }
+          if (hasReasoningEffort && hasThinking) {
             errors.push(
-              `${label}.variants.${name}: reasoningEffort and thinking cannot both be declared`,
+              `${variantWhere}: reasoningEffort and thinking cannot both be declared`,
             );
           }
         }

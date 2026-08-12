@@ -243,6 +243,12 @@ describe('OpenCode Go resolver snapshot generator', () => {
     ['a dual-representation effort variant', (model: ResolvedModel) => {
       model.variants.both = { reasoningEffort: 'high', thinking: { type: 'enabled' } };
     }, /variants\.both: reasoningEffort and thinking cannot both be declared/],
+    ['a dual variant with an unrecognized thinking representation', (model: ResolvedModel) => {
+      model.variants.both = { reasoningEffort: 'high', thinking: 'enabled' };
+    }, /variants\.both\.thinking: expected an object/],
+    ['a dual variant with a blank effort representation', (model: ResolvedModel) => {
+      model.variants.both = { reasoningEffort: ' ', thinking: { type: 'enabled' } };
+    }, /variants\.both\.reasoningEffort: expected a printable non-empty string/],
     ['a duplicate id', (model: ResolvedModel) => { model.id = 'kimi-k3'; model.api.id = 'kimi-k3'; }, /duplicate id kimi-k3/],
   ])('rejects %s at the committed snapshot boundary', (_label, mutate, expected) => {
     const rows = snapshot.models.map(model => structuredClone(model) as ResolvedModel);

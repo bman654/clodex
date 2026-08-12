@@ -317,8 +317,8 @@ describe('SDK and direct paths agree on the wire', () => {
  * that is the deferral, not a defect. Representing a sparse ladder needs a new
  * transform version, which this slice deliberately does not ship.
  *
- * This pins both halves so neither can drift silently: the exposure equals the
- * executable intersection wherever version 6 can express it, and the models it
+ * This pins both halves so neither can drift silently: the exposure stays within
+ * the validated-map levels wherever version 6 can express them, and the models it
  * cannot express are named.
  */
 describe('patched-client exposure stays within transform version 6', () => {
@@ -333,7 +333,7 @@ describe('patched-client exposure stays within transform version 6', () => {
     } as never);
   }
 
-  it('advertises exactly the executable intersection, never more', () => {
+  it('advertises only validated-map levels, never more', () => {
     for (const model of models) {
       const executable = new Set(profileLevels(openCodeGoEffortProfile(model.id)!));
       for (const level of patchCapabilities(model).levels) {

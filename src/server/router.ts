@@ -711,7 +711,7 @@ function applyDirectEffortPolicy(
     profile,
     policy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY,
   );
-  if (resolution === undefined) return body;
+  if (resolution === undefined) return normalized;
   if (resolution.resolved !== undefined) normalized.reasoning_effort = resolution.resolved;
   return normalized;
 }
