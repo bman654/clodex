@@ -140,7 +140,7 @@ describe('opencode-go catalog invariants', () => {
     }
   });
 
-  it('keeps prototype names unmapped while regenerating every reviewed model', () => {
+  it('keeps prototype names unmapped while regenerating every reviewed model under --verify-ladders', () => {
     const mappedIds = [
       'deepseek-v4-flash', 'deepseek-v4-pro', 'glm-5.1', 'glm-5.2', 'gpt-5.6-luna',
       'hy3', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k3', 'mimo-v2.5', 'mimo-v2.5-pro',
@@ -184,7 +184,12 @@ describe('opencode-go catalog invariants', () => {
         join(workspace, 'src', 'data', 'opencode-go-models.ts'),
         "export const OPENCODE_GO_SOURCE_FETCHED_AT = 'before';\n",
       );
+      // The feed is reached only by the explicit advisory mode now that the
+      // default regeneration is offline, so the bootstrap hands the updater the
+      // argv a real `pnpm update:opencode-go -- --verify-ladders` would give it.
+      // Every assertion below is the one this test has always made.
       const childScript = [
+        `process.argv = [process.argv[0], ${JSON.stringify(updaterPath)}, '--verify-ladders'];`,
         'globalThis.fetch = async () => ({',
         '  ok: true,',
         '  json: async () => JSON.parse(process.env.CLODEX_TEST_FEED),',

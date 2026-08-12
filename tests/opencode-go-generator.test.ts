@@ -1,6 +1,10 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import snapshot from '../src/data/opencode-go-cli-snapshot.json';
 // The updater is a maintainer-facing JavaScript entry point, intentionally not
@@ -249,6 +253,117 @@ describe('OpenCode Go resolver snapshot generator', () => {
     })));
     expect(after.map(entry => entry.bytes.toString('hex'))).toEqual(before.map(entry => entry.bytes.toString('hex')));
     expect(after.map(entry => entry.mtimeMs)).toEqual(before.map(entry => entry.mtimeMs));
+  });
+
+  it('regenerates and verifies the committed files with the maintained command, offline', async () => {
+    // The maintained command itself, not an approximation of it: if a flag is
+    // ever added to package.json, the default path this proves stops being the
+    // one a maintainer actually runs.
+    const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+    expect(pkg.scripts['update:opencode-go']).toBe('node scripts/update-opencode-go-models.mjs');
+    const [node, ...scriptArgs] = pkg.scripts['update:opencode-go'].split(' ');
+    expect(node).toBe('node');
+    const commandArgv = [resolve(scriptArgs[0]!), ...scriptArgs.slice(1)];
+
+    const committedCatalog = await readFile(CATALOG_PATH);
+    const committedConstants = await readFile(CONSTANTS_PATH);
+    const workspace = mkdtempSync(join(tmpdir(), 'clodex-opencode-go-offline-'));
+    try {
+      mkdirSync(join(workspace, 'src', 'data'), { recursive: true });
+      // Seeded with the committed provenance module, because regeneration
+      // rewrites it in place — reproducing it byte for byte is the proof that
+      // nothing on the write path reads a clock or the network.
+      copyFileSync(CONSTANTS_PATH, join(workspace, 'src', 'data', 'opencode-go-models.ts'));
+      const noNetwork = join(workspace, 'no-network.mjs');
+      writeFileSync(
+        noNetwork,
+        "globalThis.fetch = () => { throw new Error('this mode must not reach the network'); };\n",
+      );
+      const preload = ['--import', pathToFileURL(noNetwork).href];
+
+      const regenerated = spawnSync(process.execPath, [...preload, ...commandArgv], {
+        cwd: workspace,
+        encoding: 'utf8',
+      });
+      expect(regenerated.error).toBeUndefined();
+      expect(regenerated.status, regenerated.stderr).toBe(0);
+      expect(regenerated.stdout).toContain('committed resolver snapshot');
+      expect(regenerated.stdout).toContain('Effort ladders not cross-checked');
+
+      const catalogPath = join(workspace, 'src', 'data', 'opencode-go-models.json');
+      const constantsPath = join(workspace, 'src', 'data', 'opencode-go-models.ts');
+      expect(await readFile(catalogPath)).toEqual(committedCatalog);
+      expect(await readFile(constantsPath)).toEqual(committedConstants);
+
+      // ...and the offline verifier agrees, from a cwd that is not the repo.
+      const before = [catalogPath, constantsPath].map(path => stat(path));
+      const beforeMtimes = (await Promise.all(before)).map(entry => entry.mtimeMs);
+      const checked = spawnSync(process.execPath, [...preload, ...commandArgv, '--check'], {
+        cwd: workspace,
+        encoding: 'utf8',
+      });
+      expect(checked.status, checked.stderr).toBe(0);
+      expect(checked.stdout).toContain('matches the committed resolver snapshot');
+      const afterMtimes = await Promise.all(
+        [catalogPath, constantsPath].map(async path => (await stat(path)).mtimeMs),
+      );
+      expect(afterMtimes).toEqual(beforeMtimes);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    [
+      'the feed is unreachable',
+      () => {
+        throw new Error('models.dev is down');
+      },
+      /models\.dev is down/,
+    ],
+    [
+      'the feed has dropped a model this catalog still routes',
+      async () => ({ ok: true, json: async () => ({ 'opencode-go': { models: { 'kimi-k3': {} } } }) }),
+      /Transport-mapped models missing from models\.dev: /,
+    ],
+    [
+      'the feed publishes a narrower ladder than a local map sends',
+      async () => ({
+        ok: true,
+        json: async () => ({
+          'opencode-go': {
+            models: Object.fromEntries(REVIEWED_IDS.map(id => [id, {
+              reasoning_options: [{ type: 'effort', values: ['low'] }],
+            }])),
+          },
+        }),
+      }),
+      /models\.dev does not publish/,
+    ],
+  ])('--verify-ladders fails before any write when %s', async (_label, stub, expected) => {
+    const before = await Promise.all([CATALOG_PATH, CONSTANTS_PATH].map(async path => ({
+      bytes: await readFile(path),
+      mtimeMs: (await stat(path)).mtimeMs,
+    })));
+    vi.stubGlobal('fetch', vi.fn(stub));
+
+    await expect(run(['--verify-ladders'])).rejects.toThrow(expected);
+
+    const after = await Promise.all([CATALOG_PATH, CONSTANTS_PATH].map(async path => ({
+      bytes: await readFile(path),
+      mtimeMs: (await stat(path)).mtimeMs,
+    })));
+    expect(after).toEqual(before);
+  });
+
+  it('refuses to combine the offline verifier with the networked one', async () => {
+    const fetchSpy = vi.fn(() => {
+      throw new Error('mode validation must fail before any fetch');
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    await expect(run(['--check', '--verify-ladders'])).rejects.toThrow(/pick one/);
+    await expect(run(['--', '--check', '--verify-ladders'])).rejects.toThrow(/pick one/);
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it('rejects an unknown flag instead of falling through to a live refresh', async () => {
