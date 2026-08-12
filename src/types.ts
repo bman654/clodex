@@ -1,6 +1,7 @@
 // src/types.ts
 
 import type { FreeStatus } from './free-models.js';
+import type { EffortProfile, UnsupportedEffortPolicy } from './effort-policy.js';
 import type { ModelRuntimeCompatibility } from './model-runtime-compatibility.js';
 
 export type ModelFormat = 'anthropic' | 'openai' | 'unsupported';
@@ -47,6 +48,12 @@ export interface LocalProviderModel {
   modalities?: ('text' | 'image')[];
   /** Provider-neutral per-model wire quirks. */
   compatibility?: ModelRuntimeCompatibility;
+  /**
+   * Runtime-only: the reviewed effort levels this model can actually run.
+   * Attached from the generated authority after retained-identity projection,
+   * never read from or written to a persisted model cache.
+   */
+  effortProfile?: EffortProfile;
 }
 
 export interface LocalProvider {
@@ -88,6 +95,8 @@ export interface UserPreferences {
   appPathOverrides?: Record<string, string>;
   /** Explicit opt-in to execute ~/.clodex/local-patches.mjs during patch runs. */
   localPatchesEnabled?: boolean;
+  /** Global behavior for an explicit effort the target model does not support. */
+  effortPolicy?: UnsupportedEffortPolicy;
   recentLaunchFolders?: string[];
   server?: {
     savedPassword?: string;
@@ -143,6 +152,8 @@ export interface ParsedArgs {
   favoritesAlias?: string;
   /** Remove a saved short proxy-mode model alias. */
   favoritesUnalias?: string;
+  /** Persist the global behavior for an unsupported explicit effort. */
+  effortPolicy?: UnsupportedEffortPolicy;
   /** clodex patch: restore the pristine Claude Code binary. */
   patchRestore?: boolean;
   /** clodex patch: persistently enable or disable local patch execution. */

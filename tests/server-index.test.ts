@@ -203,6 +203,8 @@ describe('runServerCommand', () => {
       port: 17645,
       apiKey: 'registry-local',
       serverPassword: null,
+      // A running server keeps the policy snapshot it launched with.
+      effortPolicy: 'provider-default',
     });
     expect(state.close).toHaveBeenCalledOnce();
     expect(discovery.register).toHaveBeenCalledWith(expect.objectContaining({
@@ -486,5 +488,58 @@ describe('formatModelCatalogLines', () => {
     expect(lines.some(line => line.includes('#') && line.includes('Model') && line.includes('Anthropic ID') && line.includes('OpenAI ID'))).toBe(true);
     expect(lines.some(line => line.includes('DeepSeek V4 Flash') && line.includes('anthropic-go__deepseek-v4-flash') && line.includes('deepseek-v4-flash'))).toBe(true);
     expect(lines.filter(line => line.includes('DeepSeek V4 Flash'))).toHaveLength(1);
+  });
+});
+
+describe('enrichServerModelReasoning', () => {
+  const base = {
+    id: 'kimi-k3',
+    name: 'Kimi K3',
+    isFree: false,
+    brand: 'Moonshot',
+    sourceBackend: 'opencode-go',
+    modelFormat: 'openai' as const,
+    npm: '@ai-sdk/openai-compatible',
+    providerId: 'opencode-go',
+    compatibility: {
+      reasoningEffortMap: {
+        off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, max: 'max',
+      },
+    },
+  } satisfies ServerModelInfo;
+
+  it('invents a default only for models that declare none', async () => {
+    const { enrichServerModelReasoning } = await import('../src/server/index.js');
+    // No reviewed profile: the historical heuristic still picks a level, which
+    // is what keeps every ordinary provider on its current behavior.
+    expect(enrichServerModelReasoning(base).defaultEffort).toBe('max');
+  });
+
+  it('honours an explicit "no default" instead of injecting one', async () => {
+    const { enrichServerModelReasoning } = await import('../src/server/index.js');
+    const enriched = enrichServerModelReasoning({
+      ...base,
+      effortProfile: {
+        modelId: 'kimi-k3',
+        transport: 'openai-completions',
+        defaultLevel: null,
+        levels: [{ level: 'max', native: { kind: 'reasoning-effort', value: 'max' } }],
+      },
+    });
+    expect(enriched.defaultEffort).toBeUndefined();
+  });
+
+  it('uses a declared default when the profile states one', async () => {
+    const { enrichServerModelReasoning } = await import('../src/server/index.js');
+    const enriched = enrichServerModelReasoning({
+      ...base,
+      effortProfile: {
+        modelId: 'kimi-k3',
+        transport: 'openai-completions',
+        defaultLevel: 'max',
+        levels: [{ level: 'max', native: { kind: 'reasoning-effort', value: 'max' } }],
+      },
+    });
+    expect(enriched.defaultEffort).toBe('max');
   });
 });

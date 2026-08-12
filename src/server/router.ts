@@ -69,6 +69,13 @@ import {
 } from '../model-aliases.js';
 import { routeUnavailableMessage } from '../route-unavailable.js';
 import { transformOpenAiCompatibleRequestBody } from '../model-runtime-compatibility.js';
+import {
+  DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+  EffortResolutionError,
+  nativeEffortLevel,
+  resolveRequestEffort,
+  type UnsupportedEffortPolicy,
+} from '../effort-policy.js';
 
 export interface ServerOptions {
   host: string;
@@ -92,6 +99,8 @@ export interface ServerOptions {
   inferenceLogPath?: string;
   /** Opt-in request-envelope and WebSocket head-decision diagnostics. */
   webSocketDiagnosticsLogPath?: string;
+  /** Global behavior for an explicit effort the target model cannot run. */
+  effortPolicy?: UnsupportedEffortPolicy;
 }
 
 export interface ServerHandle {
@@ -430,6 +439,7 @@ async function handleAnthropicMessages(
       defaultEffort: anthropicEffortFromRequest(body as AnthropicRequest) ? undefined : model.defaultEffort,
       openAiOAuth,
       claudeSessionId,
+      effortPolicy: options.effortPolicy,
       reasoningMetadata: {
         providerId: model.providerId,
         apiBaseUrl: model.apiBaseUrl,
@@ -437,6 +447,7 @@ async function handleAnthropicMessages(
         reasoning: model.reasoning,
         interleavedReasoningField: model.interleavedReasoningField,
         compatibility: model.compatibility,
+        effortProfile: model.effortProfile,
         upstreamModelId: upstreamModelId(model),
       },
       maxTools: npmMaxTools,
@@ -653,6 +664,45 @@ async function handleAnthropicCountTokens(
   });
 }
 
+/**
+ * Apply the global effort policy to a body about to be forwarded directly.
+ *
+ * Two spellings can arrive here. A client speaking clodex's global vocabulary
+ * gets its level resolved against the model's executable ladder and rewritten to
+ * the resolved level, which the reviewed wire map then translates exactly as it
+ * does on the SDK path. A client that already wrote the upstream's own value is
+ * left alone: the generator guarantees a one-to-one mapping, so recognising that
+ * value is unambiguous, and re-resolving it would translate the request twice.
+ */
+function applyDirectEffortPolicy(
+  body: JsonBody,
+  model: ServerModelInfo,
+  policy: UnsupportedEffortPolicy | undefined,
+): JsonBody {
+  const profile = model.effortProfile;
+  if (!profile) return body;
+  const requested = openAiEffort(body);
+  if (requested !== undefined && nativeEffortLevel(profile, requested) !== undefined) return body;
+
+  const resolution = resolveRequestEffort(
+    requested,
+    profile,
+    policy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+  );
+  if (resolution === undefined) return body;
+  const next: JsonBody = { ...body };
+  // `reasoning.effort` is the other accepted spelling; both are dropped so the
+  // resolved decision cannot be contradicted by a leftover field.
+  delete next.reasoning_effort;
+  if (next.reasoning && typeof next.reasoning === 'object' && !Array.isArray(next.reasoning)) {
+    const { effort: _effort, ...rest } = next.reasoning as Record<string, unknown>;
+    if (Object.keys(rest).length > 0) next.reasoning = rest;
+    else delete next.reasoning;
+  }
+  if (resolution.resolved !== undefined) next.reasoning_effort = resolution.resolved;
+  return next;
+}
+
 async function handleOpenAIChatCompletions(
   req: IncomingMessage,
   res: ServerResponse,
@@ -688,11 +738,22 @@ async function handleOpenAIChatCompletions(
       });
       return;
     }
+    // Resolve the global effort at this boundary, then let the SAME wire map the
+    // SDK path uses do the translation. Both paths therefore reach the upstream
+    // with identical bytes for the same requested level.
+    let policyBody: JsonBody;
+    try {
+      policyBody = applyDirectEffortPolicy(body, model, options.effortPolicy);
+    } catch (err) {
+      if (!(err instanceof EffortResolutionError)) throw err;
+      sendJson(res, err.statusCode, { error: { message: err.message } });
+      return;
+    }
     // The client may have addressed the model via a gateway alias or saved
     // short alias — the upstream API only knows its own wire id.
     const compatibleBody = model.compatibility
-      ? transformOpenAiCompatibleRequestBody(body, model.compatibility)
-      : body;
+      ? transformOpenAiCompatibleRequestBody(policyBody, model.compatibility)
+      : policyBody;
     const forwardBody = compatibleBody.model === upstreamModelId(model)
       ? compatibleBody
       : { ...compatibleBody, model: upstreamModelId(model) };

@@ -195,6 +195,14 @@ describe('parseArgs', () => {
       favoritesAlias: 'sol=clodex:openai-oauth:gpt-5.6-sol',
     });
     expect(parseArgs(['models', '--unalias', 'sol'])).toMatchObject({ favoritesUnalias: 'sol' });
+    expect(parseArgs(['models', '--effort-policy', 'up'])).toMatchObject({ effortPolicy: 'up' });
+    expect(parseArgs(['models', '--effort-policy=exact'])).toMatchObject({ effortPolicy: 'exact' });
+    expect(parseArgs(['models', '--effort-policy', 'nearest']).error)
+      .toBe('--effort-policy must be one of: provider-default, up, down, exact');
+    // Saving a policy is not a favorites edit, and combining the two would make
+    // the success message describe only one of them.
+    expect(parseArgs(['models', '--effort-policy', 'up', '--list']).error)
+      .toBe('--effort-policy cannot be combined with --list, --alias, or --unalias');
     expect(parseArgs(['models', '--agy'])).toMatchObject({ error: 'Unknown models option: --agy' });
   });
 
@@ -417,6 +425,8 @@ describe('main dispatch', () => {
         compatibility,
       }),
       'opencode-api-key',
+      // Every routed launch carries the startup effort-policy snapshot.
+      'provider-default',
     );
     expect(launchClaude).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -521,6 +531,7 @@ describe('main dispatch', () => {
         headers: { 'Anthropic-Beta': 'cfg-a', 'X-Plan': 'coding' },
       }),
       'anthropic-api-key',
+      'provider-default',
     );
     const [childEnv] = vi.mocked(launchClaude).mock.calls[0]!;
     expect(childEnv).toMatchObject({

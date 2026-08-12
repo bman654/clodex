@@ -24,6 +24,7 @@ import {
 } from '../outbound-proxy.js';
 import { HTTP_PROXY_MODEL_PREFIX, type ResolvedHttpProxyAlias } from './routes.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
+import type { UnsupportedEffortPolicy } from '../effort-policy.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
 import { ANTHROPIC_BETA_HEADER, normalizeBetaTokens } from '../anthropic-beta-policy.js';
 import { isOpenAiOAuthRoute, oauthServiceTier } from '../sdk-adapter.js';
@@ -170,6 +171,8 @@ export interface HttpProxyOptions {
   inferenceLogPath?: string;
   /** Opt-in request-envelope and WebSocket head-decision diagnostics. */
   webSocketDiagnosticsLogPath?: string;
+  /** Global behavior for an explicit effort the target model cannot run. */
+  effortPolicy?: UnsupportedEffortPolicy;
   /** Test hook; production always uses https://api.anthropic.com. */
   anthropicOrigin?: string;
   /** Test hook for a local self-signed Anthropic origin. */
@@ -767,6 +770,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       options.debugLogPath,
       options.webSocketDiagnosticsLogPath,
       options.modelAliases,
+      options.effortPolicy,
     );
   }
   const adapterAgent = adapter ? new http.Agent({ keepAlive: true }) : undefined;

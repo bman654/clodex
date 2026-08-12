@@ -1378,3 +1378,84 @@ describe('translateRequest openai promptCacheKey', () => {
     expect(keyOf(req(), '@ai-sdk/xai')).toBeUndefined();
   });
 });
+
+describe('translateRequest global effort policy', () => {
+  const compatibility = {
+    reasoningEffortMap: { minimal: null, low: null, medium: null, high: 'high', max: 'max' },
+  };
+  const effortProfile = {
+    modelId: 'sparse-model',
+    transport: 'openai-completions',
+    defaultLevel: null,
+    levels: [
+      { level: 'high' as const, native: { kind: 'reasoning-effort' as const, value: 'high' } },
+      { level: 'max' as const, native: { kind: 'reasoning-effort' as const, value: 'max' } },
+    ],
+  };
+
+  function translate(
+    effort: string | undefined,
+    options: Record<string, unknown> = {},
+    metadata: Record<string, unknown> = {},
+  ) {
+    return translateRequest({
+      model: 'sparse-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      ...(effort === undefined ? {} : { output_config: { effort } }),
+    }, '@ai-sdk/openai-compatible', {
+      reasoningMetadata: {
+        providerId: 'opencode-go',
+        compatibility,
+        effortProfile,
+        upstreamModelId: 'sparse-model',
+        ...metadata,
+      },
+      ...options,
+    } as never);
+  }
+
+  it('sends a supported level through the reviewed wire map unchanged', () => {
+    expect(translate('max').providerOptions?.opencodeGo).toEqual({ reasoningEffort: 'max' });
+  });
+
+  it('sends no effort for an unsupported level by default', () => {
+    expect(translate('low').providerOptions?.opencodeGo).toBeUndefined();
+  });
+
+  it('rounds an unsupported level onto the ladder when the policy says so', () => {
+    expect(translate('low', { effortPolicy: 'up' }).providerOptions?.opencodeGo)
+      .toEqual({ reasoningEffort: 'high' });
+    expect(translate('xhigh', { effortPolicy: 'down' }).providerOptions?.opencodeGo)
+      .toEqual({ reasoningEffort: 'high' });
+  });
+
+  it('refuses an unsupported level under exact', () => {
+    expect(() => translate('low', { effortPolicy: 'exact' }))
+      .toThrow(/Effort "low" is not supported by sparse-model/);
+  });
+
+  it('injects nothing when the client omits effort and no default is declared', () => {
+    expect(translate(undefined).providerOptions?.opencodeGo).toBeUndefined();
+  });
+
+  it('ignores a caller fallback the profile cannot run rather than substituting', () => {
+    expect(translate(undefined, { defaultEffort: 'low' }).providerOptions?.opencodeGo)
+      .toBeUndefined();
+  });
+
+  it('leaves a model without a reviewed profile on its existing behavior', () => {
+    const params = translateRequest({
+      model: 'sparse-model',
+      messages: [{ role: 'user', content: 'hi' }],
+      output_config: { effort: 'max' },
+    }, '@ai-sdk/openai-compatible', {
+      effortPolicy: 'exact',
+      reasoningMetadata: {
+        providerId: 'opencode-go',
+        compatibility,
+        upstreamModelId: 'sparse-model',
+      },
+    } as never);
+    expect(params.providerOptions?.opencodeGo).toEqual({ reasoningEffort: 'max' });
+  });
+});

@@ -15,6 +15,7 @@ import {
   retainedOpenCodeGoTemplate,
 } from './resolve-template.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
+import { openCodeGoEffortProfile } from '../data/opencode-go-effort-profiles.js';
 import { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
 
 export { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
@@ -89,8 +90,8 @@ export function cachedModelToLocal(
   const endpoint = resolveEndpoint(npm, apiUrl);
   if (endpoint === null) return null;
 
-  const ignoreModelsDevCapabilities = isRetainedOpenCodeGoProvider(provider);
-  const modelsDev = ignoreModelsDevCapabilities ? null : findModelsDevModel(provider.id, cached.id);
+  const retainedOpenCodeGo = isRetainedOpenCodeGoProvider(provider);
+  const modelsDev = retainedOpenCodeGo ? null : findModelsDevModel(provider.id, cached.id);
   const { id, upstreamModelId } = normalizeGoogleModelId(cached.id, npm);
   const normalizedUpstream = normalizeGoogleModelId(cached.upstreamModelId ?? cached.id, npm).upstreamModelId;
   const family = npm === '@ai-sdk/google' ? (id.split(/[-/:]/)[0] ?? id) : (cached.family ?? '');
@@ -113,11 +114,16 @@ export function cachedModelToLocal(
     supportedParameters: cached.supportedParameters,
     reasoning: cached.reasoning ?? modelsDev?.reasoning,
     interleavedReasoningField: cached.interleavedReasoningField ?? modelsDev?.interleaved?.field,
-    ignoreModelsDevCapabilities: ignoreModelsDevCapabilities || undefined,
+    ignoreModelsDevCapabilities: retainedOpenCodeGo || undefined,
     useResponsesLite: cached.useResponsesLite,
     preferWebSockets: cached.preferWebSockets,
     modalities: cached.modalities,
     compatibility: cached.compatibility,
+    // Attached from the generated authority by retained IDENTITY, after the
+    // template projection above has already decided which rows this provider
+    // really owns. Deriving it from the persisted cache row instead would let a
+    // stale or hand-edited cache state what a model's effort control is.
+    effortProfile: retainedOpenCodeGo ? openCodeGoEffortProfile(id) : undefined,
   };
 }
 

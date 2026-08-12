@@ -2115,3 +2115,177 @@ describe('endpoint-mode Anthropic beta and identity are negative-only', () => {
     }
   });
 });
+
+describe('global effort policy at the request boundary', () => {
+  /** deepseek-v4-flash's real reviewed shape: two rungs, nothing below `high`. */
+  const SPARSE_COMPATIBILITY = {
+    reasoningEffortMap: { minimal: null, low: null, medium: null, high: 'high', max: 'max' },
+  } as const;
+  const SPARSE_PROFILE = {
+    modelId: 'sparse-model',
+    transport: 'openai-completions',
+    defaultLevel: null,
+    levels: [
+      { level: 'high' as const, native: { kind: 'reasoning-effort' as const, value: 'high' } },
+      { level: 'max' as const, native: { kind: 'reasoning-effort' as const, value: 'max' } },
+    ],
+  };
+  /** gpt-5.6-luna's real shape: `off` leaves as the native spelling `none`. */
+  const RENAMING_COMPATIBILITY = {
+    reasoningEffortMap: {
+      off: 'none', minimal: null, low: 'low', medium: 'medium',
+      high: 'high', xhigh: 'xhigh', max: 'max',
+    },
+  } as const;
+  const RENAMING_PROFILE = {
+    modelId: 'renaming-model',
+    transport: 'openai-completions',
+    defaultLevel: null,
+    levels: [
+      { level: 'off' as const, native: { kind: 'reasoning-effort' as const, value: 'none' } },
+      { level: 'low' as const, native: { kind: 'reasoning-effort' as const, value: 'low' } },
+      { level: 'high' as const, native: { kind: 'reasoning-effort' as const, value: 'high' } },
+    ],
+  };
+
+  async function directServer(
+    effortPolicy: 'provider-default' | 'up' | 'down' | 'exact' | undefined,
+  ) {
+    const upstream = await startUpstream({
+      id: 'chatcmpl-effort',
+      choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      effortPolicy,
+      catalog: createGatewayModelCatalog([
+        {
+          ...model('sparse-model', 'openai', 'go', {
+            completionsUrl: `${upstream.baseUrl}/v1/chat/completions`,
+          }),
+          compatibility: SPARSE_COMPATIBILITY,
+          effortProfile: SPARSE_PROFILE,
+        },
+        {
+          ...model('renaming-model', 'openai', 'go', {
+            completionsUrl: `${upstream.baseUrl}/v1/chat/completions`,
+          }),
+          compatibility: RENAMING_COMPATIBILITY,
+          effortProfile: RENAMING_PROFILE,
+        },
+        {
+          // Same wire map, no reviewed profile: the policy must not touch it.
+          ...model('unprofiled-model', 'openai', 'go', {
+            completionsUrl: `${upstream.baseUrl}/v1/chat/completions`,
+          }),
+          compatibility: SPARSE_COMPATIBILITY,
+        },
+      ]),
+    });
+    return { server, upstream };
+  }
+
+  async function post(server: ServerHandle, body: Record<string, unknown>) {
+    return fetch(`${server.url}/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }], ...body }),
+    });
+  }
+
+  it('omits an unsupported effort by default and lets the provider decide', async () => {
+    const { server, upstream } = await directServer(undefined);
+    expect((await post(server, { model: 'sparse-model', reasoning_effort: 'low' })).status).toBe(200);
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0]!.body).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('rounds an unsupported effort onto the ladder when asked to', async () => {
+    const { server, upstream } = await directServer('up');
+    expect((await post(server, { model: 'sparse-model', reasoning_effort: 'low' })).status).toBe(200);
+    expect(upstream.requests[0]!.body.reasoning_effort).toBe('high');
+
+    const down = await directServer('down');
+    expect((await post(down.server, { model: 'sparse-model', reasoning_effort: 'xhigh' })).status).toBe(200);
+    expect(down.upstream.requests[0]!.body.reasoning_effort).toBe('high');
+  });
+
+  it('refuses an unsupported effort under exact without reaching the upstream', async () => {
+    const { server, upstream } = await directServer('exact');
+    const response = await post(server, { model: 'sparse-model', reasoning_effort: 'low' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      error: {
+        message: 'Effort "low" is not supported by sparse-model. Supported levels: high, max.',
+      },
+    });
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it('sends the native spelling for a supported level', async () => {
+    const { server, upstream } = await directServer('provider-default');
+    expect((await post(server, { model: 'renaming-model', reasoning_effort: 'off' })).status).toBe(200);
+    expect(upstream.requests[0]!.body.reasoning_effort).toBe('none');
+  });
+
+  it('forwards an already-native value untouched instead of translating it twice', async () => {
+    // `none` is what the upstream expects and is ALSO a global level name. A
+    // client that already wrote the native value must reach the upstream with
+    // it, not have it re-resolved into something else.
+    const { server, upstream } = await directServer('up');
+    expect((await post(server, { model: 'renaming-model', reasoning_effort: 'none' })).status).toBe(200);
+    expect(upstream.requests[0]!.body.reasoning_effort).toBe('none');
+  });
+
+  it('leaves a model without a reviewed profile on its existing behavior', async () => {
+    // Same map, no profile: `low` is dropped by the wire map exactly as before,
+    // and `up` does not round it, because there is nothing to round against.
+    const { server, upstream } = await directServer('up');
+    expect((await post(server, { model: 'unprofiled-model', reasoning_effort: 'low' })).status).toBe(200);
+    expect(upstream.requests[0]!.body).not.toHaveProperty('reasoning_effort');
+  });
+
+  it('reads the other accepted spelling and never leaves both fields set', async () => {
+    const { server, upstream } = await directServer('up');
+    const response = await post(server, {
+      model: 'sparse-model',
+      reasoning: { effort: 'low', summary: 'auto' },
+    });
+    expect(response.status).toBe(200);
+    expect(upstream.requests[0]!.body.reasoning_effort).toBe('high');
+    expect(upstream.requests[0]!.body.reasoning).toEqual({ summary: 'auto' });
+  });
+
+  it('never invents a reasoning field on the token-count path', async () => {
+    const upstream = await startUpstream({ input_tokens: 42 });
+    handles.push(upstream);
+    const server = await startTestServer({
+      effortPolicy: 'up',
+      catalog: createGatewayModelCatalog([{
+        ...model('counting-model', 'anthropic', 'zen', { baseUrl: upstream.baseUrl }),
+        // A route with no clodex-operable effort control, which is exactly the
+        // shape every Anthropic-format OpenCode Go entry has.
+        effortProfile: { ...SPARSE_PROFILE, modelId: 'counting-model', levels: [] },
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'counting-model',
+        messages: [{ role: 'user', content: 'hi' }],
+        output_config: { effort: 'low' },
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests).toHaveLength(1);
+    const body = upstream.requests[0]!.body;
+    expect(body).not.toHaveProperty('reasoning_effort');
+    expect(body).not.toHaveProperty('thinking');
+    // The count sizes the request the client actually intends to send, so its
+    // own effort field travels unchanged.
+    expect(body.output_config).toEqual({ effort: 'low' });
+  });
+});

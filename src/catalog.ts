@@ -56,6 +56,7 @@ export function localModelToRoute(lp: LocalProvider, model: LocalProviderModel):
     useResponsesLite: model.useResponsesLite,
     preferWebSockets: model.preferWebSockets,
     compatibility: model.compatibility,
+    effortProfile: model.effortProfile,
   };
 }
 

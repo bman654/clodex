@@ -64,6 +64,7 @@ import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-webso
 import { resolveContextWindow } from './context-window.js';
 import { listenTcpServer } from './listener-ready.js';
 import type { ModelRuntimeCompatibility } from './model-runtime-compatibility.js';
+import type { EffortProfile, UnsupportedEffortPolicy } from './effort-policy.js';
 
 type ProxyLog = (message: string | (() => string)) => void;
 
@@ -257,6 +258,8 @@ export interface ProxyRoute {
   preferWebSockets?: boolean;
   /** Provider-neutral per-model wire quirks. */
   compatibility?: ModelRuntimeCompatibility;
+  /** Runtime-only: the reviewed effort levels this model can actually run. */
+  effortProfile?: EffortProfile;
   /** Static headers sent on every upstream request (e.g. a plan/auth-tracking header a custom endpoint requires). */
   headers?: Record<string, string>;
 }
@@ -306,6 +309,7 @@ export async function startProxyCatalog(
   debugLogPath?: string,
   webSocketDiagnosticsLogPath?: string,
   modelAliases?: ProxyModelAlias[],
+  effortPolicy?: UnsupportedEffortPolicy,
 ): Promise<ProxyHandle> {
   const proxyToken = randomUUID();
   silenceSdkWarnings();
@@ -641,6 +645,7 @@ export async function startProxyCatalog(
             openAiOAuth,
             claudeSessionId,
             maxTools: maxToolsForNpm(route.npm),
+            effortPolicy,
             reasoningMetadata: {
               providerId: route.providerId,
               apiBaseUrl: route.baseURL,
@@ -648,6 +653,7 @@ export async function startProxyCatalog(
               reasoning: route.reasoning,
               interleavedReasoningField: route.interleavedReasoningField,
               compatibility: route.compatibility,
+              effortProfile: route.effortProfile,
               upstreamModelId: route.realModelId,
             },
           });
@@ -899,9 +905,11 @@ export function startProxy(
     useResponsesLite?: boolean;
     preferWebSockets?: boolean;
     compatibility?: ModelRuntimeCompatibility;
+    effortProfile?: EffortProfile;
     headers?: Record<string, string>;
   },
   apiKey?: string,
+  effortPolicy?: UnsupportedEffortPolicy,
 ): Promise<ProxyHandle> {
   const bareModelId = stripOneMContextSuffix(modelId);
   const clientModelId = claudeCodeClientModelId(modelId, contextWindow);
@@ -925,6 +933,7 @@ export function startProxy(
     useResponsesLite: sdk?.useResponsesLite,
     preferWebSockets: sdk?.preferWebSockets,
     compatibility: sdk?.compatibility,
+    effortProfile: sdk?.effortProfile,
     headers: sdk?.headers,
-  }], clientModelId, debug);
+  }], clientModelId, debug, undefined, undefined, undefined, undefined, effortPolicy);
 }

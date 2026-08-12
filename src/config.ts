@@ -1,6 +1,10 @@
 import type { UserPreferences } from './types.js';
 import { randomUUID } from 'node:crypto';
 import { readFileSync, renameSync, unlinkSync } from 'node:fs';
+import {
+  DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+  isUnsupportedEffortPolicy,
+} from './effort-policy.js';
 import { getConfigPath } from './paths.js';
 import { syncParentDirectory, writeSecureFile } from './registry/io.js';
 import {
@@ -72,6 +76,13 @@ async function updateConfigAsync<T>(
 
 export function loadPreferences(): UserPreferences {
   const config = readConfig();
+  // A config file carrying an unknown or hand-edited policy resolves to the
+  // default rather than reaching a request path: the value only ever chooses
+  // among four behaviors, and an unrecognized one has no safe interpretation.
+  const effortPolicy = typeof config.effortPolicy === 'string'
+    && isUnsupportedEffortPolicy(config.effortPolicy)
+    ? config.effortPolicy
+    : DEFAULT_UNSUPPORTED_EFFORT_POLICY;
   return {
     lastModel: config.lastModel,
     lastProvider: config.lastProvider,
@@ -82,12 +93,13 @@ export function loadPreferences(): UserPreferences {
     serverBridgeMode: config.serverBridgeMode,
     appPathOverrides: config.appPathOverrides,
     localPatchesEnabled: config.localPatchesEnabled,
+    effortPolicy,
     recentLaunchFolders: config.recentLaunchFolders,
     server: config.server,
   };
 }
 
-export function savePreferences(prefs: Partial<Pick<UserPreferences, 'lastModel' | 'lastProvider' | 'recentModelsByProvider' | 'favoriteModels' | 'modelAliases' | 'claudeBridgeMode' | 'serverBridgeMode' | 'appPathOverrides' | 'localPatchesEnabled' | 'recentLaunchFolders'>>): void {
+export function savePreferences(prefs: Partial<Pick<UserPreferences, 'lastModel' | 'lastProvider' | 'recentModelsByProvider' | 'favoriteModels' | 'modelAliases' | 'claudeBridgeMode' | 'serverBridgeMode' | 'appPathOverrides' | 'localPatchesEnabled' | 'effortPolicy' | 'recentLaunchFolders'>>): void {
   updateConfig(config => {
     if (prefs.lastModel !== undefined) config.lastModel = prefs.lastModel;
     if (prefs.lastProvider !== undefined) config.lastProvider = prefs.lastProvider;
@@ -98,6 +110,7 @@ export function savePreferences(prefs: Partial<Pick<UserPreferences, 'lastModel'
     if (prefs.serverBridgeMode !== undefined) config.serverBridgeMode = prefs.serverBridgeMode;
     if (prefs.appPathOverrides !== undefined) config.appPathOverrides = prefs.appPathOverrides;
     if (prefs.localPatchesEnabled !== undefined) config.localPatchesEnabled = prefs.localPatchesEnabled;
+    if (prefs.effortPolicy !== undefined) config.effortPolicy = prefs.effortPolicy;
     if (prefs.recentLaunchFolders !== undefined) config.recentLaunchFolders = prefs.recentLaunchFolders;
   });
 }

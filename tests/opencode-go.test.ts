@@ -599,3 +599,114 @@ describe('qwen3.6-plus reasoning toggle', () => {
       .toBeTruthy();
   });
 });
+
+describe('retained effort profiles at runtime', () => {
+  function retainedRegistry(ids: string[]): ProviderRegistry {
+    return {
+      schemaVersion: 1,
+      providers: [{
+        id: 'opencode-go',
+        templateId: 'opencode-go',
+        name: 'OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:opencode-go',
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: OPENCODE_GO_COMPLETIONS_BASE_URL },
+        modelsCache: { fetchedAt: '2026-08-12T00:00:00.000Z', models: ids.map(liveModel) },
+        addedAt: '2026-08-12T00:00:00.000Z',
+      }],
+    };
+  }
+
+  it('attaches the generated profile to every retained model', () => {
+    const providers = materializeRegistry(retainedRegistry(['gpt-5.6-luna', 'qwen3.8-max']), () => 'key');
+    const byId = new Map(providers[0]!.models.map(model => [model.id, model]));
+    expect(byId.get('gpt-5.6-luna')?.effortProfile?.levels.map(entry => entry.level))
+      .toEqual(['off', 'low', 'medium', 'high', 'xhigh', 'max']);
+    // The Messages passthrough carries no clodex-operable effort control, and
+    // the profile says so rather than omitting the model.
+    expect(byId.get('qwen3.8-max')?.effortProfile?.levels).toEqual([]);
+    expect(byId.get('qwen3.8-max')?.effortProfile?.defaultLevel).toBeNull();
+  });
+
+  it('leaves ordinary providers without a profile, so the policy stays inert', () => {
+    const registry: ProviderRegistry = {
+      schemaVersion: 1,
+      providers: [{
+        id: 'ordinary',
+        templateId: 'custom-openai',
+        name: 'Ordinary',
+        enabled: true,
+        authRef: 'keyring:provider:ordinary',
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://ordinary.invalid/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-12T00:00:00.000Z',
+          // Same model ids as the retained catalog: the profile must follow the
+          // retained IDENTITY, not a name any provider can claim.
+          models: [liveModel('gpt-5.6-luna')],
+        },
+        addedAt: '2026-08-12T00:00:00.000Z',
+      }],
+    };
+    const model = materializeRegistry(registry, () => 'key')[0]?.models[0];
+    expect(model?.id).toBe('gpt-5.6-luna');
+    expect(model?.effortProfile).toBeUndefined();
+  });
+
+  it('is never read from the persisted cache row', () => {
+    const registry = retainedRegistry(['kimi-k3']);
+    // A cache that claims a wider ladder than the reviewed one. Profiles are
+    // attached by identity after projection, so the claim cannot survive.
+    (registry.providers[0]!.modelsCache!.models[0] as unknown as Record<string, unknown>)
+      .effortProfile = {
+        modelId: 'kimi-k3',
+        transport: 'openai-completions',
+        defaultLevel: 'max',
+        levels: [{ level: 'low', native: { kind: 'reasoning-effort', value: 'low' } }],
+      };
+
+    const model = materializeRegistry(registry, () => 'key')[0]?.models[0];
+    expect(model?.effortProfile?.levels.map(entry => entry.level)).toEqual(['max']);
+    expect(model?.effortProfile?.defaultLevel).toBeNull();
+  });
+
+  it('cannot be replaced or vetoed by models.dev', () => {
+    const cachePath = getUserModelsDevCachePath();
+    mkdirSync(dirname(cachePath), { recursive: true });
+    writeFileSync(cachePath, JSON.stringify({
+      'opencode-go': {
+        models: {
+          'kimi-k3': {
+            reasoning: false,
+            reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
+          },
+        },
+      },
+    }));
+    invalidateModelsDevCache();
+
+    try {
+      const model = materializeRegistry(retainedRegistry(['kimi-k3']), () => 'key')[0]?.models[0];
+      expect(model?.effortProfile?.levels.map(entry => entry.level)).toEqual(['max']);
+    } finally {
+      rmSync(cachePath, { force: true });
+      invalidateModelsDevCache();
+    }
+  });
+
+  it('travels onto proxy routes so favorites and aliases inherit it', () => {
+    const providers = materializeRegistry(retainedRegistry(['gpt-5.6-luna']), () => 'key');
+    const built = buildHttpProxyRoutes(
+      providers,
+      [{ providerId: 'opencode-go', modelId: 'gpt-5.6-luna' }],
+      [{ name: 'luna', providerId: 'opencode-go', modelId: 'gpt-5.6-luna' }],
+    );
+    expect(built.routes).toHaveLength(1);
+    expect(built.routes[0]!.effortProfile?.modelId).toBe('gpt-5.6-luna');
+    // The alias resolves to that same route object, so it cannot acquire an
+    // effort authority of its own.
+    expect(built.aliases.map(alias => alias.name)).toEqual(['luna']);
+    expect(built.aliases[0]!.routeId).toBe(built.routes[0]!.aliasId);
+  });
+});

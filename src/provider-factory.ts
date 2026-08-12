@@ -16,6 +16,7 @@ import {
   resolveOutboundBeta,
 } from './anthropic-beta-policy.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
+import type { EffortProfile } from './effort-policy.js';
 import {
   transformOpenAiCompatibleRequestBody,
   type ModelRuntimeCompatibility,
@@ -388,6 +389,12 @@ export interface ReasoningMetadata {
   interleavedReasoningField?: string;
   /** Provider-neutral per-model wire quirks. */
   compatibility?: ModelRuntimeCompatibility;
+  /**
+   * The reviewed effort levels this model can actually run. Present only for a
+   * retained identity that has a generated profile, so the global effort policy
+   * stays inert for every ordinary provider.
+   */
+  effortProfile?: EffortProfile;
   /**
    * Bare upstream model id (e.g. 'grok-4.5'), distinct from the request's `model`
    * field which may be a gateway alias or catalog slug (e.g. 'xai-oauth__grok-4.5').

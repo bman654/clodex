@@ -6,6 +6,7 @@ import { normalizeModelAliases } from '../model-aliases.js';
 import { maskGatewayModelId } from './vendor-mask.js';
 import type { FreeStatus } from '../free-models.js';
 import type { ModelAlias } from '../types.js';
+import type { EffortProfile } from '../effort-policy.js';
 import type { ModelRuntimeCompatibility } from '../model-runtime-compatibility.js';
 
 export interface GatewayModelOptions {
@@ -49,6 +50,8 @@ export interface ServerModelInfo {
   preferWebSockets?: boolean;
   /** Provider-neutral per-model wire quirks. */
   compatibility?: ModelRuntimeCompatibility;
+  /** Runtime-only: the reviewed effort levels this model can actually run. */
+  effortProfile?: EffortProfile;
   /** Fallback reasoning effort when the client omits output_config.effort. */
   defaultEffort?: string;
   contextWindow?: number;

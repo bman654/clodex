@@ -30,6 +30,7 @@ import {
   buildDedupedModelRows,
 } from './models.js';
 import { getReasoningCapabilities } from '../provider-factory.js';
+import { DEFAULT_UNSUPPORTED_EFFORT_POLICY } from '../effort-policy.js';
 import {
   askFavoritesOnly,
   askListenMode,
@@ -177,6 +178,15 @@ export async function loadServerModels(): Promise<ServerModelInfo[]> {
 
 export function enrichServerModelReasoning(model: ServerModelInfo): ServerModelInfo {
   if (!model.npm || model.modelFormat !== 'openai') return model;
+  // A reviewed profile states the provider's default explicitly, including the
+  // explicit "there isn't one". The heuristic below picks a plausible level for
+  // models that have no such statement; running it over a model that DOES have
+  // one would inject an effort the provider never asked for on every request
+  // that omitted it.
+  if (model.effortProfile) {
+    const declared = model.effortProfile.defaultLevel;
+    return declared === null ? model : { ...model, defaultEffort: declared };
+  }
   const caps = getReasoningCapabilities(model.npm, upstreamModelId(model), {
     providerId: model.providerId,
     apiBaseUrl: model.apiBaseUrl,
@@ -522,6 +532,9 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
       + `Saved entries were preserved.\n  ${aliasWarnings.join('\n  ')}`,
     );
   }
+  // Startup snapshot: a running server keeps the policy it launched with, so
+  // one long-lived process cannot change how requests resolve halfway through.
+  const effortPolicy = loadPreferences().effortPolicy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY;
   const inferenceLogPath = getInferenceRequestLogPath();
   const webSocketDiagnosticsLogPath = options.wsDiagnostics
     ? getSessionLogPath('server-websocket-diagnostics', 'jsonl')
@@ -537,6 +550,7 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     modelAliasRejections: aliasRejections,
     inferenceLogPath,
     webSocketDiagnosticsLogPath,
+    effortPolicy,
   });
 
   console.log('');
