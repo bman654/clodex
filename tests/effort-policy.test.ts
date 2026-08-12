@@ -15,7 +15,8 @@ import {
 } from '../src/effort-policy.js';
 import { openCodeGoEffortProfile } from '../src/data/opencode-go-effort-profiles.js';
 import { buildOpenCodeGoModels } from '../src/data/opencode-go-models.js';
-import { effortProviderOptions } from '../src/provider-factory.js';
+import { effortProviderOptions, getPatchReasoningCapabilities } from '../src/provider-factory.js';
+import { projectNativeEffort } from '../src/patch-transforms.js';
 import { transformOpenAiCompatibleRequestBody } from '../src/model-runtime-compatibility.js';
 
 function profile(
@@ -293,5 +294,55 @@ describe('SDK and direct paths agree on the wire', () => {
         expect(JSON.stringify(twice), `${model.id}/${level.level}`).toBe(JSON.stringify(once));
       }
     }
+  });
+});
+
+/**
+ * What the patched client can be told, versus what the policy can resolve.
+ *
+ * The patch transforms are at version 6, whose native effort representation is
+ * a dense low/medium/high(/xhigh/max) picker: `projectNativeEffort` discards any
+ * capability missing one of the base three. Most reviewed ladders are sparse, so
+ * they reach the patched client with no native effort control — accurately, and
+ * that is the deferral, not a defect. Representing a sparse ladder needs a new
+ * transform version, which this slice deliberately does not ship.
+ *
+ * This pins both halves so neither can drift silently: the exposure equals the
+ * executable intersection wherever version 6 can express it, and the models it
+ * cannot express are named.
+ */
+describe('patched-client exposure stays within transform version 6', () => {
+  const models = buildOpenCodeGoModels().filter(model => model.modelFormat === 'openai');
+
+  function patchCapabilities(model: (typeof models)[number]) {
+    return getPatchReasoningCapabilities(model.npm!, model.id, {
+      providerId: 'opencode-go',
+      reasoning: model.reasoning,
+      compatibility: model.compatibility,
+      upstreamModelId: model.id,
+    } as never);
+  }
+
+  it('advertises exactly the executable intersection, never more', () => {
+    for (const model of models) {
+      const executable = new Set(profileLevels(openCodeGoEffortProfile(model.id)!));
+      for (const level of patchCapabilities(model).levels) {
+        expect(executable.has(level as CanonicalEffortLevel), `${model.id}/${level}`).toBe(true);
+      }
+    }
+  });
+
+  it('reaches the native picker only for the two dense ladders', () => {
+    const native = models
+      .filter(model => {
+        const caps = patchCapabilities(model);
+        return caps.defaultLevel !== undefined
+          && projectNativeEffort({ levels: caps.levels, defaultLevel: caps.defaultLevel }) !== undefined;
+      })
+      .map(model => model.id);
+
+    // Every other reviewed ladder is sparse. Exposing one would need the sparse
+    // picker representation, which is a separate transform-version change.
+    expect(native).toEqual(['gpt-5.6-luna', 'qwen3.6-plus']);
   });
 });
