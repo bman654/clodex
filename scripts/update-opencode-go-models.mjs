@@ -40,6 +40,13 @@ const PROVIDER_ID = 'opencode-go';
 // own committed input, not something the invocation directory supplies.
 const MODELS_PATH = resolve('src/data/opencode-go-models.json');
 const CONSTANTS_PATH = resolve('src/data/opencode-go-models.ts');
+// The effort-profile table is generated ALONGSIDE the catalog rather than into
+// it. The catalog array is also this provider's template `staticModels`, and
+// those rows are persisted into `~/.clodex` model caches — putting a runtime
+// policy object there would make it persisted registry state that a stale cache
+// could carry forward. The profile table is imported directly and attached
+// after retained-identity projection instead, so it can never be stale.
+const EFFORT_PROFILES_PATH = resolve('src/data/opencode-go-effort-profiles.json');
 const SNAPSHOT_PATH = fileURLToPath(new URL('../src/data/opencode-go-cli-snapshot.json', import.meta.url));
 
 // ADVISORY cross-check, reached only by `--verify-ladders`, and never a
@@ -300,6 +307,12 @@ const PATCHES = Object.assign(Object.create(null), {
     maxTokensField: 'max_tokens',
   },
 });
+
+// The global effort vocabulary, in ascending order. `off` and `none` are two
+// provider spellings of the same "do not reason" level; both stay in the
+// vocabulary because different gateways spell it differently, and the ORDER
+// here is the one the generated table is emitted in.
+const CANONICAL_EFFORT_LEVELS = ['off', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 
 /** Provenance constants mirrored into the TypeScript data module. */
 const PROVENANCE_CONSTANTS = [
@@ -835,7 +848,195 @@ export function convertResolvedModels(models) {
     supported.push(toClodexModel(resolved));
   }
   if (supported.length === 0) throw new Error('resolver snapshot produced no supported models');
-  return { supported, unmapped, overrides, temperatureNotes };
+  const effortProfiles = buildEffortProfiles(models, supported);
+  return { supported, unmapped, overrides, temperatureNotes, effortProfiles };
+}
+
+function raiseEffortProfileErrors(errors) {
+  if (errors.length > 0) {
+    throw new Error(`OpenCode Go effort profiles failed validation:\n  ${errors.join('\n  ')}`);
+  }
+}
+
+/**
+ * Fail closed unless every reviewed effort map is a fixed point on its own output.
+ *
+ * Two request paths reach the same upstream. The SDK path maps a global level to
+ * its native value BEFORE the AI SDK serializes the body, and
+ * `transformOpenAiCompatibleRequestBody` then runs over that serialized body —
+ * so a map that also has an entry for one of its own outputs would translate the
+ * same request twice and send something neither path intended. The direct
+ * chat-completions forward has the mirror problem: a client may already spell
+ * the native value, and the two paths can only agree byte for byte if mapping an
+ * already-native value is a no-op.
+ *
+ * The injectivity half exists for the same reason from the other direction: if
+ * two global levels sent the same native value, an incoming native value could
+ * not be attributed back to one level, and the direct path would have to guess.
+ */
+export function assertEffortMapsIdempotent(patches = PATCHES) {
+  const errors = [];
+  for (const [id, patch] of Object.entries(patches)) {
+    const map = patch?.reasoningEffortMap;
+    if (map === undefined) continue;
+    if (!isPlainObject(map)) {
+      errors.push(`${id}: reasoningEffortMap must be an object`);
+      continue;
+    }
+    const levelByNative = new Map();
+    for (const [level, native] of Object.entries(map)) {
+      if (!CANONICAL_EFFORT_LEVELS.includes(level)) {
+        errors.push(`${id}: reasoningEffortMap key ${JSON.stringify(level)} is not a global effort level`);
+        continue;
+      }
+      if (native === null) continue;
+      if (typeof native !== 'string' || native.trim() === '') {
+        errors.push(`${id}: reasoningEffortMap.${level} must be null or a non-empty string`);
+        continue;
+      }
+      const claimed = levelByNative.get(native);
+      if (claimed !== undefined) {
+        errors.push(
+          `${id}: reasoningEffortMap sends ${JSON.stringify(native)} for both ${claimed} and ${level}, `
+          + 'so an already-native request value cannot be attributed to one level',
+        );
+        continue;
+      }
+      levelByNative.set(native, level);
+    }
+    for (const native of levelByNative.keys()) {
+      if (!Object.hasOwn(map, native)) continue;
+      if (map[native] !== native) {
+        errors.push(
+          `${id}: reasoningEffortMap is not idempotent — ${JSON.stringify(native)} is one of its own outputs `
+          + `but maps to ${JSON.stringify(map[native])}`,
+        );
+      }
+    }
+  }
+  raiseEffortProfileErrors(errors);
+  return true;
+}
+
+/** The reasoning representation one resolver variant advertises, if any. */
+function advertisedVariantRepresentation(variant) {
+  if (typeof variant?.reasoningEffort === 'string' && variant.reasoningEffort.trim() !== '') {
+    return { kind: 'reasoning-effort', value: variant.reasoningEffort };
+  }
+  if (isPlainObject(variant?.thinking)) {
+    return { kind: 'anthropic-thinking', thinking: sortKeysDeep(variant.thinking) };
+  }
+  return null;
+}
+
+/**
+ * Project the executable intersection of the resolver's advertised variants and
+ * the reviewed wire maps.
+ *
+ * The two inputs answer different questions and only one of them is authority.
+ * The snapshot says which reasoning variants OpenCode's own resolver advertises;
+ * `PATCHES` says what clodex has actually exercised on the wire for the route it
+ * runs. This table exposes a level only when the reviewed map can execute it, so
+ * a snapshot variant can never widen what goes upstream — the worst a changed
+ * capture can do is add a line to `disagreements`.
+ *
+ * Both directions of disagreement are recorded rather than resolved:
+ * a variant the map cannot execute (deepseek-v4-flash advertises `low`, the
+ * reviewed map sends nothing for it), a variant whose representation the running
+ * transport cannot carry (the Qwen and MiniMax Anthropic thinking objects), and
+ * an executable level the snapshot does not advertise. Widening or narrowing on
+ * any of them needs live validation, which is a review decision, not this
+ * script's.
+ */
+export function buildEffortProfiles(snapshotModels, supported) {
+  assertEffortMapsIdempotent();
+  const bySnapshotId = new Map(snapshotModels.map(model => [model.id, model]));
+  const errors = [];
+  const profiles = [];
+  const disagreements = [];
+
+  for (const model of supported) {
+    const transport = TRANSPORTS[model.id];
+    const compatibility = model.compatibility ?? {};
+    const map = compatibility.reasoningEffortMap;
+    let levels;
+    if (compatibility.supportsReasoningEffort === false) {
+      // No clodex-operable effort control on this route at all. Distinct from an
+      // unsupported LEVEL: there is no ladder to round along or reject against.
+      levels = [];
+    } else if (isPlainObject(map)) {
+      levels = CANONICAL_EFFORT_LEVELS
+        .filter(level => Object.hasOwn(map, level) && map[level] !== null)
+        .map(level => ({ level, native: { kind: 'reasoning-effort', value: map[level] } }));
+    } else {
+      errors.push(
+        `${model.id}: has neither a reviewed reasoningEffortMap nor an explicit `
+        + 'supportsReasoningEffort: false, so no executable effort ladder can be stated',
+      );
+      continue;
+    }
+
+    const variants = bySnapshotId.get(model.id)?.variants ?? {};
+    const levelByNative = new Map(levels.map(entry => [entry.native.value, entry.level]));
+    const advertisedLevels = new Set();
+    for (const variant of Object.keys(variants).sort(compareCodeUnits)) {
+      const advertised = advertisedVariantRepresentation(variants[variant]);
+      if (advertised === null) {
+        disagreements.push({
+          modelId: model.id,
+          variant,
+          advertised: null,
+          reason: 'the resolver variant declares no reasoning representation this generator understands',
+        });
+        continue;
+      }
+      if (advertised.kind !== 'reasoning-effort') {
+        disagreements.push({
+          modelId: model.id,
+          variant,
+          advertised,
+          reason: `the reviewed ${transport} route carries no clodex-controlled Anthropic thinking representation`,
+        });
+        continue;
+      }
+      const level = levelByNative.get(advertised.value);
+      if (level === undefined) {
+        disagreements.push({
+          modelId: model.id,
+          variant,
+          advertised,
+          reason: 'the reviewed wire map sends this value for no global effort level',
+        });
+        continue;
+      }
+      advertisedLevels.add(level);
+    }
+
+    const unadvertised = levels.map(entry => entry.level).filter(level => !advertisedLevels.has(level));
+    if (unadvertised.length > 0) {
+      disagreements.push({
+        modelId: model.id,
+        variant: null,
+        advertised: null,
+        reason: `the reviewed wire map executes ${unadvertised.join('/')}, which the resolver snapshot does not advertise`,
+      });
+    }
+
+    profiles.push({
+      modelId: model.id,
+      transport,
+      // The resolver declares variants as opt-in request overlays and names no
+      // default among them, and `assertModelSchema` rejects any unknown model or
+      // variant key — so a capture that grew a default marker would fail the
+      // schema long before reaching here. Nothing else in this script is
+      // entitled to invent one, so the explicit answer is "none declared".
+      defaultLevel: null,
+      levels,
+    });
+  }
+
+  raiseEffortProfileErrors(errors);
+  return { schemaVersion: 1, provider: PROVIDER_ID, profiles, disagreements };
 }
 
 async function loadSnapshot() {
@@ -909,12 +1110,17 @@ function serializeCatalog(supported) {
   return `${JSON.stringify(supported, null, 2)}\n`;
 }
 
+function serializeEffortProfiles(table) {
+  return `${JSON.stringify(table, null, 2)}\n`;
+}
+
 /**
  * Offline verification that the committed generated files still say what the
- * committed snapshot says. Reads three files, writes none, and never reaches
- * the network — so it is safe to run anywhere the repo is checked out.
+ * committed snapshot says. Reads the snapshot plus all three generated files,
+ * writes none, and never reaches the network — so it is safe to run anywhere
+ * the repo is checked out.
  */
-async function check(snapshot, supported) {
+async function check(snapshot, supported, effortProfiles) {
   const failures = [];
   const committedText = await readFile(MODELS_PATH, 'utf8');
   const generatedText = serializeCatalog(supported);
@@ -937,6 +1143,11 @@ async function check(snapshot, supported) {
       + `${drifted.length > 0 ? ` (models: ${drifted.join(', ')})` : ''}`
       + `${committedIds.length !== generatedIds.length ? ` (committed ${committedIds.length} ids, snapshot yields ${generatedIds.length})` : ''}`,
     );
+  }
+
+  const committedProfiles = await readFile(EFFORT_PROFILES_PATH, 'utf8');
+  if (committedProfiles !== serializeEffortProfiles(effortProfiles)) {
+    failures.push(`${EFFORT_PROFILES_PATH} disagrees with the resolver snapshot and the reviewed wire maps`);
   }
 
   const constants = readProvenanceConstants(await readFile(CONSTANTS_PATH, 'utf8'));
@@ -1012,10 +1223,10 @@ export async function run(argv = []) {
   }
 
   const snapshot = await loadSnapshot();
-  const { supported, unmapped, overrides, temperatureNotes } = convertResolvedModels(snapshot.models);
+  const { supported, unmapped, overrides, temperatureNotes, effortProfiles } = convertResolvedModels(snapshot.models);
 
   if (values.check) {
-    await check(snapshot, supported);
+    await check(snapshot, supported, effortProfiles);
     console.log(
       `OpenCode Go catalog matches the committed resolver snapshot `
       + `(${supported.length} models, opencode ${snapshot._meta.openCodeVersion}).`,
@@ -1031,6 +1242,7 @@ export async function run(argv = []) {
   // then marks a catalog that is already on disk.
   const constants = await prepareSourceConstants(snapshot._meta);
   await writeFile(MODELS_PATH, serializeCatalog(supported));
+  await writeFile(EFFORT_PROFILES_PATH, serializeEffortProfiles(effortProfiles));
   await writeFile(CONSTANTS_PATH, constants.content);
 
   console.log(
@@ -1042,6 +1254,12 @@ export async function run(argv = []) {
   }
   for (const note of temperatureNotes) {
     console.log(`Temperature capability note — ${note}`);
+  }
+  for (const disagreement of effortProfiles.disagreements) {
+    const where = disagreement.variant === null
+      ? disagreement.modelId
+      : `${disagreement.modelId} variant ${disagreement.variant}`;
+    console.log(`Effort profile disagreement — ${where}: ${disagreement.reason}`);
   }
   for (const note of advisory.notes) {
     console.log(`Effort ladder note — ${note}`);

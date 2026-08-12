@@ -11,8 +11,10 @@ import snapshot from '../src/data/opencode-go-cli-snapshot.json';
 // part of the published TypeScript API surface.
 // @ts-expect-error no declaration file for the maintenance script
 import {
+  assertEffortMapsIdempotent,
   assertResolvedModels,
   assertSnapshotMeta,
+  buildEffortProfiles,
   canonicalizeResolvedModels,
   convertResolvedModels,
   crossCheckTemperatureSupport,
@@ -24,6 +26,7 @@ import {
 const CATALOG_PATH = 'src/data/opencode-go-models.json';
 const SNAPSHOT_PATH = 'src/data/opencode-go-cli-snapshot.json';
 const CONSTANTS_PATH = 'src/data/opencode-go-models.ts';
+const EFFORT_PROFILES_PATH = 'src/data/opencode-go-effort-profiles.json';
 
 /** Every id the reviewed catalog routes, in committed order. */
 const REVIEWED_IDS = [
@@ -289,7 +292,7 @@ describe('OpenCode Go resolver snapshot generator', () => {
   });
 
   it('verifies the committed catalog offline, with no fetch and no write', async () => {
-    const before = await Promise.all([CATALOG_PATH, SNAPSHOT_PATH, CONSTANTS_PATH].map(async path => ({
+    const before = await Promise.all([CATALOG_PATH, SNAPSHOT_PATH, CONSTANTS_PATH, EFFORT_PROFILES_PATH].map(async path => ({
       bytes: await readFile(path),
       mtimeMs: (await stat(path)).mtimeMs,
     })));
@@ -305,7 +308,7 @@ describe('OpenCode Go resolver snapshot generator', () => {
     await expect(run(['--', '--check'])).resolves.toBeUndefined();
 
     expect(fetchSpy).not.toHaveBeenCalled();
-    const after = await Promise.all([CATALOG_PATH, SNAPSHOT_PATH, CONSTANTS_PATH].map(async path => ({
+    const after = await Promise.all([CATALOG_PATH, SNAPSHOT_PATH, CONSTANTS_PATH, EFFORT_PROFILES_PATH].map(async path => ({
       bytes: await readFile(path),
       mtimeMs: (await stat(path)).mtimeMs,
     })));
@@ -329,6 +332,7 @@ describe('OpenCode Go resolver snapshot generator', () => {
       mkdirSync(join(workspace, 'src', 'data'), { recursive: true });
       copyFileSync(CATALOG_PATH, join(workspace, 'src', 'data', 'opencode-go-models.json'));
       copyFileSync(CONSTANTS_PATH, join(workspace, 'src', 'data', 'opencode-go-models.ts'));
+      copyFileSync(EFFORT_PROFILES_PATH, join(workspace, 'src', 'data', 'opencode-go-effort-profiles.json'));
       const noNetwork = join(workspace, 'no-network.mjs');
       writeFileSync(
         noNetwork,
@@ -369,6 +373,7 @@ describe('OpenCode Go resolver snapshot generator', () => {
 
     const committedCatalog = await readFile(CATALOG_PATH);
     const committedConstants = await readFile(CONSTANTS_PATH);
+    const committedProfiles = await readFile(EFFORT_PROFILES_PATH);
     const workspace = mkdtempSync(join(tmpdir(), 'clodex-opencode-go-offline-'));
     try {
       mkdirSync(join(workspace, 'src', 'data'), { recursive: true });
@@ -394,11 +399,13 @@ describe('OpenCode Go resolver snapshot generator', () => {
 
       const catalogPath = join(workspace, 'src', 'data', 'opencode-go-models.json');
       const constantsPath = join(workspace, 'src', 'data', 'opencode-go-models.ts');
+      const profilesPath = join(workspace, 'src', 'data', 'opencode-go-effort-profiles.json');
       expect(await readFile(catalogPath)).toEqual(committedCatalog);
       expect(await readFile(constantsPath)).toEqual(committedConstants);
+      expect(await readFile(profilesPath)).toEqual(committedProfiles);
 
       // ...and the offline verifier agrees, from a cwd that is not the repo.
-      const before = [catalogPath, constantsPath].map(path => stat(path));
+      const before = [catalogPath, constantsPath, profilesPath].map(path => stat(path));
       const beforeMtimes = (await Promise.all(before)).map(entry => entry.mtimeMs);
       const checked = spawnSync(process.execPath, [...preload, ...commandArgv, '--check'], {
         cwd: workspace,
@@ -407,7 +414,7 @@ describe('OpenCode Go resolver snapshot generator', () => {
       expect(checked.status, checked.stderr).toBe(0);
       expect(checked.stdout).toContain('matches the committed resolver snapshot');
       const afterMtimes = await Promise.all(
-        [catalogPath, constantsPath].map(async path => (await stat(path)).mtimeMs),
+        [catalogPath, constantsPath, profilesPath].map(async path => (await stat(path)).mtimeMs),
       );
       expect(afterMtimes).toEqual(beforeMtimes);
     } finally {
@@ -443,7 +450,7 @@ describe('OpenCode Go resolver snapshot generator', () => {
       /models\.dev does not publish/,
     ],
   ])('--verify-ladders fails before any write when %s', async (_label, stub, expected) => {
-    const before = await Promise.all([CATALOG_PATH, CONSTANTS_PATH].map(async path => ({
+    const before = await Promise.all([CATALOG_PATH, CONSTANTS_PATH, EFFORT_PROFILES_PATH].map(async path => ({
       bytes: await readFile(path),
       mtimeMs: (await stat(path)).mtimeMs,
     })));
@@ -451,7 +458,7 @@ describe('OpenCode Go resolver snapshot generator', () => {
 
     await expect(run(['--verify-ladders'])).rejects.toThrow(expected);
 
-    const after = await Promise.all([CATALOG_PATH, CONSTANTS_PATH].map(async path => ({
+    const after = await Promise.all([CATALOG_PATH, CONSTANTS_PATH, EFFORT_PROFILES_PATH].map(async path => ({
       bytes: await readFile(path),
       mtimeMs: (await stat(path)).mtimeMs,
     })));
@@ -487,5 +494,219 @@ describe('OpenCode Go resolver snapshot generator', () => {
       if (loadsSnapshot.test(await readFile(path, 'utf8'))) referencing.push(path);
     }
     expect(referencing).toEqual([]);
+  });
+});
+
+/**
+ * The executable intersection, one row per reviewed model: id, the route clodex
+ * runs, and every global effort level that route can actually execute paired
+ * with the exact value it puts on the wire.
+ *
+ * A per-model table rather than a spot-check, and deliberately redundant with
+ * `PATCHES`: this is the reviewed statement of what the global effort policy is
+ * allowed to resolve to. A regeneration that widens a ladder, drops a level, or
+ * lets a resolver variant reach the wire should fail here with the id named.
+ */
+const EXECUTABLE_INTERSECTION: Array<[string, string, Array<[string, string]>]> = [
+  ['deepseek-v4-flash', 'openai-completions', [['high', 'high'], ['max', 'max']]],
+  ['deepseek-v4-pro', 'openai-completions', [['high', 'high'], ['max', 'max']]],
+  ['glm-5.1', 'openai-completions', []],
+  ['glm-5.2', 'openai-completions', [['high', 'high'], ['max', 'max']]],
+  ['gpt-5.6-luna', 'openai-completions', [
+    ['off', 'none'], ['low', 'low'], ['medium', 'medium'],
+    ['high', 'high'], ['xhigh', 'xhigh'], ['max', 'max'],
+  ]],
+  ['hy3', 'openai-completions', [['off', 'none'], ['low', 'low'], ['high', 'high']]],
+  ['kimi-k2.6', 'openai-completions', []],
+  ['kimi-k2.7-code', 'openai-completions', []],
+  ['kimi-k3', 'openai-completions', [['max', 'max']]],
+  ['mimo-v2.5', 'openai-completions', []],
+  ['mimo-v2.5-pro', 'openai-completions', []],
+  ['minimax-m2.7', 'openai-completions', []],
+  ['minimax-m3', 'anthropic-messages', []],
+  ['qwen3.6-plus', 'openai-completions', [
+    ['low', 'low'], ['medium', 'medium'], ['high', 'high'],
+    ['xhigh', 'xhigh'], ['max', 'max'],
+  ]],
+  ['qwen3.7-max', 'anthropic-messages', []],
+  ['qwen3.7-plus', 'anthropic-messages', []],
+  ['qwen3.8-max', 'anthropic-messages', []],
+];
+
+type EffortProfileTable = {
+  schemaVersion: number;
+  provider: string;
+  profiles: Array<{
+    modelId: string;
+    transport: string;
+    defaultLevel: string | null;
+    levels: Array<{ level: string; native: { kind: string; value: string } }>;
+  }>;
+  disagreements: Array<{
+    modelId: string;
+    variant: string | null;
+    advertised: Record<string, unknown> | null;
+    reason: string;
+  }>;
+};
+
+function generatedProfiles(): EffortProfileTable {
+  return convertResolvedModels(snapshot.models).effortProfiles as EffortProfileTable;
+}
+
+describe('OpenCode Go executable effort intersection', () => {
+  it('regenerates the committed profile table byte for byte', async () => {
+    const committed = await readFile(EFFORT_PROFILES_PATH, 'utf8');
+    expect(committed).toBe(`${JSON.stringify(generatedProfiles(), null, 2)}\n`);
+    expect(JSON.parse(committed)).toMatchObject({ schemaVersion: 1, provider: 'opencode-go' });
+  });
+
+  it('exposes exactly the levels the reviewed wire maps can execute', () => {
+    const table = generatedProfiles();
+    expect(table.profiles.map(profile => profile.modelId))
+      .toEqual(EXECUTABLE_INTERSECTION.map(([id]) => id));
+    const byId = new Map(table.profiles.map(profile => [profile.modelId, profile]));
+    for (const [id, transport, levels] of EXECUTABLE_INTERSECTION) {
+      const profile = byId.get(id)!;
+      expect(profile.transport, id).toBe(transport);
+      expect(profile.levels.map(entry => [entry.level, entry.native.value]), id).toEqual(levels);
+      for (const entry of profile.levels) {
+        expect(entry.native.kind, `${id}.${entry.level}`).toBe('reasoning-effort');
+      }
+    }
+  });
+
+  it('declares no default for any model, because the resolver declares none', () => {
+    // The snapshot names variants but never a default among them, and inventing
+    // one here would silently change every request that omits an effort.
+    for (const profile of generatedProfiles().profiles) {
+      expect(profile.defaultLevel, profile.modelId).toBeNull();
+    }
+  });
+
+  it('denies every Anthropic thinking representation the running transport cannot carry', () => {
+    const denied = generatedProfiles().disagreements
+      .filter(entry => entry.advertised?.kind === 'anthropic-thinking')
+      .map(entry => `${entry.modelId}/${entry.variant}`);
+
+    // qwen3.6-plus is the case where the resolver advertises Anthropic budgets
+    // for a model clodex runs over Chat Completions: the budgets are denied, and
+    // the reviewed effort map — not the snapshot — governs that route.
+    expect(denied).toEqual([
+      'minimax-m3/none', 'minimax-m3/thinking',
+      'qwen3.6-plus/high', 'qwen3.6-plus/max',
+      'qwen3.7-max/high', 'qwen3.7-max/max',
+      'qwen3.7-plus/high', 'qwen3.7-plus/max',
+      'qwen3.8-max/high', 'qwen3.8-max/max',
+    ]);
+    const qwen36 = generatedProfiles().profiles.find(profile => profile.modelId === 'qwen3.6-plus')!;
+    for (const entry of qwen36.levels) {
+      expect(entry.native.kind).toBe('reasoning-effort');
+      expect(entry.native).not.toHaveProperty('thinking');
+    }
+  });
+
+  it('reports an advertised variant the reviewed map cannot execute instead of exposing it', () => {
+    const table = generatedProfiles();
+    // The resolver advertises `low` for DeepSeek V4 Flash; the reviewed map sends
+    // nothing for it, so the level must not reach the profile.
+    expect(table.disagreements).toContainEqual({
+      modelId: 'deepseek-v4-flash',
+      variant: 'low',
+      advertised: { kind: 'reasoning-effort', value: 'low' },
+      reason: 'the reviewed wire map sends this value for no global effort level',
+    });
+    const flash = table.profiles.find(profile => profile.modelId === 'deepseek-v4-flash')!;
+    expect(flash.levels.map(entry => entry.level)).not.toContain('low');
+  });
+
+  it('reports executable levels the resolver snapshot does not advertise', () => {
+    expect(generatedProfiles().disagreements).toContainEqual({
+      modelId: 'qwen3.6-plus',
+      variant: null,
+      advertised: null,
+      reason: 'the reviewed wire map executes low/medium/high/xhigh/max, which the resolver snapshot does not advertise',
+    });
+  });
+
+  it('records every disagreement and nothing else', () => {
+    const table = generatedProfiles();
+    expect(table.disagreements).toHaveLength(12);
+    expect(new Set(table.disagreements.map(entry => entry.modelId))).toEqual(new Set([
+      'deepseek-v4-flash', 'minimax-m3', 'qwen3.6-plus',
+      'qwen3.7-max', 'qwen3.7-plus', 'qwen3.8-max',
+    ]));
+  });
+
+  it('accepts the committed maps as idempotent and injective', () => {
+    expect(assertEffortMapsIdempotent()).toBe(true);
+  });
+
+  it.each<[string, Record<string, unknown>, RegExp]>([
+    [
+      // The double-map hazard exactly: the SDK path would send low as `high`,
+      // and the post-serialization transform would then translate that `high`
+      // again into `max`.
+      'a map that re-maps one of its own outputs',
+      { 'deepseek-v4-flash': { reasoningEffortMap: { low: 'high', high: 'max' } } },
+      /is not idempotent/,
+    ],
+    [
+      'a map that sends one native value for two levels',
+      { 'gpt-5.6-luna': { reasoningEffortMap: { high: 'high', xhigh: 'high' } } },
+      /sends "high" for both high and xhigh/,
+    ],
+    [
+      'a map keyed on a level outside the global vocabulary',
+      { hy3: { reasoningEffortMap: { turbo: 'high' } } },
+      /is not a global effort level/,
+    ],
+    [
+      'a map that blanks a level instead of disabling it',
+      { 'kimi-k3': { reasoningEffortMap: { max: '  ' } } },
+      /must be null or a non-empty string/,
+    ],
+  ])('refuses to generate from %s', (_label, patches, expected) => {
+    expect(() => assertEffortMapsIdempotent(patches)).toThrow(expected);
+  });
+
+  it('refuses a catalog row that states neither a map nor an explicit suppression', () => {
+    expect(() => buildEffortProfiles(snapshot.models, [{ id: 'kimi-k3', compatibility: {} }]))
+      .toThrow(/kimi-k3: has neither a reviewed reasoningEffortMap nor an explicit/);
+  });
+
+  it('rejects stale committed profile bytes offline, without writing', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'clodex-opencode-go-profile-drift-'));
+    try {
+      mkdirSync(join(workspace, 'src', 'data'), { recursive: true });
+      copyFileSync(CATALOG_PATH, join(workspace, 'src', 'data', 'opencode-go-models.json'));
+      copyFileSync(CONSTANTS_PATH, join(workspace, 'src', 'data', 'opencode-go-models.ts'));
+      const profilesPath = join(workspace, 'src', 'data', 'opencode-go-effort-profiles.json');
+      const stale = JSON.parse(await readFile(EFFORT_PROFILES_PATH, 'utf8')) as EffortProfileTable;
+      // Exactly the widening this table exists to prevent: a hand-added level
+      // that no reviewed wire map executes.
+      stale.profiles.find(profile => profile.modelId === 'deepseek-v4-flash')!.levels
+        .unshift({ level: 'low', native: { kind: 'reasoning-effort', value: 'low' } });
+      writeFileSync(profilesPath, `${JSON.stringify(stale, null, 2)}\n`);
+      const beforeMtime = (await stat(profilesPath)).mtimeMs;
+      const noNetwork = join(workspace, 'no-network.mjs');
+      writeFileSync(
+        noNetwork,
+        "globalThis.fetch = () => { throw new Error('this mode must not reach the network'); };\n",
+      );
+
+      const checked = spawnSync(
+        process.execPath,
+        ['--import', pathToFileURL(noNetwork).href, resolve('scripts/update-opencode-go-models.mjs'), '--check'],
+        { cwd: workspace, encoding: 'utf8' },
+      );
+
+      expect(checked.error).toBeUndefined();
+      expect(checked.status).not.toBe(0);
+      expect(checked.stderr).toContain('opencode-go-effort-profiles.json disagrees with the resolver snapshot');
+      expect((await stat(profilesPath)).mtimeMs).toBe(beforeMtime);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
   });
 });

@@ -1,0 +1,397 @@
+{
+  "schemaVersion": 1,
+  "provider": "opencode-go",
+  "profiles": [
+    {
+      "modelId": "deepseek-v4-flash",
+      "transport": "openai-completions",
+      "defaultLevel": null,
+      "levels": [
+        {
+          "level": "high",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "high"
+          }
+        },
+        {
+          "level": "max",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "max"
+          }
+        }
+      ]
+    },
+    {
+      "modelId": "deepseek-v4-pro",
+      "transport": "openai-completions",
+      "defaultLevel": null,
+      "levels": [
+        {
+          "level": "high",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "high"
+          }
+        },
+        {
+          "level": "max",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "max"
+          }
+        }
+      ]
+    },
+    {
+      "modelId": "glm-5.1",
+      "transport": "openai-completions",
+      "defaultLevel": null,
+      "levels": []
+    },
+    {
+      "modelId": "glm-5.2",
+      "transport": "openai-completions",
+      "defaultLevel": null,
+      "levels": [
+        {
+          "level": "high",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "high"
+          }
+        },
+        {
+          "level": "max",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "max"
+          }
+        }
+      ]
+    },
+    {
+      "modelId": "gpt-5.6-luna",
+      "transport": "openai-completions",
+      "defaultLevel": null,
+      "levels": [
+        {
+          "level": "off",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "none"
+          }
+        },
+        {
+          "level": "low",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "low"
+          }
+        },
+        {
+          "level": "medium",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "medium"
+          }
+        },
+        {
+          "level": "high",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "high"
+          }
+        },
+        {
+          "level": "xhigh",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "xhigh"
+          }
+        },
+        {
+          "level": "max",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "max"
+          }
+        }
+      ]
+    },
+    {
+      "modelId": "hy3",
+      "transport": "openai-completions",
+      "defaultLevel": null,
+      "levels": [
+        {
+          "level": "off",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "none"
+          }
+        },
+        {
+          "level": "low",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "low"
+          }
+        },
+        {
+          "level": "high",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "high"
+          }
+        }
+      ]
+    },
+    {
+      "modelId": "kimi-k2.6",
+      "transport": "openai-completions",
+      "defaultLevel": null,
+      "levels": []
+    },
+    {
+      "modelId": "kimi-k2.7-code",
+      "transport": "openai-completions",
+      "defaultLevel": null,
+      "levels": []
+    },
+    {
+      "modelId": "kimi-k3",
+      "transport": "openai-completions",
+      "defaultLevel": null,
+      "levels": [
+        {
+          "level": "max",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "max"
+          }
+        }
+      ]
+    },
+    {
+      "modelId": "mimo-v2.5",
+      "transport": "openai-completions",
+      "defaultLevel": null,
+      "levels": []
+    },
+    {
+      "modelId": "mimo-v2.5-pro",
+      "transport": "openai-completions",
+      "defaultLevel": null,
+      "levels": []
+    },
+    {
+      "modelId": "minimax-m2.7",
+      "transport": "openai-completions",
+      "defaultLevel": null,
+      "levels": []
+    },
+    {
+      "modelId": "minimax-m3",
+      "transport": "anthropic-messages",
+      "defaultLevel": null,
+      "levels": []
+    },
+    {
+      "modelId": "qwen3.6-plus",
+      "transport": "openai-completions",
+      "defaultLevel": null,
+      "levels": [
+        {
+          "level": "low",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "low"
+          }
+        },
+        {
+          "level": "medium",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "medium"
+          }
+        },
+        {
+          "level": "high",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "high"
+          }
+        },
+        {
+          "level": "xhigh",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "xhigh"
+          }
+        },
+        {
+          "level": "max",
+          "native": {
+            "kind": "reasoning-effort",
+            "value": "max"
+          }
+        }
+      ]
+    },
+    {
+      "modelId": "qwen3.7-max",
+      "transport": "anthropic-messages",
+      "defaultLevel": null,
+      "levels": []
+    },
+    {
+      "modelId": "qwen3.7-plus",
+      "transport": "anthropic-messages",
+      "defaultLevel": null,
+      "levels": []
+    },
+    {
+      "modelId": "qwen3.8-max",
+      "transport": "anthropic-messages",
+      "defaultLevel": null,
+      "levels": []
+    }
+  ],
+  "disagreements": [
+    {
+      "modelId": "deepseek-v4-flash",
+      "variant": "low",
+      "advertised": {
+        "kind": "reasoning-effort",
+        "value": "low"
+      },
+      "reason": "the reviewed wire map sends this value for no global effort level"
+    },
+    {
+      "modelId": "minimax-m3",
+      "variant": "none",
+      "advertised": {
+        "kind": "anthropic-thinking",
+        "thinking": {
+          "type": "disabled"
+        }
+      },
+      "reason": "the reviewed anthropic-messages route carries no clodex-controlled Anthropic thinking representation"
+    },
+    {
+      "modelId": "minimax-m3",
+      "variant": "thinking",
+      "advertised": {
+        "kind": "anthropic-thinking",
+        "thinking": {
+          "type": "adaptive"
+        }
+      },
+      "reason": "the reviewed anthropic-messages route carries no clodex-controlled Anthropic thinking representation"
+    },
+    {
+      "modelId": "qwen3.6-plus",
+      "variant": "high",
+      "advertised": {
+        "kind": "anthropic-thinking",
+        "thinking": {
+          "budgetTokens": 16000,
+          "type": "enabled"
+        }
+      },
+      "reason": "the reviewed openai-completions route carries no clodex-controlled Anthropic thinking representation"
+    },
+    {
+      "modelId": "qwen3.6-plus",
+      "variant": "max",
+      "advertised": {
+        "kind": "anthropic-thinking",
+        "thinking": {
+          "budgetTokens": 31999,
+          "type": "enabled"
+        }
+      },
+      "reason": "the reviewed openai-completions route carries no clodex-controlled Anthropic thinking representation"
+    },
+    {
+      "modelId": "qwen3.6-plus",
+      "variant": null,
+      "advertised": null,
+      "reason": "the reviewed wire map executes low/medium/high/xhigh/max, which the resolver snapshot does not advertise"
+    },
+    {
+      "modelId": "qwen3.7-max",
+      "variant": "high",
+      "advertised": {
+        "kind": "anthropic-thinking",
+        "thinking": {
+          "budgetTokens": 16000,
+          "type": "enabled"
+        }
+      },
+      "reason": "the reviewed anthropic-messages route carries no clodex-controlled Anthropic thinking representation"
+    },
+    {
+      "modelId": "qwen3.7-max",
+      "variant": "max",
+      "advertised": {
+        "kind": "anthropic-thinking",
+        "thinking": {
+          "budgetTokens": 31999,
+          "type": "enabled"
+        }
+      },
+      "reason": "the reviewed anthropic-messages route carries no clodex-controlled Anthropic thinking representation"
+    },
+    {
+      "modelId": "qwen3.7-plus",
+      "variant": "high",
+      "advertised": {
+        "kind": "anthropic-thinking",
+        "thinking": {
+          "budgetTokens": 16000,
+          "type": "enabled"
+        }
+      },
+      "reason": "the reviewed anthropic-messages route carries no clodex-controlled Anthropic thinking representation"
+    },
+    {
+      "modelId": "qwen3.7-plus",
+      "variant": "max",
+      "advertised": {
+        "kind": "anthropic-thinking",
+        "thinking": {
+          "budgetTokens": 31999,
+          "type": "enabled"
+        }
+      },
+      "reason": "the reviewed anthropic-messages route carries no clodex-controlled Anthropic thinking representation"
+    },
+    {
+      "modelId": "qwen3.8-max",
+      "variant": "high",
+      "advertised": {
+        "kind": "anthropic-thinking",
+        "thinking": {
+          "budgetTokens": 16000,
+          "type": "enabled"
+        }
+      },
+      "reason": "the reviewed anthropic-messages route carries no clodex-controlled Anthropic thinking representation"
+    },
+    {
+      "modelId": "qwen3.8-max",
+      "variant": "max",
+      "advertised": {
+        "kind": "anthropic-thinking",
+        "thinking": {
+          "budgetTokens": 31999,
+          "type": "enabled"
+        }
+      },
+      "reason": "the reviewed anthropic-messages route carries no clodex-controlled Anthropic thinking representation"
+    }
+  ]
+}
