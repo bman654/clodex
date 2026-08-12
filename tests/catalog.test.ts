@@ -235,6 +235,29 @@ describe('resolveCatalogModelAliases', () => {
     ]);
   });
 
+  it('keeps an alias inactive when its favorite target is outside the exposed catalog', () => {
+    const target = { providerId: 'other', modelId: 'model-b' };
+    const targetRoute = {
+      aliasId: 'anthropic-other__model-b',
+      realModelId: 'model-b',
+      displayName: 'Model B',
+      upstreamUrl: 'https://example.com',
+      apiKey: 'key',
+      modelFormat: 'openai' as const,
+    };
+
+    expect(resolveCatalogModelAliases(
+      [{ name: 'later', ...target }],
+      () => targetRoute,
+      [{ aliasId: 'anthropic-other__model-a' }],
+      { favorites: [target], capacitySkippedFavorites: [target] },
+    )).toEqual([{
+      name: 'later',
+      routeId: targetRoute.aliasId,
+      rejectionReason: 'target-not-exposed',
+    }]);
+  });
+
   it('does not guess that a target is unavailable when availability metadata is omitted', () => {
     const targetRoute = {
       aliasId: 'anthropic-other__model-b',

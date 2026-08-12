@@ -89,7 +89,7 @@ describe('HTTP proxy startup model list', () => {
       rmSync(home, { recursive: true, force: true });
     }
   }, 20_000);
-  it('threads structured inactive alias rejections without reducing them to reserved names', () => {
+  it('reserves canonical and exact stored names for inactive configured aliases', () => {
     const loaded: LoadedHttpProxyRoutes = {
       routes: [],
       aliases: [],
@@ -131,11 +131,28 @@ describe('HTTP proxy startup model list', () => {
       modelAliases: [],
       inferenceLogPath: '/tmp/inference.jsonl',
     });
-    expect(options.modelAliasRejections).toEqual(loaded.unavailableAliasRejections);
+    expect(options.modelAliasRejections).toEqual([
+      {
+        alias: {
+          name: ' Orbit ',
+          providerId: 'openai',
+          modelId: 'model-a',
+        },
+        reason: 'conflicting-targets',
+      },
+      {
+        alias: {
+          name: 'ORBIT',
+          providerId: 'other',
+          modelId: 'model-b',
+        },
+        reason: 'conflicting-targets',
+      },
+    ]);
     expect(options.reservedModelIds).toBeUndefined();
   });
 
-  it('passes every exact source spelling through active alias metadata', () => {
+  it('reserves every exact source spelling for an active canonical alias', () => {
     const loaded: LoadedHttpProxyRoutes = {
       routes: [],
       aliases: [{
