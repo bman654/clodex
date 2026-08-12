@@ -963,6 +963,10 @@ describe('selective HTTP proxy', () => {
           alias: { name: 'missing-route', providerId: 'test', modelId: 'missing-model' },
           reason: 'target-unavailable',
         },
+        {
+          alias: { name: 'DeFaUlT', providerId: 'test', modelId: 'default-model' },
+          reason: 'reserved-name',
+        },
       ],
       adapterHandle: {
         port: adapterPort,
@@ -1113,6 +1117,11 @@ describe('selective HTTP proxy', () => {
           expectedReason: 'target is unavailable or unsupported',
         },
         {
+          model: 'DEFAULT',
+          path: '/v1/messages',
+          expectedReason: 'reserved client name',
+        },
+        {
           model: 'missing-route[1m]',
           path: '/v1/messages',
           expectedReason: 'target is unavailable or unsupported',
@@ -1133,6 +1142,11 @@ describe('selective HTTP proxy', () => {
           path: '/v1/messages/count_tokens',
           expectedReason: 'target is unavailable or unsupported',
         },
+        {
+          model: 'DEFAULT',
+          path: '/v1/messages/count_tokens',
+          expectedReason: 'reserved client name',
+        },
         { model: 'models/clodex:test:unavailable-model[1M]', path: '/v1/messages/count_tokens' },
       ];
       for (const testCase of rejectedCases) {
@@ -1145,6 +1159,7 @@ describe('selective HTTP proxy', () => {
         expect(response, `${testCase.path} ${testCase.model}`).toContain('400 Bad Request');
         expect(response).toContain('invalid_request_error');
         expect(response).toContain('clodex models --list');
+        expect(response).toContain(testCase.model);
         if (testCase.expectedReason) expect(response).toContain(testCase.expectedReason);
         expect(response).not.toContain('clodex patch');
       }

@@ -20,7 +20,6 @@ import {
 } from '../trace-log.js';
 import { removeAnthropicProxyBypass } from '../wrapper-env.js';
 import {
-  canonicalModelAliasName,
   describeModelAliasRejection,
   normalizeModelAliases,
 } from '../model-aliases.js';
@@ -151,13 +150,6 @@ export function buildConfiguredHttpProxyOptions(
     routes: loaded.routes,
     modelAliases: loaded.aliases,
     modelAliasRejections: loaded.unavailableAliasRejections,
-    reservedModelIds: [...new Set(
-      loaded.aliases.flatMap(alias => alias.sourceNames ?? []).flatMap(name => {
-        const trimmedName = name.trim();
-        const canonicalName = canonicalModelAliasName(name);
-        return [name, trimmedName, canonicalName].filter(Boolean);
-      }),
-    )],
     debug,
     debugLogPath,
     inferenceLogPath,

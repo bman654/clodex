@@ -14,6 +14,7 @@ import {
 import { routeUnavailableMessage } from './route-unavailable.js';
 import {
   describeModelAliasRejection,
+  modelAliasLookupKey,
   type ModelAliasRejectionReason,
 } from './model-aliases.js';
 import {
@@ -289,16 +290,12 @@ export interface ProxyModelAlias {
   rejectionReason?: ModelAliasRejectionReason;
 }
 
-function configuredAliasLookupNames(alias: ProxyModelAlias): string[] {
-  const sourceNames = [
+function configuredAliasLookupKeys(alias: ProxyModelAlias): string[] {
+  return [...new Set([
     alias.name,
     ...(alias.savedName === undefined ? [] : [alias.savedName]),
     ...(alias.sourceNames ?? []),
-  ];
-  return [...new Set(sourceNames.flatMap(name => {
-    const trimmed = name.trim();
-    return trimmed === name ? [name] : [name, trimmed];
-  }))].map(normalizeRouteLookupId);
+  ].map(name => modelAliasLookupKey(normalizeRouteLookupId(name))))];
 }
 
 /** Multi-model proxy: routes each request by body.model to the correct upstream. */
@@ -320,12 +317,12 @@ export async function startProxyCatalog(
 
   const byAlias = new Map(routes.map(r => [normalizeRouteLookupId(r.aliasId), r]));
   const configuredAliasNames = new Set(
-    (modelAliases ?? []).flatMap(configuredAliasLookupNames),
+    (modelAliases ?? []).flatMap(configuredAliasLookupKeys),
   );
   const unavailableAliasReasons = new Map(
     (modelAliases ?? [])
       .filter(alias => alias.rejectionReason !== undefined)
-      .flatMap(alias => configuredAliasLookupNames(alias).map(name => (
+      .flatMap(alias => configuredAliasLookupKeys(alias).map(name => (
         [name, describeModelAliasRejection(alias.rejectionReason!)] as const
       ))),
   );
@@ -421,10 +418,19 @@ export async function startProxyCatalog(
       const resolvedRoute = typeof originalModel === 'string'
         ? lookupRoute(byAlias, originalModel)
         : undefined;
-      const configuredModelUnavailable = typeof originalModel === 'string'
+      const originalModelLookupId = typeof originalModel === 'string'
+        ? normalizeRouteLookupId(originalModel)
+        : undefined;
+      const originalAliasLookupKey = originalModelLookupId === undefined
+        ? undefined
+        : modelAliasLookupKey(originalModelLookupId);
+      const configuredModelUnavailable = originalModelLookupId !== undefined
         && (
-          normalizeRouteLookupId(originalModel).startsWith('clodex:')
-          || configuredAliasNames.has(normalizeRouteLookupId(originalModel))
+          originalModelLookupId.startsWith('clodex:')
+          || (
+            originalAliasLookupKey !== undefined
+            && configuredAliasNames.has(originalAliasLookupKey)
+          )
         );
       if (!resolvedRoute && configuredModelUnavailable) {
         anthropicError(
@@ -432,7 +438,9 @@ export async function startProxyCatalog(
           400,
           routeUnavailableMessage(
             originalModel,
-            unavailableAliasReasons.get(normalizeRouteLookupId(originalModel)),
+            originalAliasLookupKey === undefined
+              ? undefined
+              : unavailableAliasReasons.get(originalAliasLookupKey),
           ),
         );
         return;

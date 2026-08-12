@@ -55,6 +55,18 @@ export function canonicalModelAliasName(name: string): string {
   return name.trim().toLowerCase();
 }
 
+/**
+ * Lookup identity for alias names only. Valid alias spellings compare under the
+ * writer's trim-and-lowercase contract; malformed names retain exact case so
+ * they cannot acquire new routing semantics.
+ */
+export function modelAliasLookupKey(name: string): string {
+  const trimmed = name.trim();
+  return isModelAliasNameSyntax(trimmed)
+    ? canonicalModelAliasName(trimmed)
+    : trimmed;
+}
+
 export function isReservedModelAlias(name: string): boolean {
   return RESERVED_MODEL_ALIASES.has(
     stripOneMContextSuffix(canonicalModelAliasName(name)),
@@ -74,17 +86,14 @@ export function modelAliasMatchesName(value: unknown, name: string): boolean {
   if (!value || typeof value !== 'object' || !('name' in value)) return false;
   const candidate = value.name;
   return typeof candidate === 'string'
-    && canonicalModelAliasName(candidate) === canonicalModelAliasName(name);
+    && modelAliasLookupKey(candidate) === modelAliasLookupKey(name);
 }
 
 export function modelAliasMatchesStoredName(value: unknown, name: string): boolean {
   if (!value || typeof value !== 'object' || !('name' in value)) return false;
   const candidate = value.name;
-  if (typeof candidate !== 'string') return false;
-  const requested = name.trim();
-  return isModelAliasNameSyntax(requested)
-    ? canonicalModelAliasName(candidate) === canonicalModelAliasName(requested)
-    : candidate.trim() === requested;
+  return typeof candidate === 'string'
+    && modelAliasLookupKey(candidate) === modelAliasLookupKey(name);
 }
 
 export function describeModelAliasRejection(reason: ModelAliasRejectionReason): string {

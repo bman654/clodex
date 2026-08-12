@@ -504,6 +504,52 @@ describe('catalog model aliases', () => {
     }
   });
 
+  it('rejects every case-equivalent spelling of a configured rejected alias without using the default route', async () => {
+    const defaultRoute: ProxyRoute = {
+      aliasId: 'clodex:test:default-model',
+      realModelId: 'default-model',
+      displayName: 'Default Model',
+      upstreamUrl: 'https://default.example',
+      apiKey: 'provider-key',
+      modelFormat: 'anthropic',
+      providerId: 'test-provider',
+    };
+    const modelAliases = resolveCatalogModelAliases([
+      { name: 'DeFaUlT', providerId: 'test-provider', modelId: 'default-model' },
+    ], () => defaultRoute);
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const handle = await startProxyCatalog(
+      [defaultRoute],
+      defaultRoute.aliasId,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      modelAliases,
+    );
+
+    try {
+      for (const path of ['/v1/messages', '/v1/messages/count_tokens']) {
+        const response = await postToProxy(handle.port, handle.token, {
+          model: 'DEFAULT',
+          max_tokens: 100,
+          messages: [{ role: 'user', content: 'hi' }],
+          stream: false,
+        }, undefined, path);
+
+        expect(response.status, path).toBe(400);
+        expect(JSON.parse(response.body).error.message).toBe(
+          "Clodex model route 'DEFAULT' is unavailable: reserved client name. Run `clodex models --list` to inspect saved routes and aliases.",
+        );
+      }
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('routes only the canonical alias and blocks every equivalent saved spelling', async () => {
     const defaultRoute: ProxyRoute = {
       aliasId: 'clodex:test:default-model',
