@@ -224,6 +224,13 @@ describe('anthropicSseModelRewrite', () => {
     expect(streamed).toContain('"model":"alias-x"');
   });
 
+  it('emits a complete CR-delimited event before the upstream closes', async () => {
+    const event = 'event: message_start\r'
+      + 'data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5"}}\r\r';
+    const { streamed } = await collectBeforeEnd(anthropicSseModelRewrite('alias-x'), [event]);
+    expect(streamed).toBe(event.replace('"model":"claude-sonnet-4-5"', '"model":"alias-x"'));
+  });
+
   it('keeps CR-only line endings on the line it rewrites', async () => {
     const out = await collect(anthropicSseModelRewrite('alias-x'), [crOnly]);
     expect(out).toContain('"model":"alias-x"');

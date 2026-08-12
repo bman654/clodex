@@ -160,16 +160,13 @@ export function anthropicSseModelRewrite(override: string): Transform {
   };
   return new Transform({
     transform(chunk: Buffer, _encoding, callback) {
-      let buffered = tail + decoder.write(chunk);
-      // Holding a trailing CR keeps a split CRLF as one internal delimiter in
-      // spec-shaped framing. The emitted bytes are equivalent without this guard.
-      let heldCr = '';
-      if (buffered.endsWith('\r')) {
-        heldCr = '\r';
-        buffered = buffered.slice(0, -1);
-      }
+      const buffered = tail + decoder.write(chunk);
+      // Emit every observed line ending immediately. If a CRLF is split across
+      // chunks, the CR and later LF still pass through in their original order;
+      // treating the LF as an empty internal line is harmless because this
+      // transform carries no event-level state.
       const parts = buffered.split(SSE_LINE_SPLIT);
-      tail = (parts.pop() ?? '') + heldCr;
+      tail = parts.pop() ?? '';
       callback(null, rewriteTerminated(parts));
     },
     flush(callback) {
