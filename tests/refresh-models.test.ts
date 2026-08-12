@@ -1001,6 +1001,37 @@ describe('refreshProviderModels', () => {
   );
 
   it.each([
+    ['opencode-go', 'openai', '@ai-sdk/openai-compatible', OPENCODE_GO_COMPLETIONS_BASE_URL],
+    ['opencode-go', 'openai', '@ai-sdk/anthropic', OPENCODE_GO_ANTHROPIC_BASE_URL],
+    ['opencode-go-mirror', 'opencode-go', '@ai-sdk/openai-compatible', OPENCODE_GO_COMPLETIONS_BASE_URL],
+    ['opencode-go-mirror', 'opencode-go', '@ai-sdk/anthropic', OPENCODE_GO_ANTHROPIC_BASE_URL],
+  ])(
+    'uses the retained template and package pin when %s names %s without a URL (%s)',
+    async (id, templateId, npm, url) => {
+      const registry = openCodeRegistry({ id, templateId, npm });
+      delete registry.providers[0]!.api.url;
+      vi.mocked(fetchTemplateModels).mockResolvedValue({
+        baseUrl: url,
+        models: openCodeTemplateModels,
+      });
+      vi.mocked(loadRegistryStrict).mockReturnValue(registry);
+
+      const result = await refreshProviderModels(id, 'oc-real-key', registry);
+
+      expect(fetchAnthropicModels).not.toHaveBeenCalled();
+      expect(fetchTemplateModels).toHaveBeenCalledOnce();
+      expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[0]).toMatchObject({
+        id: 'opencode-go',
+        staticModelPolicy: 'allowlist',
+        npm,
+      });
+      expect(vi.mocked(fetchTemplateModels).mock.calls[0]?.[2]).toBe(url);
+      expect(saveRegistry).toHaveBeenCalledOnce();
+      expect(result).toMatchObject({ ok: true, modelCount: 1 });
+    },
+  );
+
+  it.each([
     ['@ai-sdk/openai-compatible', OPENCODE_GO_COMPLETIONS_BASE_URL],
     ['@ai-sdk/anthropic', OPENCODE_GO_ANTHROPIC_BASE_URL],
   ])('routes a retained OpenCode template migration with %s through template discovery', async (npm, url) => {

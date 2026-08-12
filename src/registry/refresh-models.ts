@@ -263,7 +263,17 @@ async function refreshApiListProvider(
   const retained = isRetainedOpenCodeGoProvider(provider);
   const catalogTemplate = (retained ? retainedOpenCodeGoTemplate() : undefined)
     ?? resolveProviderTemplate(provider);
-  const baseUrl = effectiveProviderBaseUrl(provider, catalogTemplate);
+  const pinned = retained ? openCodeGoPinnedApiUrl(npm) : undefined;
+  if (retained && pinned === null) {
+    return {
+      models: [],
+      error: `${OPENCODE_GO_PROVIDER_NAME} does not support the ${npm} SDK package.`,
+    };
+  }
+  const configuredUrl = provider.api.url?.trim();
+  const baseUrl = retained
+    ? configuredUrl || pinned || undefined
+    : effectiveProviderBaseUrl(provider, catalogTemplate);
 
   if (!baseUrl) {
     return { models: [], error: 'Provider has no API base URL configured.' };
@@ -282,13 +292,6 @@ async function refreshApiListProvider(
   // Refuse rather than silently substitute the pinned URL: a caller that
   // believed it had redirected discovery should find out that it had not.
   if (retained) {
-    const pinned = openCodeGoPinnedApiUrl(npm);
-    if (!pinned) {
-      return {
-        models: [],
-        error: `${OPENCODE_GO_PROVIDER_NAME} does not support the ${npm} SDK package.`,
-      };
-    }
     if (baseUrl.replace(/\/$/, '') !== pinned) {
       return {
         models: [],
@@ -298,7 +301,6 @@ async function refreshApiListProvider(
   }
 
   let safeBaseUrl = baseUrl;
-  const configuredUrl = provider.api.url?.trim();
   const templateDefault = catalogTemplate?.defaultBaseUrl?.trim();
   if (configuredUrl && configuredUrl !== templateDefault) {
     const urlCheck = await validateCustomEndpointUrl(baseUrl, {
