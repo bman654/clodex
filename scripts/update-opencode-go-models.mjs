@@ -342,7 +342,8 @@ const SNAPSHOT_CAPABILITY_KEYS = [
 ];
 const SNAPSHOT_MODALITY_KEYS = ['audio', 'image', 'pdf', 'text', 'video'];
 const SNAPSHOT_COST_KEYS = ['cache', 'experimentalOver200K', 'input', 'output', 'tiers'];
-const SNAPSHOT_VARIANT_KEYS = ['include', 'reasoningEffort', 'reasoningSummary', 'thinking'];
+const SNAPSHOT_REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const SNAPSHOT_THINKING_TYPES = ['adaptive', 'disabled', 'enabled'];
 
 const HEX_64 = /^[0-9a-f]{64}$/;
 const HEX_40 = /^[0-9a-f]{40}$/;
@@ -365,6 +366,78 @@ function assertPrintable(where, value, errors) {
     return false;
   }
   return true;
+}
+
+function assertRequiredKeys(where, value, required, errors) {
+  for (const key of required) {
+    if (!Object.hasOwn(value, key)) errors.push(`${where}: missing ${key}`);
+  }
+}
+
+function assertReasoningEffort(where, value, errors) {
+  if (assertPrintable(where, value, errors) && !SNAPSHOT_REASONING_EFFORTS.includes(value)) {
+    errors.push(`${where}: unsupported value ${JSON.stringify(value)}`);
+  }
+}
+
+function assertVariantSchema(where, variant, transport, errors) {
+  const hasReasoningEffort = Object.hasOwn(variant, 'reasoningEffort');
+  const hasThinking = Object.hasOwn(variant, 'thinking');
+  if (hasThinking && !isPlainObject(variant.thinking)) {
+    errors.push(`${where}.thinking: expected an object`);
+  }
+  if (hasReasoningEffort && hasThinking) {
+    errors.push(`${where}: reasoningEffort and thinking cannot both be declared`);
+  }
+
+  if (transport === 'openai-completions') {
+    const keys = ['reasoningEffort'];
+    assertKnownKeys(where, variant, keys, errors);
+    assertRequiredKeys(where, variant, keys, errors);
+    assertReasoningEffort(`${where}.reasoningEffort`, variant.reasoningEffort, errors);
+    return;
+  }
+
+  if (transport === 'anthropic-messages') {
+    assertKnownKeys(where, variant, ['thinking'], errors);
+    assertRequiredKeys(where, variant, ['thinking'], errors);
+    if (!isPlainObject(variant.thinking)) {
+      errors.push(`${where}.thinking: expected an object`);
+      return;
+    }
+    const thinkingWhere = `${where}.thinking`;
+    assertKnownKeys(thinkingWhere, variant.thinking, ['budgetTokens', 'type'], errors);
+    assertRequiredKeys(thinkingWhere, variant.thinking, ['type'], errors);
+    if (assertPrintable(`${thinkingWhere}.type`, variant.thinking.type, errors)
+      && !SNAPSHOT_THINKING_TYPES.includes(variant.thinking.type)) {
+      errors.push(`${thinkingWhere}.type: unsupported value ${JSON.stringify(variant.thinking.type)}`);
+    }
+    if (variant.thinking.type === 'enabled') {
+      const budget = variant.thinking.budgetTokens;
+      if (!Number.isInteger(budget) || budget <= 0 || budget > 10_000_000) {
+        errors.push(`${thinkingWhere}.budgetTokens: expected a positive integer <= 10000000, got ${JSON.stringify(budget)}`);
+      }
+    } else if (Object.hasOwn(variant.thinking, 'budgetTokens')) {
+      errors.push(`${thinkingWhere}.budgetTokens: only valid for enabled thinking`);
+    }
+    return;
+  }
+
+  const keys = ['include', 'reasoningEffort', 'reasoningSummary'];
+  assertKnownKeys(where, variant, keys, errors);
+  assertRequiredKeys(where, variant, keys, errors);
+  if (!Array.isArray(variant.include) || variant.include.length === 0) {
+    errors.push(`${where}.include: expected a non-empty array of printable strings`);
+  } else {
+    for (const [index, entry] of variant.include.entries()) {
+      assertPrintable(`${where}.include[${index}]`, entry, errors);
+    }
+  }
+  assertReasoningEffort(`${where}.reasoningEffort`, variant.reasoningEffort, errors);
+  if (assertPrintable(`${where}.reasoningSummary`, variant.reasoningSummary, errors)
+    && variant.reasoningSummary !== 'auto') {
+    errors.push(`${where}.reasoningSummary: unsupported value ${JSON.stringify(variant.reasoningSummary)}`);
+  }
 }
 
 function assertMoney(where, value, errors) {
@@ -516,19 +589,12 @@ function assertModelSchema(model, index, seen, errors) {
         if (!isPlainObject(variant)) {
           errors.push(`${label}.variants.${name}: expected an object`);
         } else {
-          const variantWhere = `${label}.variants.${name}`;
-          assertKnownKeys(variantWhere, variant, SNAPSHOT_VARIANT_KEYS, errors);
-          const hasReasoningEffort = Object.hasOwn(variant, 'reasoningEffort');
-          const hasThinking = Object.hasOwn(variant, 'thinking');
-          if (hasReasoningEffort) assertPrintable(`${variantWhere}.reasoningEffort`, variant.reasoningEffort, errors);
-          if (hasThinking && !isPlainObject(variant.thinking)) {
-            errors.push(`${variantWhere}.thinking: expected an object`);
-          }
-          if (hasReasoningEffort && hasThinking) {
-            errors.push(
-              `${variantWhere}: reasoningEffort and thinking cannot both be declared`,
-            );
-          }
+          assertVariantSchema(
+            `${label}.variants.${name}`,
+            variant,
+            SDK_TRANSPORTS[model.api?.npm],
+            errors,
+          );
         }
       }
     }

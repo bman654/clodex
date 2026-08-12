@@ -65,6 +65,12 @@ function resolvedModel(id: string, npm: string, overrides: ResolvedModel = {}): 
   };
 }
 
+function validateVariant(npm: string, variant: unknown): void {
+  const rows = snapshot.models.map(model => structuredClone(model) as ResolvedModel);
+  const extra = resolvedModel('unreviewed-row', npm, { variants: { probe: variant } });
+  assertResolvedModels([...rows, extra]);
+}
+
 /** The snapshot rows for the three models whose transport is overridden. */
 function overriddenRows(): ResolvedModel[] {
   return snapshot.models
@@ -199,7 +205,11 @@ describe('OpenCode Go resolver snapshot generator', () => {
     // kimi-k3 is Chat Completions in both the snapshot and TRANSPORTS. Flip the
     // snapshot alone and the update must stop: nobody has reviewed that route.
     const mutated = snapshot.models.map(model => (model.id === 'kimi-k3'
-      ? { ...structuredClone(model), api: { ...model.api, npm: '@ai-sdk/anthropic' } }
+      ? {
+          ...structuredClone(model),
+          api: { ...model.api, npm: '@ai-sdk/anthropic' },
+          variants: { max: { thinking: { budgetTokens: 1, type: 'enabled' } } },
+        }
       : model));
     expect(() => convertResolvedModels(mutated))
       .toThrow(/kimi-k3: resolver snapshot routes anthropic-messages but clodex routes openai-completions/);
@@ -255,6 +265,163 @@ describe('OpenCode Go resolver snapshot generator', () => {
     const extra = resolvedModel('unreviewed-row', '@ai-sdk/openai-compatible');
     mutate(extra);
     expect(() => assertResolvedModels([...rows, extra])).toThrow(expected);
+  });
+
+  describe('resolver variant schema', () => {
+    const efforts = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+    const completions = '@ai-sdk/openai-compatible';
+    const messages = '@ai-sdk/anthropic';
+    const responses = '@ai-sdk/openai';
+    const responseVariant = {
+      include: ['reasoning.encrypted_content'],
+      reasoningEffort: 'high',
+      reasoningSummary: 'auto',
+    };
+
+    it('accepts every committed variant and an empty variants map', () => {
+      expect(() => assertResolvedModels(structuredClone(snapshot.models))).not.toThrow();
+      expect(() => assertResolvedModels([
+        ...structuredClone(snapshot.models),
+        resolvedModel('unreviewed-row', completions),
+      ])).not.toThrow();
+    });
+
+    it.each(efforts)('accepts the completions reasoning effort %s', effort => {
+      expect(() => validateVariant(completions, { reasoningEffort: effort })).not.toThrow();
+    });
+
+    it.each(efforts)('accepts the Responses reasoning effort %s', effort => {
+      expect(() => validateVariant(responses, { ...responseVariant, reasoningEffort: effort })).not.toThrow();
+    });
+
+    it.each([
+      ['adaptive', { thinking: { type: 'adaptive' } }],
+      ['disabled', { thinking: { type: 'disabled' } }],
+      ['enabled', { thinking: { budgetTokens: 1, type: 'enabled' } }],
+    ])('accepts the Messages thinking type %s', (_label, variant) => {
+      expect(() => validateVariant(messages, variant)).not.toThrow();
+    });
+
+    it.each([
+      ['missing', {}],
+      ['null', { reasoningEffort: null }],
+      ['boolean', { reasoningEffort: false }],
+      ['number', { reasoningEffort: 7 }],
+      ['object', { reasoningEffort: {} }],
+      ['array', { reasoningEffort: [] }],
+      ['empty string', { reasoningEffort: '' }],
+      ['blank string', { reasoningEffort: ' ' }],
+      ['control character', { reasoningEffort: 'high\n' }],
+      ['unsupported string', { reasoningEffort: 'turbo' }],
+    ])('rejects a completions reasoningEffort that is %s', (_label, variant) => {
+      expect(() => validateVariant(completions, variant)).toThrow(/reasoningEffort/);
+    });
+
+    it.each([
+      ['wrong type', { ...responseVariant, reasoningEffort: 7 }],
+      ['unsupported value', { ...responseVariant, reasoningEffort: 'turbo' }],
+    ])('applies the shared reasoningEffort schema to Responses for an %s', (_label, variant) => {
+      expect(() => validateVariant(responses, variant)).toThrow(/reasoningEffort/);
+    });
+
+    it.each([
+      ['missing', { reasoningEffort: 'high', reasoningSummary: 'auto' }],
+      ['null', { ...responseVariant, include: null }],
+      ['boolean', { ...responseVariant, include: false }],
+      ['number', { ...responseVariant, include: 7 }],
+      ['object', { ...responseVariant, include: {} }],
+      ['string', { ...responseVariant, include: 'reasoning.encrypted_content' }],
+      ['empty array', { ...responseVariant, include: [] }],
+      ['null member', { ...responseVariant, include: [null] }],
+      ['boolean member', { ...responseVariant, include: [false] }],
+      ['number member', { ...responseVariant, include: [7] }],
+      ['object member', { ...responseVariant, include: [{}] }],
+      ['array member', { ...responseVariant, include: [[]] }],
+      ['empty member', { ...responseVariant, include: [''] }],
+      ['blank member', { ...responseVariant, include: [' '] }],
+      ['control-character member', { ...responseVariant, include: ['reasoning.\nencrypted_content'] }],
+    ])('rejects a Responses include that is %s', (_label, variant) => {
+      expect(() => validateVariant(responses, variant)).toThrow(/include/);
+    });
+
+    it.each([
+      ['missing', { include: responseVariant.include, reasoningEffort: 'high' }],
+      ['null', { ...responseVariant, reasoningSummary: null }],
+      ['boolean', { ...responseVariant, reasoningSummary: false }],
+      ['number', { ...responseVariant, reasoningSummary: 7 }],
+      ['object', { ...responseVariant, reasoningSummary: {} }],
+      ['array', { ...responseVariant, reasoningSummary: [] }],
+      ['empty string', { ...responseVariant, reasoningSummary: '' }],
+      ['blank string', { ...responseVariant, reasoningSummary: ' ' }],
+      ['control character', { ...responseVariant, reasoningSummary: 'auto\n' }],
+      ['unsupported string', { ...responseVariant, reasoningSummary: 'detailed' }],
+    ])('rejects a Responses reasoningSummary that is %s', (_label, variant) => {
+      expect(() => validateVariant(responses, variant)).toThrow(/reasoningSummary/);
+    });
+
+    it.each([
+      ['missing', {}],
+      ['null', { thinking: null }],
+      ['boolean', { thinking: false }],
+      ['number', { thinking: 7 }],
+      ['string', { thinking: 'enabled' }],
+      ['array', { thinking: [] }],
+      ['empty object', { thinking: {} }],
+    ])('rejects a Messages thinking representation that is %s', (_label, variant) => {
+      expect(() => validateVariant(messages, variant)).toThrow(/thinking/);
+    });
+
+    it.each([
+      ['missing', { thinking: {} }],
+      ['null', { thinking: { type: null } }],
+      ['boolean', { thinking: { type: false } }],
+      ['number', { thinking: { type: 7 } }],
+      ['object', { thinking: { type: {} } }],
+      ['array', { thinking: { type: [] } }],
+      ['empty string', { thinking: { type: '' } }],
+      ['blank string', { thinking: { type: ' ' } }],
+      ['control character', { thinking: { type: 'enabled\n' } }],
+      ['unsupported string', { thinking: { type: 'future' } }],
+    ])('rejects a Messages thinking.type that is %s', (_label, variant) => {
+      expect(() => validateVariant(messages, variant)).toThrow(/thinking\.type/);
+    });
+
+    it.each([
+      ['missing', { thinking: { type: 'enabled' } }],
+      ['null', { thinking: { budgetTokens: null, type: 'enabled' } }],
+      ['boolean', { thinking: { budgetTokens: false, type: 'enabled' } }],
+      ['string', { thinking: { budgetTokens: '1', type: 'enabled' } }],
+      ['object', { thinking: { budgetTokens: {}, type: 'enabled' } }],
+      ['array', { thinking: { budgetTokens: [], type: 'enabled' } }],
+      ['zero', { thinking: { budgetTokens: 0, type: 'enabled' } }],
+      ['negative', { thinking: { budgetTokens: -1, type: 'enabled' } }],
+      ['fractional', { thinking: { budgetTokens: 1.5, type: 'enabled' } }],
+      ['above the retained upper bound', { thinking: { budgetTokens: 10_000_001, type: 'enabled' } }],
+    ])('rejects an enabled-thinking budgetTokens value that is %s', (_label, variant) => {
+      expect(() => validateVariant(messages, variant)).toThrow(/budgetTokens/);
+    });
+
+    it.each([
+      ['adaptive', { thinking: { budgetTokens: 1, type: 'adaptive' } }],
+      ['disabled', { thinking: { budgetTokens: 1, type: 'disabled' } }],
+    ])('rejects budgetTokens for %s thinking', (_label, variant) => {
+      expect(() => validateVariant(messages, variant)).toThrow(/budgetTokens/);
+    });
+
+    it.each([
+      ['unknown completions key', completions, { reasoningEffort: 'high', surprise: true }],
+      ['unknown Messages key', messages, { surprise: true, thinking: { budgetTokens: 1, type: 'enabled' } }],
+      ['unknown Responses key', responses, { ...responseVariant, surprise: true }],
+      ['unknown nested thinking key', messages, { thinking: { budgetTokens: 1, surprise: true, type: 'enabled' } }],
+      ['completions plus thinking', completions, { reasoningEffort: 'high', thinking: { budgetTokens: 1, type: 'enabled' } }],
+      ['Messages plus reasoning effort', messages, { reasoningEffort: 'high', thinking: { budgetTokens: 1, type: 'enabled' } }],
+      ['Responses plus thinking', responses, { ...responseVariant, thinking: { budgetTokens: 1, type: 'enabled' } }],
+      ['Responses fields on completions', completions, responseVariant],
+      ['Responses fields on Messages', messages, { ...responseVariant, thinking: { budgetTokens: 1, type: 'enabled' } }],
+      ['zero representation on Responses', responses, {}],
+    ])('rejects %s', (_label, npm, variant) => {
+      expect(() => validateVariant(npm, variant)).toThrow(/variants\.probe/);
+    });
   });
 
   it.each([
