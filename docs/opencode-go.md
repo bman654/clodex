@@ -10,7 +10,7 @@ Run:
 clodex providers add
 ```
 
-Choose **OpenCode Go API key**, paste an API key from OpenCode, then use `clodex models` to add the desired models to favorites. The pasted key is verified against the authenticated chat-completions endpoint before it is saved — `/models` alone cannot validate a credential (see below) — so a mistyped key is rejected at add time instead of failing on first inference. Favorites can be assigned short aliases and patched into Claude Code in the same way as OpenAI models.
+Choose **OpenCode Go API key**, paste an API key from OpenCode, then use `clodex models` to add the desired models to favorites. The pasted key is checked against the authenticated chat-completions endpoint before it is saved — `/models` alone cannot validate a credential (see below). The pre-save probe rejects only definite, recognized authentication failures; timeout, network, and unrecognized responses are inconclusive, so a bad key may still be saved and surface an authentication failure on first inference. Favorites can be assigned short aliases and patched into Claude Code in the same way as OpenAI models.
 
 The provider uses one credential with two upstream wire protocols:
 
