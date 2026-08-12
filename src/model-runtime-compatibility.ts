@@ -100,6 +100,7 @@ export function transformOpenAiCompatibleRequestBody(
   const transformed = { ...body };
 
   if (compatibility.supportsStore === false) delete transformed.store;
+  if (compatibility.supportsReasoningEffort === false) delete transformed.reasoning_effort;
   if (compatibility.supportsLongCacheRetention === false) {
     delete transformed.prompt_cache_retention;
     delete transformed.promptCacheRetention;

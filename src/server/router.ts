@@ -68,6 +68,7 @@ import {
   type ModelAliasRejection,
 } from '../model-aliases.js';
 import { routeUnavailableMessage } from '../route-unavailable.js';
+import { transformOpenAiCompatibleRequestBody } from '../model-runtime-compatibility.js';
 
 export interface ServerOptions {
   host: string;
@@ -669,7 +670,12 @@ async function handleOpenAIChatCompletions(
     }
     // The client may have addressed the model via a gateway alias or saved
     // short alias — the upstream API only knows its own wire id.
-    const forwardBody = body.model === upstreamModelId(model) ? body : { ...body, model: upstreamModelId(model) };
+    const compatibleBody = model.compatibility
+      ? transformOpenAiCompatibleRequestBody(body, model.compatibility)
+      : body;
+    const forwardBody = compatibleBody.model === upstreamModelId(model)
+      ? compatibleBody
+      : { ...compatibleBody, model: upstreamModelId(model) };
     auditInference(options, {
       modelId: body.model,
       effort: openAiEffort(body),

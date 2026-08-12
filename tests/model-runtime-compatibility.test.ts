@@ -52,6 +52,17 @@ describe('transformOpenAiCompatibleRequestBody', () => {
     });
   });
 
+  it('omits unsupported reasoning effort and thinking without mutating input', () => {
+    const input = { reasoning_effort: 'high' };
+    const result = transformOpenAiCompatibleRequestBody(input, {
+      supportsReasoningEffort: false,
+      thinkingFormat: 'deepseek',
+    });
+
+    expect(result).toEqual({});
+    expect(input).toEqual({ reasoning_effort: 'high' });
+  });
+
   it('enables Qwen thinking only when an effort is present', () => {
     expect(transformOpenAiCompatibleRequestBody(
       { reasoning_effort: 'high', messages: [] },

@@ -1166,6 +1166,54 @@ describe('server router', () => {
     });
   });
 
+  it('applies direct OpenAI model compatibility before forwarding Chat Completions', async () => {
+    const upstream = await startUpstream({
+      id: 'chatcmpl-compatible',
+      choices: [{ message: { content: 'compatible ok' }, finish_reason: 'stop' }],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        id: 'openai-compatible',
+        name: 'OpenAI Compatible',
+        isFree: false,
+        brand: 'Other',
+        providerId: 'ordinary',
+        sourceBackend: 'ordinary',
+        modelFormat: 'openai',
+        completionsUrl: `${upstream.baseUrl}/v1/chat/completions`,
+        compatibility: {
+          supportsStore: false,
+          maxTokensField: 'max_tokens',
+          supportsReasoningEffort: false,
+        },
+        upstreamModelId: 'upstream-compatible',
+      }]),
+    });
+
+    const body = {
+      model: 'openai-compatible',
+      messages: [{ role: 'user', content: 'hi' }],
+      store: true,
+      reasoning_effort: 'high',
+      max_completion_tokens: 100,
+      temperature: 0.2,
+    };
+    const response = await fetch(`${server.url}/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests[0]?.body).toEqual({
+      model: 'upstream-compatible',
+      messages: [{ role: 'user', content: 'hi' }],
+      max_tokens: 100,
+      temperature: 0.2,
+    });
+  });
+
   it('caches SDK language models per provider-qualified route, not just raw model id', async () => {
     const duplicateCatalog = createGatewayModelCatalog([
       {
