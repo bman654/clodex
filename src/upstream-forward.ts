@@ -161,9 +161,8 @@ export function anthropicSseModelRewrite(override: string): Transform {
   return new Transform({
     transform(chunk: Buffer, _encoding, callback) {
       let buffered = tail + decoder.write(chunk);
-      // A trailing CR may be the first half of a CRLF whose LF is in the next
-      // chunk. Framing it as a bare-CR terminator now would split one line
-      // ending into two and insert a blank line, which in SSE ends the event.
+      // Holding a trailing CR keeps a split CRLF as one internal delimiter in
+      // spec-shaped framing. The emitted bytes are equivalent without this guard.
       let heldCr = '';
       if (buffered.endsWith('\r')) {
         heldCr = '\r';

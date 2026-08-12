@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { refreshProviderModels } from '../src/registry/refresh-models.js';
 import * as io from '../src/registry/io.js';
-import type { ProviderRegistry } from '../src/registry/types.js';
+import * as pricing from '../src/registry/pricing.js';
+import type { CachedModel, ProviderRegistry } from '../src/registry/types.js';
 
 vi.mock('../src/registry/io.js', () => ({
   loadRegistry: vi.fn(),
@@ -9,17 +10,22 @@ vi.mock('../src/registry/io.js', () => ({
   saveRegistry: vi.fn(),
 }));
 
-vi.mock('../src/registry/pricing.js', () => ({
-  loadPricingCache: vi.fn(),
-  enrichModelsWithPricing: vi.fn((models) => models),
-  enrichPricingAsync: vi.fn(),
-  pricingPlatformForProvider: vi.fn(),
-  buildPricingIndex: vi.fn(),
-  // Preserve an explicit flag while defaulting omitted fields for this mock.
-  providerPreservesModelPricing: vi.fn(
-    (provider: { preserveModelPricing?: boolean }) => provider.preserveModelPricing ?? false,
-  ),
-}));
+vi.mock('../src/registry/pricing.js', async () => {
+  const actual = await vi.importActual<typeof import('../src/registry/pricing.js')>(
+    '../src/registry/pricing.js',
+  );
+  return {
+    ...actual,
+    loadPricingCache: vi.fn(),
+    enrichModelsWithPricing: vi.fn((models: CachedModel[]) => models.map(model => ({
+      ...model,
+      cost: { input: 999, output: 999 },
+    }))),
+    enrichPricingAsync: vi.fn(),
+    pricingPlatformForProvider: vi.fn(),
+    buildPricingIndex: vi.fn(),
+  };
+});
 
 describe('registry/refresh-models', () => {
   const originalFetch = global.fetch;
@@ -316,6 +322,39 @@ describe('registry/refresh-models', () => {
       expect(result.ok).toBe(false);
       expect(result.reason).toContain('OAuth token not available');
     });
+  });
+
+  it('preserves curated OpenCode pricing when the provider flag is absent', async () => {
+    const mockRegistry: ProviderRegistry = {
+      schemaVersion: 1,
+      providers: [{
+        id: 'opencode-go',
+        templateId: 'opencode-go',
+        name: 'OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:opencode-go',
+        authType: 'api',
+        api: {
+          npm: '@ai-sdk/openai-compatible',
+          url: 'https://opencode.ai/zen/go/v1',
+        },
+        addedAt: '2026-08-12T00:00:00.000Z',
+      }],
+    };
+    vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+    vi.mocked(pricing.loadPricingCache).mockReturnValue({ models: [] });
+    vi.mocked(global.fetch).mockResolvedValueOnce(new Response(JSON.stringify([
+      { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+    ]), { status: 200 }));
+
+    expect(pricing.providerPreservesModelPricing(mockRegistry.providers[0]!)).toBe(true);
+    const result = await refreshProviderModels('opencode-go', 'oc-real-key', mockRegistry);
+
+    const savedRegistry = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+    const savedModel = savedRegistry.providers[0]?.modelsCache?.models[0];
+    expect(result).toMatchObject({ ok: true, modelCount: 1 });
+    expect(savedModel?.cost).toEqual({ input: 0.435, output: 0.87, cache_read: 0.003625 });
+    expect(pricing.enrichModelsWithPricing).not.toHaveBeenCalled();
   });
 
     });

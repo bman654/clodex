@@ -126,10 +126,9 @@ describe('translated route response identity', () => {
 
   it('reports the routed model, not the request id, on a non-stream default-route fallback', async () => {
     // The requested id named no route we honoured, so the default route
-    // answered. Echoing the request back would tell the client it reached a
-    // model it never reached — and patched Claude Code keys its context window
-    // off that id. The Anthropic passthrough already refuses to do this; the
-    // translated path has to agree.
+    // answered. Report that answering/default model rather than the unresolved
+    // requested id; patched Claude Code keys its context window off that id,
+    // and built-in Anthropic-format fallback is routine in this PR.
     const handle = await startProxyCatalog([route], route.aliasId, false);
     const res = await postToProxy(handle.port, handle.token, {
       model: 'some-unconfigured-model',

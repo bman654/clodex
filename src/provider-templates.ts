@@ -101,7 +101,7 @@ export async function verifyOpenCodeGoCredential(apiKey: string): Promise<string
         // "Unauthorized" and would reject that key at add time, blaming the
         // key for an entitlement problem. Only a type that IS an auth error,
         // or a message that talks about the key itself, counts.
-        authRejected = /^(?:auth|authentication|authorization)(?:_?error)?$/i.test(errorType)
+        authRejected = /^(?:auth|authentication)(?:_?error)?$/i.test(errorType)
           || /\b(?:invalid|bad|missing|expired|incorrect)\b[^.]{0,40}\bapi[ _-]?key\b/i.test(message)
           || /\bapi[ _-]?key\b[^.]{0,40}\b(?:invalid|not valid|expired|incorrect|missing)\b/i.test(message)
           || /\bauthentication (?:failed|error)\b/i.test(message);

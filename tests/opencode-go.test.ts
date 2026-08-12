@@ -292,6 +292,12 @@ describe('verifyOpenCodeGoCredential', () => {
     expect(await verifyOpenCodeGoCredential('bad-key')).not.toBeNull();
   });
 
+  it('treats a 403 authorization_error as inconclusive', async () => {
+    const authorizationError = '{"error":{"type":"authorization_error","message":"Authorization failed."}}';
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(authorizationError, { status: 403 })));
+    expect(await verifyOpenCodeGoCredential('good-key')).toBeNull();
+  });
+
   it('treats a 401 ModelError as inconclusive, never a key rejection', async () => {
     // Live behavior that broke the original empty-body probe: the gateway
     // returns 401 ModelError for an unsupported model REGARDLESS of the key.

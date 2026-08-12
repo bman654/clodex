@@ -234,10 +234,8 @@ describe('anthropicSseModelRewrite', () => {
   });
 
   it('does not split a CRLF whose halves land in different chunks', async () => {
-    // The hazard the CR terminator introduces: a trailing \r may be the first
-    // half of a CRLF. Framing it as a bare-CR terminator would turn one line
-    // ending into two and insert a phantom blank line, which in SSE ends the
-    // event.
+    // Holding the trailing CR keeps a split CRLF as one internal delimiter in
+    // spec-shaped framing; the emitted bytes are equivalent without the guard.
     const crlf = 'event: message_start\r\n'
       + 'data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5"}}\r\n\r\n';
     const boundary = crlf.indexOf('\r\n') + 1;
