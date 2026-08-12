@@ -661,9 +661,9 @@ describe('materializeRegistry', () => {
       modelsCache: {
         fetchedAt: '2026-08-11T00:00:00.000Z',
         models: [{
-          id: 'compatible-sentinel',
-          name: 'Compatible Sentinel',
-          upstreamModelId: 'compatible-sentinel',
+          id: 'deepseek-v4-pro',
+          name: 'DeepSeek V4 Pro',
+          upstreamModelId: 'deepseek-v4-pro',
           modelFormat: 'openai',
           npm: '@ai-sdk/openai-compatible',
           apiUrl: 'https://model-sentinel.invalid/v1',
@@ -691,9 +691,9 @@ describe('materializeRegistry', () => {
       modelsCache: {
         fetchedAt: '2026-08-11T00:00:00.000Z',
         models: [{
-          id: 'anthropic-sentinel',
-          name: 'Anthropic Sentinel',
-          upstreamModelId: 'anthropic-sentinel',
+          id: 'qwen3.8-max',
+          name: 'Qwen3.8 Max',
+          upstreamModelId: 'qwen3.8-max',
           modelFormat: 'anthropic',
           npm: '@ai-sdk/anthropic',
           apiUrl: 'https://model-sentinel.invalid/v1',
@@ -749,9 +749,9 @@ describe('materializeRegistry', () => {
         modelsCache: {
           fetchedAt: '2026-08-11T00:00:00.000Z',
           models: [{
-            id: 'opencode-sentinel',
-            name: 'OpenCode Sentinel',
-            upstreamModelId: 'opencode-sentinel',
+            id: 'deepseek-v4-pro',
+            name: 'DeepSeek V4 Pro',
+            upstreamModelId: 'deepseek-v4-pro',
             modelFormat: 'openai',
             npm: '@ai-sdk/openai-compatible',
             apiUrl: 'https://opencode-model-sentinel.invalid/v1',
@@ -806,17 +806,17 @@ describe('materializeRegistry', () => {
         fetchedAt: '2026-08-11T00:00:00.000Z',
         models: [
           {
-            id: 'compatible-sentinel',
-            name: 'Compatible Sentinel',
-            upstreamModelId: 'compatible-sentinel',
+            id: 'deepseek-v4-pro',
+            name: 'DeepSeek V4 Pro',
+            upstreamModelId: 'deepseek-v4-pro',
             modelFormat: 'openai',
             npm: '@ai-sdk/openai-compatible',
             apiUrl: 'https://model-sentinel.invalid/v1',
           },
           {
-            id: 'anthropic-sentinel',
-            name: 'Anthropic Sentinel',
-            upstreamModelId: 'anthropic-sentinel',
+            id: 'qwen3.8-max',
+            name: 'Qwen3.8 Max',
+            upstreamModelId: 'qwen3.8-max',
             modelFormat: 'anthropic',
             npm: '@ai-sdk/anthropic',
             apiUrl: 'https://model-sentinel.invalid/v1',
@@ -841,7 +841,7 @@ describe('materializeRegistry', () => {
     expect(models?.[0]?.completionsUrl).toBe(`${OPENCODE_GO_COMPLETIONS_BASE_URL}/chat/completions`);
     expect(models?.[1]?.apiBaseUrl).toBe(OPENCODE_GO_ANTHROPIC_BASE_URL);
     expect(models?.[1]?.baseUrl).toBe(OPENCODE_GO_ANTHROPIC_BASE_URL);
-    expect(models?.map(model => model.id)).toEqual(['compatible-sentinel', 'anthropic-sentinel']);
+    expect(models?.map(model => model.id)).toEqual(['deepseek-v4-pro', 'qwen3.8-max']);
   });
 
   it('honors per-model npm and apiUrl overrides', () => {
