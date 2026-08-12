@@ -5,6 +5,9 @@ import {
   OPENCODE_GO_COMPLETIONS_BASE_URL,
   OPENCODE_GO_SOURCE,
   OPENCODE_GO_SOURCE_FETCHED_AT,
+  OPENCODE_GO_SOURCE_MODELS_SHA256,
+  OPENCODE_GO_SOURCE_RELEASE_COMMIT,
+  OPENCODE_GO_SOURCE_VERSION,
 } from '../src/data/opencode-go-models.js';
 import { TEST_TIMEOUT_MS } from '../src/constants.js';
 import { buildHttpProxyRoutes } from '../src/http-proxy/routes.js';
@@ -45,8 +48,11 @@ describe('OpenCode Go catalog', () => {
     const models = buildOpenCodeGoModels();
     const ids = models.map(model => model.id);
 
-    expect(OPENCODE_GO_SOURCE).toBe('https://models.dev/api.json');
-    expect(new Date(OPENCODE_GO_SOURCE_FETCHED_AT).toISOString()).toBe(OPENCODE_GO_SOURCE_FETCHED_AT);
+    expect(OPENCODE_GO_SOURCE).toBe('opencode --pure models opencode-go --verbose');
+    expect(Number.isNaN(Date.parse(OPENCODE_GO_SOURCE_FETCHED_AT))).toBe(false);
+    expect(OPENCODE_GO_SOURCE_VERSION).toBe('1.18.15');
+    expect(OPENCODE_GO_SOURCE_RELEASE_COMMIT).toMatch(/^[0-9a-f]{40}$/);
+    expect(OPENCODE_GO_SOURCE_MODELS_SHA256).toMatch(/^[0-9a-f]{64}$/);
     expect(models).toHaveLength(17);
     expect(new Set(ids).size).toBe(models.length);
     expect(ids).not.toContain('grok-4.5');

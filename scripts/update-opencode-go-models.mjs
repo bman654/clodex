@@ -1,40 +1,75 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { parseArgs } from 'node:util';
 
-// OpenCode's own catalog service (the opencode CLI consumes the same feed).
-// Supplies per-model metadata: name, context window, cost, modalities.
+// PER-MODEL METADATA COMES FROM A COMMITTED SNAPSHOT OF OPENCODE'S OWN MODEL
+// RESOLVER — `opencode --pure models opencode-go --verbose`, captured once from
+// a pinned release and stored at src/data/opencode-go-cli-snapshot.json. That
+// file is the metadata authority for this catalog: it is byte-pinned, hashed,
+// and reviewed, so a routine regeneration is deterministic and offline instead
+// of depending on whatever models.dev happens to serve today.
 //
-// WHAT THE FEED CAN AND CANNOT CONTROL — the property that keeps this script's
-// supply-chain surface narrow, and which is not obvious from reading it:
+// WHAT THE SNAPSHOT CAN AND CANNOT CONTROL — the property that keeps this
+// script's supply-chain surface narrow, and which is not obvious from reading
+// it:
 //
-//   Feed-controlled: name, contextWindow, cost, modalities, reasoning.
-//   Local-only:      apiUrl, npm, modelFormat, the whole compatibility block,
-//                    and which ids exist at all (TRANSPORTS below).
+//   Snapshot-controlled: name, contextWindow, cost, modalities, reasoning.
+//   Local-only:          apiUrl, npm, modelFormat, the whole compatibility
+//                        block, and which ids exist at all (TRANSPORTS below).
 //
 // `toClodexModel` hardcodes every routing constant locally and filters ids
-// against TRANSPORTS, so a hostile or simply wrong feed cannot produce a bad
-// base URL, a bad SDK package, or any code-execution path — the worst it can
-// do is a wrong display name, price, or context window, and the ingest
-// validation in main() catches the last of those. Keep it that way: never move
-// a routing or compatibility field into the feed-derived half.
-const MODELS_DEV_URL = 'https://models.dev/api.json';
+// against TRANSPORTS, so a wrong snapshot cannot produce a bad base URL, a bad
+// SDK package, or any code-execution path — the worst it can do is a wrong
+// display name, price, or context window, and `assertSnapshotSchema` catches
+// the last of those. Keep it that way: never move a routing or compatibility
+// field into the snapshot-derived half.
+//
+// The snapshot's recorded release digests are INTEGRITY/REPRODUCIBILITY fields
+// — they identify which capture these bytes came from. This script neither
+// fetches nor authenticates that release asset, so nothing here is a
+// provenance or authenticity proof.
 const PROVIDER_ID = 'opencode-go';
+// Outputs are cwd-relative (the repo root) so a maintainer can regenerate into
+// a scratch tree; the snapshot is script-relative because it is this script's
+// own committed input, not something the invocation directory supplies.
 const MODELS_PATH = resolve('src/data/opencode-go-models.json');
 const CONSTANTS_PATH = resolve('src/data/opencode-go-models.ts');
+const SNAPSHOT_PATH = fileURLToPath(new URL('../src/data/opencode-go-cli-snapshot.json', import.meta.url));
+
+// Retained cross-check only, never a metadata source. models.dev publishes a
+// per-model `reasoning_options`, which is the closest thing to an authority on
+// what OpenCode's GATEWAY accepts for graded effort; the resolver snapshot does
+// not describe the same thing. `assertEffortLadders` uses it on the refresh
+// path so a local map cannot start sending an effort value the gateway never
+// advertised. `--check` never touches it and never reaches the network.
+const MODELS_DEV_URL = 'https://models.dev/api.json';
 
 const COMPLETIONS_BASE_URL = 'https://opencode.ai/zen/go/v1';
 const ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go';
 
-// models.dev does not publish per-model wire transport, and the family-level
-// summary in the Zen docs is not reliable per model (minimax-m3 is
-// Anthropic-format while minimax-m2.x are Chat Completions; gpt-5.6-luna rides
-// Chat Completions, not Responses). This map is clodex's live-validated
-// routing knowledge: catalog entries only exist for ids mapped here. A new
-// model on models.dev surfaces in the updater's "unmapped" report and is added
-// once its transport is verified against the live endpoint. Responses-only
-// models (grok, mainline gpt) are deliberately absent.
+// The only API URL the pinned resolver emits. Validated exactly, so a snapshot
+// carrying URL credentials, another host, or an alternate scheme fails the
+// schema instead of reaching the local routing table.
+const RESOLVER_API_URL = 'https://opencode.ai/zen/go/v1';
+
+const SDK_TRANSPORTS = Object.assign(Object.create(null), {
+  '@ai-sdk/openai-compatible': 'openai-completions',
+  '@ai-sdk/anthropic': 'anthropic-messages',
+  '@ai-sdk/openai': 'openai-responses',
+});
+
+// clodex's live-validated routing knowledge: catalog entries only exist for ids
+// mapped here. The resolver snapshot names an SDK package per model, but that
+// is the resolver's own routing decision for the opencode CLI, not a validated
+// statement about what this proxy has exercised on the wire — where the two
+// disagree, TRANSPORT_OVERRIDES below records the reviewed reason. A new model
+// in the snapshot surfaces in the "unmapped" report and is added once its
+// transport is verified against the live endpoint. Responses-transport models
+// (grok, mainline gpt) are deliberately absent.
 const TRANSPORTS = Object.assign(Object.create(null), {
   'deepseek-v4-flash': 'openai-completions',
   'deepseek-v4-pro': 'openai-completions',
@@ -55,9 +90,51 @@ const TRANSPORTS = Object.assign(Object.create(null), {
   'qwen3.8-max': 'anthropic-messages',
 });
 
+/**
+ * Reviewed exceptions where the pinned resolver's SDK package disagrees with
+ * the transport clodex actually runs.
+ *
+ * Every entry conserves the CURRENT reviewed runtime transport. None of them is
+ * a claim that the resolver is wrong about its own client: the resolver picks a
+ * package for the opencode CLI, while these routes are the ones clodex has
+ * exercised end to end. Flipping any of them changes what goes on the wire and
+ * needs a live-credential validation run, so each stays as it is until that
+ * evidence exists.
+ *
+ * `snapshot` and `runtime` are both declared so the pair is checked in both
+ * directions: a divergence that disappears, changes shape, or appears on an
+ * unlisted model fails the update before anything is written.
+ */
+const TRANSPORT_OVERRIDES = Object.assign(Object.create(null), {
+  'gpt-5.6-luna': {
+    snapshot: 'openai-responses',
+    runtime: 'openai-completions',
+    reason: 'the resolver routes OpenCode\'s Luna through Responses, but clodex\'s '
+      + 'validated Luna route is this gateway\'s OpenAI-compatible Chat Completions '
+      + 'endpoint; the entry is conserved rather than dropped or re-pointed pending '
+      + 'independent live validation of the Responses shape',
+  },
+  'minimax-m2.7': {
+    snapshot: 'anthropic-messages',
+    runtime: 'openai-completions',
+    reason: 'the resolver routes M2.7 through the Messages SDK, while clodex\'s '
+      + 'validated M2.7 route is /zen/go/v1 Chat Completions with the always-on '
+      + '`thinking` object; the current reviewed runtime transport is conserved '
+      + 'pending independent live validation of the Messages shape',
+  },
+  'qwen3.6-plus': {
+    snapshot: 'anthropic-messages',
+    runtime: 'openai-completions',
+    reason: 'the resolver routes Qwen3.6 Plus through the Messages SDK, while '
+      + 'clodex\'s validated route is /zen/go/v1 Chat Completions carrying the '
+      + '`enable_thinking` transform; the current reviewed runtime transport is '
+      + 'conserved pending independent live validation of the Messages shape',
+  },
+});
+
 // Clodex-side compatibility behavior per model, validated against the live
 // endpoint. It travels with the transport map rather than being read from the
-// feed, so a hostile or wrong feed cannot change what clodex puts on the wire.
+// snapshot, so a wrong snapshot cannot change what clodex puts on the wire.
 //
 // models.dev DOES publish a per-model `reasoning_options` (an effort ladder, a
 // bare toggle, or nothing), and it is the closest thing to an authority on
@@ -212,8 +289,344 @@ const PATCHES = Object.assign(Object.create(null), {
   },
 });
 
+/** Provenance constants mirrored into the TypeScript data module. */
+const PROVENANCE_CONSTANTS = [
+  ['OPENCODE_GO_SOURCE', meta => meta.sourceCommand],
+  ['OPENCODE_GO_SOURCE_FETCHED_AT', meta => meta.capturedAt],
+  ['OPENCODE_GO_SOURCE_VERSION', meta => meta.openCodeVersion],
+  ['OPENCODE_GO_SOURCE_RELEASE_COMMIT', meta => meta.releaseCommit],
+  ['OPENCODE_GO_SOURCE_MODELS_SHA256', meta => meta.normalizedModelsSha256],
+];
+
+// The one constant whose absence is fatal rather than reported: it is the
+// timestamp every previous revision of this script already maintained, so a
+// data module without it is a module this script no longer understands.
+const REQUIRED_CONSTANT = 'OPENCODE_GO_SOURCE_FETCHED_AT';
+
+const SNAPSHOT_META_KEYS = [
+  'capturedAt', 'normalization', 'normalizedModelsSha256', 'openCodeVersion', 'provider',
+  'rawCatalogSha256', 'refreshCommand', 'releaseAsset', 'releaseAssetSha256', 'releaseCommit',
+  'releaseRepository', 'releaseTag', 'schemaVersion', 'sourceCommand',
+];
+const SNAPSHOT_MODEL_KEYS = [
+  'api', 'capabilities', 'cost', 'family', 'headers', 'id', 'limit', 'name', 'options',
+  'providerID', 'release_date', 'status', 'variants',
+];
+const SNAPSHOT_CAPABILITY_KEYS = [
+  'attachment', 'input', 'interleaved', 'output', 'reasoning', 'temperature', 'toolcall',
+];
+const SNAPSHOT_MODALITY_KEYS = ['audio', 'image', 'pdf', 'text', 'video'];
+const SNAPSHOT_COST_KEYS = ['cache', 'experimentalOver200K', 'input', 'output', 'tiers'];
+const SNAPSHOT_VARIANT_KEYS = ['include', 'reasoningEffort', 'reasoningSummary', 'thinking'];
+
+const HEX_64 = /^[0-9a-f]{64}$/;
+const HEX_40 = /^[0-9a-f]{40}$/;
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+
+function isPlainObject(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function assertKnownKeys(where, value, allowed, errors) {
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) errors.push(`${where}: unsupported key ${key}`);
+  }
+}
+
+function assertPrintable(where, value, errors) {
+  if (typeof value !== 'string' || value.trim() === '' || CONTROL_CHARS.test(value)) {
+    errors.push(`${where}: expected a printable non-empty string, got ${JSON.stringify(value)}`);
+    return false;
+  }
+  return true;
+}
+
+function assertMoney(where, value, errors) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    errors.push(`${where}: expected a non-negative finite number, got ${JSON.stringify(value)}`);
+  }
+}
+
+function assertBooleanMap(where, value, allowed, errors) {
+  if (!isPlainObject(value)) {
+    errors.push(`${where}: expected an object of booleans`);
+    return;
+  }
+  assertKnownKeys(where, value, allowed, errors);
+  for (const [key, flag] of Object.entries(value)) {
+    if (typeof flag !== 'boolean') errors.push(`${where}.${key}: expected a boolean`);
+  }
+}
+
+function assertMetaSchema(meta, errors) {
+  if (!isPlainObject(meta)) {
+    errors.push('_meta: expected an object');
+    return;
+  }
+  assertKnownKeys('_meta', meta, SNAPSHOT_META_KEYS, errors);
+  for (const key of SNAPSHOT_META_KEYS) {
+    if (!Object.hasOwn(meta, key)) errors.push(`_meta: missing ${key}`);
+  }
+  if (meta.schemaVersion !== 1) errors.push(`_meta.schemaVersion: expected 1, got ${JSON.stringify(meta.schemaVersion)}`);
+  if (meta.provider !== PROVIDER_ID) errors.push(`_meta.provider: expected ${PROVIDER_ID}, got ${JSON.stringify(meta.provider)}`);
+  for (const key of ['normalizedModelsSha256', 'rawCatalogSha256', 'releaseAssetSha256']) {
+    if (!HEX_64.test(String(meta[key]))) errors.push(`_meta.${key}: expected 64 lowercase hex characters`);
+  }
+  if (!HEX_40.test(String(meta.releaseCommit))) errors.push('_meta.releaseCommit: expected 40 lowercase hex characters');
+  for (const key of ['normalization', 'openCodeVersion', 'refreshCommand', 'releaseAsset', 'releaseRepository', 'sourceCommand']) {
+    assertPrintable(`_meta.${key}`, meta[key], errors);
+  }
+  if (assertPrintable('_meta.capturedAt', meta.capturedAt, errors)
+    && Number.isNaN(Date.parse(meta.capturedAt))) {
+    errors.push(`_meta.capturedAt: expected an ISO timestamp, got ${JSON.stringify(meta.capturedAt)}`);
+  }
+  // A capture whose tag and version disagree cannot say which release produced
+  // it, which is the only thing the recorded digests are good for.
+  if (meta.releaseTag !== `v${meta.openCodeVersion}`) {
+    errors.push(`_meta: release-tag must equal v<openCodeVersion> (${JSON.stringify(meta.releaseTag)} vs ${JSON.stringify(meta.openCodeVersion)})`);
+  }
+  if (!String(meta.releaseRepository).startsWith('https://')) {
+    errors.push('_meta.releaseRepository: expected an https URL');
+  }
+}
+
+function assertModelSchema(model, index, seen, errors) {
+  const where = `models[${index}]`;
+  if (!isPlainObject(model)) {
+    errors.push(`${where}: expected an object`);
+    return;
+  }
+  assertKnownKeys(where, model, SNAPSHOT_MODEL_KEYS, errors);
+  const id = model.id;
+  if (assertPrintable(`${where}.id`, id, errors)) {
+    if (seen.has(id)) errors.push(`${where}.id: duplicate id ${id}`);
+    seen.add(id);
+  }
+  const label = typeof id === 'string' ? id : where;
+  assertPrintable(`${label}.name`, model.name, errors);
+  assertPrintable(`${label}.family`, model.family, errors);
+  if (model.providerID !== PROVIDER_ID) errors.push(`${label}.providerID: expected ${PROVIDER_ID}`);
+  if (model.status !== 'active') errors.push(`${label}.status: status must be active, got ${JSON.stringify(model.status)}`);
+
+  if (!isPlainObject(model.api)) {
+    errors.push(`${label}.api: expected an object`);
+  } else {
+    assertKnownKeys(`${label}.api`, model.api, ['id', 'npm', 'url'], errors);
+    if (model.api.id !== id) errors.push(`${label}.api.id: expected ${JSON.stringify(id)}, got ${JSON.stringify(model.api.id)}`);
+    if (model.api.url !== RESOLVER_API_URL) {
+      errors.push(`${label}.api.url must be exactly ${RESOLVER_API_URL}, got ${JSON.stringify(model.api.url)}`);
+    }
+    if (!SDK_TRANSPORTS[model.api.npm]) {
+      errors.push(`${label}.api.npm: unsupported SDK transport ${JSON.stringify(model.api.npm)}`);
+    }
+  }
+
+  // A resolver row carries no credential and no request override. Anything in
+  // these two maps would be a header or option this script would otherwise
+  // carry forward without review, so they must stay empty.
+  for (const key of ['headers', 'options']) {
+    if (!isPlainObject(model[key])) errors.push(`${label}.${key}: expected an object`);
+    else if (Object.keys(model[key]).length > 0) {
+      errors.push(`${label}.${key}: must be empty, found forbidden key ${Object.keys(model[key])[0]}`);
+    }
+  }
+
+  if (!isPlainObject(model.limit)) {
+    errors.push(`${label}.limit: expected an object`);
+  } else {
+    assertKnownKeys(`${label}.limit`, model.limit, ['context', 'input', 'output'], errors);
+    const context = model.limit.context;
+    if (!Number.isInteger(context) || context <= 0 || context > 10_000_000) {
+      errors.push(`${label}.limit.context: expected a positive integer <= 10000000, got ${JSON.stringify(context)}`);
+    }
+  }
+
+  if (!isPlainObject(model.cost)) {
+    errors.push(`${label}.cost: expected an object`);
+  } else {
+    assertKnownKeys(`${label}.cost`, model.cost, SNAPSHOT_COST_KEYS, errors);
+    assertMoney(`${label}.cost.input`, model.cost.input, errors);
+    assertMoney(`${label}.cost.output`, model.cost.output, errors);
+    if (model.cost.cache !== undefined) {
+      if (!isPlainObject(model.cost.cache)) errors.push(`${label}.cost.cache: expected an object`);
+      else {
+        assertKnownKeys(`${label}.cost.cache`, model.cost.cache, ['read', 'write'], errors);
+        for (const key of Object.keys(model.cost.cache)) assertMoney(`${label}.cost.cache.${key}`, model.cost.cache[key], errors);
+      }
+    }
+  }
+
+  const capabilities = model.capabilities;
+  if (!isPlainObject(capabilities)) {
+    errors.push(`${label}.capabilities: expected an object`);
+  } else {
+    assertKnownKeys(`${label}.capabilities`, capabilities, SNAPSHOT_CAPABILITY_KEYS, errors);
+    for (const key of ['attachment', 'reasoning', 'temperature', 'toolcall']) {
+      if (typeof capabilities[key] !== 'boolean') errors.push(`${label}.capabilities.${key}: expected a boolean`);
+    }
+    assertBooleanMap(`${label}.capabilities.input`, capabilities.input, SNAPSHOT_MODALITY_KEYS, errors);
+    assertBooleanMap(`${label}.capabilities.output`, capabilities.output, SNAPSHOT_MODALITY_KEYS, errors);
+    const interleaved = capabilities.interleaved;
+    if (interleaved !== false) {
+      if (!isPlainObject(interleaved)) errors.push(`${label}.capabilities.interleaved: expected false or an object`);
+      else {
+        assertKnownKeys(`${label}.capabilities.interleaved`, interleaved, ['field'], errors);
+        assertPrintable(`${label}.capabilities.interleaved.field`, interleaved.field, errors);
+      }
+    }
+    // Every catalog entry is a coding model behind a patched Claude Code, so a
+    // row that cannot take text in, emit text, or call a tool has no route.
+    if (capabilities.input?.text !== true || capabilities.output?.text !== true || capabilities.toolcall !== true) {
+      errors.push(`${label}: supported models must declare text input, text output, and tool calls`);
+    }
+  }
+
+  if (model.variants !== undefined) {
+    if (!isPlainObject(model.variants)) errors.push(`${label}.variants: expected an object`);
+    else {
+      for (const [name, variant] of Object.entries(model.variants)) {
+        if (!isPlainObject(variant)) errors.push(`${label}.variants.${name}: expected an object`);
+        else assertKnownKeys(`${label}.variants.${name}`, variant, SNAPSHOT_VARIANT_KEYS, errors);
+      }
+    }
+  }
+}
+
+function raise(errors) {
+  if (errors.length > 0) {
+    throw new Error(`OpenCode Go resolver snapshot failed validation:\n  ${errors.join('\n  ')}`);
+  }
+}
+
 /**
- * Cross-check every local effort map against what the feed publishes.
+ * Validate the capture's own provenance block.
+ *
+ * The snapshot is reviewed, hashed bytes rather than a live feed, so this is
+ * not defence against an attacker who can already edit the repository. It is
+ * what makes a RE-CAPTURE reviewable: a refreshed capture whose release tag,
+ * version, or digests no longer agree stops here with an exact reason.
+ */
+export function assertSnapshotMeta(meta) {
+  const errors = [];
+  assertMetaSchema(meta, errors);
+  raise(errors);
+  return meta;
+}
+
+/**
+ * Validate the resolver rows before any of them are believed.
+ *
+ * A refreshed capture that grew a header, a request option, a new field, a
+ * different API URL, or an unknown SDK package stops here with an exact reason
+ * instead of quietly changing what the catalog routes.
+ */
+export function assertResolvedModels(models) {
+  const errors = [];
+  if (!Array.isArray(models) || models.length === 0) {
+    errors.push('models: expected a non-empty array');
+  } else {
+    const seen = new Set();
+    models.forEach((model, index) => assertModelSchema(model, index, seen, errors));
+  }
+  raise(errors);
+  return models;
+}
+
+function sortKeysDeep(value) {
+  if (Array.isArray(value)) return value.map(sortKeysDeep);
+  if (isPlainObject(value)) {
+    const sorted = {};
+    for (const key of Object.keys(value).sort(compareCodeUnits)) sorted[key] = sortKeysDeep(value[key]);
+    return sorted;
+  }
+  return value;
+}
+
+// Code-unit ordering, never localeCompare: the recorded hash must reproduce on
+// any host, and localeCompare's answer for '-' vs '.' vs '0' depends on the
+// machine's ICU data.
+function compareCodeUnits(a, b) {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * Deterministic byte form of the resolver rows: models sorted by id, object
+ * keys recursively sorted, compact JSON array plus a trailing LF. Recorded in
+ * `_meta.normalization`, and its sha256 in `_meta.normalizedModelsSha256`.
+ */
+export function canonicalizeResolvedModels(models) {
+  const sorted = [...models].sort((a, b) => compareCodeUnits(a.id, b.id)).map(sortKeysDeep);
+  return `${JSON.stringify(sorted)}\n`;
+}
+
+export function resolvedModelsSha256(models) {
+  return createHash('sha256').update(canonicalizeResolvedModels(models)).digest('hex');
+}
+
+/**
+ * Reconcile the resolver's SDK package with clodex's routing table.
+ *
+ * Agreement is silent. A divergence must be a reviewed entry in
+ * TRANSPORT_OVERRIDES whose declared snapshot AND runtime transports both still
+ * match reality — anything else (an unlisted divergence, an override whose
+ * shape moved, an override for a model that now agrees) throws, so no generated
+ * file is written from a transport assumption nobody has looked at.
+ */
+export function crossCheckTransports(models) {
+  const bySnapshotId = new Map(models.map(model => [model.id, model]));
+  const errors = [];
+  const applied = [];
+
+  for (const [id, override] of Object.entries(TRANSPORT_OVERRIDES)) {
+    if (!TRANSPORTS[id]) errors.push(`${id}: transport override names a model that is not transport-mapped`);
+    else if (override.runtime !== TRANSPORTS[id]) {
+      errors.push(`${id}: transport override declares runtime ${override.runtime}, but TRANSPORTS says ${TRANSPORTS[id]}`);
+    }
+  }
+
+  for (const id of Object.keys(TRANSPORTS)) {
+    const model = bySnapshotId.get(id);
+    // Membership is `assertMappedModelsPresent`'s job, so a partial row set
+    // stays reconcilable on its own terms.
+    if (!model) continue;
+    const snapshotTransport = SDK_TRANSPORTS[model.api.npm];
+    const runtimeTransport = TRANSPORTS[id];
+    const override = TRANSPORT_OVERRIDES[id];
+    if (snapshotTransport === runtimeTransport) {
+      if (override) {
+        errors.push(
+          `${id}: transport override is stale — the snapshot now agrees with the runtime transport `
+          + `(${runtimeTransport}); remove the override or re-review it`,
+        );
+      }
+      continue;
+    }
+    if (!override) {
+      errors.push(
+        `${id}: resolver snapshot routes ${snapshotTransport} but clodex routes ${runtimeTransport}, `
+        + 'and no reviewed transport override covers it',
+      );
+      continue;
+    }
+    if (override.snapshot !== snapshotTransport) {
+      errors.push(
+        `${id}: transport override expects the snapshot to route ${override.snapshot}, `
+        + `but it routes ${snapshotTransport}`,
+      );
+      continue;
+    }
+    applied.push(`${id}: snapshot ${snapshotTransport} -> runtime ${runtimeTransport} (${override.reason})`);
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`OpenCode Go transport cross-check failed:\n  ${errors.join('\n  ')}`);
+  }
+  return applied;
+}
+
+/**
+ * Cross-check every local effort map against what models.dev publishes.
  *
  * The invariant is a SUBSET, not equality, and the asymmetry is the point.
  * Sending a value the gateway does not publish risks a rejected request, so it
@@ -293,22 +706,17 @@ async function fetchJson(url) {
   return response.json();
 }
 
-function toClodexModel(id, devModel) {
+function toClodexModel(resolved) {
+  const id = resolved.id;
   const transport = TRANSPORTS[id];
   const anthropic = transport === 'anthropic-messages';
-  const devCost = devModel.cost ?? {};
+  const cache = resolved.cost?.cache ?? {};
   const cost = {
-    input: devCost.input ?? 0,
-    output: devCost.output ?? 0,
-    ...(devCost.cache_read ? { cache_read: devCost.cache_read } : {}),
-    ...(devCost.cache_write ? { cache_write: devCost.cache_write } : {}),
+    input: resolved.cost?.input ?? 0,
+    output: resolved.cost?.output ?? 0,
+    ...(cache.read ? { cache_read: cache.read } : {}),
+    ...(cache.write ? { cache_write: cache.write } : {}),
   };
-  // OpenCode Zen documents /v1/responses, /v1/chat/completions and
-  // /v1/messages, and no token-counting endpoint. Marked on the anthropic-
-  // format entries so the proxy answers count_tokens from its local estimate
-  // instead of forwarding to a path that 404s into the client's token
-  // accounting. Hardcoded here, like every other routing constant, so the
-  // upstream feed cannot influence it.
   // Defaults every anthropic-format entry carries, overridable per model.
   //
   // supportsCountTokens: OpenCode Zen documents /v1/responses,
@@ -326,23 +734,80 @@ function toClodexModel(id, devModel) {
   const compatibility = anthropic
     ? { supportsCountTokens: false, supportsReasoningEffort: false, ...(PATCHES[id] ?? {}) }
     : PATCHES[id];
-  const modalities = (devModel.modalities?.input ?? ['text'])
-    .filter(value => value === 'text' || value === 'image');
+  const modalities = ['text', 'image'].filter(modality => resolved.capabilities?.input?.[modality] === true);
 
   return {
     id,
-    name: devModel.name ?? id,
-    contextWindow: devModel.limit?.context,
+    name: resolved.name,
+    contextWindow: resolved.limit?.context,
     cost,
     modelFormat: anthropic ? 'anthropic' : 'openai',
     npm: anthropic ? '@ai-sdk/anthropic' : '@ai-sdk/openai-compatible',
     apiUrl: anthropic ? ANTHROPIC_BASE_URL : COMPLETIONS_BASE_URL,
-    reasoning: devModel.reasoning === true,
+    reasoning: resolved.capabilities?.reasoning === true,
     modalities,
     ...(compatibility ? { compatibility } : {}),
     upstreamModelId: id,
     family: id.split('-')[0] ?? id,
   };
+}
+
+/**
+ * Project the validated resolver rows onto the clodex catalog shape.
+ *
+ * Membership is the intersection of the snapshot and TRANSPORTS, never the
+ * snapshot alone: an id clodex has not routed on the wire is reported as
+ * unmapped rather than shipped.
+ */
+export function convertResolvedModels(models) {
+  assertResolvedModels(models);
+  const overrides = crossCheckTransports(models);
+  const supported = [];
+  const unmapped = [];
+  for (const resolved of [...models].sort((a, b) => compareCodeUnits(a.id, b.id))) {
+    if (!TRANSPORTS[resolved.id]) {
+      unmapped.push(resolved.id);
+      continue;
+    }
+    supported.push(toClodexModel(resolved));
+  }
+  if (supported.length === 0) throw new Error('resolver snapshot produced no supported models');
+  return { supported, unmapped, overrides };
+}
+
+async function loadSnapshot() {
+  const snapshot = JSON.parse(await readFile(SNAPSHOT_PATH, 'utf8'));
+  const errors = [];
+  if (!isPlainObject(snapshot)) throw new Error('snapshot: expected a JSON object');
+  assertKnownKeys('snapshot', snapshot, ['_meta', 'models'], errors);
+  raise(errors);
+  assertSnapshotMeta(snapshot._meta);
+  assertResolvedModels(snapshot.models);
+  const absent = Object.keys(TRANSPORTS).filter(id => !snapshot.models.some(model => model.id === id));
+  if (absent.length > 0) {
+    throw new Error(`Transport-mapped models are absent from the resolver snapshot: ${absent.join(', ')}`);
+  }
+  const digest = resolvedModelsSha256(snapshot.models);
+  if (digest !== snapshot._meta.normalizedModelsSha256) {
+    throw new Error(
+      `Resolver snapshot rows do not match their recorded digest: computed ${digest}, `
+      + `_meta.normalizedModelsSha256 says ${snapshot._meta.normalizedModelsSha256}`,
+    );
+  }
+  return snapshot;
+}
+
+function constantPattern(name) {
+  return new RegExp(`export const ${name} = '[^']*';`);
+}
+
+function readProvenanceConstants(source) {
+  const found = {};
+  for (const [name] of PROVENANCE_CONSTANTS) {
+    const match = source.match(new RegExp(`export const ${name} = '([^']*)';`));
+    if (match) found[name] = match[1];
+  }
+  return found;
 }
 
 /**
@@ -352,62 +817,97 @@ function toClodexModel(id, devModel) {
  * interruption leaves the other stale. What it can do is move the one failure
  * that is actually likely, the regex ceasing to match after an unrelated edit
  * to the constants file, ahead of every write. Both writes then fail only on
- * real I/O trouble, and the catalog goes first so the timestamp is a commit
- * marker for a catalog already on disk rather than a promise about one.
+ * real I/O trouble, and the catalog goes first so the provenance stamp marks a
+ * catalog already on disk rather than a promise about one.
  */
-async function prepareSourceConstant(fetchedAt) {
+async function prepareSourceConstants(meta) {
   const source = await readFile(CONSTANTS_PATH, 'utf8');
-  const pattern = /export const OPENCODE_GO_SOURCE_FETCHED_AT = '[^']*';/;
-  if (!pattern.test(source)) {
-    throw new Error('Could not find OPENCODE_GO_SOURCE_FETCHED_AT in opencode-go-models.ts');
+  if (!constantPattern(REQUIRED_CONSTANT).test(source)) {
+    throw new Error(`Could not find ${REQUIRED_CONSTANT} in opencode-go-models.ts`);
   }
-  return source.replace(pattern, `export const OPENCODE_GO_SOURCE_FETCHED_AT = '${fetchedAt}';`);
+  let content = source;
+  const absent = [];
+  for (const [name, read] of PROVENANCE_CONSTANTS) {
+    const pattern = constantPattern(name);
+    if (!pattern.test(content)) {
+      absent.push(`${name} = '${read(meta)}'`);
+      continue;
+    }
+    content = content.replace(pattern, `export const ${name} = '${read(meta)}';`);
+  }
+  return { content, absent };
 }
 
-async function main() {
+function deepEqual(a, b) {
+  return JSON.stringify(sortKeysDeep(a)) === JSON.stringify(sortKeysDeep(b));
+}
+
+/**
+ * Offline verification that the committed generated files still say what the
+ * committed snapshot says. Reads three files, writes none, and never reaches
+ * the network — so it is safe to run anywhere the repo is checked out.
+ */
+async function check(snapshot, supported) {
+  const failures = [];
+  const committed = JSON.parse(await readFile(MODELS_PATH, 'utf8'));
+  if (!deepEqual(committed, supported)) {
+    const committedIds = committed.map(model => model.id);
+    const generatedIds = supported.map(model => model.id);
+    const drifted = generatedIds
+      .filter(id => committedIds.includes(id))
+      .filter(id => !deepEqual(committed.find(model => model.id === id), supported.find(model => model.id === id)));
+    failures.push(
+      `${MODELS_PATH} disagrees with the resolver snapshot`
+      + `${drifted.length > 0 ? ` (models: ${drifted.join(', ')})` : ''}`
+      + `${committedIds.length !== generatedIds.length ? ` (committed ${committedIds.length} ids, snapshot yields ${generatedIds.length})` : ''}`,
+    );
+  }
+
+  const constants = readProvenanceConstants(await readFile(CONSTANTS_PATH, 'utf8'));
+  for (const [name, read] of PROVENANCE_CONSTANTS) {
+    const expected = read(snapshot._meta);
+    if (!Object.hasOwn(constants, name)) failures.push(`${name} is missing from opencode-go-models.ts (expected '${expected}')`);
+    else if (constants[name] !== expected) failures.push(`${name} is '${constants[name]}', snapshot says '${expected}'`);
+  }
+
+  if (failures.length > 0) {
+    throw new Error(`OpenCode Go catalog is out of date with its committed resolver snapshot:\n  ${failures.join('\n  ')}`);
+  }
+}
+
+export async function run(argv = []) {
+  // `pnpm update:opencode-go -- --check` forwards the separator itself, so a
+  // leading bare `--` is dropped before parsing; without this the documented
+  // invocation reaches parseArgs as a positional and is rejected.
+  const args = argv[0] === '--' ? argv.slice(1) : argv;
+  const { values } = parseArgs({
+    args,
+    options: { check: { type: 'boolean', default: false } },
+    strict: true,
+    allowPositionals: false,
+  });
+
+  const snapshot = await loadSnapshot();
+  const { supported, unmapped, overrides } = convertResolvedModels(snapshot.models);
+
+  if (values.check) {
+    await check(snapshot, supported);
+    console.log(
+      `OpenCode Go catalog matches the committed resolver snapshot `
+      + `(${supported.length} models, opencode ${snapshot._meta.openCodeVersion}).`,
+    );
+    return;
+  }
+
   const catalog = await fetchJson(MODELS_DEV_URL);
-  const provider = catalog?.[PROVIDER_ID];
-  const devModels = provider?.models;
+  const devModels = catalog?.[PROVIDER_ID]?.models;
   if (!devModels || typeof devModels !== 'object') {
     throw new Error(`models.dev catalog has no "${PROVIDER_ID}" provider models`);
   }
-
-  const supported = [];
-  const unmapped = [];
-  for (const [id, devModel] of Object.entries(devModels).sort(([a], [b]) => a.localeCompare(b))) {
-    if (!TRANSPORTS[id]) {
-      unmapped.push(id);
-      continue;
-    }
-    supported.push(toClodexModel(id, devModel));
-  }
-
   const missing = Object.keys(TRANSPORTS).filter(id => !Object.hasOwn(devModels, id));
   if (missing.length > 0) {
     throw new Error(`Transport-mapped models missing from models.dev: ${missing.join(', ')}`);
   }
-  if (supported.length === 0) {
-    throw new Error('models.dev catalog produced no supported models');
-  }
-
-  // Validate at ingest, before anything is written. contextWindow flows into
-  // the patched client's context map, where a bad value breaks auto-compaction
-  // silently rather than failing here; a name with control characters or
-  // newlines corrupts every list that renders it.
-  const invalid = [];
-  for (const model of supported) {
-    if (!Number.isInteger(model.contextWindow) || model.contextWindow <= 0 || model.contextWindow > 10_000_000) {
-      invalid.push(`${model.id}: contextWindow=${JSON.stringify(model.contextWindow)}`);
-    }
-    // eslint-disable-next-line no-control-regex
-    if (typeof model.name !== 'string' || model.name.trim() === '' || /[\x00-\x1f\x7f]/.test(model.name)) {
-      invalid.push(`${model.id}: name=${JSON.stringify(model.name)}`);
-    }
-  }
-  if (invalid.length > 0) {
-    throw new Error(`models.dev returned unusable metadata:\n  ${invalid.join('\n  ')}`);
-  }
-
   const ladders = assertEffortLadders(supported, devModels);
   if (ladders.errors.length > 0) {
     throw new Error(
@@ -418,25 +918,42 @@ async function main() {
 
   // Resolve the constants content before either write, so the likely failure —
   // the regex no longer matching — aborts with both files untouched rather
-  // than stranding one of them. Catalog first, timestamp second: the timestamp
+  // than stranding one of them. Catalog first, provenance second: the stamp
   // then marks a catalog that is already on disk.
-  const constantsContent = await prepareSourceConstant(new Date().toISOString());
+  const constants = await prepareSourceConstants(snapshot._meta);
   await writeFile(MODELS_PATH, `${JSON.stringify(supported, null, 2)}\n`);
-  await writeFile(CONSTANTS_PATH, constantsContent);
+  await writeFile(CONSTANTS_PATH, constants.content);
 
-  console.log(`Updated ${supported.length} OpenCode Go models from ${MODELS_DEV_URL} (${PROVIDER_ID}).`);
+  console.log(
+    `Updated ${supported.length} OpenCode Go models from the committed resolver snapshot `
+    + `(opencode ${snapshot._meta.openCodeVersion}, captured ${snapshot._meta.capturedAt}).`,
+  );
+  for (const override of overrides) {
+    console.log(`Reviewed transport override — ${override}`);
+  }
   for (const note of ladders.notes) {
     console.log(`Effort ladder note — ${note}`);
   }
-  if (unmapped.length > 0) {
+  for (const name of constants.absent) {
+    console.log(`Provenance constant absent from opencode-go-models.ts — add export const ${name};`);
+  }
+  const unknown = [...new Set([...unmapped, ...Object.keys(devModels).filter(id => !TRANSPORTS[id])])].sort(compareCodeUnits);
+  if (unknown.length > 0) {
     console.log(
-      'Present on models.dev but not transport-mapped (verify wire protocol '
-      + `against the live endpoint, then add to TRANSPORTS): ${unmapped.join(', ')}`,
+      'Present in the resolver snapshot or on models.dev but not transport-mapped (verify wire '
+      + `protocol against the live endpoint, then add to TRANSPORTS): ${unknown.join(', ')}`,
     );
   }
 }
 
-main().catch(error => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+// Run when invoked as a program — directly, or through a bootstrap that has no
+// script path of its own (`node -e`). Importing this module into a host with
+// its own entry point, such as the test runner, exposes the functions above
+// without executing anything.
+const entryPoint = process.argv[1];
+if (entryPoint === undefined || pathToFileURL(entryPoint).href === import.meta.url) {
+  run(process.argv.slice(2)).catch(error => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
