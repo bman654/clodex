@@ -23,9 +23,18 @@ import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-t
 import { anthropicErrorType, upstreamHttpStatus } from './upstream-error.js';
 import { upstreamMaxRetries } from './upstream-retry.js';
 import { emitParentNotice } from './parent-notice.js';
-import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
 
 export { silenceSdkWarnings };
+
+/**
+ * Prefix of the Claude Code billing-attribution system line.
+ *
+ * clodex never emits this line; it only STRIPS one a client already sent, so a
+ * volatile per-request attribution string can never head a translated prompt
+ * and churn an upstream's implicit cache prefix. Private to this module on
+ * purpose — it is a recognizer, and nothing may import it to build the line.
+ */
+const CLAUDE_CODE_BILLING_HEADER_PREFIX = 'x-anthropic-billing-header:';
 
 export type SdkTranslationErrorSignature =
   | 'reasoning_part_not_found'

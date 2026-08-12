@@ -5,6 +5,7 @@ import { sanitizeCredential } from './server/auth.js';
 import {
   ANTHROPIC_BETA_HEADER,
   isAnthropicBetaHeaderName,
+  isRouteOwnedCredentialHeaderName,
   resolveOutboundBeta,
 } from './anthropic-beta-policy.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
@@ -18,6 +19,11 @@ import { isCredentialBearingHeader } from './credential-headers.js';
  * The credential scheme (api key, OAuth bearer, anonymous) is unchanged, and no
  * native-client identity is synthesized — clodex ships no supported producer of
  * native Claude credentials whose lineage such an identity could represent.
+ *
+ * When the route owns the credential it owns it OUTRIGHT: every configured
+ * spelling of `authorization` and `x-api-key` is removed before the route's own
+ * canonical credential is added, so a configured value can never be appended
+ * alongside it. Ordinary configured headers are untouched.
  */
 export function anthropicUpstreamHeaders(
   apiKey: string,
@@ -31,10 +37,12 @@ export function anthropicUpstreamHeaders(
   const outboundBeta = resolveOutboundBeta(extraHeaders);
   // Configured beta spellings are re-emitted once, normalized, under the
   // canonical name. Passing them through as well would leave two case-variant
-  // keys on one request, which fetch appends into a single merged header.
+  // keys on one request, which fetch appends into a single merged header — the
+  // same failure the route-owned credential names are dropped to avoid.
   const forwardedExtraHeaders = Object.fromEntries(
     Object.entries(extraHeaders ?? {}).filter(([name]) =>
       !isAnthropicBetaHeaderName(name)
+      && !isRouteOwnedCredentialHeaderName(name)
       && (resolvedAuthType !== 'none' || !isCredentialBearingHeader(name)),
     ),
   );

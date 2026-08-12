@@ -133,6 +133,97 @@ describe('anthropicUpstreamHeaders', () => {
   });
 });
 
+describe('route-owned credential headers cannot collide', () => {
+  /** Every configured spelling that normalizes to one wire header name. */
+  const spellingsOf = (headers: Record<string, string>, name: string) =>
+    Object.keys(headers).filter(key => key.trim().toLowerCase() === name);
+
+  const COLLIDING = {
+    authorization: 'Bearer configured-secret',
+    Authorization: 'Bearer configured-secret-2',
+    AUTHORIZATION: 'Bearer configured-secret-3',
+    'x-api-key': 'configured-secret',
+    'X-API-Key': 'configured-secret-2',
+    'X-Api-Key ': 'configured-secret-3',
+    'X-Plan': 'coding',
+    'Anthropic-Beta': 'cfg-a',
+  };
+
+  it('lets an API-key route own both credential headers outright', () => {
+    const headers = anthropicUpstreamHeaders('route-key', false, 'api', { ...COLLIDING });
+
+    expect(spellingsOf(headers, 'authorization')).toEqual(['Authorization']);
+    expect(spellingsOf(headers, 'x-api-key')).toEqual(['x-api-key']);
+    expect(headers.Authorization).toBe('Bearer route-key');
+    expect(headers['x-api-key']).toBe('route-key');
+    // Never concatenated with a configured value.
+    expect(JSON.stringify(headers)).not.toContain('configured-secret');
+    // Ordinary configured headers survive untouched.
+    expect(headers['X-Plan']).toBe('coding');
+    expect(headers['anthropic-beta']).toBe('cfg-a');
+  });
+
+  it('lets an OAuth route own the bearer and carry no configured x-api-key', () => {
+    const headers = anthropicUpstreamHeaders('oauth-token', false, 'oauth', { ...COLLIDING });
+
+    expect(spellingsOf(headers, 'authorization')).toEqual(['Authorization']);
+    expect(headers.Authorization).toBe('Bearer oauth-token');
+    // OAuth authority is bearer-only: a configured x-api-key is not a second
+    // credential it may carry.
+    expect(spellingsOf(headers, 'x-api-key')).toEqual([]);
+    expect(JSON.stringify(headers)).not.toContain('configured-secret');
+    expect(headers['X-Plan']).toBe('coding');
+  });
+
+  it('keeps the anonymous route credential-free exactly as before', () => {
+    const headers = anthropicUpstreamHeaders('', false, 'none', { ...COLLIDING });
+
+    expect(spellingsOf(headers, 'authorization')).toEqual([]);
+    expect(spellingsOf(headers, 'x-api-key')).toEqual([]);
+    expect(headers['X-Plan']).toBe('coding');
+    expect(headers['anthropic-beta']).toBe('cfg-a');
+  });
+
+  it('keeps the retry attempts collision-free and otherwise identical', async () => {
+    const refreshToken = vi.fn(async () => 'refreshed-token');
+    let call = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      call += 1;
+      return call === 1
+        ? new Response('nope', { status: 401 })
+        : new Response(JSON.stringify({ id: 'm', type: 'message', model: 'm', content: [] }), {
+            status: 200, headers: { 'Content-Type': 'application/json' },
+          });
+    }));
+    const res = new Writable({ write(_c, _e, cb) { cb(); } }) as never as Record<string, unknown>;
+    res.writeHead = () => res;
+    res.end = () => undefined;
+
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'm' },
+      'stale-token',
+      false,
+      { authType: 'oauth', refreshToken, extraHeaders: { ...COLLIDING } },
+    );
+
+    const attempts = vi.mocked(fetch).mock.calls.map(
+      ([, init]) => (init?.headers ?? {}) as Record<string, string>,
+    );
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]!.Authorization).toBe('Bearer stale-token');
+    expect(attempts[1]!.Authorization).toBe('Bearer refreshed-token');
+    for (const headers of attempts) {
+      expect(spellingsOf(headers, 'authorization')).toEqual(['Authorization']);
+      expect(spellingsOf(headers, 'x-api-key')).toEqual([]);
+      expect(JSON.stringify(headers)).not.toContain('configured-secret');
+      expect(headers['anthropic-beta']).toBe('cfg-a');
+    }
+    vi.unstubAllGlobals();
+  });
+});
+
 describe('anthropic beta policy tokens', () => {
   it('normalizes list and comma forms into stable-order exact tokens', () => {
     expect(normalizeBetaTokens(undefined)).toEqual([]);

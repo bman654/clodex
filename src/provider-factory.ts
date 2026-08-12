@@ -9,6 +9,12 @@ import {
   createResponsesWebSocketFetch,
   type ResponsesWebSocketDiagnosticEvent,
 } from './oauth/responses-websocket.js';
+import {
+  ANTHROPIC_BETA_HEADER,
+  isAnthropicBetaHeaderName,
+  isRouteOwnedCredentialHeaderName,
+  resolveOutboundBeta,
+} from './anthropic-beta-policy.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
 import {
   transformOpenAiCompatibleRequestBody,
@@ -37,6 +43,47 @@ type SdkProviderFactory = (options: {
 };
 
 const factoryCache = new Map<string, Promise<SdkProviderFactory>>();
+
+/**
+ * A route owns its credential only when it actually supplies one. An anonymous
+ * route supplies none and relies on the wire-level strip below; a route left
+ * without a key supplies none either, and there the provider's configured
+ * header is the only authority — removing it would break the route outright.
+ */
+function routeSuppliesCredential(spec: ProviderModelSpec): boolean {
+  return spec.authType !== 'none' && spec.apiKey.trim() !== '';
+}
+
+/**
+ * The configured headers an SDK provider may be constructed with.
+ *
+ * Drops every spelling of a credential name the route itself will set, so the
+ * SDK's own credential can never be appended to a configured one. Ordinary
+ * configured headers are preserved exactly as given.
+ */
+function configuredSdkHeaders(spec: ProviderModelSpec): Record<string, string> | undefined {
+  if (!spec.headers || !routeSuppliesCredential(spec)) return spec.headers;
+  return Object.fromEntries(
+    Object.entries(spec.headers).filter(([name]) => !isRouteOwnedCredentialHeaderName(name)),
+  );
+}
+
+/**
+ * Configured headers for the Anthropic SDK: the same credential-collision
+ * denial, plus the single canonical `anthropic-beta` this provider configured.
+ * A client beta cannot participate — none is visible at SDK construction.
+ */
+function configuredAnthropicSdkHeaders(spec: ProviderModelSpec): Record<string, string> | undefined {
+  const configured = configuredSdkHeaders(spec);
+  if (!configured) return undefined;
+  const withoutBeta = Object.fromEntries(
+    Object.entries(configured).filter(([name]) => !isAnthropicBetaHeaderName(name)),
+  );
+  const outboundBeta = resolveOutboundBeta(spec.headers);
+  return outboundBeta.source === 'configured'
+    ? { ...withoutBeta, [ANTHROPIC_BETA_HEADER]: outboundBeta.value }
+    : withoutBeta;
+}
 
 const fetchWithoutCredentialHeaders: typeof fetch = (input, init) => {
   const headers = new Headers(
@@ -164,6 +211,9 @@ async function loadSdkProviderFactory(npm: string): Promise<SdkProviderFactory> 
 
 export async function createLanguageModel(spec: ProviderModelSpec): Promise<LanguageModel> {
   const { npm, modelId, apiKey, baseURL } = spec;
+  // Configured headers, minus any credential name this route's own auth
+  // ownership will set. Computed once so every SDK branch closes the same hole.
+  const sdkHeaders = configuredSdkHeaders(spec);
 
   if (npm === '@ai-sdk/openai') {
     const { createOpenAI } = await import('@ai-sdk/openai');
@@ -179,7 +229,7 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
           apiKey,
           baseURL: 'https://chatgpt.com/backend-api/codex',
           headers: {
-            ...spec.headers,
+            ...sdkHeaders,
             ...(accountId ? { 'ChatGPT-Account-Id': accountId } : {}),
             originator: 'clodex',
             // Responses-Lite models (backend prefer_websockets/use_responses_lite,
@@ -205,10 +255,10 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
       : spec.authType === 'none'
         ? {
             apiKey: '',
-            ...(spec.headers ? { headers: spec.headers } : {}),
+            ...(sdkHeaders ? { headers: sdkHeaders } : {}),
             fetch: fetchWithoutCredentialHeaders,
           }
-        : { apiKey, ...(spec.headers ? { headers: spec.headers } : {}) };
+        : { apiKey, ...(sdkHeaders ? { headers: sdkHeaders } : {}) };
     const openai = createOpenAI(oauthOptions);
     return useResponsesEndpoint ? openai.responses(modelId) : openai.chat(modelId);
   }
@@ -226,8 +276,9 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
       : spec.authType === 'none'
         ? { apiKey: '', fetch: fetchWithoutCredentialHeaders }
         : { apiKey };
-    if (spec.headers) {
-      anthropicOptions.headers = { ...anthropicOptions.headers, ...spec.headers };
+    const anthropicHeaders = configuredAnthropicSdkHeaders(spec);
+    if (anthropicHeaders) {
+      anthropicOptions.headers = { ...anthropicOptions.headers, ...anthropicHeaders };
     }
     if (!root || root === 'https://api.anthropic.com') {
       return createAnthropic(anthropicOptions)(modelId);
@@ -244,7 +295,7 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
       baseURL: baseURL ?? '',
       ...(spec.authType !== 'none' && apiKey.trim() ? { apiKey } : {}),
       ...(spec.authType === 'none' ? { fetch: fetchWithoutCredentialHeaders } : {}),
-      ...(spec.headers ? { headers: spec.headers } : {}),
+      ...(sdkHeaders ? { headers: sdkHeaders } : {}),
       ...(spec.compatibility
         ? {
             transformRequestBody: (body: Record<string, unknown>) =>
@@ -261,7 +312,7 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
       apiKey: spec.authType === 'none' ? '' : apiKey,
       ...(spec.authType === 'none' ? { fetch: fetchWithoutCredentialHeaders } : {}),
       ...(baseURL ? { baseURL } : {}),
-      ...(spec.headers ? { headers: spec.headers } : {}),
+      ...(sdkHeaders ? { headers: sdkHeaders } : {}),
     });
     model = provider(modelId);
   }

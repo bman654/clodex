@@ -8,7 +8,9 @@
 //   * it can classify a destination strictly enough to prove a URL negative;
 //   * it always reports native-identity synthesis as suppressed;
 //   * it resolves the outbound `anthropic-beta` header from a provider's
-//     CONFIGURED headers, and from nothing else.
+//     CONFIGURED headers, and from nothing else;
+//   * it names the credential headers a route owns, so a configured spelling can
+//     never ride alongside the route's own credential.
 //
 // There is deliberately no allow variant of the suppression result and no
 // positive synthesis path. Adding one requires a separately approved supported
@@ -22,6 +24,27 @@
 
 /** Canonical outbound header name. Configured spellings are matched case-insensitively. */
 export const ANTHROPIC_BETA_HEADER = 'anthropic-beta';
+
+/**
+ * The credential header names a route's own auth ownership sets — exactly these
+ * two, matched case-insensitively after trimming.
+ *
+ * A configured header record can hold several spellings of one wire name
+ * (`authorization`, `Authorization`, `AUTHORIZATION`) and a plain object keeps
+ * them all; the HTTP layer then normalizes and APPENDS them, putting a
+ * configured value and the route's own credential on a single header. Removing
+ * every spelling before the route adds its canonical credential is what stops
+ * the two from concatenating. Nothing beyond this exact pair is route-owned.
+ */
+const ROUTE_OWNED_CREDENTIAL_HEADERS: ReadonlySet<string> = new Set([
+  'authorization',
+  'x-api-key',
+]);
+
+/** True for any case/whitespace spelling of a credential header the route owns. */
+export function isRouteOwnedCredentialHeaderName(name: string): boolean {
+  return ROUTE_OWNED_CREDENTIAL_HEADERS.has(name.trim().toLowerCase());
+}
 
 /**
  * The one fixed destination that native Claude traffic is addressed to. Private

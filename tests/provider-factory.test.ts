@@ -681,9 +681,11 @@ describe('createLanguageModel', () => {
       headers: { 'Anthropic-Beta': 'alpha-2026-01-01', 'X-Plan': 'coding' },
     });
 
+    // The configured beta survives in full, now under the one canonical header
+    // name the SDK boundary emits; the ordinary header is untouched.
     expect(createAnthropic).toHaveBeenCalledWith({
       authToken: 'oauth-token',
-      headers: { 'Anthropic-Beta': 'alpha-2026-01-01', 'X-Plan': 'coding' },
+      headers: { 'X-Plan': 'coding', 'anthropic-beta': 'alpha-2026-01-01' },
     });
     const [options] = vi.mocked(createAnthropic).mock.calls[0]!;
     for (const name of ['User-Agent', 'x-app', 'X-Claude-Code-Session-Id']) {
@@ -830,5 +832,153 @@ describe('createLanguageModel', () => {
       headers: { 'X-Plan': 'coding' },
     });
     vi.doUnmock('@ai-sdk/anthropic');
+  });
+});
+
+describe('SDK construction closes the configured-header boundaries', () => {
+  const spellingsOf = (headers: Record<string, string> | undefined, name: string) =>
+    Object.keys(headers ?? {}).filter(key => key.trim().toLowerCase() === name);
+
+  /** Configured headers carrying every colliding spelling plus ordinary ones. */
+  const CONFIGURED = {
+    authorization: 'Bearer configured-secret',
+    Authorization: 'Bearer configured-secret-2',
+    'x-api-key': 'configured-secret',
+    'X-API-Key': 'configured-secret-2',
+    'Anthropic-Beta': ' cfg-a , cfg-b ,, cfg-a ',
+    'anthropic-beta': 'cfg-b,Cfg-C',
+    'X-Plan': 'coding',
+    'X-Trace': 'on',
+  };
+
+  async function createAnthropicWith(spec: Record<string, unknown>) {
+    const anthropicFactory = vi.fn((modelId: string) => ({ modelId }));
+    const createAnthropic = vi.fn(() => anthropicFactory);
+    vi.doMock('@ai-sdk/anthropic', () => ({ createAnthropic }));
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({ npm: '@ai-sdk/anthropic', modelId: 'claude-sonnet-4-6', apiKey: '', ...spec } as never);
+    const [options] = vi.mocked(createAnthropic).mock.calls[0]!;
+    vi.doUnmock('@ai-sdk/anthropic');
+    return options as { headers?: Record<string, string>; apiKey?: string; authToken?: string; fetch?: unknown };
+  }
+
+  it('canonicalizes the configured beta at the Anthropic SDK boundary', async () => {
+    const options = await createAnthropicWith({ apiKey: 'sk-test', headers: { ...CONFIGURED } });
+
+    // One canonical name, stable first-seen order, exact-token dedupe, case kept.
+    expect(spellingsOf(options.headers, 'anthropic-beta')).toEqual(['anthropic-beta']);
+    expect(options.headers!['anthropic-beta']).toBe('cfg-a,cfg-b,Cfg-C');
+    expect(options.headers).not.toHaveProperty('Anthropic-Beta');
+    // Ordinary configured headers are preserved exactly.
+    expect(options.headers!['X-Plan']).toBe('coding');
+    expect(options.headers!['X-Trace']).toBe('on');
+  });
+
+  it('emits no beta header when the provider configures none', async () => {
+    const options = await createAnthropicWith({ apiKey: 'sk-test', headers: { 'X-Plan': 'coding' } });
+    expect(spellingsOf(options.headers, 'anthropic-beta')).toEqual([]);
+    expect(options.headers!['X-Plan']).toBe('coding');
+  });
+
+  it('denies configured credential collisions on an API-key Anthropic route', async () => {
+    const options = await createAnthropicWith({ apiKey: 'sk-test', headers: { ...CONFIGURED } });
+
+    // The route owns the credential; the SDK sets it from apiKey alone.
+    expect(options.apiKey).toBe('sk-test');
+    expect(spellingsOf(options.headers, 'authorization')).toEqual([]);
+    expect(spellingsOf(options.headers, 'x-api-key')).toEqual([]);
+    expect(JSON.stringify(options)).not.toContain('configured-secret');
+    expect(options.headers!['X-Plan']).toBe('coding');
+  });
+
+  it('denies configured credential collisions on an OAuth Anthropic route', async () => {
+    const options = await createAnthropicWith({
+      apiKey: 'oauth-token',
+      authType: 'oauth',
+      providerId: 'claude-code',
+      headers: { ...CONFIGURED },
+    });
+
+    expect(options.authToken).toBe('oauth-token');
+    expect(options).not.toHaveProperty('apiKey');
+    expect(spellingsOf(options.headers, 'authorization')).toEqual([]);
+    expect(spellingsOf(options.headers, 'x-api-key')).toEqual([]);
+    expect(JSON.stringify(options)).not.toContain('configured-secret');
+    expect(options.headers!['anthropic-beta']).toBe('cfg-a,cfg-b,Cfg-C');
+    // Still no synthesized native-client identity.
+    for (const name of ['User-Agent', 'x-app', 'X-Claude-Code-Session-Id']) {
+      expect(options.headers).not.toHaveProperty(name);
+    }
+    expect(JSON.stringify(options)).not.toContain('claude-cli');
+  });
+
+  it('leaves the anonymous Anthropic route to its wire-level credential strip', async () => {
+    const options = await createAnthropicWith({ authType: 'none', headers: { ...CONFIGURED } });
+
+    // Current authority: an anonymous route owns no credential, and the fetch
+    // wrapper drops every credential-bearing header at the wire.
+    expect(options.apiKey).toBe('');
+    expect(typeof options.fetch).toBe('function');
+    expect(options.headers!['X-Plan']).toBe('coding');
+  });
+
+  it('denies configured credential collisions on the OpenAI and compatible routes', async () => {
+    const openaiFactory = Object.assign(
+      vi.fn((modelId: string) => ({ modelId })),
+      { chat: vi.fn((modelId: string) => ({ modelId })), responses: vi.fn((modelId: string) => ({ modelId })) },
+    );
+    const createOpenAI = vi.fn(() => openaiFactory);
+    vi.doMock('@ai-sdk/openai', () => ({ createOpenAI }));
+    const compatibleFactory = vi.fn((modelId: string) => ({ modelId }));
+    const createOpenAICompatible = vi.fn(() => compatibleFactory);
+    vi.doMock('@ai-sdk/openai-compatible', () => ({ createOpenAICompatible }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai', modelId: 'gpt-5.5', apiKey: 'sk-openai', headers: { ...CONFIGURED },
+    });
+    await create({
+      npm: '@ai-sdk/openai-compatible',
+      modelId: 'glm-5.2',
+      apiKey: 'sk-compat',
+      baseURL: 'https://api.z.ai/v1',
+      headers: { ...CONFIGURED },
+    });
+
+    for (const [options] of [
+      ...vi.mocked(createOpenAI).mock.calls,
+      ...vi.mocked(createOpenAICompatible).mock.calls,
+    ]) {
+      const headers = (options as { headers?: Record<string, string> }).headers;
+      expect(spellingsOf(headers, 'authorization')).toEqual([]);
+      expect(spellingsOf(headers, 'x-api-key')).toEqual([]);
+      expect(JSON.stringify(options)).not.toContain('configured-secret');
+      expect(headers!['X-Plan']).toBe('coding');
+    }
+    vi.doUnmock('@ai-sdk/openai');
+    vi.doUnmock('@ai-sdk/openai-compatible');
+  });
+
+  it('keeps a configured credential header when the route supplies none', async () => {
+    const compatibleFactory = vi.fn((modelId: string) => ({ modelId }));
+    const createOpenAICompatible = vi.fn(() => compatibleFactory);
+    vi.doMock('@ai-sdk/openai-compatible', () => ({ createOpenAICompatible }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai-compatible',
+      modelId: 'glm-5.2',
+      // No route credential: the SDK is given no apiKey, so the configured
+      // header is the only authority and removing it would break the route.
+      apiKey: '   ',
+      baseURL: 'https://api.z.ai/v1',
+      headers: { Authorization: 'Bearer configured-secret', 'X-Plan': 'coding' },
+    });
+
+    const [options] = vi.mocked(createOpenAICompatible).mock.calls[0]!;
+    expect(options).not.toHaveProperty('apiKey');
+    expect((options as { headers: Record<string, string> }).headers.Authorization)
+      .toBe('Bearer configured-secret');
+    vi.doUnmock('@ai-sdk/openai-compatible');
   });
 });
