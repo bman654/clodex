@@ -72,6 +72,12 @@ function configuredSdkHeaders(spec: ProviderModelSpec): Record<string, string> |
  * Configured headers for the Anthropic SDK: the same credential-collision
  * denial, plus the single canonical `anthropic-beta` this provider configured.
  * A client beta cannot participate — none is visible at SDK construction.
+ *
+ * NOT authoritative for the beta. `@ai-sdk/anthropic` reads this header back,
+ * LOWERCASES its tokens, and unions them with its own generated and
+ * per-request betas, emitting that set with precedence over what was
+ * configured. `anthropicWireFetch` below is the authority; this only keeps the
+ * value the SDK reads canonical and free of credential collisions.
  */
 function configuredAnthropicSdkHeaders(spec: ProviderModelSpec): Record<string, string> | undefined {
   const configured = configuredSdkHeaders(spec);
@@ -94,6 +100,39 @@ const fetchWithoutCredentialHeaders: typeof fetch = (input, init) => {
   }
   return fetch(input, { ...init, headers });
 };
+
+/**
+ * The FINAL Anthropic wire boundary: the last point before the request leaves.
+ *
+ * `@ai-sdk/anthropic` does not treat a configured `anthropic-beta` as final. It
+ * parses the header back out, lowercases every token, unions it with betas it
+ * generated for the request shape and with any per-request beta, then emits
+ * that union LAST so it wins. A provider that configured `Cfg-C` therefore puts
+ * `cfg-c` on the wire, alongside betas nobody configured. Only inspecting the
+ * outgoing request can see this, which is why it survived constructor-option
+ * tests.
+ *
+ * So this drops every outgoing spelling of the header — `Headers` is
+ * case-insensitive, so one delete removes them all — and re-emits only the
+ * configured result, verbatim. No configured beta means no beta at all. Header
+ * VALUES are never case-folded by `Headers`, so exact token case, order, and
+ * dedupe survive. Everything else about the request is untouched, and the
+ * wrapped `inner` keeps each branch's existing fetch behavior (the anonymous
+ * route still strips credential-bearing headers underneath this).
+ */
+function anthropicWireFetch(spec: ProviderModelSpec, inner: typeof fetch = fetch): typeof fetch {
+  const outboundBeta = resolveOutboundBeta(spec.headers);
+  return (input, init) => {
+    const headers = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
+    headers.delete(ANTHROPIC_BETA_HEADER);
+    if (outboundBeta.source === 'configured') {
+      headers.set(ANTHROPIC_BETA_HEADER, outboundBeta.value);
+    }
+    return inner(input, { ...init, headers });
+  };
+}
 
 /**
  * True when a model id must use the OpenAI/xAI Responses API instead of
@@ -271,11 +310,13 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
     // gains no synthesized native-client identity: a `claude-code` provider id
     // is a route label, not proof of credential lineage, and clodex has no
     // supported producer of native Claude credentials for it to stand for.
+    // One wire boundary for every construction below, composed over whatever
+    // fetch the branch already needed, so no branch can drift from the others.
     const anthropicOptions: Parameters<typeof createAnthropic>[0] = spec.authType === 'oauth'
-      ? { authToken: apiKey }
+      ? { authToken: apiKey, fetch: anthropicWireFetch(spec) }
       : spec.authType === 'none'
-        ? { apiKey: '', fetch: fetchWithoutCredentialHeaders }
-        : { apiKey };
+        ? { apiKey: '', fetch: anthropicWireFetch(spec, fetchWithoutCredentialHeaders) }
+        : { apiKey, fetch: anthropicWireFetch(spec) };
     const anthropicHeaders = configuredAnthropicSdkHeaders(spec);
     if (anthropicHeaders) {
       anthropicOptions.headers = { ...anthropicOptions.headers, ...anthropicHeaders };
