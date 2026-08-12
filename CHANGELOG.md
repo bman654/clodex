@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.5.1](https://github.com/bman654/clodex/compare/v2.5.0...v2.5.1) (2026-08-12)
+
+
+### Bug Fixes
+
+* **patch:** restore patching on Claude Code 2.1.228 so model aliases work again ([#118](https://github.com/bman654/clodex/issues/118)) ([e996623](https://github.com/bman654/clodex/commit/e996623db711e0b6aaf21a033a28bc46abfcdc3e))
+
 ## [2.5.0](https://github.com/bman654/clodex/compare/v2.4.0...v2.5.0) (2026-08-11)
 
 
