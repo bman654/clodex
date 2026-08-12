@@ -66,6 +66,7 @@ break the parser; build prompts with `[...].join('\n')`.
 | "This is/isn't reachable in practice" | Mine the diagnostics ledgers for rate and reachability. |
 | "This terminal output is safe" | Drive real Claude Code under `tmux` and read the actual bytes. |
 | "Nothing consumes X" | Grep the **value**, not one comparison spelling, and trace every hit. |
+| "This hunk is required by the feature" | Revert it and run the full suite. Only its own tests red, none of the feature's, is strong evidence it is severable — then trace the consumers to be sure. |
 
 **Mining the ledgers.** `~/.clodex/logs/sessions/*websocket-diagnostics*.jsonl` is a large corpus of
 real traffic and it has settled more disputes than any other technique. Gotchas: files exceed Node's
@@ -136,6 +137,21 @@ Bundle-dependent harnesses need `node scripts/extract-cc-bundles.mjs` run once, 
   that did survive.
 - **A wrong claim in our own code comment or docs propagates into contributor PRs.** This has
   happened twice. When an author's description is wrong, check whether they got it from us first.
+- **Aim at the decision, not just the comment.** A *circular* justification — one citing as an
+  external given the behavior its own hunk creates — still needs correcting, but it is also a tell
+  that the real rationale went unstated. Ask why the hunk exists before you file the wording. We
+  filed a blocking ask because a comment said the Anthropic passthrough "already" refused to echo on
+  a fallback when the same hunk is what made it refuse; the better question was why the change was
+  there at all. Reverting both halves left **1716/1719** green — only that change's own three
+  tests red, every feature test passing — so it was severable from the PR's stated purpose, and
+  the commit message turned out to carry the rationale the comment lacked. That converted one
+  blocking ask into a prose fix plus a scope note.
+- **When the ask turns on a vendor fact nobody here has observed, ask for the fact before
+  prescribing the code.** For a community-supported provider we cannot exercise, a synthetic
+  response body shows a risk, not a reachable defect, and narrowing a predicate around it can make
+  the code worse — a panel proposed exactly that against an auth response no reviewer had seen.
+  Frame it as "tell us the real response, **or** make this change," and say plainly that we could
+  not verify it.
 - **Verify "blocked by X" justifications by executing them.** A structural claim that sounds
   obviously true is exactly the kind that ships into a review and gets cited for years.
 - **Don't let "not a regression versus `main`" excuse shipping a broken guarantee.**
