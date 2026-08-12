@@ -245,6 +245,11 @@ async function routeRequest(req: IncomingMessage, res: ServerResponse, options: 
       return;
     }
 
+    if (req.method === 'POST' && pathname === '/anthropic/v1/messages/count_tokens') {
+      await handleAnthropicCountTokens(req, res, options, plog);
+      return;
+    }
+
     if (req.method === 'POST' && pathname === '/openai/v1/chat/completions') {
       await handleOpenAIChatCompletions(req, res, options, modelCache, plog);
       return;
@@ -526,6 +531,97 @@ async function handleAnthropicMessages(
   }
 
   sendJson(res, 400, { error: { message: `Unsupported model format: ${model.modelFormat}` } });
+}
+
+/**
+ * `POST /anthropic/v1/messages/count_tokens`.
+ *
+ * Claude Code preflights its token accounting here, so the gateway has to
+ * answer it on every launch mode that points ANTHROPIC_BASE_URL at this server
+ * (`clodex server --endpoint`, the clodex-claude wrapper's endpoint gateway).
+ * The routing rule is the one the adapter proxy already applies in
+ * `src/proxy.ts`: speaking the Messages API is not the same question as
+ * implementing count_tokens. A translated (SDK) model has no such endpoint at
+ * all, and an Anthropic-format model whose upstream documents none is marked
+ * with an explicit `supportsCountTokens: false`. Both answer from the shared
+ * local estimator. An unset or `true` capability keeps forwarding, so a custom
+ * Anthropic-compatible endpoint that does implement it is unaffected.
+ */
+async function handleAnthropicCountTokens(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: ServerOptions,
+  plog: PLog,
+): Promise<void> {
+  const body = await readJson(req);
+  if (!body) {
+    sendJson(res, 400, { error: { message: 'Invalid JSON body' } });
+    return;
+  }
+
+  const model = lookupModel(res, options.catalog, body.model);
+  if (!model) {
+    plog(`model not found: ${body.model}`);
+    return;
+  }
+
+  // Keep the sibling messages route's format contract: a catalog entry this
+  // server cannot serve must not be answered with a token count either.
+  if (model.modelFormat !== 'anthropic' && model.modelFormat !== 'openai') {
+    sendJson(res, 400, { error: { message: `Unsupported model format: ${model.modelFormat}` } });
+    return;
+  }
+
+  if (model.modelFormat !== 'anthropic' || model.compatibility?.supportsCountTokens === false) {
+    const inputTokens = estimateAnthropicInputTokens(body);
+    plog(() => `token-count: local estimate model=${body.model} input_tokens=${inputTokens}`);
+    res.setHeader('x-relay-token-count-source', 'local-estimate');
+    sendJson(res, 200, { input_tokens: inputTokens });
+    return;
+  }
+
+  if (model.baseUrl && !/^https?:\/\//i.test(model.baseUrl)) {
+    sendJson(res, 400, { error: { message: `Invalid provider baseUrl: must be http:// or https://` } });
+    return;
+  }
+  if (!model.baseUrl) {
+    sendJson(res, 400, { error: { message: `Model ${model.id} has no Anthropic baseUrl configured` } });
+    return;
+  }
+
+  let apiKey: string;
+  try {
+    apiKey = await resolveModelApiKey(model, options.apiKey);
+  } catch (err) {
+    sendJson(res, 401, {
+      error: { message: err instanceof Error ? err.message : String(err) },
+    });
+    return;
+  }
+
+  const betaHeaderRaw = req.headers['anthropic-beta'];
+  const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
+  const authType = model.authType ?? 'api';
+  const isOAuth = authType === 'oauth';
+  const forwardBody: Record<string, unknown> = { ...body, model: upstreamModelId(model) };
+  const refreshToken = isOAuth && model.providerId && model.authRef
+    ? (rejectedAccessToken: string) => resolveModelApiKey(
+        model,
+        options.apiKey,
+        rejectedAccessToken,
+      )
+    : undefined;
+
+  const countTokensUrl = `${model.baseUrl}/v1/messages/count_tokens`;
+  plog(() => `anthropic-count-tokens → ${countTokensUrl} oauth=${isOAuth}`);
+  await relayAnthropicMessages(res, countTokensUrl, forwardBody, apiKey, false, {
+    inboundBeta,
+    authType,
+    log: message => plog(message),
+    extraHeaders: model.headers,
+    refreshToken,
+    onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
+  });
 }
 
 async function handleOpenAIChatCompletions(

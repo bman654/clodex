@@ -1414,3 +1414,216 @@ describe('server router', () => {
     });
   });
 });
+
+describe('anthropic count_tokens', () => {
+  // `clodex server --endpoint` and the clodex-claude wrapper both point
+  // ANTHROPIC_BASE_URL at this gateway (src/wrapper-env.ts), so Claude Code's
+  // token-accounting preflight lands here. Before the route existed it fell
+  // through to the catch-all 404 and Claude Code got no number at all.
+
+  it('answers count_tokens locally when the model declares no upstream support', async () => {
+    const upstream = await startUpstream({ input_tokens: 999 });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('opencode-anthropic', 'anthropic', 'go', { baseUrl: upstream.baseUrl }),
+        compatibility: { supportsCountTokens: false },
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'opencode-anthropic',
+        messages: [{ role: 'user', content: 'count this' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-relay-token-count-source')).toBe('local-estimate');
+    const payload = await response.json() as { input_tokens: number };
+    expect(payload.input_tokens).toBeGreaterThan(0);
+    // The point of the capability: the upstream is never asked.
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it('answers count_tokens locally for translated (SDK) models', async () => {
+    const upstream = await startUpstream({ input_tokens: 999 });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        model('openai-format', 'openai', 'go', { completionsUrl: `${upstream.baseUrl}/v1/chat/completions` }),
+      ]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'openai-format',
+        messages: [{ role: 'user', content: 'count this' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-relay-token-count-source')).toBe('local-estimate');
+    expect((await response.json() as { input_tokens: number }).input_tokens).toBeGreaterThan(0);
+    expect(upstream.requests).toHaveLength(0);
+  });
+
+  it('forwards count_tokens upstream when the capability is unset', async () => {
+    const upstream = await startUpstream({ input_tokens: 42 });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        model('claude-native', 'anthropic', 'zen', { baseUrl: upstream.baseUrl }),
+      ]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-native', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ input_tokens: 42 });
+    expect(response.headers.get('x-relay-token-count-source')).toBeNull();
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0]).toMatchObject({
+      method: 'POST',
+      url: '/v1/messages/count_tokens',
+      authorization: 'Bearer real-opencode-key',
+      body: { model: 'claude-native', messages: [{ role: 'user', content: 'hi' }] },
+    });
+  });
+
+  it('forwards count_tokens upstream when the capability is explicitly true', async () => {
+    const upstream = await startUpstream({ input_tokens: 7 });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('claude-supported', 'anthropic', 'zen', { baseUrl: upstream.baseUrl }),
+        compatibility: { supportsCountTokens: true },
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-supported', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ input_tokens: 7 });
+    expect(upstream.requests).toHaveLength(1);
+    expect(upstream.requests[0]!.url).toBe('/v1/messages/count_tokens');
+  });
+
+  it('sends the upstream wire id, not the catalog id, when forwarding', async () => {
+    const upstream = await startUpstream({ input_tokens: 3 });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('catalog-id', 'anthropic', 'zen', { baseUrl: upstream.baseUrl }),
+        upstreamModelId: 'wire-id',
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'catalog-id', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(upstream.requests[0]).toMatchObject({ body: { model: 'wire-id' } });
+  });
+
+  it('rejects an unknown model on the count_tokens route', async () => {
+    const server = await startTestServer();
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'nope', messages: [] }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { message: 'Unknown model: nope' } });
+  });
+
+  it('rejects an unsupported model format on the count_tokens route', async () => {
+    const server = await startTestServer();
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'bad-format', messages: [] }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { message: 'Unsupported model format: unsupported' },
+    });
+  });
+
+  it('rejects invalid JSON on the count_tokens route', async () => {
+    const server = await startTestServer();
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: 'not json',
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { message: 'Invalid JSON body' } });
+  });
+
+  it('does not widen routing to neighbouring paths or other methods', async () => {
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('opencode-anthropic', 'anthropic', 'go', { baseUrl: 'http://127.0.0.1:1' }),
+        compatibility: { supportsCountTokens: false },
+      }]),
+    });
+    const body = JSON.stringify({ model: 'opencode-anthropic', messages: [] });
+
+    const suffixed = await fetch(`${server.url}/anthropic/v1/messages/count_tokens/extra`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    expect(suffixed.status).toBe(404);
+
+    const unprefixed = await fetch(`${server.url}/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    expect(unprefixed.status).toBe(404);
+
+    const wrongMethod = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`);
+    expect(wrongMethod.status).toBe(404);
+  });
+
+  it('requires authorization before answering count_tokens', async () => {
+    const server = await startTestServer({
+      serverPassword: 'secret',
+      catalog: createGatewayModelCatalog([{
+        ...model('opencode-anthropic', 'anthropic', 'go', { baseUrl: 'http://127.0.0.1:1' }),
+        compatibility: { supportsCountTokens: false },
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'opencode-anthropic', messages: [] }),
+    });
+
+    expect(response.status).toBe(401);
+  });
+});
