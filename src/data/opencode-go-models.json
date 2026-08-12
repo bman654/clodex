@@ -248,6 +248,7 @@
       "image"
     ],
     "compatibility": {
+      "supportsTemperature": false,
       "supportsReasoningEffort": false,
       "supportsStore": false,
       "supportsDeveloperRole": false,
@@ -284,6 +285,7 @@
         "xhigh": null,
         "max": "max"
       },
+      "supportsTemperature": false,
       "supportsStore": false,
       "supportsDeveloperRole": false,
       "maxTokensField": "max_tokens"

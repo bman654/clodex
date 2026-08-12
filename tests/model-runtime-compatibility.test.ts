@@ -63,6 +63,28 @@ describe('transformOpenAiCompatibleRequestBody', () => {
     expect(input).toEqual({ reasoning_effort: 'high' });
   });
 
+  it('omits unsupported temperature while preserving other fields without mutating input', () => {
+    const input = {
+      model: 'kimi-k3',
+      temperature: 0.2,
+      top_p: 0.9,
+      messages: [{ role: 'user', content: 'hello' }],
+    };
+    const result = transformOpenAiCompatibleRequestBody(input, { supportsTemperature: false });
+
+    expect(result).toEqual({
+      model: 'kimi-k3',
+      top_p: 0.9,
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+    expect(input).toEqual({
+      model: 'kimi-k3',
+      temperature: 0.2,
+      top_p: 0.9,
+      messages: [{ role: 'user', content: 'hello' }],
+    });
+  });
+
   it('enables Qwen thinking only when an effort is present', () => {
     expect(transformOpenAiCompatibleRequestBody(
       { reasoning_effort: 'high', messages: [] },

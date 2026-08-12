@@ -18,6 +18,8 @@ import { parseArgs } from 'node:util';
 // it:
 //
 //   Snapshot-controlled: name, contextWindow, cost, modalities, reasoning.
+//   Snapshot cross-check only: capabilities.temperature is checked against the
+//                         local supportsTemperature patch; PATCHES remains the authority.
 //   Local-only:          apiUrl, npm, modelFormat, the whole compatibility
 //                        block, and which ids exist at all (TRANSPORTS below).
 //
@@ -218,6 +220,8 @@ const PATCHES = Object.assign(Object.create(null), {
     // accept. Stated explicitly so the model-name Kimi rule cannot claim it:
     // reasoning genuinely happens, it just isn't effort-controllable, which is
     // exactly what `supportsReasoningEffort: false` reports (internal-only).
+    // The OpenCode Go `/zen/go/v1` route rejects `temperature` for Kimi K2.7 Code.
+    supportsTemperature: false,
     supportsReasoningEffort: false,
     supportsStore: false,
     supportsDeveloperRole: false,
@@ -227,7 +231,9 @@ const PATCHES = Object.assign(Object.create(null), {
     // Moonshot's own API documents low/high/max (default max), but models.dev
     // publishes effort=max for OpenCode's deployment. Same reasoning as
     // glm-5.2: the gateway's set is the one that reaches the wire.
+    // The OpenCode Go `/zen/go/v1` route rejects `temperature` for Kimi K3.
     reasoningEffortMap: { off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, max: 'max' },
+    supportsTemperature: false,
     supportsStore: false,
     supportsDeveloperRole: false,
     maxTokensField: 'max_tokens',
@@ -632,6 +638,44 @@ export function crossCheckTransports(models) {
 }
 
 /**
+ * Cross-check local temperature exclusions against the resolver snapshot.
+ *
+ * PATCHES remains the runtime authority: a local exclusion that the snapshot
+ * does not also report is unsafe and fails. A snapshot exclusion without a
+ * local patch is only a report, except that transport overrides are named as
+ * awaiting live validation rather than treated as a missing local entry.
+ */
+export function crossCheckTemperatureSupport(models) {
+  const bySnapshotId = new Map(models.map(model => [model.id, model]));
+  const errors = [];
+  const notes = [];
+
+  for (const [id, patch] of Object.entries(PATCHES)) {
+    if (patch.supportsTemperature !== false) continue;
+    const model = bySnapshotId.get(id);
+    if (model?.capabilities?.temperature !== false) {
+      errors.push(`${id}: PATCHES disables temperature, but resolver snapshot does not`);
+    }
+  }
+
+  for (const model of models) {
+    if (model.capabilities?.temperature !== false) continue;
+    if (PATCHES[model.id]?.supportsTemperature === false) continue;
+    if (TRANSPORT_OVERRIDES[model.id]) {
+      notes.push(
+        `${model.id}: resolver snapshot rejects temperature; transport override is awaiting live validation `
+        + 'before a local PATCHES entry',
+      );
+    } else {
+      notes.push(`${model.id}: resolver snapshot rejects temperature without a local PATCHES entry (reported only)`);
+    }
+  }
+
+  raise(errors);
+  return notes;
+}
+
+/**
  * Cross-check every local effort map against what models.dev publishes.
  *
  * The invariant is a SUBSET, not equality, and the asymmetry is the point.
@@ -778,6 +822,7 @@ function toClodexModel(resolved) {
 export function convertResolvedModels(models) {
   assertResolvedModels(models);
   const overrides = crossCheckTransports(models);
+  const temperatureNotes = crossCheckTemperatureSupport(models);
   const supported = [];
   const unmapped = [];
   for (const resolved of [...models].sort((a, b) => compareCodeUnits(a.id, b.id))) {
@@ -788,7 +833,7 @@ export function convertResolvedModels(models) {
     supported.push(toClodexModel(resolved));
   }
   if (supported.length === 0) throw new Error('resolver snapshot produced no supported models');
-  return { supported, unmapped, overrides };
+  return { supported, unmapped, overrides, temperatureNotes };
 }
 
 async function loadSnapshot() {
@@ -952,7 +997,7 @@ export async function run(argv = []) {
   }
 
   const snapshot = await loadSnapshot();
-  const { supported, unmapped, overrides } = convertResolvedModels(snapshot.models);
+  const { supported, unmapped, overrides, temperatureNotes } = convertResolvedModels(snapshot.models);
 
   if (values.check) {
     await check(snapshot, supported);
@@ -979,6 +1024,9 @@ export async function run(argv = []) {
   );
   for (const override of overrides) {
     console.log(`Reviewed transport override — ${override}`);
+  }
+  for (const note of temperatureNotes) {
+    console.log(`Temperature capability note — ${note}`);
   }
   for (const note of advisory.notes) {
     console.log(`Effort ladder note — ${note}`);

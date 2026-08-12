@@ -15,6 +15,7 @@ import {
   assertSnapshotMeta,
   canonicalizeResolvedModels,
   convertResolvedModels,
+  crossCheckTemperatureSupport,
   crossCheckTransports,
   resolvedModelsSha256,
   run,
@@ -168,6 +169,27 @@ describe('OpenCode Go resolver snapshot generator', () => {
       .toMatch(/snapshot anthropic-messages -> runtime openai-completions .*conserved/s);
     expect(applied.find(entry => entry.startsWith('qwen3.6-plus:')))
       .toMatch(/snapshot anthropic-messages -> runtime openai-completions .*conserved/s);
+  });
+
+  it('rejects a local temperature exclusion that the resolver snapshot does not support', () => {
+    const mutated = snapshot.models.map(model => (model.id === 'kimi-k3'
+      ? {
+          ...structuredClone(model),
+          capabilities: { ...model.capabilities, temperature: true },
+        }
+      : model));
+
+    expect(() => convertResolvedModels(mutated))
+      .toThrow(/kimi-k3: PATCHES disables temperature, but resolver snapshot does not/);
+  });
+
+  it('reports snapshot temperature exclusions without a local patch', () => {
+    const notes: string[] = crossCheckTemperatureSupport(snapshot.models);
+
+    expect(notes).toEqual([
+      'gpt-5.6-luna: resolver snapshot rejects temperature; transport override is awaiting live validation before a local PATCHES entry',
+    ]);
+    expect(notes.join('\n')).not.toContain('missing local PATCHES entry');
   });
 
   it('rejects an unreviewed transport divergence before anything is generated', () => {

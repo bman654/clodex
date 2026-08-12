@@ -127,6 +127,16 @@ describe('opencode-go catalog invariants', () => {
     }
   });
 
+  it('marks exactly the two Kimi routes that reject temperature', () => {
+    const unsupported = models
+      .filter(model => model.compatibility?.supportsTemperature === false)
+      .map(model => model.id);
+
+    expect(unsupported).toEqual(['kimi-k2.7-code', 'kimi-k3']);
+    expect(models.find(model => model.id === 'gpt-5.6-luna')?.compatibility?.supportsTemperature)
+      .toBeUndefined();
+  });
+
   it('no entry maps an effort level to a value outside its own ladder', () => {
     // Guards the shape rather than the contents: a mapped value must be a
     // non-empty string, so a typo like `high: ''` cannot silently drop a level
