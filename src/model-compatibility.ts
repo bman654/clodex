@@ -13,6 +13,7 @@ export interface CompatibilityContext {
   providerId: string;
   modelId: string;
   agent: CompatibilityAgent;
+  ignoreModelsDevCapabilities?: boolean;
 }
 
 export interface IncompatibleModelEntry {
@@ -55,9 +56,11 @@ export function hideReason(ctx: CompatibilityContext): string | null {
   const blacklist = findBlacklistEntry(ctx);
   if (blacklist) return `[blacklist:${blacklist.category}] ${blacklist.reason}`;
 
-  const modelsDev = findModelsDevModel(ctx.providerId, ctx.modelId, loadModelsDevCache());
-  if (modelsDev && shouldHideByModelsDevCapabilities(modelsDev)) {
-    return '[models.dev] incompatible capabilities for coding agents';
+  if (!ctx.ignoreModelsDevCapabilities) {
+    const modelsDev = findModelsDevModel(ctx.providerId, ctx.modelId, loadModelsDevCache());
+    if (modelsDev && shouldHideByModelsDevCapabilities(modelsDev)) {
+      return '[models.dev] incompatible capabilities for coding agents';
+    }
   }
 
   return null;

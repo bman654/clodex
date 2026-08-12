@@ -290,7 +290,9 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
     for (const model of projectedModels) {
       const npm = model.npm ?? provider.api.npm ?? '';
       const upstreamModelId = model.upstreamModelId ?? model.id;
-      const modelsDev = findModelsDevModel(provider.id, model.id);
+      const modelsDev = isRetainedOpenCodeGoProvider(provider)
+        ? null
+        : findModelsDevModel(provider.id, model.id);
       const effort = getPatchReasoningCapabilities(npm, upstreamModelId, {
         providerId: provider.id,
         apiBaseUrl: model.apiUrl ?? provider.api.url,

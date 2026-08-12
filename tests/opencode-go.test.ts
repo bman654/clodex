@@ -1,3 +1,5 @@
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   buildOpenCodeGoModels,
@@ -20,6 +22,10 @@ import {
   materializeRegistry,
   projectProviderCachedModels,
 } from '../src/registry/materialize.js';
+import {
+  getUserModelsDevCachePath,
+  invalidateModelsDevCache,
+} from '../src/registry/models-dev.js';
 import type { CachedModel, ProviderRegistry } from '../src/registry/types.js';
 
 function liveModel(id: string): CachedModel {
@@ -214,6 +220,102 @@ describe('OpenCode Go catalog', () => {
         apiUrl: OPENCODE_GO_COMPLETIONS_BASE_URL,
         contextWindow: 1_000_000,
       });
+    }
+  });
+
+  it('ignores hostile models.dev capability rows for retained identities only', () => {
+    const cachePath = getUserModelsDevCachePath();
+    mkdirSync(dirname(cachePath), { recursive: true });
+    writeFileSync(cachePath, JSON.stringify({
+      openai: {
+        models: {
+          'kimi-k3': { modalities: { output: ['audio'] }, tool_call: false },
+        },
+      },
+    }));
+    invalidateModelsDevCache();
+
+    try {
+      const registry: ProviderRegistry = {
+        schemaVersion: 1,
+        providers: [
+          {
+            id: 'opencode-go',
+            templateId: 'opencode-go',
+            name: 'OpenCode Go',
+            enabled: true,
+            authRef: 'keyring:provider:opencode-go',
+            authType: 'api',
+            api: { npm: '@ai-sdk/openai-compatible', url: OPENCODE_GO_COMPLETIONS_BASE_URL },
+            modelsCache: {
+              fetchedAt: '2026-08-12T00:00:00.000Z',
+              models: [liveModel('kimi-k3')],
+            },
+            addedAt: '2026-08-12T00:00:00.000Z',
+          },
+          {
+            id: 'openai',
+            templateId: 'openai',
+            name: 'OpenAI',
+            enabled: true,
+            authRef: 'keyring:provider:openai',
+            authType: 'api',
+            api: { npm: '@ai-sdk/openai-compatible', url: 'https://ordinary.invalid/v1' },
+            modelsCache: {
+              fetchedAt: '2026-08-12T00:00:00.000Z',
+              models: [liveModel('kimi-k3')],
+            },
+            addedAt: '2026-08-12T00:00:00.000Z',
+          },
+        ],
+      };
+
+      const providers = materializeRegistry(registry, () => 'key');
+      expect(providers.map(provider => provider.id)).toEqual(['opencode-go']);
+      expect(providers[0]?.models.map(model => model.id)).toEqual(['kimi-k3']);
+    } finally {
+      rmSync(cachePath, { force: true });
+      invalidateModelsDevCache();
+    }
+  });
+
+  it('keeps retained pinned reasoning metadata ahead of models.dev values', () => {
+    const cachePath = getUserModelsDevCachePath();
+    mkdirSync(dirname(cachePath), { recursive: true });
+    writeFileSync(cachePath, JSON.stringify({
+      'opencode-go': {
+        models: {
+          'minimax-m3': { reasoning: false, interleaved: { field: 'hostile_reasoning' } },
+        },
+      },
+    }));
+    invalidateModelsDevCache();
+
+    try {
+      const registry: ProviderRegistry = {
+        schemaVersion: 1,
+        providers: [{
+          id: 'opencode-go',
+          templateId: 'opencode-go',
+          name: 'OpenCode Go',
+          enabled: true,
+          authRef: 'keyring:provider:opencode-go',
+          authType: 'api',
+          api: { npm: '@ai-sdk/openai-compatible', url: OPENCODE_GO_COMPLETIONS_BASE_URL },
+          modelsCache: {
+            fetchedAt: '2026-08-12T00:00:00.000Z',
+            models: [liveModel('minimax-m3')],
+          },
+          addedAt: '2026-08-12T00:00:00.000Z',
+        }],
+      };
+
+      const model = materializeRegistry(registry, () => 'key')[0]?.models[0];
+      expect(model?.reasoning).toBe(true);
+      expect(model?.interleavedReasoningField).toBeUndefined();
+    } finally {
+      rmSync(cachePath, { force: true });
+      invalidateModelsDevCache();
     }
   });
 

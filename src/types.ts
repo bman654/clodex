@@ -35,6 +35,8 @@ export interface LocalProviderModel {
   reasoning?: boolean;
   /** Streaming/interleaved reasoning field name from metadata, e.g. reasoning_content. */
   interleavedReasoningField?: string;
+  /** Runtime-only: resolver-pinned identity skips models.dev capability fallback/veto. */
+  ignoreModelsDevCapabilities?: boolean;
   /** Backend capability: model requires the Responses-Lite request shape (x-openai-internal-codex-responses-lite). */
   useResponsesLite?: boolean;
   /** Backend capability: model must use the WebSocket Responses transport instead of HTTP. */

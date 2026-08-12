@@ -89,7 +89,8 @@ export function cachedModelToLocal(
   const endpoint = resolveEndpoint(npm, apiUrl);
   if (endpoint === null) return null;
 
-  const modelsDev = findModelsDevModel(provider.id, cached.id);
+  const ignoreModelsDevCapabilities = isRetainedOpenCodeGoProvider(provider);
+  const modelsDev = ignoreModelsDevCapabilities ? null : findModelsDevModel(provider.id, cached.id);
   const { id, upstreamModelId } = normalizeGoogleModelId(cached.id, npm);
   const normalizedUpstream = normalizeGoogleModelId(cached.upstreamModelId ?? cached.id, npm).upstreamModelId;
   const family = npm === '@ai-sdk/google' ? (id.split(/[-/:]/)[0] ?? id) : (cached.family ?? '');
@@ -112,6 +113,7 @@ export function cachedModelToLocal(
     supportedParameters: cached.supportedParameters,
     reasoning: cached.reasoning ?? modelsDev?.reasoning,
     interleavedReasoningField: cached.interleavedReasoningField ?? modelsDev?.interleaved?.field,
+    ignoreModelsDevCapabilities: ignoreModelsDevCapabilities || undefined,
     useResponsesLite: cached.useResponsesLite,
     preferWebSockets: cached.preferWebSockets,
     modalities: cached.modalities,
@@ -263,7 +265,12 @@ function materializeOne(
     if (freeOnly && !isFreeStatus(freeStatus)) continue;
     const model = cachedModelToLocal(cached, provider);
     if (!model) continue;
-    if (shouldHideModel({ providerId: provider.id, modelId: model.id, agent })) continue;
+    if (shouldHideModel({
+      providerId: provider.id,
+      modelId: model.id,
+      agent,
+      ignoreModelsDevCapabilities: model.ignoreModelsDevCapabilities,
+    })) continue;
     models.push(model);
   }
   if (models.length === 0) return null;
