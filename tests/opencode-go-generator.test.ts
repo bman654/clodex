@@ -71,6 +71,13 @@ function validateVariant(npm: string, variant: unknown): void {
   assertResolvedModels([...rows, extra]);
 }
 
+function validateNamedVariant(npm: string, name: string, variant: unknown): void {
+  const rows = snapshot.models.map(model => structuredClone(model) as ResolvedModel);
+  const variants = Object.fromEntries([[name, variant]]);
+  const extra = resolvedModel('unreviewed-row', npm, { variants });
+  assertResolvedModels([...rows, extra]);
+}
+
 /** The snapshot rows for the three models whose transport is overridden. */
 function overriddenRows(): ResolvedModel[] {
   return snapshot.models
@@ -286,6 +293,23 @@ describe('OpenCode Go resolver snapshot generator', () => {
       ])).not.toThrow();
     });
 
+    it.each(['__proto__', 'constructor', 'prototype', 'authorization', 'api_key'])
+      ('rejects dangerous or sensitive variant-map name %s', name => {
+        expect(() => validateNamedVariant(completions, name, { reasoningEffort: 'high' }))
+          .toThrow(/forbidden key/);
+      });
+
+    it.each([
+      ['empty', ''],
+      ['control', 'bad\nname'],
+      ['Unicode format', 'bad​name'],
+      ['uppercase', 'High'],
+      ['overlength', 'a'.repeat(65)],
+    ])('rejects %s variant-map name', (_label, name) => {
+      expect(() => validateNamedVariant(completions, name, { reasoningEffort: 'high' }))
+        .toThrow(/unsafe variant name/);
+    });
+
     it.each(efforts)('accepts the completions reasoning effort %s', effort => {
       expect(() => validateVariant(completions, { reasoningEffort: effort })).not.toThrow();
     });
@@ -340,6 +364,8 @@ describe('OpenCode Go resolver snapshot generator', () => {
       ['empty member', { ...responseVariant, include: [''] }],
       ['blank member', { ...responseVariant, include: [' '] }],
       ['control-character member', { ...responseVariant, include: ['reasoning.\nencrypted_content'] }],
+      ['Unicode Cc member', { ...responseVariant, include: ['reasoning.encrypted_content'] }],
+      ['Unicode Cf member', { ...responseVariant, include: ['reasoning.​encrypted_content'] }],
     ])('rejects a Responses include that is %s', (_label, variant) => {
       expect(() => validateVariant(responses, variant)).toThrow(/include/);
     });

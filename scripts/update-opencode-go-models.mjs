@@ -349,6 +349,12 @@ const HEX_64 = /^[0-9a-f]{64}$/;
 const HEX_40 = /^[0-9a-f]{40}$/;
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+// Unicode Cc/Cf catches controls and invisible formatting characters that the
+// ASCII-only check cannot represent.
+const UNICODE_UNSAFE_CHARS = /[\p{Cc}\p{Cf}]/u;
+const SAFE_VARIANT_NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const SENSITIVE_KEY = /(?:^|[_-])(authorization|auth|api[_-]?key|cookie|credential|password|secret|token)(?:$|[_-])/i;
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
 function isPlainObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -366,6 +372,29 @@ function assertPrintable(where, value, errors) {
     return false;
   }
   return true;
+}
+
+function assertSafeTree(value, where, errors) {
+  if (typeof value === 'string') {
+    if (CONTROL_CHARS.test(value) || UNICODE_UNSAFE_CHARS.test(value)) {
+      errors.push(`${where}: contains a control or format character`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => assertSafeTree(entry, `${where}[${index}]`, errors));
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  for (const [key, entry] of Object.entries(value)) {
+    if (DANGEROUS_KEYS.has(key) || SENSITIVE_KEY.test(key)) {
+      errors.push(`${where}: contains forbidden key ${key}`);
+    }
+    if (CONTROL_CHARS.test(key) || UNICODE_UNSAFE_CHARS.test(key)) {
+      errors.push(`${where}: contains a control or format character key`);
+    }
+    assertSafeTree(entry, `${where}.${key}`, errors);
+  }
 }
 
 function assertRequiredKeys(where, value, required, errors) {
@@ -458,6 +487,7 @@ function assertBooleanMap(where, value, allowed, errors) {
 }
 
 function assertMetaSchema(meta, errors) {
+  assertSafeTree(meta, '_meta', errors);
   if (!isPlainObject(meta)) {
     errors.push('_meta: expected an object');
     return;
@@ -491,6 +521,7 @@ function assertMetaSchema(meta, errors) {
 
 function assertModelSchema(model, index, seen, errors) {
   const where = `models[${index}]`;
+  assertSafeTree(model, where, errors);
   if (!isPlainObject(model)) {
     errors.push(`${where}: expected an object`);
     return;
@@ -586,6 +617,9 @@ function assertModelSchema(model, index, seen, errors) {
     if (!isPlainObject(model.variants)) errors.push(`${label}.variants: expected an object`);
     else {
       for (const [name, variant] of Object.entries(model.variants)) {
+        if (!SAFE_VARIANT_NAME.test(name)) {
+          errors.push(`${label}: unsafe variant name ${name}`);
+        }
         if (!isPlainObject(variant)) {
           errors.push(`${label}.variants.${name}: expected an object`);
         } else {
