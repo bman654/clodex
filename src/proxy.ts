@@ -33,6 +33,7 @@ import {
 } from './upstream-forward.js';
 import {
   normalizeBetaTokens,
+  resolveCapabilityBetaTokens,
   resolveNativeIdentitySuppression,
 } from './anthropic-beta-policy.js';
 import { createLanguageModel, isSdkMigratedNpm, maxToolsForNpm } from './provider-factory.js';
@@ -510,20 +511,29 @@ export async function startProxyCatalog(
         const forwardBody = { ...anthropicBody, model: route.realModelId };
         const targetUrl = `${upstreamUrl}/v1/messages/count_tokens`;
         // The client beta arrives as non-authoritative context (possibly
-        // duplicated across the internal adapter hop) and is dropped here; the
-        // relay recomputes the outbound set from the configured headers alone.
+        // duplicated across the internal adapter hop); the relay recomputes the
+        // outbound set from the configured headers plus whatever this exact
+        // count_tokens request earns, and drops everything else.
         const clientBeta = normalizeBetaTokens(req.headers['anthropic-beta']);
         const suppression = resolveNativeIdentitySuppression(upstreamUrl);
+        const capability = {
+          clientBeta,
+          requestedModelId: typeof originalModel === 'string' ? originalModel : undefined,
+          advertisedModelId: route.aliasId,
+          advertisedContextWindow: route.contextWindow,
+        };
         plog(() =>
           `anthropic token-count: model=${route.realModelId}, auth=${routeAuthType}, `
           + `native-identity=suppressed(${suppression.reason}), `
-          + `client-beta-dropped=${clientBeta.length}`,
+          + `client-beta=${clientBeta.length}, `
+          + `capability-beta=${resolveCapabilityBetaTokens({ ...capability, url: targetUrl, body: forwardBody }).join('|') || 'none'}`,
         );
         try {
           await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, false, {
             authType: routeAuthType,
             log: message => plog(message),
             extraHeaders: route.headers,
+            capability,
             refreshToken: route.refreshToken,
             onTokenRefreshed: refreshed => { route.apiKey = refreshed; },
             signal: clientAbort.signal,
@@ -554,10 +564,17 @@ export async function startProxyCatalog(
         // the route's provider id or auth type is a label, not proof of one.
         const clientBeta = normalizeBetaTokens(req.headers['anthropic-beta']);
         const suppression = resolveNativeIdentitySuppression(upstreamUrl);
+        const capability = {
+          clientBeta,
+          requestedModelId: typeof originalModel === 'string' ? originalModel : undefined,
+          advertisedModelId: route.aliasId,
+          advertisedContextWindow: route.contextWindow,
+        };
         plog(() =>
           `anthropic-passthrough: model=${route.realModelId}, stream=${clientWantsStream}, `
           + `auth=${routeAuthType}, native-identity=suppressed(${suppression.reason}), `
-          + `client-beta-dropped=${clientBeta.length}`,
+          + `client-beta=${clientBeta.length}, `
+          + `capability-beta=${resolveCapabilityBetaTokens({ ...capability, url: targetUrl, body: forwardBody }).join('|') || 'none'}`,
         );
 
         try {
@@ -565,6 +582,7 @@ export async function startProxyCatalog(
             authType: routeAuthType,
             log: message => plog(message),
             extraHeaders: route.headers,
+            capability,
             refreshToken: route.refreshToken,
             onTokenRefreshed: refreshed => { route.apiKey = refreshed; },
             signal: clientAbort.signal,

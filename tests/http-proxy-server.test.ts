@@ -1985,6 +1985,88 @@ describe('selective HTTP proxy', () => {
     },
   );
 
+  it('carries capability betas across the adapter hop in their exact spelling', async () => {
+    // Downstream admission is an EXACT token match, so this hop must not fold
+    // case or drop a duplicate spelling in a way that changes the token itself.
+    const certificates = ensureHttpProxyCertificates();
+    const adapterHeaders: http.IncomingHttpHeaders[] = [];
+
+    const origin = https.createServer({
+      key: certificates.serverKey,
+      cert: certificates.serverCert,
+    }, async (req, res) => {
+      req.resume();
+      await once(req, 'end');
+      res.setHeader('Connection', 'close');
+      res.end('{"unexpected":true}');
+    });
+    const originPort = await listen(origin);
+
+    const adapterServer = http.createServer(async (req, res) => {
+      adapterHeaders.push(req.headers);
+      req.resume();
+      await once(req, 'end');
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Connection': 'close' });
+      res.end('{"input_tokens":1}');
+    });
+    const adapterPort = await listen(adapterServer);
+
+    const proxy = await startHttpProxy({
+      routes: [{
+        aliasId: 'clodex:groq:llama-3.3-70b',
+        realModelId: 'llama-3.3-70b-versatile',
+        displayName: 'Llama 3.3 70B (Groq)',
+        upstreamUrl: '',
+        apiKey: 'provider-key',
+        modelFormat: 'openai',
+        npm: '@ai-sdk/groq',
+        providerId: 'groq',
+      }],
+      adapterHandle: {
+        port: adapterPort,
+        token: 'adapter-local-token',
+        close: () => {
+          adapterServer.closeAllConnections();
+          adapterServer.close();
+        },
+      },
+      anthropicOrigin: `https://127.0.0.1:${originPort}`,
+      anthropicRejectUnauthorized: false,
+    });
+
+    try {
+      const body = JSON.stringify({ model: 'clodex:groq:llama-3.3-70b', messages: [] });
+      const secure = await connectMitm(proxy.port, certificates.caCert);
+      let response = '';
+      secure.on('data', chunk => { response += chunk.toString(); });
+      secure.write([
+        'POST /v1/messages HTTP/1.1',
+        'Host: api.anthropic.com',
+        'anthropic-beta: context-1m-2025-08-07 , advanced-tool-use-2025-11-20',
+        'Anthropic-Beta: context-1m-2025-08-07,tool-search-tool-2025-10-19',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n') + body);
+      await once(secure, 'close');
+
+      expect(response).toContain('200 OK');
+      expect(adapterHeaders).toHaveLength(1);
+      expect(adapterHeaders[0]!['anthropic-beta']).toBe(
+        'context-1m-2025-08-07,advanced-tool-use-2025-11-20,tool-search-tool-2025-10-19',
+      );
+      // Still non-authoritative: the hop adds no credential and no identity.
+      expect(adapterHeaders[0]!['x-api-key']).toBe('adapter-local-token');
+      expect(adapterHeaders[0]!.authorization).toBeUndefined();
+    } finally {
+      proxy.close();
+      origin.closeAllConnections();
+      origin.close();
+    }
+  });
+
   it('leaves an unmatched route-less native passthrough byte-equivalent', async () => {
     const certificates = ensureHttpProxyCertificates();
     let seen: http.IncomingHttpHeaders | undefined;

@@ -8,11 +8,41 @@ import {
   relayAnthropicMessages,
 } from '../src/upstream-forward.js';
 import {
+  CONTEXT_1M_BETA,
+  TOOL_SEARCH_BETAS,
+  classifyAnthropicCapabilityEndpoint,
   extractConfiguredBetaTokens,
   isAnthropicBetaHeaderName,
   normalizeBetaTokens,
+  resolveCapabilityBetaTokens,
   resolveOutboundBeta,
+  type AnthropicCapabilityRequest,
 } from '../src/anthropic-beta-policy.js';
+
+const [TOOL_SEARCH_FIRST_PARTY_BETA, TOOL_SEARCH_GATEWAY_BETA] = TOOL_SEARCH_BETAS as [string, string];
+
+/** A tools array that structurally uses the tool-search server tool. */
+const TOOL_SEARCH_TOOLS = [
+  { type: 'tool_search_tool_regex_20251119', name: 'tool_search_tool_regex' },
+];
+/** A tools array whose only marker is a deferred tool. */
+const DEFERRED_TOOLS = [{ name: 'mcp__docs__search', defer_loading: true }];
+/** An ordinary tool request: no tool-search type, no defer_loading. */
+const ORDINARY_TOOLS = [{ name: 'Read', description: 'read a file', input_schema: { type: 'object' } }];
+
+const ANTHROPIC_MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
+
+function capability(over: Partial<AnthropicCapabilityRequest> = {}): AnthropicCapabilityRequest {
+  return {
+    url: ANTHROPIC_MESSAGES_URL,
+    clientBeta: [],
+    requestedModelId: 'claude-sonnet-4-6[1m]',
+    advertisedModelId: 'claude-sonnet-4-6[1m]',
+    advertisedContextWindow: 1_000_000,
+    body: { model: 'claude-sonnet-4-6' },
+    ...over,
+  };
+}
 
 /** Header names that would only ever be present to simulate a native Claude client. */
 const NATIVE_IDENTITY_HEADER_NAMES = [
@@ -130,6 +160,252 @@ describe('anthropicUpstreamHeaders', () => {
     expect(headers['anthropic-beta']).toBe('alpha-2026-01-01');
     expect(headers).not.toHaveProperty('Authorization');
     expectNoSynthesizedIdentity(headers);
+  });
+
+  it.each(['api', 'oauth', 'none'] as const)(
+    'emits an earned capability beta on a %s route, and nothing else the client asked for',
+    authType => {
+      const headers = anthropicUpstreamHeaders('token', false, authType, { 'X-Plan': 'coding' }, capability({
+        clientBeta: [CONTEXT_1M_BETA, TOOL_SEARCH_GATEWAY_BETA, 'client-alpha'],
+        body: { tools: TOOL_SEARCH_TOOLS },
+      }));
+      expect(headers['anthropic-beta']).toBe(`${CONTEXT_1M_BETA},${TOOL_SEARCH_GATEWAY_BETA}`);
+      expect(headers['X-Plan']).toBe('coding');
+      expect(JSON.stringify(headers)).not.toContain('client-alpha');
+      expect(Object.keys(headers).filter(isAnthropicBetaHeaderName)).toEqual(['anthropic-beta']);
+      expectNoSynthesizedIdentity(headers);
+    },
+  );
+
+  it.each(['api', 'oauth', 'none'] as const)(
+    'emits no beta at all on a %s route when the predicate is false',
+    authType => {
+      const headers = anthropicUpstreamHeaders('token', false, authType, undefined, capability({
+        // Exact capability tokens, but the route advertises 200K and the
+        // request is an ordinary tool call.
+        clientBeta: [CONTEXT_1M_BETA, ...TOOL_SEARCH_BETAS],
+        advertisedContextWindow: 200_000,
+        body: { tools: ORDINARY_TOOLS },
+      }));
+      expect(headers).not.toHaveProperty('anthropic-beta');
+      expect(Object.keys(headers).some(isAnthropicBetaHeaderName)).toBe(false);
+    },
+  );
+
+  it('unions the operator-configured beta with the earned capability, configured first', () => {
+    const headers = anthropicUpstreamHeaders('token', true, 'oauth', {
+      'Anthropic-Beta': 'cfg-a , cfg-b',
+      'anthropic-beta': 'cfg-b',
+    }, capability({ clientBeta: [CONTEXT_1M_BETA] }));
+    expect(headers['anthropic-beta']).toBe(`cfg-a,cfg-b,${CONTEXT_1M_BETA}`);
+    expect(Object.keys(headers).filter(isAnthropicBetaHeaderName)).toEqual(['anthropic-beta']);
+  });
+});
+
+describe('capability betas are earned per request, never allowlisted', () => {
+  describe('endpoint role is recomputed from the destination', () => {
+    it.each([
+      ['https://api.anthropic.com/v1/messages', 'messages'],
+      ['https://api.anthropic.com/v1/messages/count_tokens', 'count_tokens'],
+      // A base URL may carry a path prefix; the well-known suffix still matches.
+      ['https://gateway.example/api/anthropic/v1/messages', 'messages'],
+      ['https://gateway.example/api/anthropic/v1/messages/count_tokens', 'count_tokens'],
+    ])('classifies %s as %s', (url, expected) => {
+      expect(classifyAnthropicCapabilityEndpoint(url)).toBe(expected);
+    });
+
+    it.each([
+      ['https://api.openai.com/v1/chat/completions'],
+      ['https://api.anthropic.com/v1/complete'],
+      ['https://api.anthropic.com/v1/messages/batches'],
+      ['https://api.anthropic.com/'],
+      ['not-a-url'],
+      [''],
+    ])('refuses %s', url => {
+      expect(classifyAnthropicCapabilityEndpoint(url)).toBeUndefined();
+    });
+  });
+
+  describe('context-1m', () => {
+    it.each([
+      ['/v1/messages', ANTHROPIC_MESSAGES_URL],
+      ['/v1/messages/count_tokens', 'https://api.anthropic.com/v1/messages/count_tokens'],
+    ])('admits the exact token on %s when the route really advertises 1M', (_label, url) => {
+      expect(resolveCapabilityBetaTokens(capability({ url, clientBeta: [CONTEXT_1M_BETA] })))
+        .toEqual([CONTEXT_1M_BETA]);
+    });
+
+    it.each([
+      ['a token that merely looks related', { clientBeta: ['context-1m'] }],
+      ['a drifted version of the token', { clientBeta: ['context-1m-2026-08-07'] }],
+      ['a case variant of the token', { clientBeta: ['Context-1M-2025-08-07'] }],
+      ['no inbound token at all', { clientBeta: [] }],
+      ['a requested id without the [1m] surface', {
+        clientBeta: [CONTEXT_1M_BETA],
+        requestedModelId: 'claude-sonnet-4-6',
+      }],
+      ['a route whose window is below the threshold', {
+        clientBeta: [CONTEXT_1M_BETA],
+        advertisedContextWindow: 200_000,
+      }],
+      ['a window one token short of the threshold', {
+        clientBeta: [CONTEXT_1M_BETA],
+        advertisedContextWindow: 999_999,
+      }],
+      ['a translated OpenAI destination', {
+        clientBeta: [CONTEXT_1M_BETA],
+        url: 'https://api.openai.com/v1/chat/completions',
+      }],
+      ['a non-messages Anthropic endpoint', {
+        clientBeta: [CONTEXT_1M_BETA],
+        url: 'https://api.anthropic.com/v1/complete',
+      }],
+    ])('refuses with %s', (_label, over) => {
+      expect(resolveCapabilityBetaTokens(capability(over))).toEqual([]);
+    });
+
+    it('is decided by the route, not by the credential scheme or provider label', () => {
+      // No auth type, provider id, or destination host reaches this predicate:
+      // there is no parameter for one. The same facts decide every route.
+      const admitted = resolveCapabilityBetaTokens(capability({
+        clientBeta: [CONTEXT_1M_BETA],
+        url: 'https://anthropic.internal.example/v1/messages',
+      }));
+      expect(admitted).toEqual([CONTEXT_1M_BETA]);
+    });
+  });
+
+  describe('tool search', () => {
+    it.each([
+      ['first-party/proxy presentation', TOOL_SEARCH_FIRST_PARTY_BETA],
+      ['gateway/third-party presentation', TOOL_SEARCH_GATEWAY_BETA],
+    ])('admits the %s token on a tool-search request shape', (_label, token) => {
+      expect(resolveCapabilityBetaTokens(capability({
+        clientBeta: [token],
+        body: { tools: TOOL_SEARCH_TOOLS },
+      }))).toEqual([token]);
+    });
+
+    it.each([
+      ['first-party/proxy presentation', TOOL_SEARCH_FIRST_PARTY_BETA],
+      ['gateway/third-party presentation', TOOL_SEARCH_GATEWAY_BETA],
+    ])('admits the %s token on a deferred-tool request shape', (_label, token) => {
+      expect(resolveCapabilityBetaTokens(capability({
+        clientBeta: [token],
+        body: { tools: DEFERRED_TOOLS },
+      }))).toEqual([token]);
+    });
+
+    it('admits both presentations at once in fixed policy order', () => {
+      expect(resolveCapabilityBetaTokens(capability({
+        // Inbound order reversed: the emitted order is the policy's, not the client's.
+        clientBeta: [TOOL_SEARCH_GATEWAY_BETA, TOOL_SEARCH_FIRST_PARTY_BETA],
+        body: { tools: TOOL_SEARCH_TOOLS },
+      }))).toEqual([TOOL_SEARCH_FIRST_PARTY_BETA, TOOL_SEARCH_GATEWAY_BETA]);
+    });
+
+    it.each([
+      ['an ordinary tool request', { tools: ORDINARY_TOOLS }],
+      ['defer_loading explicitly false', { tools: [{ name: 'Read', defer_loading: false }] }],
+      ['a defer_loading string rather than true', { tools: [{ name: 'Read', defer_loading: 'true' }] }],
+      ['a tool type that only resembles tool search', { tools: [{ type: 'tool_search', name: 'x' }] }],
+      ['a tool merely NAMED for tool search', { tools: [{ name: 'tool_search_tool_regex' }] }],
+      ['a tool-search RESULT block in the body root', { tools: [], type: 'tool_search_tool_result' }],
+      ['no tools array', { model: 'm' }],
+      ['a non-array tools field', { tools: { type: 'tool_search_tool_regex_20251119' } }],
+      ['a null entry in tools', { tools: [null] }],
+      ['a non-object body', 'tool_search_tool_regex_20251119'],
+    ])('refuses both tokens for %s', (_label, body) => {
+      for (const token of TOOL_SEARCH_BETAS) {
+        expect(resolveCapabilityBetaTokens(capability({ clientBeta: [token], body }))).toEqual([]);
+      }
+    });
+
+    it('refuses a drifted tool-search token even on a real tool-search request', () => {
+      expect(resolveCapabilityBetaTokens(capability({
+        clientBeta: ['tool-search-tool-2026-10-19', 'advanced-tool-use-2026-11-20'],
+        body: { tools: TOOL_SEARCH_TOOLS },
+      }))).toEqual([]);
+    });
+
+    it('refuses on a translated destination even with the exact token and shape', () => {
+      for (const token of TOOL_SEARCH_BETAS) {
+        expect(resolveCapabilityBetaTokens(capability({
+          clientBeta: [token],
+          body: { tools: TOOL_SEARCH_TOOLS },
+          url: 'https://generativelanguage.googleapis.com/v1beta/models',
+        }))).toEqual([]);
+      }
+    });
+  });
+
+  it('admits nothing for an arbitrary client beta, however it is packaged', () => {
+    expect(resolveCapabilityBetaTokens(capability({
+      clientBeta: normalizeBetaTokens([
+        'client-alpha, client-beta',
+        'oauth-2025-04-20',
+        'skills-2025-10-02',
+        'claude-code-20250219',
+      ]),
+      body: { tools: [...TOOL_SEARCH_TOOLS, ...DEFERRED_TOOLS] },
+    }))).toEqual([]);
+  });
+
+  it('admits each capability independently when both are earned', () => {
+    expect(resolveCapabilityBetaTokens(capability({
+      clientBeta: [CONTEXT_1M_BETA, TOOL_SEARCH_GATEWAY_BETA, 'client-alpha'],
+      body: { tools: TOOL_SEARCH_TOOLS },
+    }))).toEqual([CONTEXT_1M_BETA, TOOL_SEARCH_GATEWAY_BETA]);
+  });
+
+  describe('configured union', () => {
+    it('keeps configured tokens first, in their own order, then the capability', () => {
+      expect(resolveOutboundBeta(
+        { 'Anthropic-Beta': 'cfg-b , cfg-a', 'anthropic-beta': 'cfg-a' },
+        capability({ clientBeta: [CONTEXT_1M_BETA] }),
+      )).toEqual({ source: 'configured+capability', value: `cfg-b,cfg-a,${CONTEXT_1M_BETA}` });
+    });
+
+    it('dedupes a capability token the operator already configured', () => {
+      expect(resolveOutboundBeta(
+        { 'anthropic-beta': `cfg-a,${CONTEXT_1M_BETA}` },
+        capability({ clientBeta: [CONTEXT_1M_BETA] }),
+      )).toEqual({ source: 'configured', value: `cfg-a,${CONTEXT_1M_BETA}` });
+    });
+
+    it('treats a case-variant configured token as a different exact token', () => {
+      // Token case is never folded: an operator spelling and the canonical
+      // capability spelling are two tokens, and both are emitted.
+      expect(resolveOutboundBeta(
+        { 'anthropic-beta': 'CONTEXT-1M-2025-08-07' },
+        capability({ clientBeta: [CONTEXT_1M_BETA] }),
+      )).toEqual({
+        source: 'configured+capability',
+        value: `CONTEXT-1M-2025-08-07,${CONTEXT_1M_BETA}`,
+      });
+    });
+
+    it('reports capability-only and none exactly', () => {
+      expect(resolveOutboundBeta(undefined, capability({ clientBeta: [CONTEXT_1M_BETA] })))
+        .toEqual({ source: 'capability', value: CONTEXT_1M_BETA });
+      expect(resolveOutboundBeta(undefined, capability({ clientBeta: ['client-alpha'] })))
+        .toEqual({ source: 'none' });
+    });
+
+    it('is byte-identical to the configured-only result when no capability is passed', () => {
+      for (const headers of [
+        undefined,
+        { 'X-Plan': 'coding' },
+        { 'Anthropic-Beta': ' cfg-a , cfg-b ,, cfg-a ', 'anthropic-beta': 'Cfg-C' },
+      ]) {
+        expect(resolveOutboundBeta(headers, undefined)).toEqual(resolveOutboundBeta(headers));
+      }
+      // Configured operator authority survives with a capability present and unearned.
+      expect(resolveOutboundBeta(
+        { 'Anthropic-Beta': 'cfg-a' },
+        capability({ clientBeta: ['client-alpha'] }),
+      )).toEqual({ source: 'configured', value: 'cfg-a' });
+    });
   });
 });
 
@@ -649,6 +925,23 @@ describe('relayAnthropicMessages outbound headers', () => {
     ([, init]) => (init?.headers ?? {}) as Record<string, string>,
   );
 
+  const stubJsonOnce = () => vi.stubGlobal('fetch', vi.fn(async () => new Response(
+    JSON.stringify({ id: 'msg_1', type: 'message', model: 'm', content: [] }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  )));
+
+  /** Relay one non-streaming request and discard the response. */
+  const relayJson = (
+    options: Parameters<typeof relayAnthropicMessages>[5],
+    url = 'https://upstream.example/v1/messages',
+    body: Record<string, unknown> = { model: 'm' },
+  ) => {
+    const res = new Writable({ write(_c, _e, cb) { cb(); } }) as never as Record<string, unknown>;
+    res.writeHead = () => res;
+    res.end = () => undefined;
+    return relayAnthropicMessages(res as never, url, body, 'key', false, options);
+  };
+
   it('carries the configured beta and no client identity on the JSON path', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(
       JSON.stringify({ id: 'msg_1', type: 'message', model: 'm', content: [] }),
@@ -721,28 +1014,133 @@ describe('relayAnthropicMessages outbound headers', () => {
     expect(stripAuth(second!)).toEqual(stripAuth(first!));
   });
 
-  it('offers no option channel for a client-supplied beta', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => new Response(
-      JSON.stringify({ id: 'msg_1', type: 'message', model: 'm', content: [] }),
-      { status: 200, headers: { 'Content-Type': 'application/json' } },
-    )));
-    const res = new Writable({ write(_c, _e, cb) { cb(); } }) as never as Record<string, unknown>;
-    res.writeHead = () => res;
-    res.end = () => undefined;
+  // Supersedes "offers no option channel for a client-supplied beta". The
+  // capability channel now exists, so the property under test is no longer the
+  // absence of a channel — it is that the channel forwards nothing a request
+  // has not earned. The original property (no arbitrary client beta reaches an
+  // upstream) is retained verbatim in the assertions below and, unchanged, in
+  // "carries no beta at all when no option is passed".
+  it('carries no beta at all when no option is passed', async () => {
+    stubJsonOnce();
+    await relayJson({ authType: 'api' });
+    const [headers] = capturedHeaders();
+    expect(headers).not.toHaveProperty('anthropic-beta');
+    expectNoSynthesizedIdentity(headers!);
+  });
+
+  it('forwards nothing for an arbitrary client beta handed to the capability channel', async () => {
+    stubJsonOnce();
+    await relayJson({
+      authType: 'api',
+      capability: {
+        clientBeta: ['client-alpha', 'client-beta', 'oauth-2025-04-20'],
+        requestedModelId: 'm[1m]',
+        advertisedModelId: 'm[1m]',
+        advertisedContextWindow: 1_000_000,
+      },
+    });
+    const [headers] = capturedHeaders();
+    expect(headers).not.toHaveProperty('anthropic-beta');
+    expect(JSON.stringify(headers)).not.toContain('client-');
+    expectNoSynthesizedIdentity(headers!);
+  });
+
+  it('takes the destination and body from what it is sending, not from the caller', async () => {
+    stubJsonOnce();
+    // A tool-search token with a body that carries no tool-search shape: the
+    // caller supplies neither the URL nor the body, so it cannot fake either.
+    await relayJson({
+      authType: 'api',
+      capability: {
+        clientBeta: [TOOL_SEARCH_GATEWAY_BETA],
+        advertisedModelId: 'm',
+      },
+    });
+    const [headers] = capturedHeaders();
+    expect(headers).not.toHaveProperty('anthropic-beta');
+  });
+
+  it.each([
+    ['/v1/messages', 'https://upstream.example/v1/messages'],
+    ['/v1/messages/count_tokens', 'https://upstream.example/v1/messages/count_tokens'],
+  ])('earns the capability on %s', async (_label, url) => {
+    stubJsonOnce();
+    await relayJson({
+      authType: 'oauth',
+      capability: {
+        clientBeta: [CONTEXT_1M_BETA, TOOL_SEARCH_FIRST_PARTY_BETA],
+        requestedModelId: 'm[1m]',
+        advertisedModelId: 'm[1m]',
+        advertisedContextWindow: 1_000_000,
+      },
+    }, url, { model: 'm', tools: TOOL_SEARCH_TOOLS });
+    const [headers] = capturedHeaders();
+    expect(headers!['anthropic-beta'])
+      .toBe(`${CONTEXT_1M_BETA},${TOOL_SEARCH_FIRST_PARTY_BETA}`);
+  });
+
+  it('emits no capability beta on a non-Anthropic destination reached through this relay', async () => {
+    stubJsonOnce();
+    await relayJson({
+      authType: 'api',
+      capability: {
+        clientBeta: [CONTEXT_1M_BETA, ...TOOL_SEARCH_BETAS],
+        requestedModelId: 'm[1m]',
+        advertisedModelId: 'm[1m]',
+        advertisedContextWindow: 1_000_000,
+      },
+    }, 'https://upstream.example/v1/chat/completions', { model: 'm', tools: TOOL_SEARCH_TOOLS });
+    const [headers] = capturedHeaders();
+    expect(headers).not.toHaveProperty('anthropic-beta');
+  });
+
+  it('recomputes the same capability set on the SSE path and on the refresh retry', async () => {
+    const refreshToken = vi.fn(async () => 'refreshed-token');
+    let call = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      call += 1;
+      return call === 1
+        ? new Response('nope', { status: 401 })
+        : new Response('event: message_stop\ndata: {"type":"message_stop"}\n\n', {
+            status: 200, headers: { 'Content-Type': 'text/event-stream' },
+          });
+    }));
+    const res = makeStreamRes();
+    const done = new Promise<void>(resolve => res.on('finish', () => resolve()));
 
     await relayAnthropicMessages(
       res as never,
       'https://upstream.example/v1/messages',
-      { model: 'm' },
-      'key',
-      false,
-      // A caller cannot pass an inbound/client beta: the option does not exist,
-      // and an unknown property is inert rather than forwarded.
-      { authType: 'api' } as Record<string, never>,
+      { model: 'm', stream: true, tools: DEFERRED_TOOLS },
+      'stale-token',
+      true,
+      {
+        authType: 'oauth',
+        refreshToken,
+        extraHeaders: { 'ANTHROPIC-BETA': 'cfg-a' },
+        capability: {
+          clientBeta: [CONTEXT_1M_BETA, TOOL_SEARCH_GATEWAY_BETA, 'client-alpha'],
+          requestedModelId: 'm[1m]',
+          advertisedModelId: 'm[1m]',
+          advertisedContextWindow: 1_000_000,
+        },
+      },
     );
+    await done;
 
-    const [headers] = capturedHeaders();
-    expect(headers).not.toHaveProperty('anthropic-beta');
-    expectNoSynthesizedIdentity(headers!);
+    const [first, second] = capturedHeaders();
+    expect(refreshToken).toHaveBeenCalledOnce();
+    const expected = `cfg-a,${CONTEXT_1M_BETA},${TOOL_SEARCH_GATEWAY_BETA}`;
+    for (const headers of [first!, second!]) {
+      expect(headers['anthropic-beta']).toBe(expected);
+      expect(headers.Accept).toBe('text/event-stream');
+      expect(JSON.stringify(headers)).not.toContain('client-alpha');
+      expectNoSynthesizedIdentity(headers);
+    }
+    const stripAuth = (h: Record<string, string>) => {
+      const { Authorization: _drop, ...rest } = h;
+      return rest;
+    };
+    expect(stripAuth(second!)).toEqual(stripAuth(first!));
   });
 });

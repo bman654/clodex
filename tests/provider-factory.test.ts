@@ -1119,6 +1119,32 @@ describe('Anthropic SDK wire boundary enforces configured betas', () => {
     expect(wire[0]!.headers['x-plan']).toBe('coding');
   });
 
+  it('keeps capability betas off the SDK wire, configured or not', async () => {
+    // The routed raw-Anthropic boundary admits validated capability tokens; the
+    // SDK boundary deliberately does not. No inbound request is visible at SDK
+    // construction, so there is nothing here that could have earned one, and a
+    // capability-looking token supplied per request is refused exactly like any
+    // other request-supplied beta.
+    const capabilityTokens = [
+      'context-1m-2025-08-07',
+      'advanced-tool-use-2025-11-20',
+      'tool-search-tool-2025-10-19',
+    ];
+    const wire = captureWire();
+    await dispatch(
+      { headers: { 'Anthropic-Beta': 'cfg-a' } },
+      {
+        providerOptions: { anthropic: { anthropicBeta: capabilityTokens } },
+        headers: { 'anthropic-beta': capabilityTokens.join(',') },
+      },
+    );
+
+    expect(wire[0]!.headers['anthropic-beta']).toBe('cfg-a');
+    for (const token of capabilityTokens) {
+      expect(wire[0]!.headers['anthropic-beta']).not.toContain(token);
+    }
+  });
+
   it('normalizes duplicate spellings and list whitespace to one exact value', async () => {
     const wire = captureWire();
     await dispatch({

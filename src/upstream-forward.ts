@@ -7,18 +7,24 @@ import {
   isAnthropicBetaHeaderName,
   isRouteOwnedCredentialHeaderName,
   resolveOutboundBeta,
+  type AnthropicCapabilityRequest,
+  type AnthropicCapabilityRouteFacts,
 } from './anthropic-beta-policy.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
 
 /**
  * Build the headers for a routed Anthropic-format upstream request.
  *
- * This is the final routed boundary, so it recomputes the beta set from the
- * provider's CONFIGURED headers and from nothing else: a client's inbound beta
- * has no parameter to arrive through and cannot reach an upstream from here.
- * The credential scheme (api key, OAuth bearer, anonymous) is unchanged, and no
- * native-client identity is synthesized — clodex ships no supported producer of
- * native Claude credentials whose lineage such an identity could represent.
+ * This is the final routed boundary, so it RECOMPUTES the beta set here: from
+ * the provider's CONFIGURED headers, plus — only when `capability` is supplied —
+ * the capability tokens this exact destination, route and body earn under
+ * `anthropic-beta-policy`. The inbound client beta is one input to those
+ * predicates and never a value to forward, so an arbitrary client beta still
+ * cannot reach an upstream from here, and neither can a capability token whose
+ * predicate is false. The credential scheme (api key, OAuth bearer, anonymous)
+ * is unchanged, and no native-client identity is synthesized — clodex ships no
+ * supported producer of native Claude credentials whose lineage such an
+ * identity could represent.
  *
  * When the route owns the credential it owns it OUTRIGHT: every configured
  * spelling of `authorization` and `x-api-key` is removed before the route's own
@@ -30,11 +36,12 @@ export function anthropicUpstreamHeaders(
   stream = false,
   authType?: 'api' | 'oauth' | 'none',
   extraHeaders?: Record<string, string>,
+  capability?: AnthropicCapabilityRequest,
 ): Record<string, string> {
   const key = sanitizeCredential(apiKey) ?? apiKey.trim();
   const resolvedAuthType = authType ?? 'api';
   const isOAuth = resolvedAuthType === 'oauth';
-  const outboundBeta = resolveOutboundBeta(extraHeaders);
+  const outboundBeta = resolveOutboundBeta(extraHeaders, capability);
   // Configured beta spellings are re-emitted once, normalized, under the
   // canonical name. Passing them through as well would leave two case-variant
   // keys on one request, which fetch appends into a single merged header — the
@@ -58,7 +65,7 @@ export function anthropicUpstreamHeaders(
         }),
     ...(stream ? { Accept: 'text/event-stream' } : {}),
   };
-  if (outboundBeta.source === 'configured') {
+  if (outboundBeta.source !== 'none') {
     headers[ANTHROPIC_BETA_HEADER] = outboundBeta.value;
   }
   return headers;
@@ -121,11 +128,22 @@ export interface RelayAnthropicOptions {
   authType?: 'api' | 'oauth' | 'none';
   log?: (message: string) => void;
   /**
-   * The provider's configured static headers. The only channel through which an
-   * `Anthropic-Beta` can reach an upstream — there is deliberately no inbound /
-   * client beta option, and no session-identity option.
+   * The provider's configured static headers. Explicit operator authority, and
+   * the only channel through which an arbitrary `Anthropic-Beta` can reach an
+   * upstream. There is deliberately no session-identity option.
    */
   extraHeaders?: Record<string, string>;
+  /**
+   * Route facts for capability-beta admission on a raw Anthropic route.
+   *
+   * Supplying this does NOT allow anything: it hands the policy the inbound
+   * tokens and the route's own advertised id/window so the boundary can decide.
+   * The destination URL and the exact forwarded body are taken from what this
+   * relay is actually sending, not from the caller, and the whole set is
+   * recomputed on every attempt including the OAuth-refresh retry. Omit it on a
+   * translated or non-Anthropic route to keep the configured-only behaviour.
+   */
+  capability?: AnthropicCapabilityRouteFacts;
   refreshToken?: (rejectedAccessToken: string) => Promise<string | null>;
   onTokenRefreshed?: (token: string) => void;
   onUpstreamError?: (statusCode: number, body: string) => void;
@@ -221,6 +239,9 @@ export async function relayAnthropicMessages(
       clientWantsStream,
       options.authType,
       options.extraHeaders,
+      options.capability
+        ? { ...options.capability, url: messagesUrl, body }
+        : undefined,
     ),
     body: JSON.stringify(body),
     signal: options.signal,

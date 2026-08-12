@@ -26,6 +26,7 @@ import {
 import { resolveProviderCredential } from '../env.js';
 import {
   normalizeBetaTokens,
+  resolveCapabilityBetaTokens,
   resolveNativeIdentitySuppression,
 } from '../anthropic-beta-policy.js';
 import {
@@ -339,11 +340,19 @@ async function handleAnthropicMessages(
       requestPreview: getLatestMessagePreview(body.messages, body.system),
     });
 
-    // Forwarded verbatim: no metadata user identity, no billing system line,
-    // no request-shape-derived beta set. The client's own beta is dropped here
-    // and the relay recomputes the outbound set from configured headers alone.
+    // Forwarded verbatim: no metadata user identity and no billing system line.
+    // The client's beta travels on as NON-AUTHORITATIVE context only; the relay
+    // recomputes the outbound set at the wire boundary from the configured
+    // headers plus whichever capability tokens this exact destination, route and
+    // body earn. Everything else the client asked for is dropped there.
     const clientBeta = normalizeBetaTokens(req.headers['anthropic-beta']);
     const suppression = resolveNativeIdentitySuppression(model.baseUrl);
+    const capability = {
+      clientBeta,
+      requestedModelId: typeof body.model === 'string' ? body.model : undefined,
+      advertisedModelId: model.id,
+      advertisedContextWindow: model.contextWindow,
+    };
 
     const refreshToken = isOAuth && model.providerId && model.authRef
       ? (rejectedAccessToken: string) => resolveModelApiKey(
@@ -355,12 +364,14 @@ async function handleAnthropicMessages(
 
     plog(() =>
       `anthropic-passthrough → ${messagesUrl} oauth=${isOAuth} stream=${clientWantsStream} `
-      + `native-identity=suppressed(${suppression.reason}) client-beta-dropped=${clientBeta.length}`,
+      + `native-identity=suppressed(${suppression.reason}) client-beta=${clientBeta.length} `
+      + `capability-beta=${resolveCapabilityBetaTokens({ ...capability, url: messagesUrl, body: forwardBody }).join('|') || 'none'}`,
     );
     await relayAnthropicMessages(res, messagesUrl, forwardBody, apiKey, clientWantsStream, {
       authType,
       log: message => plog(message),
       extraHeaders: model.headers,
+      capability,
       refreshToken,
       onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
       // Echo the exact requested id when it differs from the upstream id, so
@@ -605,10 +616,19 @@ async function handleAnthropicCountTokens(
   const authType = model.authType ?? 'api';
   const isOAuth = authType === 'oauth';
   const forwardBody: Record<string, unknown> = { ...body, model: upstreamModelId(model) };
-  // Same negative as the Messages path: the client's beta is dropped and the
-  // relay emits only what the provider configured.
+  // Same contract as the Messages path: the client's beta is non-authoritative
+  // context, and the relay emits what the provider configured plus whatever this
+  // exact count_tokens request earns. A count is beta-gated the same way the
+  // message it precedes is, so omitting it here would make the count disagree
+  // with the request it is sizing.
   const clientBeta = normalizeBetaTokens(req.headers['anthropic-beta']);
   const suppression = resolveNativeIdentitySuppression(model.baseUrl);
+  const capability = {
+    clientBeta,
+    requestedModelId: typeof body.model === 'string' ? body.model : undefined,
+    advertisedModelId: model.id,
+    advertisedContextWindow: model.contextWindow,
+  };
   const refreshToken = isOAuth && model.providerId && model.authRef
     ? (rejectedAccessToken: string) => resolveModelApiKey(
         model,
@@ -620,12 +640,14 @@ async function handleAnthropicCountTokens(
   const countTokensUrl = `${model.baseUrl}/v1/messages/count_tokens`;
   plog(() =>
     `anthropic-count-tokens → ${countTokensUrl} oauth=${isOAuth} `
-    + `native-identity=suppressed(${suppression.reason}) client-beta-dropped=${clientBeta.length}`,
+    + `native-identity=suppressed(${suppression.reason}) client-beta=${clientBeta.length} `
+    + `capability-beta=${resolveCapabilityBetaTokens({ ...capability, url: countTokensUrl, body: forwardBody }).join('|') || 'none'}`,
   );
   await relayAnthropicMessages(res, countTokensUrl, forwardBody, apiKey, false, {
     authType,
     log: message => plog(message),
     extraHeaders: model.headers,
+    capability,
     refreshToken,
     onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
   });
