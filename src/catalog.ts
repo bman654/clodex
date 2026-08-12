@@ -8,9 +8,9 @@ import { resolveProviderCredential } from './env.js';
 import { projectFavoriteExposure } from './favorites.js';
 import {
   canonicalModelAliasName,
-  describeModelAliasRejection,
   modelAliasTarget,
   normalizeModelAliases,
+  type ModelAliasRejectionReason,
 } from './model-aliases.js';
 import { isSdkMigratedNpm } from './provider-factory.js';
 import { aliasModelId } from './proxy.js';
@@ -73,14 +73,29 @@ export function resolveCatalogModelAliases(
   modelAliases: unknown,
   resolveRoute: (providerId: string, modelId: string) => ProxyRoute | undefined,
   catalogRoutes?: readonly Pick<ProxyRoute, 'aliasId'>[],
+  availability?: {
+    favorites: readonly FavoriteModel[];
+    capacitySkippedFavorites: readonly FavoriteModel[];
+  },
 ): ProxyModelAlias[] {
   const normalized = normalizeModelAliases(modelAliases);
   const catalogRouteIds = catalogRoutes === undefined
     ? undefined
     : new Set(catalogRoutes.map(route => normalizeRouteLookupId(route.aliasId)));
+  const favoriteTargets = availability === undefined
+    ? undefined
+    : new Set(availability.favorites.map(favorite => (
+        `${favorite.providerId}:${favorite.modelId}`
+      )));
+  const capacitySkippedTargets = availability === undefined
+    ? undefined
+    : new Set(availability.capacitySkippedFavorites.map(favorite => (
+        `${favorite.providerId}:${favorite.modelId}`
+      )));
   return [
     ...normalized.accepted.map(({ alias, source, sources }) => {
       const route = resolveRoute(alias.providerId, alias.modelId);
+      const target = `${alias.providerId}:${alias.modelId}`;
       const collidesWithCatalog = catalogRouteIds?.has(
         normalizeRouteLookupId(alias.name),
       ) ?? false;
@@ -88,6 +103,13 @@ export function resolveCatalogModelAliases(
         catalogRouteIds === undefined
         || catalogRouteIds.has(normalizeRouteLookupId(route.aliasId))
       );
+      let rejectionReason: ModelAliasRejectionReason | undefined;
+      if (collidesWithCatalog) rejectionReason = 'catalog-id-collision';
+      else if (targetIsExposed) rejectionReason = undefined;
+      else if (capacitySkippedTargets?.has(target)) rejectionReason = 'target-not-exposed';
+      else if (favoriteTargets !== undefined && !favoriteTargets.has(target)) {
+        rejectionReason = 'target-not-favorite';
+      } else rejectionReason = 'target-unavailable';
       const sourceNames = [...new Set(sources.map(entry => entry.name))];
       return {
         name: alias.name,
@@ -98,13 +120,7 @@ export function resolveCatalogModelAliases(
             : { sourceNames }
         ),
         routeId: route?.aliasId ?? modelAliasTarget(alias),
-        ...(
-          collidesWithCatalog
-            ? { unavailableReason: 'conflicts with a catalog model id' }
-            : targetIsExposed
-              ? {}
-              : { unavailableReason: 'target unavailable' }
-        ),
+        ...(rejectionReason === undefined ? {} : { rejectionReason }),
       };
     }),
     ...normalized.rejections.map(rejection => ({
@@ -112,7 +128,7 @@ export function resolveCatalogModelAliases(
       ...(rejection.alias.name === canonicalModelAliasName(rejection.alias.name)
         ? {}
         : { savedName: rejection.alias.name }),
-      unavailableReason: describeModelAliasRejection(rejection.reason),
+      rejectionReason: rejection.reason,
     })),
   ];
 }

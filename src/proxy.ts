@@ -13,6 +13,10 @@ import {
 } from './context-model-id.js';
 import { routeUnavailableMessage } from './route-unavailable.js';
 import {
+  describeModelAliasRejection,
+  type ModelAliasRejectionReason,
+} from './model-aliases.js';
+import {
   getProxyDebugLogPath,
   INFERENCE_PROGRESS_INTERVAL_MS,
   redactTraceLine,
@@ -282,7 +286,7 @@ export interface ProxyModelAlias {
   /** All exact saved spellings represented by this canonical alias. Never routed. */
   sourceNames?: string[];
   routeId?: string;
-  unavailableReason?: string;
+  rejectionReason?: ModelAliasRejectionReason;
 }
 
 function configuredAliasLookupNames(alias: ProxyModelAlias): string[] {
@@ -320,13 +324,13 @@ export async function startProxyCatalog(
   );
   const unavailableAliasReasons = new Map(
     (modelAliases ?? [])
-      .filter(alias => alias.unavailableReason !== undefined)
+      .filter(alias => alias.rejectionReason !== undefined)
       .flatMap(alias => configuredAliasLookupNames(alias).map(name => (
-        [name, alias.unavailableReason!] as const
+        [name, describeModelAliasRejection(alias.rejectionReason!)] as const
       ))),
   );
   for (const alias of modelAliases ?? []) {
-    if (alias.routeId === undefined || alias.unavailableReason !== undefined) continue;
+    if (alias.routeId === undefined || alias.rejectionReason !== undefined) continue;
     const route = lookupRoute(byAlias, alias.routeId);
     const aliasId = normalizeRouteLookupId(alias.name);
     if (route && !byAlias.has(aliasId)) byAlias.set(aliasId, route);

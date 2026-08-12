@@ -213,6 +213,19 @@ describe('buildPatchModelConfig', () => {
     }
   });
 
+  it('does not treat missing patch metadata as target unavailability', () => {
+    const favorite = { providerId: 'provider', modelId: 'model-a' };
+    const desired = buildPatchModelConfig(
+      [favorite],
+      [{ name: 'active', ...favorite }],
+      () => undefined,
+    );
+
+    expect(desired.config['clodex:provider:model-a']?.alias).toBe('active');
+    expect(desired.unknownWindows).toEqual(['clodex:provider:model-a']);
+    expect(desired.rejectedAliasRejections).toEqual([]);
+  });
+
   it('patches only the first catalog-sized favorite window and rejects aliases beyond it', () => {
     const manyFavorites = Array.from({ length: 25 }, (_, index) => ({
       providerId: 'provider',

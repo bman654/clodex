@@ -137,7 +137,7 @@ describe('resolveCatalogModelAliases', () => {
       },
       {
         name: 'best',
-        unavailableReason: 'reserved client name',
+        rejectionReason: 'reserved-name',
       },
     ]);
     expect(resolved[0]?.routeId).not.toBe('clodex:test-provider:model-v1');
@@ -153,7 +153,7 @@ describe('resolveCatalogModelAliases', () => {
     expect(resolveCatalogModelAliases([alias], makeRouteResolver([]))).toEqual([{
       name: 'archived',
       routeId: modelAliasTarget(alias),
-      unavailableReason: 'target unavailable',
+      rejectionReason: 'target-unavailable',
     }]);
   });
 
@@ -171,17 +171,17 @@ describe('resolveCatalogModelAliases', () => {
         savedName: 'ArChIvEd',
         sourceNames: ['ArChIvEd', 'ARCHIVED'],
         routeId: 'clodex:missing-provider:missing-model',
-        unavailableReason: 'target unavailable',
+        rejectionReason: 'target-unavailable',
       },
       {
         name: 'orbit',
         savedName: 'Orbit',
-        unavailableReason: 'conflicting targets',
+        rejectionReason: 'conflicting-targets',
       },
       {
         name: 'orbit',
         savedName: 'ORBIT',
-        unavailableReason: 'conflicting targets',
+        rejectionReason: 'conflicting-targets',
       },
     ]);
   });
@@ -217,7 +217,7 @@ describe('resolveCatalogModelAliases', () => {
         savedName: 'CLAUDE-SONNET-4',
         sourceNames: ['CLAUDE-SONNET-4'],
         routeId: 'anthropic-other__model-a',
-        unavailableReason: 'conflicts with a catalog model id',
+        rejectionReason: 'catalog-id-collision',
       },
     ]);
   });
@@ -239,8 +239,59 @@ describe('resolveCatalogModelAliases', () => {
     )).toEqual([{
       name: 'later',
       routeId: targetRoute.aliasId,
-      unavailableReason: 'target unavailable',
+      rejectionReason: 'target-unavailable',
     }]);
+  });
+
+  it('distinguishes a capacity-skipped target from an unavailable selected target', () => {
+    const availableRoute = {
+      aliasId: 'anthropic-other__model-c',
+      realModelId: 'model-c',
+      displayName: 'Model C',
+      upstreamUrl: '',
+      apiKey: 'key',
+      modelFormat: 'openai' as const,
+    };
+    const activeRoute = {
+      ...availableRoute,
+      aliasId: 'anthropic-other__model-a',
+      realModelId: 'model-a',
+      displayName: 'Model A',
+    };
+    const favorites = [
+      { providerId: 'other', modelId: 'missing-selected' },
+      { providerId: 'other', modelId: 'model-c' },
+      { providerId: 'other', modelId: 'model-a' },
+    ];
+    const capacitySkippedFavorites = [favorites[1]!, favorites[2]!];
+
+    expect(resolveCatalogModelAliases(
+      [
+        { name: 'missing', ...favorites[0]! },
+        { name: 'later', ...favorites[1]! },
+        { name: 'active', ...favorites[2]! },
+      ],
+      (_providerId, modelId) => (
+        modelId === 'model-c' ? availableRoute : modelId === 'model-a' ? activeRoute : undefined
+      ),
+      [activeRoute],
+      { favorites, capacitySkippedFavorites },
+    )).toEqual([
+      {
+        name: 'missing',
+        routeId: 'clodex:other:missing-selected',
+        rejectionReason: 'target-unavailable',
+      },
+      {
+        name: 'later',
+        routeId: availableRoute.aliasId,
+        rejectionReason: 'target-not-exposed',
+      },
+      {
+        name: 'active',
+        routeId: activeRoute.aliasId,
+      },
+    ]);
   });
 
   it('rejects malformed array elements before resolving catalog routes', () => {

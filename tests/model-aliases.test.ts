@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   canonicalModelAliasName,
+  describeModelAliasRejection,
   isValidModelAlias,
   modelAliasTarget,
   normalizeModelAliases,
@@ -141,6 +142,13 @@ describe('model aliases', () => {
     ])).toThrow(
       'Saved model aliases are malformed: "modelAliases[1]" must be an object with a string "name".',
     );
+  });
+
+  it('keeps capacity omission distinct from target unavailability', () => {
+    expect(describeModelAliasRejection('target-not-exposed'))
+      .toBe('target is outside the active Claude Code catalog');
+    expect(describeModelAliasRejection('target-unavailable'))
+      .toBe('target is unavailable or unsupported');
   });
 
   it('formats a canonical HTTP-proxy target', () => {

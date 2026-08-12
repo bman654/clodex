@@ -600,17 +600,18 @@ function printHelp(text: string): void {
 }
 
 export function reportInactiveCatalogAliases(modelAliases: ProxyModelAlias[]): void {
-  const unavailableAliases = modelAliases.filter(alias => alias.unavailableReason !== undefined);
+  const unavailableAliases = modelAliases.filter(alias => alias.rejectionReason !== undefined);
   if (unavailableAliases.length === 0) return;
-  const warningLines = unavailableAliases.flatMap(alias => (
-    alias.sourceNames?.length
+  const warningLines = unavailableAliases.flatMap(alias => {
+    const reason = describeModelAliasRejection(alias.rejectionReason!);
+    return alias.sourceNames?.length
       ? alias.sourceNames.map(name => (
-          `  ${JSON.stringify(name)} — ${alias.unavailableReason}`
+          `  ${JSON.stringify(name)} — ${reason}`
         ))
       : [
-          `  ${JSON.stringify(alias.savedName ?? alias.name)} — ${alias.unavailableReason}`,
-        ]
-  ));
+          `  ${JSON.stringify(alias.savedName ?? alias.name)} — ${reason}`,
+        ];
+  });
 
   p.log.warn(
     `${warningLines.length} saved model alias${warningLines.length === 1 ? '' : 'es'} inactive. `
@@ -1350,6 +1351,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
         prefs.modelAliases,
         resolveRoute,
         catalogRoutes,
+        { favorites, capacitySkippedFavorites },
       ),
       selectedModel.contextWindow,
       trace,

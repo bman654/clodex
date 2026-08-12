@@ -122,10 +122,19 @@ describe('HTTP proxy routes', () => {
       routeId: 'clodex:groq:llama-3.3-70b[1m]',
       displayName: 'Llama 3.3 70B (Groq Cloud)',
     }]);
-    expect(result.unavailableAliases).toEqual([
-      { name: 'bad:name', providerId: 'groq', modelId: 'llama-3.3-70b' },
-      { name: 'DeFaUlT', providerId: 'groq', modelId: 'llama-3.3-70b' },
-      { name: 'missing', providerId: 'groq', modelId: 'gone' },
+    expect(result.unavailableAliasRejections).toEqual([
+      {
+        alias: { name: 'bad:name', providerId: 'groq', modelId: 'llama-3.3-70b' },
+        reason: 'invalid-name',
+      },
+      {
+        alias: { name: 'DeFaUlT', providerId: 'groq', modelId: 'llama-3.3-70b' },
+        reason: 'reserved-name',
+      },
+      {
+        alias: { name: 'missing', providerId: 'groq', modelId: 'gone' },
+        reason: 'target-not-favorite',
+      },
     ]);
   });
 
@@ -140,9 +149,15 @@ describe('HTTP proxy routes', () => {
     );
 
     expect(result.aliases).toEqual([]);
-    expect(result.unavailableAliases).toEqual([
-      { name: 'LLaMa', providerId: 'groq', modelId: 'llama-3.3-70b' },
-      { name: 'llama', providerId: 'groq', modelId: 'other' },
+    expect(result.unavailableAliasRejections).toEqual([
+      {
+        alias: { name: 'LLaMa', providerId: 'groq', modelId: 'llama-3.3-70b' },
+        reason: 'conflicting-targets',
+      },
+      {
+        alias: { name: 'llama', providerId: 'groq', modelId: 'other' },
+        reason: 'conflicting-targets',
+      },
     ]);
   });
 
@@ -162,7 +177,7 @@ describe('HTTP proxy routes', () => {
       displayName: 'Llama 3.3 70B (Groq Cloud)',
       sourceNames: ['LLaMa', 'LLAMA'],
     }]);
-    expect(result.unavailableAliases).toEqual([]);
+    expect(result.unavailableAliasRejections).toEqual([]);
   });
 
   it('uses the same canonical alias for patch identity and proxy routing', () => {
@@ -212,10 +227,13 @@ describe('HTTP proxy routes', () => {
     );
     expect(result.capacitySkippedFavorites).toEqual(favorites.slice(20));
     expect(result.aliases).toEqual([]);
-    expect(result.unavailableAliases).toEqual([{
-      name: 'late',
-      providerId: 'many',
-      modelId: 'model-20',
+    expect(result.unavailableAliasRejections).toEqual([{
+      alias: {
+        name: 'late',
+        providerId: 'many',
+        modelId: 'model-20',
+      },
+      reason: 'target-not-exposed',
     }]);
   });
 
@@ -241,7 +259,10 @@ describe('HTTP proxy routes', () => {
       { providerId: 'main', modelId: 'three' },
     ];
 
-    const result = buildHttpProxyRoutes([mainProvider], favorites, undefined, 3);
+    const result = buildHttpProxyRoutes([mainProvider], favorites, [
+      { name: 'missing', providerId: 'missing', modelId: 'gone' },
+      { name: 'later', providerId: 'main', modelId: 'three' },
+    ], 3);
 
     expect(result.routes.map(route => route.aliasId)).toEqual([
       'clodex:main:one',
@@ -249,6 +270,16 @@ describe('HTTP proxy routes', () => {
     ]);
     expect(result.unavailable).toEqual([{ providerId: 'missing', modelId: 'gone' }]);
     expect(result.capacitySkippedFavorites).toEqual([{ providerId: 'main', modelId: 'three' }]);
+    expect(result.unavailableAliasRejections).toEqual([
+      {
+        alias: { name: 'missing', providerId: 'missing', modelId: 'gone' },
+        reason: 'target-unavailable',
+      },
+      {
+        alias: { name: 'later', providerId: 'main', modelId: 'three' },
+        reason: 'target-not-exposed',
+      },
+    ]);
     const routedAliasIds = new Set(result.routes.map(route => route.aliasId));
     expect(
       result.capacitySkippedFavorites.every(

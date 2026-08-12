@@ -58,6 +58,7 @@ import { getInferenceRequestLogPath, getSessionLogPath } from '../trace-log.js';
 import {
   describeModelAliasRejection,
   normalizeModelAliases,
+  type ModelAliasRejection,
 } from '../model-aliases.js';
 
 export interface ServerRunConfig {
@@ -401,6 +402,8 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   spinner.start('Fetching available models...');
 
   let models: ServerModelInfo[];
+  let favoriteTargets: Set<string> | undefined;
+  let capacitySkippedTargets: Set<string> | undefined;
   try {
     models = await loadServerModels();
     if (runConfig.exposedProviders) {
@@ -414,6 +417,14 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
         return 1;
       }
       const favoriteCatalog = buildServerFavoriteCatalog(models, favorites);
+      favoriteTargets = new Set(
+        favorites.map(favorite => `${favorite.providerId}:${favorite.modelId}`),
+      );
+      capacitySkippedTargets = new Set(
+        favoriteCatalog.capacitySkippedFavorites.map(favorite => (
+          `${favorite.providerId}:${favorite.modelId}`
+        )),
+      );
       models = favoriteCatalog.models;
       if (favoriteCatalog.unavailableFavorites.length > 0) {
         p.log.warn(
@@ -477,35 +488,34 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   // advertised in /models listings; see createGatewayModelCatalog.
   const normalizedAliases = normalizeModelAliases(loadPreferences().modelAliases);
   const baseCatalog = createGatewayModelCatalog(models, gateway);
-  const unavailableAliases = normalizedAliases.accepted.filter(({ alias }) => (
-    !models.some(model => (
-      gatewayProviderId(model) === alias.providerId
-      && model.id === alias.modelId
-    ))
-  ));
-  const collidingAliases = normalizedAliases.accepted.filter(({ alias }) => (
-    baseCatalog.get(alias.name) !== undefined
-  ));
-  const collidingAliasNames = new Set(collidingAliases.map(({ alias }) => alias.name));
-  const targetUnavailableAliases = unavailableAliases.filter(({ alias }) => (
-    !collidingAliasNames.has(alias.name)
-  ));
-  const inactiveAliasNames = new Set([
-    ...targetUnavailableAliases.map(({ alias }) => alias.name),
-    ...collidingAliasNames,
-  ]);
+  const availableTargets = new Set(models.map(model => (
+    `${gatewayProviderId(model)}:${model.id}`
+  )));
+  const inactiveAliasNames = new Set<string>();
+  const targetAliasRejections: ModelAliasRejection[] = [];
+  for (const { alias, sources } of normalizedAliases.accepted) {
+    const target = `${alias.providerId}:${alias.modelId}`;
+    let reason: ModelAliasRejection['reason'] | undefined;
+    if (baseCatalog.get(alias.name) !== undefined) reason = 'catalog-id-collision';
+    else if (availableTargets.has(target)) reason = undefined;
+    else if (capacitySkippedTargets?.has(target)) reason = 'target-not-exposed';
+    else if (favoriteTargets !== undefined && !favoriteTargets.has(target)) {
+      reason = 'target-not-favorite';
+    } else reason = 'target-unavailable';
+    if (reason === undefined) continue;
+    inactiveAliasNames.add(alias.name);
+    targetAliasRejections.push(
+      ...sources.map(source => ({ alias: source, reason })),
+    );
+  }
   const modelAliases = normalizedAliases.aliases.filter(alias => !inactiveAliasNames.has(alias.name));
-  const aliasWarnings = [
-    ...normalizedAliases.rejections.map(rejection => (
-      `${JSON.stringify(rejection.alias.name)} — ${describeModelAliasRejection(rejection.reason)}`
-    )),
-    ...targetUnavailableAliases.flatMap(({ sources }) => sources.map(source => (
-      `${JSON.stringify(source.name)} — target unavailable`
-    ))),
-    ...collidingAliases.flatMap(({ sources }) => sources.map(source => (
-      `${JSON.stringify(source.name)} — conflicts with a catalog model id`
-    ))),
+  const aliasRejections = [
+    ...normalizedAliases.rejections,
+    ...targetAliasRejections,
   ];
+  const aliasWarnings = aliasRejections.map(rejection => (
+    `${JSON.stringify(rejection.alias.name)} — ${describeModelAliasRejection(rejection.reason)}`
+  ));
   if (aliasWarnings.length > 0) {
     p.log.warn(
       `${aliasWarnings.length} saved model alias${aliasWarnings.length === 1 ? '' : 'es'} inactive. `

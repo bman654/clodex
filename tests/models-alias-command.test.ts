@@ -35,17 +35,17 @@ describe('models alias command', () => {
           name: 'orbit',
           savedName: 'Orbit',
           sourceNames: ['Orbit', 'ORBIT'],
-          unavailableReason: 'conflicting targets',
+          rejectionReason: 'conflicting-targets',
         },
         {
           name: 'archived',
           savedName: 'ARCHIVED',
-          unavailableReason: 'target unavailable',
+          rejectionReason: 'target-unavailable',
         },
         {
           name: 'claude-sonnet-4',
           savedName: 'CLAUDE-SONNET-4',
-          unavailableReason: 'conflicts with a catalog model id',
+          rejectionReason: 'catalog-id-collision',
         },
       ]);
 
@@ -53,7 +53,7 @@ describe('models alias command', () => {
         '4 saved model aliases inactive. Saved entries were preserved.\n'
         + '  "Orbit" — conflicting targets\n'
         + '  "ORBIT" — conflicting targets\n'
-        + '  "ARCHIVED" — target unavailable\n'
+        + '  "ARCHIVED" — target is unavailable or unsupported\n'
         + '  "CLAUDE-SONNET-4" — conflicts with a catalog model id',
       );
     } finally {

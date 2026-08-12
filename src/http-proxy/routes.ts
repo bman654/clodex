@@ -6,7 +6,7 @@ import { claudeCodeClientModelId } from '../context-model-id.js';
 import type { ProxyRoute } from '../proxy.js';
 import {
   normalizeModelAliases,
-  type StoredModelAlias,
+  type ModelAliasRejection,
 } from '../model-aliases.js';
 import { formatModelLabel } from '../ui.js';
 import type { FavoriteModel, LocalProvider, LocalProviderModel } from '../types.js';
@@ -36,7 +36,7 @@ export interface HttpProxyRouteResult {
   unsupported: FavoriteModel[];
   capacitySkippedFavorites: FavoriteModel[];
   aliases: ResolvedHttpProxyAlias[];
-  unavailableAliases: StoredModelAlias[];
+  unavailableAliasRejections: ModelAliasRejection[];
 }
 
 export interface ResolvedHttpProxyAlias {
@@ -97,11 +97,29 @@ export function buildHttpProxyRoutes(
 
   const aliases: ResolvedHttpProxyAlias[] = [];
   const normalizedAliases = normalizeModelAliases(modelAliases);
-  const unavailableAliases: StoredModelAlias[] = [...normalizedAliases.rejected];
+  const unavailableAliasRejections: ModelAliasRejection[] = [
+    ...normalizedAliases.rejections,
+  ];
+  const favoriteTargets = new Set(
+    favorites.map(favorite => `${favorite.providerId}:${favorite.modelId}`),
+  );
+  const capacitySkippedTargets = new Set(
+    projection.capacitySkippedFavorites.map(favorite => (
+      `${favorite.providerId}:${favorite.modelId}`
+    )),
+  );
   for (const { alias, sources } of normalizedAliases.accepted) {
-    const route = routesByFavorite.get(`${alias.providerId}:${alias.modelId}`);
+    const target = `${alias.providerId}:${alias.modelId}`;
+    const route = routesByFavorite.get(target);
     if (!route) {
-      unavailableAliases.push(...sources);
+      const reason = capacitySkippedTargets.has(target)
+        ? 'target-not-exposed'
+        : !favoriteTargets.has(target)
+          ? 'target-not-favorite'
+          : 'target-unavailable';
+      unavailableAliasRejections.push(
+        ...sources.map(source => ({ alias: source, reason } as const)),
+      );
       continue;
     }
     const sourceNames = [...new Set(sources.map(source => source.name))];
@@ -123,6 +141,6 @@ export function buildHttpProxyRoutes(
     unsupported,
     capacitySkippedFavorites: projection.capacitySkippedFavorites,
     aliases,
-    unavailableAliases,
+    unavailableAliasRejections,
   };
 }
