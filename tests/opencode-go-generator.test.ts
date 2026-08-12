@@ -277,6 +277,50 @@ describe('OpenCode Go resolver snapshot generator', () => {
     expect(after.map(entry => entry.mtimeMs)).toEqual(before.map(entry => entry.mtimeMs));
   });
 
+  it.each<[string, (rows: ResolvedModel[]) => string]>([
+    ['compact JSON with the same object values', rows => JSON.stringify(rows)],
+    [
+      'reordered keys with the same values',
+      rows => {
+        const [first, ...rest] = rows;
+        return `${JSON.stringify([Object.fromEntries(Object.entries(first).reverse()), ...rest], null, 2)}\n`;
+      },
+    ],
+    ['missing trailing newline', rows => `${JSON.stringify(rows, null, 2)}`],
+  ])('rejects serialization-only catalog drift without writing for %s', async (_label, serializeDrift) => {
+    const workspace = mkdtempSync(join(tmpdir(), 'clodex-opencode-go-byte-drift-'));
+    try {
+      mkdirSync(join(workspace, 'src', 'data'), { recursive: true });
+      copyFileSync(CATALOG_PATH, join(workspace, 'src', 'data', 'opencode-go-models.json'));
+      copyFileSync(CONSTANTS_PATH, join(workspace, 'src', 'data', 'opencode-go-models.ts'));
+      const noNetwork = join(workspace, 'no-network.mjs');
+      writeFileSync(
+        noNetwork,
+        "globalThis.fetch = () => { throw new Error('this mode must not reach the network'); };\n",
+      );
+      const catalogPath = join(workspace, 'src', 'data', 'opencode-go-models.json');
+      const original = await readFile(catalogPath, 'utf8');
+      const drifted = serializeDrift(JSON.parse(original));
+      expect(drifted).not.toBe(original);
+      writeFileSync(catalogPath, drifted);
+      const beforeMtime = (await stat(catalogPath)).mtimeMs;
+
+      const checked = spawnSync(
+        process.execPath,
+        ['--import', pathToFileURL(noNetwork).href, resolve('scripts/update-opencode-go-models.mjs'), '--check'],
+        { cwd: workspace, encoding: 'utf8' },
+      );
+
+      expect(checked.error).toBeUndefined();
+      expect(checked.status).not.toBe(0);
+      expect(checked.stderr).toContain('OpenCode Go catalog is out of date with its committed resolver snapshot');
+      expect(await readFile(catalogPath, 'utf8')).toBe(drifted);
+      expect((await stat(catalogPath)).mtimeMs).toBe(beforeMtime);
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('regenerates and verifies the committed files with the maintained command, offline', async () => {
     // The maintained command itself, not an approximation of it: if a flag is
     // ever added to package.json, the default path this proves stops being the

@@ -903,6 +903,10 @@ function deepEqual(a, b) {
   return JSON.stringify(sortKeysDeep(a)) === JSON.stringify(sortKeysDeep(b));
 }
 
+function serializeCatalog(supported) {
+  return `${JSON.stringify(supported, null, 2)}\n`;
+}
+
 /**
  * Offline verification that the committed generated files still say what the
  * committed snapshot says. Reads three files, writes none, and never reaches
@@ -910,13 +914,22 @@ function deepEqual(a, b) {
  */
 async function check(snapshot, supported) {
   const failures = [];
-  const committed = JSON.parse(await readFile(MODELS_PATH, 'utf8'));
-  if (!deepEqual(committed, supported)) {
-    const committedIds = committed.map(model => model.id);
+  const committedText = await readFile(MODELS_PATH, 'utf8');
+  const generatedText = serializeCatalog(supported);
+  if (committedText !== generatedText) {
+    let committed;
+    try {
+      committed = JSON.parse(committedText);
+    } catch {
+      committed = undefined;
+    }
+    const committedIds = Array.isArray(committed) ? committed.map(model => model?.id) : [];
     const generatedIds = supported.map(model => model.id);
-    const drifted = generatedIds
-      .filter(id => committedIds.includes(id))
-      .filter(id => !deepEqual(committed.find(model => model.id === id), supported.find(model => model.id === id)));
+    const drifted = Array.isArray(committed)
+      ? generatedIds
+        .filter(id => committedIds.includes(id))
+        .filter(id => !deepEqual(committed.find(model => model?.id === id), supported.find(model => model.id === id)))
+      : [];
     failures.push(
       `${MODELS_PATH} disagrees with the resolver snapshot`
       + `${drifted.length > 0 ? ` (models: ${drifted.join(', ')})` : ''}`
@@ -1015,7 +1028,7 @@ export async function run(argv = []) {
   // than stranding one of them. Catalog first, provenance second: the stamp
   // then marks a catalog that is already on disk.
   const constants = await prepareSourceConstants(snapshot._meta);
-  await writeFile(MODELS_PATH, `${JSON.stringify(supported, null, 2)}\n`);
+  await writeFile(MODELS_PATH, serializeCatalog(supported));
   await writeFile(CONSTANTS_PATH, constants.content);
 
   console.log(
