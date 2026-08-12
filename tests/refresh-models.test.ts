@@ -701,7 +701,7 @@ describe('refreshProviderModels', () => {
 
   it('rejects restricted provider API URLs before refreshing models', async () => {
     const registry: ProviderRegistry = {
-      version: 1,
+      schemaVersion: 1,
       providers: [{
         id: 'bad',
         templateId: 'custom-openai',
@@ -724,7 +724,7 @@ describe('refreshProviderModels', () => {
 
   it('does not report an imported snapshot as a model-count change on first live refresh', async () => {
     const registry: ProviderRegistry = {
-      version: 1,
+      schemaVersion: 1,
       providers: [{
         id: 'groq',
         templateId: 'groq',
@@ -785,7 +785,7 @@ describe('refreshProviderModels', () => {
     npm?: string;
     url?: string;
   } = {}): ProviderRegistry => ({
-    version: 1,
+    schemaVersion: 1,
     providers: [{
       id: overrides.id ?? 'opencode-go',
       templateId: overrides.templateId ?? 'opencode-go',
@@ -884,7 +884,7 @@ describe('refreshProviderModels', () => {
 
   it('leaves an ordinary Anthropic provider refreshing against its own configured endpoint', async () => {
     const registry: ProviderRegistry = {
-      version: 1,
+      schemaVersion: 1,
       providers: [{
         id: 'ordinary-anthropic',
         templateId: 'custom-anthropic',

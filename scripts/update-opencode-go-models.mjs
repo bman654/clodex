@@ -35,7 +35,7 @@ const ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go';
 // model on models.dev surfaces in the updater's "unmapped" report and is added
 // once its transport is verified against the live endpoint. Responses-only
 // models (grok, mainline gpt) are deliberately absent.
-const TRANSPORTS = {
+const TRANSPORTS = Object.assign(Object.create(null), {
   'deepseek-v4-flash': 'openai-completions',
   'deepseek-v4-pro': 'openai-completions',
   'glm-5.1': 'openai-completions',
@@ -53,7 +53,7 @@ const TRANSPORTS = {
   'qwen3.7-max': 'anthropic-messages',
   'qwen3.7-plus': 'anthropic-messages',
   'qwen3.8-max': 'anthropic-messages',
-};
+});
 
 // Clodex-side compatibility behavior per model, validated against the live
 // endpoint. It travels with the transport map rather than being read from the
@@ -66,7 +66,7 @@ const TRANSPORTS = {
 // entries are validated against, never as their source: `assertEffortLadders`
 // below fails this updater if a map would send an effort value the feed does
 // not publish, and reports the safe direction rather than failing on it.
-const PATCHES = {
+const PATCHES = Object.assign(Object.create(null), {
   'deepseek-v4-flash': {
     reasoningEffortMap: { minimal: null, low: null, medium: null, high: 'high', max: 'max' },
     supportsStore: false,
@@ -210,7 +210,7 @@ const PATCHES = {
     thinkingFormat: 'qwen',
     maxTokensField: 'max_tokens',
   },
-};
+});
 
 /**
  * Cross-check every local effort map against what the feed publishes.
@@ -382,7 +382,7 @@ async function main() {
     supported.push(toClodexModel(id, devModel));
   }
 
-  const missing = Object.keys(TRANSPORTS).filter(id => !devModels[id]);
+  const missing = Object.keys(TRANSPORTS).filter(id => !Object.hasOwn(devModels, id));
   if (missing.length > 0) {
     throw new Error(`Transport-mapped models missing from models.dev: ${missing.join(', ')}`);
   }

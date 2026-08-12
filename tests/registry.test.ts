@@ -663,6 +663,8 @@ describe('materializeRegistry', () => {
         models: [{
           id: 'compatible-sentinel',
           name: 'Compatible Sentinel',
+          upstreamModelId: 'compatible-sentinel',
+          modelFormat: 'openai',
           npm: '@ai-sdk/openai-compatible',
           apiUrl: 'https://model-sentinel.invalid/v1',
         }],
@@ -691,6 +693,8 @@ describe('materializeRegistry', () => {
         models: [{
           id: 'anthropic-sentinel',
           name: 'Anthropic Sentinel',
+          upstreamModelId: 'anthropic-sentinel',
+          modelFormat: 'anthropic',
           npm: '@ai-sdk/anthropic',
           apiUrl: 'https://model-sentinel.invalid/v1',
         }],
@@ -719,6 +723,8 @@ describe('materializeRegistry', () => {
         models: [{
           id: 'unsupported-sentinel',
           name: 'Unsupported Sentinel',
+          upstreamModelId: 'unsupported-sentinel',
+          modelFormat: 'openai',
           npm: '@ai-sdk/openai',
           apiUrl: 'https://model-sentinel.invalid/v1',
         }],
@@ -745,6 +751,8 @@ describe('materializeRegistry', () => {
           models: [{
             id: 'opencode-sentinel',
             name: 'OpenCode Sentinel',
+            upstreamModelId: 'opencode-sentinel',
+            modelFormat: 'openai',
             npm: '@ai-sdk/openai-compatible',
             apiUrl: 'https://opencode-model-sentinel.invalid/v1',
           }],
@@ -764,6 +772,8 @@ describe('materializeRegistry', () => {
           models: [{
             id: 'ordinary-sentinel',
             name: 'Ordinary Sentinel',
+            upstreamModelId: 'ordinary-sentinel',
+            modelFormat: 'openai',
             npm: '@ai-sdk/openai-compatible',
             apiUrl: 'https://ordinary-model.invalid/v1',
           }],
@@ -798,18 +808,24 @@ describe('materializeRegistry', () => {
           {
             id: 'compatible-sentinel',
             name: 'Compatible Sentinel',
+            upstreamModelId: 'compatible-sentinel',
+            modelFormat: 'openai',
             npm: '@ai-sdk/openai-compatible',
             apiUrl: 'https://model-sentinel.invalid/v1',
           },
           {
             id: 'anthropic-sentinel',
             name: 'Anthropic Sentinel',
+            upstreamModelId: 'anthropic-sentinel',
+            modelFormat: 'anthropic',
             npm: '@ai-sdk/anthropic',
             apiUrl: 'https://model-sentinel.invalid/v1',
           },
           {
             id: 'unsupported-sentinel',
             name: 'Unsupported Sentinel',
+            upstreamModelId: 'unsupported-sentinel',
+            modelFormat: 'openai',
             npm: '@ai-sdk/openai',
             apiUrl: 'https://model-sentinel.invalid/v1',
           },

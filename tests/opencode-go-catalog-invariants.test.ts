@@ -1,3 +1,8 @@
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { buildOpenCodeGoModels } from '../src/data/opencode-go-models.js';
 
@@ -70,6 +75,81 @@ describe('opencode-go catalog invariants', () => {
         expect(typeof mapped, `${model.id}.${level}`).toBe('string');
         expect(mapped.trim(), `${model.id}.${level}`).not.toBe('');
       }
+    }
+  });
+
+  it('keeps prototype names unmapped while regenerating every reviewed model', () => {
+    const mappedIds = [
+      'deepseek-v4-flash', 'deepseek-v4-pro', 'glm-5.1', 'glm-5.2', 'gpt-5.6-luna',
+      'hy3', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k3', 'mimo-v2.5', 'mimo-v2.5-pro',
+      'minimax-m2.7', 'minimax-m3', 'qwen3.6-plus', 'qwen3.7-max', 'qwen3.7-plus',
+      'qwen3.8-max',
+    ];
+    const hostileNames = ['constructor', 'toString', '__proto__', 'hasOwnProperty'];
+    const effortValues = {
+      'deepseek-v4-flash': ['high', 'max'],
+      'deepseek-v4-pro': ['high', 'max'],
+      'glm-5.2': ['high', 'max'],
+      'gpt-5.6-luna': ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      hy3: ['none', 'low', 'high'],
+      'kimi-k3': ['max'],
+    };
+    const feedModels = Object.fromEntries([
+      ...mappedIds.map(id => [id, {
+        name: `Fixture ${id}`,
+        limit: { context: 128_000 },
+        cost: { input: 0.1, output: 0.2 },
+        modalities: { input: ['text'] },
+        reasoning: false,
+        ...(effortValues[id as keyof typeof effortValues]
+          ? { reasoning_options: [{ type: 'effort', values: effortValues[id as keyof typeof effortValues] }] }
+          : id === 'qwen3.6-plus' ? { reasoning_options: [{ type: 'toggle' }] } : {}),
+      }]),
+      ...hostileNames.map(id => [id, {
+        name: `Hostile ${id}`,
+        limit: { context: 128_000 },
+        cost: { input: 0.1, output: 0.2 },
+        modalities: { input: ['text'] },
+        reasoning: false,
+      }]),
+    ]);
+    const feed = { 'opencode-go': { models: feedModels } };
+    const workspace = mkdtempSync(join(tmpdir(), 'clodex-opencode-go-updater-'));
+    const updaterPath = fileURLToPath(new URL('../scripts/update-opencode-go-models.mjs', import.meta.url));
+    try {
+      mkdirSync(join(workspace, 'src', 'data'), { recursive: true });
+      writeFileSync(
+        join(workspace, 'src', 'data', 'opencode-go-models.ts'),
+        "export const OPENCODE_GO_SOURCE_FETCHED_AT = 'before';\n",
+      );
+      const childScript = [
+        'globalThis.fetch = async () => ({',
+        '  ok: true,',
+        '  json: async () => JSON.parse(process.env.CLODEX_TEST_FEED),',
+        '});',
+        `await import(${JSON.stringify(updaterPath)});`,
+      ].join('\n');
+      const result = spawnSync(process.execPath, ['--input-type=module', '-e', childScript], {
+        cwd: workspace,
+        encoding: 'utf8',
+        env: { ...process.env, CLODEX_TEST_FEED: JSON.stringify(feed) },
+      });
+
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('not transport-mapped');
+      for (const hostileName of hostileNames) {
+        expect(result.stdout).toContain(hostileName);
+      }
+      const regenerated = JSON.parse(
+        readFileSync(join(workspace, 'src', 'data', 'opencode-go-models.json'), 'utf8'),
+      ) as Array<{ id: string }>;
+      expect(regenerated.map(model => model.id).sort()).toEqual([...mappedIds].sort());
+      for (const hostileName of hostileNames) {
+        expect(regenerated.some(model => model.id === hostileName)).toBe(false);
+      }
+    } finally {
+      rmSync(workspace, { recursive: true, force: true });
     }
   });
 });
