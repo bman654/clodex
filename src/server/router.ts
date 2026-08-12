@@ -25,10 +25,9 @@ import {
 } from '../anthropic-endpoints.js';
 import { resolveProviderCredential } from '../env.js';
 import {
-  injectClaudeCodeBillingSystemLine,
-  injectClaudeIdentity,
-  selectBetaFlags,
-} from '../oauth/claude-identity.js';
+  normalizeBetaTokens,
+  resolveNativeIdentitySuppression,
+} from '../anthropic-beta-policy.js';
 import {
   getLatestMessagePreview,
   writeInferenceRequestLog,
@@ -325,8 +324,6 @@ async function handleAnthropicMessages(
       });
       return;
     }
-    const betaHeaderRaw = req.headers['anthropic-beta'];
-    const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
     const clientWantsStream = Boolean(body.stream);
     const forwardBody: Record<string, unknown> = { ...body, model: upstreamModelId(model) };
     const authType = model.authType ?? 'api';
@@ -342,15 +339,11 @@ async function handleAnthropicMessages(
       requestPreview: getLatestMessagePreview(body.messages, body.system),
     });
 
-    let effectiveBeta = inboundBeta;
-    let claudeCodeSessionId: string | undefined;
-    if (isOAuth) {
-      const seed = model.providerId ?? upstreamModelId(model);
-      const identity = injectClaudeIdentity(forwardBody, model.providerData, seed);
-      if (model.providerId === 'claude-code') injectClaudeCodeBillingSystemLine(forwardBody);
-      claudeCodeSessionId = identity.sessionId;
-      effectiveBeta = selectBetaFlags(forwardBody, upstreamModelId(model), inboundBeta);
-    }
+    // Forwarded verbatim: no metadata user identity, no billing system line,
+    // no request-shape-derived beta set. The client's own beta is dropped here
+    // and the relay recomputes the outbound set from configured headers alone.
+    const clientBeta = normalizeBetaTokens(req.headers['anthropic-beta']);
+    const suppression = resolveNativeIdentitySuppression(model.baseUrl);
 
     const refreshToken = isOAuth && model.providerId && model.authRef
       ? (rejectedAccessToken: string) => resolveModelApiKey(
@@ -360,7 +353,10 @@ async function handleAnthropicMessages(
         )
       : undefined;
 
-    plog(() => `anthropic-passthrough → ${messagesUrl} oauth=${isOAuth} stream=${clientWantsStream}`);
+    plog(() =>
+      `anthropic-passthrough → ${messagesUrl} oauth=${isOAuth} stream=${clientWantsStream} `
+      + `native-identity=suppressed(${suppression.reason}) client-beta-dropped=${clientBeta.length}`,
+    );
     await relayAnthropicMessages(res, messagesUrl, forwardBody, apiKey, clientWantsStream, {
       authType,
       log: message => plog(message),
@@ -606,11 +602,13 @@ async function handleAnthropicCountTokens(
     return;
   }
 
-  const betaHeaderRaw = req.headers['anthropic-beta'];
-  const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
   const authType = model.authType ?? 'api';
   const isOAuth = authType === 'oauth';
   const forwardBody: Record<string, unknown> = { ...body, model: upstreamModelId(model) };
+  // Same negative as the Messages path: the client's beta is dropped and the
+  // relay emits only what the provider configured.
+  const clientBeta = normalizeBetaTokens(req.headers['anthropic-beta']);
+  const suppression = resolveNativeIdentitySuppression(model.baseUrl);
   const refreshToken = isOAuth && model.providerId && model.authRef
     ? (rejectedAccessToken: string) => resolveModelApiKey(
         model,
@@ -620,7 +618,10 @@ async function handleAnthropicCountTokens(
     : undefined;
 
   const countTokensUrl = `${model.baseUrl}/v1/messages/count_tokens`;
-  plog(() => `anthropic-count-tokens → ${countTokensUrl} oauth=${isOAuth}`);
+  plog(() =>
+    `anthropic-count-tokens → ${countTokensUrl} oauth=${isOAuth} `
+    + `native-identity=suppressed(${suppression.reason}) client-beta-dropped=${clientBeta.length}`,
+  );
   await relayAnthropicMessages(res, countTokensUrl, forwardBody, apiKey, false, {
     authType,
     log: message => plog(message),

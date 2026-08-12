@@ -1787,3 +1787,167 @@ describe('anthropic count_tokens', () => {
     expect(response.status).toBe(401);
   });
 });
+
+describe('endpoint-mode Anthropic beta and identity are negative-only', () => {
+  /** Upstream that records the full header map of every request it receives. */
+  async function startHeaderCapturingUpstream(body: unknown): Promise<{
+    baseUrl: string;
+    requests: Array<{ url: string; headers: Record<string, string | string[] | undefined>; body: any }>;
+    close: () => Promise<void>;
+  }> {
+    const requests: Array<{ url: string; headers: Record<string, string | string[] | undefined>; body: any }> = [];
+    const server = createServer(async (req, res) => {
+      requests.push({ url: req.url ?? '', headers: req.headers, body: await readRequestBody(req) });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(body));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('missing upstream address');
+    return {
+      baseUrl: `http://127.0.0.1:${address.port}`,
+      requests,
+      close: () => new Promise<void>((resolve, reject) =>
+        server.close(err => (err ? reject(err) : resolve()))),
+    };
+  }
+
+  function expectNoNativeIdentity(headers: Record<string, string | string[] | undefined>): void {
+    for (const name of ['x-app', 'x-claude-code-session-id']) {
+      expect(headers[name]).toBeUndefined();
+    }
+    // The HTTP client's own UA is expected; a simulated native-client UA is not.
+    expect(String(headers['user-agent'] ?? '')).not.toContain('claude');
+  }
+
+  it.each([
+    ['/anthropic/v1/messages', '/v1/messages'],
+    ['/anthropic/v1/messages/count_tokens', '/v1/messages/count_tokens'],
+  ])('drops the client beta and synthesizes nothing on %s', async (endpoint, upstreamPath) => {
+    const upstream = await startHeaderCapturingUpstream({
+      id: 'msg-negative', type: 'message', role: 'assistant',
+      model: 'claude-oauth', content: [], input_tokens: 3,
+    });
+    handles.push(upstream);
+    vi.mocked(resolveProviderCredential).mockResolvedValue('current-oauth-token');
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('claude-oauth', 'anthropic', 'oauth-provider', { baseUrl: upstream.baseUrl }),
+        // Every tempting label, at the endpoint boundary this time.
+        providerId: 'claude-code',
+        authType: 'oauth',
+        authRef: TEST_HELPER_REF,
+        apiKey: 'launch-token',
+        providerData: { cliUserID: 'a'.repeat(64), nativeClaude: true },
+      }]),
+    });
+
+    const response = await fetch(`${server.url}${endpoint}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'anthropic-beta': 'client-alpha,client-beta',
+      },
+      body: JSON.stringify({
+        model: 'claude-oauth',
+        system: 'You are helpful.',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    const sent = upstream.requests[0]!;
+    // Destination and count routing conserved.
+    expect(sent.url).toBe(upstreamPath);
+    expect(sent.headers.authorization).toBe('Bearer current-oauth-token');
+    expect(sent.headers['x-api-key']).toBeUndefined();
+    // Negative: no client beta, no synthesized identity, verbatim body.
+    expect(sent.headers['anthropic-beta']).toBeUndefined();
+    expectNoNativeIdentity(sent.headers);
+    expect(sent.body.system).toBe('You are helpful.');
+    expect(sent.body).not.toHaveProperty('metadata');
+    expect(JSON.stringify(sent.body)).not.toContain('x-anthropic-billing-header');
+  });
+
+  it('emits the configured beta and echoes the requested model on the endpoint path', async () => {
+    const upstream = await startHeaderCapturingUpstream({
+      id: 'msg-cfg', type: 'message', role: 'assistant',
+      model: 'upstream-real-id', content: [],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('claude-cfg', 'anthropic', 'zen', { baseUrl: upstream.baseUrl }),
+        upstreamModelId: 'upstream-real-id',
+        headers: { 'Anthropic-Beta': 'cfg-a, cfg-b', 'anthropic-beta': 'cfg-b', 'X-Plan': 'coding' },
+      }]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'anthropic-beta': 'client-alpha' },
+      body: JSON.stringify({ model: 'claude-cfg', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+
+    expect(response.status).toBe(200);
+    const sent = upstream.requests[0]!;
+    expect(sent.headers['anthropic-beta']).toBe('cfg-a,cfg-b');
+    expect(sent.headers['x-plan']).toBe('coding');
+    expectNoNativeIdentity(sent.headers);
+    // Response-model echo conserved: the client sees the id it asked for.
+    expect((await response.json() as { model: string }).model).toBe('claude-cfg');
+    expect(sent.body.model).toBe('upstream-real-id');
+  });
+
+  it('keeps direct OpenAI chat completions negative', async () => {
+    const upstream = await startHeaderCapturingUpstream({
+      id: 'chatcmpl-negative',
+      choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+    });
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        model('openai-direct', 'openai', 'go', {
+          completionsUrl: `${upstream.baseUrl}/v1/chat/completions`,
+        }),
+      ]),
+    });
+
+    const response = await fetch(`${server.url}/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'anthropic-beta': 'client-alpha' },
+      body: JSON.stringify({ model: 'openai-direct', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+
+    expect(response.status).toBe(200);
+    const sent = upstream.requests[0]!;
+    expect(sent.headers['anthropic-beta']).toBeUndefined();
+    expectNoNativeIdentity(sent.headers);
+  });
+
+  it('never wires providerData into SDK creation for an OpenAI-ingress Anthropic model', async () => {
+    vi.mocked(resolveProviderCredential).mockResolvedValue('current-oauth-token');
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([{
+        ...model('claude-sdk', 'anthropic', 'oauth-provider', { baseUrl: 'https://api.anthropic.com' }),
+        npm: '@ai-sdk/anthropic',
+        providerId: 'claude-code',
+        authType: 'oauth',
+        authRef: TEST_HELPER_REF,
+        providerData: { cliUserID: 'a'.repeat(64), nativeClaude: true },
+      }]),
+    });
+
+    await fetch(`${server.url}/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-sdk', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+
+    for (const [spec] of vi.mocked(createLanguageModel).mock.calls) {
+      expect(spec).not.toHaveProperty('providerData');
+      expect(JSON.stringify(spec)).not.toContain('cliUserID');
+      expect(JSON.stringify(spec)).not.toContain('nativeClaude');
+    }
+  });
+});
