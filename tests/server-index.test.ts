@@ -18,6 +18,7 @@ const state = vi.hoisted(() => ({
   favoritesOnly: false,
   maskGatewayIds: true,
   startMode: 'quick' as 'configure' | 'quick' | null,
+  favoriteModels: [] as Array<{ providerId: string; modelId: string }>,
   modelAliases: [] as Array<{ name: string; providerId: string; modelId: string }>,
   startServerOptions: null as any,
   close: vi.fn<() => Promise<void>>(async () => undefined),
@@ -47,11 +48,11 @@ vi.mock('../src/config.js', () => ({
   getSavedServerPassword: () => state.savedPassword,
   getServerExposedProviders: () => null,
   getServerMaskGatewayIds: () => true,
-  getServerFavoritesOnly: () => false,
+  getServerFavoritesOnly: () => state.favoritesOnly,
   getServerFreeModelsOnly: () => false,
   getServerListenMode: () => state.savedListenMode,
   loadPreferences: () => ({
-    favoriteModels: [],
+    favoriteModels: state.favoriteModels,
     modelAliases: state.modelAliases,
   }),
   setSavedServerPassword: (password: string) => {
@@ -153,6 +154,7 @@ describe('runServerCommand', () => {
     state.favoritesOnly = false;
     state.maskGatewayIds = true;
     state.startMode = 'configure';
+    state.favoriteModels = [];
     state.modelAliases = [];
     state.startServerOptions = null;
     state.close.mockClear();
@@ -277,17 +279,65 @@ describe('runServerCommand', () => {
         + '  "Orbit" — conflicting targets\n'
         + '  "ORBIT" — conflicting targets\n'
         + '  "default" — reserved client name\n'
-        + '  "ArChIvEd" — target unavailable\n'
-        + '  "ARCHIVED" — target unavailable\n'
+        + '  "ArChIvEd" — target is unavailable or unsupported\n'
+        + '  "ARCHIVED" — target is unavailable or unsupported\n'
         + '  "CLAUDE-TEST" — conflicts with a catalog model id',
       );
       expect(state.startServerOptions.aliasNames).toEqual(new Set(['active']));
+      expect(state.startServerOptions.modelAliasRejections).toEqual([
+        { alias: state.modelAliases[1], reason: 'conflicting-targets' },
+        { alias: state.modelAliases[2], reason: 'conflicting-targets' },
+        { alias: state.modelAliases[3], reason: 'reserved-name' },
+        { alias: state.modelAliases[4], reason: 'target-unavailable' },
+        { alias: state.modelAliases[5], reason: 'target-unavailable' },
+        { alias: state.modelAliases[6], reason: 'catalog-id-collision' },
+      ]);
       expect(state.startServerOptions.catalog.get('active')).toMatchObject({
         id: 'claude-test',
         providerId: 'zen',
       });
       expect(state.startServerOptions.catalog.get('orbit')).toBeUndefined();
       expect(state.startServerOptions.catalog.get('archived')).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('reports exact favorites omitted from a favorites-only catalog at capacity', async () => {
+    state.favoritesOnly = true;
+    state.favoriteModels = [
+      { providerId: 'zen', modelId: 'claude-test' },
+      ...Array.from({ length: 21 }, (_, index) => ({
+        providerId: 'missing',
+        modelId: `model-${index + 1}`,
+      })),
+    ];
+    state.modelAliases = [
+      { name: 'missing', providerId: 'missing', modelId: 'model-1' },
+      { name: 'later', providerId: 'missing', modelId: 'model-20' },
+    ];
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+
+    try {
+      const { runServerCommand } = await import('../src/server/index.js');
+      const result = runServerCommand({ quick: true, noDiscovery: true });
+      await vi.waitFor(() => expect(state.startServerOptions).not.toBeNull());
+      process.emit('SIGINT');
+
+      await expect(result).resolves.toBe(0);
+      expect(warn).toHaveBeenCalledWith(
+        '2 saved favorites not exposed because clodex limits this Claude-facing catalog to 20 models. '
+        + 'Capacity is selected from saved order before availability and support checks; unavailable '
+        + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+        + 'entries reclaims positions. Skipped entries were preserved:\n'
+        + '  clodex:missing:model-20\n'
+        + '  clodex:missing:model-21',
+      );
+      expect(warn).toHaveBeenCalledWith(
+        '2 saved model aliases inactive. Saved entries were preserved.\n'
+        + '  "missing" — target is unavailable or unsupported\n'
+        + '  "later" — target is outside the active Claude Code catalog',
+      );
     } finally {
       warn.mockRestore();
     }

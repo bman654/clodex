@@ -13,6 +13,10 @@ import {
 } from '../src/registry/index.js';
 import { loadRegistryStrict } from '../src/registry/io.js';
 import { withRegistryWriteLockSync } from '../src/registry/lock.js';
+import {
+  OPENCODE_GO_ANTHROPIC_BASE_URL,
+  OPENCODE_GO_COMPLETIONS_BASE_URL,
+} from '../src/data/opencode-go-models.js';
 
 describe('provider id validation', () => {
   it('accepts stable slugs', () => {
@@ -641,6 +645,203 @@ describe('materializeRegistry', () => {
       isFree: true,
       freeStatus: 'free_provider',
     });
+  });
+
+  it('pins OpenCode OpenAI-compatible models to the reviewed completions authority', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      enabled: true,
+      authRef: 'keyring:provider:opencode-go',
+      authType: 'api',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://provider-sentinel.invalid/v1' },
+      addedAt: '2026-08-11T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-08-11T00:00:00.000Z',
+        models: [{
+          id: 'deepseek-v4-pro',
+          name: 'DeepSeek V4 Pro',
+          upstreamModelId: 'deepseek-v4-pro',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai-compatible',
+          apiUrl: 'https://model-sentinel.invalid/v1',
+        }],
+      },
+    });
+
+    const model = materializeRegistry(registry, () => 'credential-sentinel')[0]?.models[0];
+
+    expect(model?.apiBaseUrl).toBe(OPENCODE_GO_COMPLETIONS_BASE_URL);
+    expect(model?.completionsUrl).toBe(`${OPENCODE_GO_COMPLETIONS_BASE_URL}/chat/completions`);
+  });
+
+  it('pins OpenCode Anthropic models to the reviewed Anthropic authority', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      enabled: true,
+      authRef: 'keyring:provider:opencode-go',
+      authType: 'api',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://provider-sentinel.invalid/v1' },
+      addedAt: '2026-08-11T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-08-11T00:00:00.000Z',
+        models: [{
+          id: 'qwen3.8-max',
+          name: 'Qwen3.8 Max',
+          upstreamModelId: 'qwen3.8-max',
+          modelFormat: 'anthropic',
+          npm: '@ai-sdk/anthropic',
+          apiUrl: 'https://model-sentinel.invalid/v1',
+        }],
+      },
+    });
+
+    const model = materializeRegistry(registry, () => 'credential-sentinel')[0]?.models[0];
+
+    expect(model?.apiBaseUrl).toBe(OPENCODE_GO_ANTHROPIC_BASE_URL);
+    expect(model?.baseUrl).toBe(OPENCODE_GO_ANTHROPIC_BASE_URL);
+  });
+
+  it('fails closed for an unsupported OpenCode SDK package', () => {
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'opencode-go',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      enabled: true,
+      authRef: 'keyring:provider:opencode-go',
+      authType: 'api',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://provider-sentinel.invalid/v1' },
+      addedAt: '2026-08-11T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-08-11T00:00:00.000Z',
+        models: [{
+          id: 'unsupported-sentinel',
+          name: 'Unsupported Sentinel',
+          upstreamModelId: 'unsupported-sentinel',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai',
+          apiUrl: 'https://model-sentinel.invalid/v1',
+        }],
+      },
+    });
+
+    expect(materializeRegistry(registry, () => 'credential-sentinel')).toEqual([]);
+  });
+
+  it('scopes immutable endpoint selection to OpenCode while preserving ordinary custom endpoints', () => {
+    const registry = emptyRegistry();
+    registry.providers.push(
+      {
+        id: 'opencode-go',
+        templateId: 'opencode-go',
+        name: 'OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:opencode-go',
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode-provider-sentinel.invalid/v1' },
+        addedAt: '2026-08-11T00:00:00.000Z',
+        modelsCache: {
+          fetchedAt: '2026-08-11T00:00:00.000Z',
+          models: [{
+            id: 'deepseek-v4-pro',
+            name: 'DeepSeek V4 Pro',
+            upstreamModelId: 'deepseek-v4-pro',
+            modelFormat: 'openai',
+            npm: '@ai-sdk/openai-compatible',
+            apiUrl: 'https://opencode-model-sentinel.invalid/v1',
+          }],
+        },
+      },
+      {
+        id: 'ordinary-provider',
+        templateId: 'custom-openai',
+        name: 'Ordinary Provider',
+        enabled: true,
+        authRef: 'keyring:provider:ordinary-provider',
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://ordinary-provider.invalid/v1' },
+        addedAt: '2026-08-11T00:00:00.000Z',
+        modelsCache: {
+          fetchedAt: '2026-08-11T00:00:00.000Z',
+          models: [{
+            id: 'ordinary-sentinel',
+            name: 'Ordinary Sentinel',
+            upstreamModelId: 'ordinary-sentinel',
+            modelFormat: 'openai',
+            npm: '@ai-sdk/openai-compatible',
+            apiUrl: 'https://ordinary-model.invalid/v1',
+          }],
+        },
+      },
+    );
+
+    const locals = materializeRegistry(registry, () => 'credential-sentinel');
+
+    expect(locals[0]?.models[0]?.apiBaseUrl).toBe(OPENCODE_GO_COMPLETIONS_BASE_URL);
+    expect(locals[1]?.models[0]?.apiBaseUrl).toBe('https://ordinary-model.invalid/v1');
+    expect(locals[1]?.models[0]?.completionsUrl).toBe('https://ordinary-model.invalid/v1/chat/completions');
+  });
+
+  it('pins OpenCode endpoints for a record that drifts its id but keeps the template', () => {
+    // Nothing couples `id` to `templateId`, and `authRef` still names the
+    // keyring slot holding the OpenCode credential — so an id-drifted record
+    // is the same secret pointed at a different address.
+    const registry = emptyRegistry();
+    registry.providers.push({
+      id: 'opencode-go-mirror',
+      templateId: 'opencode-go',
+      name: 'OpenCode Go',
+      enabled: true,
+      authRef: 'keyring:provider:opencode-go',
+      authType: 'api',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://provider-sentinel.invalid/v1' },
+      addedAt: '2026-08-11T00:00:00.000Z',
+      modelsCache: {
+        fetchedAt: '2026-08-11T00:00:00.000Z',
+        models: [
+          {
+            id: 'deepseek-v4-pro',
+            name: 'DeepSeek V4 Pro',
+            upstreamModelId: 'deepseek-v4-pro',
+            modelFormat: 'openai',
+            npm: '@ai-sdk/openai-compatible',
+            apiUrl: 'https://model-sentinel.invalid/v1',
+          },
+          {
+            id: 'qwen3.8-max',
+            name: 'Qwen3.8 Max',
+            upstreamModelId: 'qwen3.8-max',
+            modelFormat: 'anthropic',
+            npm: '@ai-sdk/anthropic',
+            apiUrl: 'https://model-sentinel.invalid/v1',
+          },
+          {
+            id: 'unsupported-sentinel',
+            name: 'Unsupported Sentinel',
+            upstreamModelId: 'unsupported-sentinel',
+            modelFormat: 'openai',
+            npm: '@ai-sdk/openai',
+            apiUrl: 'https://model-sentinel.invalid/v1',
+          },
+        ],
+      },
+    });
+
+    const models = materializeRegistry(registry, () => 'credential-sentinel')[0]?.models;
+
+    // Destination assertions first, so a regression names the address the
+    // credential would have reached rather than the fail-closed count.
+    expect(models?.[0]?.apiBaseUrl).toBe(OPENCODE_GO_COMPLETIONS_BASE_URL);
+    expect(models?.[0]?.completionsUrl).toBe(`${OPENCODE_GO_COMPLETIONS_BASE_URL}/chat/completions`);
+    expect(models?.[1]?.apiBaseUrl).toBe(OPENCODE_GO_ANTHROPIC_BASE_URL);
+    expect(models?.[1]?.baseUrl).toBe(OPENCODE_GO_ANTHROPIC_BASE_URL);
+    expect(models?.map(model => model.id)).toEqual(['deepseek-v4-pro', 'qwen3.8-max']);
   });
 
   it('honors per-model npm and apiUrl overrides', () => {

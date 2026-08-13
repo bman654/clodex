@@ -604,3 +604,31 @@ describe('buildChildEnv remote passthrough keeps the proxy (issue #95 regression
     expect(env['HTTPS_PROXY']).toBe('http://corp:3128');
   });
 });
+
+describe('experimental-beta child suppression is inherited, never imposed', () => {
+  const SUPPRESSION = 'CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS';
+  let previous: string | undefined;
+
+  beforeEach(() => { previous = process.env[SUPPRESSION]; });
+  afterEach(() => {
+    if (previous === undefined) delete process.env[SUPPRESSION];
+    else process.env[SUPPRESSION] = previous;
+  });
+
+  it('passes an ambient suppression through both builders untouched', () => {
+    process.env[SUPPRESSION] = '1';
+    expect(buildChildEnv('https://api.example.com', 'claude-sonnet-4-6', 'k')[SUPPRESSION])
+      .toBe('1');
+    expect(buildHttpProxyChildEnv(43123, '/tmp/ca.pem')[SUPPRESSION]).toBe('1');
+    // The builders copy; they never write back to the parent process.
+    expect(process.env[SUPPRESSION]).toBe('1');
+  });
+
+  it('never imposes suppression on a proxied child, which needs the tool-search betas', () => {
+    delete process.env[SUPPRESSION];
+    expect(buildChildEnv('https://api.example.com', 'claude-sonnet-4-6', 'k', 43123))
+      .not.toHaveProperty(SUPPRESSION);
+    expect(buildHttpProxyChildEnv(43123, '/tmp/ca.pem')).not.toHaveProperty(SUPPRESSION);
+    expect(process.env[SUPPRESSION]).toBeUndefined();
+  });
+});

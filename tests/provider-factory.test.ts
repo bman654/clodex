@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   createLanguageModel,
   deepMergeProviderOptions,
@@ -12,6 +12,7 @@ import {
   thinkingProviderOptions,
 } from '../src/provider-factory.js';
 import { VERTEX_ANTHROPIC_NPM } from '../src/constants.js';
+import { buildOpenCodeGoModels } from '../src/data/opencode-go-models.js';
 
 async function expectCredentialHeadersStripped(
   fetchImpl: typeof fetch,
@@ -274,6 +275,41 @@ describe('getReasoningCapabilities', () => {
       openaiCompatible: { reasoningEffort: 'max' },
     });
     expect(effortProviderOptions('@ai-sdk/openai-compatible', 'low', 'glm-5.2')).toBeUndefined();
+  });
+
+  it('lets a wire-shape-only compatibility block keep suppressing effort options', () => {
+    // Conservation. A compatibility block that says nothing about reasoning
+    // still owns the answer for an openai-compatible route: the compatibility
+    // path returns "no effort", and the model-name rules below must not get a
+    // second vote. Treating such a block as "no opinion" would start emitting
+    // DeepSeek/Kimi/GLM options for custom providers that had none, which is a
+    // wire change to routes this work never looked at.
+    for (const modelId of ['deepseek-v4-pro', 'kimi-k3', 'glm-5.2']) {
+      expect(
+        effortProviderOptions('@ai-sdk/openai-compatible', 'high', modelId, {
+          providerId: 'some-custom-provider',
+          compatibility: { supportsStore: false, maxTokensField: 'max_tokens' },
+        }),
+        modelId,
+      ).toBeUndefined();
+    }
+  });
+
+  it('keeps every OpenCode Go catalog block expressing an explicit reasoning opinion', () => {
+    // Why the conservation above costs OpenCode Go nothing: each shipped entry
+    // states supportsReasoningEffort, a reasoningEffortMap, or a
+    // thinkingFormat, so none of them is a wire-shape-only block and none
+    // depends on the model-name fallback.
+    for (const model of buildOpenCodeGoModels()) {
+      const compatibility = model.compatibility;
+      expect(compatibility, model.id).toBeDefined();
+      expect(
+        compatibility!.supportsReasoningEffort !== undefined
+        || compatibility!.reasoningEffortMap !== undefined
+        || compatibility!.thinkingFormat !== undefined,
+        model.id,
+      ).toBe(true);
+    }
   });
 
 
@@ -563,7 +599,11 @@ describe('createLanguageModel', () => {
       baseURL: 'https://api.anthropic.com',
     });
 
-    expect(createAnthropic).toHaveBeenCalledWith({ apiKey: 'test-key' });
+    expect(createAnthropic).toHaveBeenCalledWith({
+      apiKey: 'test-key',
+      // Every Anthropic construction carries the final wire boundary.
+      fetch: expect.any(Function),
+    });
     expect(createAnthropic).not.toHaveBeenCalledWith(
       expect.objectContaining({ baseURL: 'https://api.anthropic.com' }),
     );
@@ -586,11 +626,16 @@ describe('createLanguageModel', () => {
     expect(createAnthropic).toHaveBeenCalledWith({
       apiKey: 'test-key',
       baseURL: 'https://proxy.example.com/v1',
+      fetch: expect.any(Function),
     });
     vi.doUnmock('@ai-sdk/anthropic');
   });
 
-  it('routes Claude Code Anthropic OAuth through Bearer auth with compatibility headers', async () => {
+  // Supersedes the "compatibility headers" half of this case: the UA/x-app/session
+  // trio simulated a native client clodex has no supported producer for. The
+  // retained property — OAuth uses authToken (Bearer), never apiKey — is asserted
+  // here unchanged, and the removed synthesis is now asserted absent.
+  it('routes Claude Code Anthropic OAuth through Bearer auth with no synthesized identity', async () => {
     const anthropicFactory = vi.fn((modelId: string) => ({ modelId, provider: 'anthropic-oauth' }));
     const createAnthropic = vi.fn(() => anthropicFactory);
     vi.doMock('@ai-sdk/anthropic', () => ({ createAnthropic }));
@@ -601,22 +646,60 @@ describe('createLanguageModel', () => {
       modelId: 'claude-sonnet-4-6',
       apiKey: 'oauth-token',
       authType: 'oauth',
+      // Every tempting label at once: the claude-code provider id, the exact
+      // canonical destination, and a hand-built providerData full of identity.
       providerId: 'claude-code',
+      baseURL: 'https://api.anthropic.com',
       oauthAccountId: '11111111-1111-4111-8111-111111111111',
+      providerData: {
+        cliUserID: 'a'.repeat(64),
+        accountUUID: '11111111-1111-4111-8111-111111111111',
+        nativeClaude: true,
+      },
     });
 
     expect(createAnthropic).toHaveBeenCalledWith({
       authToken: 'oauth-token',
-      headers: expect.objectContaining({
-        'User-Agent': 'claude-cli/2.1.195 (external, cli)',
-        'x-app': 'cli',
-        'X-Claude-Code-Session-Id': expect.any(String),
-      }),
+      fetch: expect.any(Function),
     });
     expect(createAnthropic).not.toHaveBeenCalledWith(
       expect.objectContaining({ apiKey: 'oauth-token' }),
     );
+    const [options] = vi.mocked(createAnthropic).mock.calls[0]!;
+    expect(options).not.toHaveProperty('headers');
+    expect(JSON.stringify(options)).not.toContain('claude-cli');
+    // The canonical destination is the SDK default, so no baseURL is forced.
+    expect(options).not.toHaveProperty('baseURL');
     expect(anthropicFactory).toHaveBeenCalledWith('claude-sonnet-4-6');
+    vi.doUnmock('@ai-sdk/anthropic');
+  });
+
+  it('keeps configured provider headers on an Anthropic OAuth route without synthesis', async () => {
+    const anthropicFactory = vi.fn((modelId: string) => ({ modelId }));
+    const createAnthropic = vi.fn(() => anthropicFactory);
+    vi.doMock('@ai-sdk/anthropic', () => ({ createAnthropic }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/anthropic',
+      modelId: 'claude-sonnet-4-6',
+      apiKey: 'oauth-token',
+      authType: 'oauth',
+      providerId: 'claude-code',
+      headers: { 'Anthropic-Beta': 'alpha-2026-01-01', 'X-Plan': 'coding' },
+    });
+
+    // The configured beta survives in full, now under the one canonical header
+    // name the SDK boundary emits; the ordinary header is untouched.
+    expect(createAnthropic).toHaveBeenCalledWith({
+      authToken: 'oauth-token',
+      headers: { 'X-Plan': 'coding', 'anthropic-beta': 'alpha-2026-01-01' },
+      fetch: expect.any(Function),
+    });
+    const [options] = vi.mocked(createAnthropic).mock.calls[0]!;
+    for (const name of ['User-Agent', 'x-app', 'X-Claude-Code-Session-Id']) {
+      expect(options!.headers).not.toHaveProperty(name);
+    }
     vi.doUnmock('@ai-sdk/anthropic');
   });
 
@@ -756,7 +839,388 @@ describe('createLanguageModel', () => {
       apiKey: 'sk-test',
       baseURL: 'https://api.z.ai/api/anthropic/v1',
       headers: { 'X-Plan': 'coding' },
+      fetch: expect.any(Function),
     });
     vi.doUnmock('@ai-sdk/anthropic');
+  });
+});
+
+describe('SDK construction closes the configured-header boundaries', () => {
+  const spellingsOf = (headers: Record<string, string> | undefined, name: string) =>
+    Object.keys(headers ?? {}).filter(key => key.trim().toLowerCase() === name);
+
+  /** Configured headers carrying every colliding spelling plus ordinary ones. */
+  const CONFIGURED = {
+    authorization: 'Bearer configured-secret',
+    Authorization: 'Bearer configured-secret-2',
+    'x-api-key': 'configured-secret',
+    'X-API-Key': 'configured-secret-2',
+    'Anthropic-Beta': ' cfg-a , cfg-b ,, cfg-a ',
+    'anthropic-beta': 'cfg-b,Cfg-C',
+    'X-Plan': 'coding',
+    'X-Trace': 'on',
+  };
+
+  async function createAnthropicWith(spec: Record<string, unknown>) {
+    const anthropicFactory = vi.fn((modelId: string) => ({ modelId }));
+    const createAnthropic = vi.fn(() => anthropicFactory);
+    vi.doMock('@ai-sdk/anthropic', () => ({ createAnthropic }));
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({ npm: '@ai-sdk/anthropic', modelId: 'claude-sonnet-4-6', apiKey: '', ...spec } as never);
+    const [options] = vi.mocked(createAnthropic).mock.calls[0]!;
+    vi.doUnmock('@ai-sdk/anthropic');
+    return options as { headers?: Record<string, string>; apiKey?: string; authToken?: string; fetch?: unknown };
+  }
+
+  it('canonicalizes the configured beta at the Anthropic SDK boundary', async () => {
+    const options = await createAnthropicWith({ apiKey: 'sk-test', headers: { ...CONFIGURED } });
+
+    // One canonical name, stable first-seen order, exact-token dedupe, case kept.
+    expect(spellingsOf(options.headers, 'anthropic-beta')).toEqual(['anthropic-beta']);
+    expect(options.headers!['anthropic-beta']).toBe('cfg-a,cfg-b,Cfg-C');
+    expect(options.headers).not.toHaveProperty('Anthropic-Beta');
+    // Ordinary configured headers are preserved exactly.
+    expect(options.headers!['X-Plan']).toBe('coding');
+    expect(options.headers!['X-Trace']).toBe('on');
+  });
+
+  it('emits no beta header when the provider configures none', async () => {
+    const options = await createAnthropicWith({ apiKey: 'sk-test', headers: { 'X-Plan': 'coding' } });
+    expect(spellingsOf(options.headers, 'anthropic-beta')).toEqual([]);
+    expect(options.headers!['X-Plan']).toBe('coding');
+  });
+
+  it('denies configured credential collisions on an API-key Anthropic route', async () => {
+    const options = await createAnthropicWith({ apiKey: 'sk-test', headers: { ...CONFIGURED } });
+
+    // The route owns the credential; the SDK sets it from apiKey alone.
+    expect(options.apiKey).toBe('sk-test');
+    expect(spellingsOf(options.headers, 'authorization')).toEqual([]);
+    expect(spellingsOf(options.headers, 'x-api-key')).toEqual([]);
+    expect(JSON.stringify(options)).not.toContain('configured-secret');
+    expect(options.headers!['X-Plan']).toBe('coding');
+  });
+
+  it('denies configured credential collisions on an OAuth Anthropic route', async () => {
+    const options = await createAnthropicWith({
+      apiKey: 'oauth-token',
+      authType: 'oauth',
+      providerId: 'claude-code',
+      headers: { ...CONFIGURED },
+    });
+
+    expect(options.authToken).toBe('oauth-token');
+    expect(options).not.toHaveProperty('apiKey');
+    expect(spellingsOf(options.headers, 'authorization')).toEqual([]);
+    expect(spellingsOf(options.headers, 'x-api-key')).toEqual([]);
+    expect(JSON.stringify(options)).not.toContain('configured-secret');
+    expect(options.headers!['anthropic-beta']).toBe('cfg-a,cfg-b,Cfg-C');
+    // Still no synthesized native-client identity.
+    for (const name of ['User-Agent', 'x-app', 'X-Claude-Code-Session-Id']) {
+      expect(options.headers).not.toHaveProperty(name);
+    }
+    expect(JSON.stringify(options)).not.toContain('claude-cli');
+  });
+
+  it('leaves the anonymous Anthropic route to its wire-level credential strip', async () => {
+    const options = await createAnthropicWith({ authType: 'none', headers: { ...CONFIGURED } });
+
+    // Current authority: an anonymous route owns no credential, and the fetch
+    // wrapper drops every credential-bearing header at the wire.
+    expect(options.apiKey).toBe('');
+    expect(typeof options.fetch).toBe('function');
+    expect(options.headers!['X-Plan']).toBe('coding');
+  });
+
+  it('denies configured credential collisions on the OpenAI and compatible routes', async () => {
+    const openaiFactory = Object.assign(
+      vi.fn((modelId: string) => ({ modelId })),
+      { chat: vi.fn((modelId: string) => ({ modelId })), responses: vi.fn((modelId: string) => ({ modelId })) },
+    );
+    const createOpenAI = vi.fn(() => openaiFactory);
+    vi.doMock('@ai-sdk/openai', () => ({ createOpenAI }));
+    const compatibleFactory = vi.fn((modelId: string) => ({ modelId }));
+    const createOpenAICompatible = vi.fn(() => compatibleFactory);
+    vi.doMock('@ai-sdk/openai-compatible', () => ({ createOpenAICompatible }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai', modelId: 'gpt-5.5', apiKey: 'sk-openai', headers: { ...CONFIGURED },
+    });
+    await create({
+      npm: '@ai-sdk/openai-compatible',
+      modelId: 'glm-5.2',
+      apiKey: 'sk-compat',
+      baseURL: 'https://api.z.ai/v1',
+      headers: { ...CONFIGURED },
+    });
+
+    for (const [options] of [
+      ...vi.mocked(createOpenAI).mock.calls,
+      ...vi.mocked(createOpenAICompatible).mock.calls,
+    ]) {
+      const headers = (options as { headers?: Record<string, string> }).headers;
+      expect(spellingsOf(headers, 'authorization')).toEqual([]);
+      expect(spellingsOf(headers, 'x-api-key')).toEqual([]);
+      expect(JSON.stringify(options)).not.toContain('configured-secret');
+      expect(headers!['X-Plan']).toBe('coding');
+    }
+    vi.doUnmock('@ai-sdk/openai');
+    vi.doUnmock('@ai-sdk/openai-compatible');
+  });
+
+  it('keeps a configured credential header when the route supplies none', async () => {
+    const compatibleFactory = vi.fn((modelId: string) => ({ modelId }));
+    const createOpenAICompatible = vi.fn(() => compatibleFactory);
+    vi.doMock('@ai-sdk/openai-compatible', () => ({ createOpenAICompatible }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai-compatible',
+      modelId: 'glm-5.2',
+      // No route credential: the SDK is given no apiKey, so the configured
+      // header is the only authority and removing it would break the route.
+      apiKey: '   ',
+      baseURL: 'https://api.z.ai/v1',
+      headers: { Authorization: 'Bearer configured-secret', 'X-Plan': 'coding' },
+    });
+
+    const [options] = vi.mocked(createOpenAICompatible).mock.calls[0]!;
+    expect(options).not.toHaveProperty('apiKey');
+    expect((options as { headers: Record<string, string> }).headers.Authorization)
+      .toBe('Bearer configured-secret');
+    vi.doUnmock('@ai-sdk/openai-compatible');
+  });
+});
+
+/**
+ * Wire-level proofs for the Anthropic SDK boundary.
+ *
+ * These drive the REAL `@ai-sdk/anthropic` provider and capture what it puts on
+ * the wire. Constructor-option assertions cannot cover this: the SDK lowercases
+ * every configured beta token and unions its own generated/request betas over
+ * the configured value AFTER construction, so the header a provider configured
+ * is not the header the upstream receives.
+ */
+describe('Anthropic SDK wire boundary enforces configured betas', () => {
+  const JSON_RESPONSE = {
+    id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6',
+    content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn',
+    usage: { input_tokens: 1, output_tokens: 1 },
+  };
+
+  const SSE_RESPONSE = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"claude-sonnet-4-6","content":[],"stop_reason":null,"usage":{"input_tokens":1,"output_tokens":0}}}',
+    '',
+    'event: content_block_start',
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}',
+    '',
+    'event: content_block_stop',
+    'data: {"type":"content_block_stop","index":0}',
+    '',
+    'event: message_delta',
+    'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}',
+    '',
+    'event: message_stop',
+    'data: {"type":"message_stop"}',
+    '',
+    '',
+  ].join('\n');
+
+  interface WireCall { url: string; headers: Record<string, string> }
+
+  /** Stub the global fetch the SDK ultimately reaches and record each request. */
+  function captureWire(stream = false): WireCall[] {
+    const calls: WireCall[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown, init: RequestInit) => {
+      const headers: Record<string, string> = {};
+      new Headers(init?.headers).forEach((value, key) => { headers[key] = value; });
+      calls.push({ url: String(input), headers });
+      return stream
+        ? new Response(SSE_RESPONSE, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+        : new Response(JSON.stringify(JSON_RESPONSE), {
+            status: 200, headers: { 'Content-Type': 'application/json' },
+          });
+    }));
+    return calls;
+  }
+
+  const PROMPT = [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }];
+
+  /** Issue one real SDK request through `createLanguageModel`. */
+  async function dispatch(
+    spec: Record<string, unknown>,
+    options: { stream?: boolean; providerOptions?: Record<string, unknown>; headers?: Record<string, string> } = {},
+  ): Promise<void> {
+    const model = await createLanguageModel({
+      npm: '@ai-sdk/anthropic',
+      modelId: 'claude-sonnet-4-6',
+      apiKey: 'sk-test',
+      ...spec,
+    } as never);
+    const args = {
+      prompt: PROMPT,
+      ...(options.providerOptions ? { providerOptions: options.providerOptions } : {}),
+      ...(options.headers ? { headers: options.headers } : {}),
+    };
+    if (options.stream) {
+      const { stream } = await (model as never as {
+        doStream: (a: unknown) => Promise<{ stream: ReadableStream }>;
+      }).doStream(args);
+      const reader = stream.getReader();
+      for (;;) { const { done } = await reader.read(); if (done) break; }
+    } else {
+      await (model as never as { doGenerate: (a: unknown) => Promise<unknown> }).doGenerate(args);
+    }
+  }
+
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('puts the configured token on the wire in its exact case', async () => {
+    const wire = captureWire();
+    await dispatch({ headers: { 'Anthropic-Beta': 'Cfg-C', 'X-Plan': 'coding' } });
+
+    // The SDK lowercases configured beta tokens internally; the wire boundary
+    // re-emits the configured result verbatim, so the case survives.
+    expect(wire[0]!.headers['anthropic-beta']).toBe('Cfg-C');
+    expect(wire[0]!.headers['x-plan']).toBe('coding');
+  });
+
+  it('removes SDK-generated and request-supplied betas, keeping only configured', async () => {
+    const wire = captureWire();
+    await dispatch(
+      { headers: { 'Anthropic-Beta': 'cfg-a,Cfg-C' } },
+      {
+        providerOptions: { anthropic: { anthropicBeta: ['sdk-generated-2026-01-01'] } },
+        headers: { 'anthropic-beta': 'request-supplied-2026-02-02' },
+      },
+    );
+
+    expect(wire[0]!.headers['anthropic-beta']).toBe('cfg-a,Cfg-C');
+    expect(wire[0]!.headers['anthropic-beta']).not.toContain('sdk-generated');
+    expect(wire[0]!.headers['anthropic-beta']).not.toContain('request-supplied');
+  });
+
+  it('emits no beta at all when none is configured, even when the SDK generates one', async () => {
+    const wire = captureWire();
+    await dispatch(
+      { headers: { 'X-Plan': 'coding' } },
+      {
+        providerOptions: { anthropic: { anthropicBeta: ['sdk-generated-2026-01-01'] } },
+        headers: { 'anthropic-beta': 'request-supplied-2026-02-02' },
+      },
+    );
+
+    expect(wire[0]!.headers).not.toHaveProperty('anthropic-beta');
+    expect(wire[0]!.headers['x-plan']).toBe('coding');
+  });
+
+  it('keeps capability betas off the SDK wire, configured or not', async () => {
+    // The routed raw-Anthropic boundary admits validated capability tokens; the
+    // SDK boundary deliberately does not. No inbound request is visible at SDK
+    // construction, so there is nothing here that could have earned one, and a
+    // capability-looking token supplied per request is refused exactly like any
+    // other request-supplied beta.
+    const capabilityTokens = [
+      'context-1m-2025-08-07',
+      'advanced-tool-use-2025-11-20',
+      'tool-search-tool-2025-10-19',
+    ];
+    const wire = captureWire();
+    await dispatch(
+      { headers: { 'Anthropic-Beta': 'cfg-a' } },
+      {
+        providerOptions: { anthropic: { anthropicBeta: capabilityTokens } },
+        headers: { 'anthropic-beta': capabilityTokens.join(',') },
+      },
+    );
+
+    expect(wire[0]!.headers['anthropic-beta']).toBe('cfg-a');
+    for (const token of capabilityTokens) {
+      expect(wire[0]!.headers['anthropic-beta']).not.toContain(token);
+    }
+  });
+
+  it('normalizes duplicate spellings and list whitespace to one exact value', async () => {
+    const wire = captureWire();
+    await dispatch({
+      headers: {
+        'Anthropic-Beta': ' cfg-a , cfg-b ,, cfg-a ',
+        'anthropic-beta': 'cfg-b,Cfg-C',
+        'ANTHROPIC-BETA': 'cfg-a',
+      },
+    });
+
+    // First-seen order, exact-token dedupe, token case preserved, one header.
+    expect(wire[0]!.headers['anthropic-beta']).toBe('cfg-a,cfg-b,Cfg-C');
+  });
+
+  it('enforces the same boundary on the streaming request path', async () => {
+    const wire = captureWire(true);
+    await dispatch(
+      { headers: { 'Anthropic-Beta': 'Cfg-C' } },
+      { stream: true, providerOptions: { anthropic: { anthropicBeta: ['sdk-generated-2026-01-01'] } } },
+    );
+
+    expect(wire).toHaveLength(1);
+    expect(wire[0]!.headers['anthropic-beta']).toBe('Cfg-C');
+    expect(wire[0]!.headers['anthropic-beta']).not.toContain('sdk-generated');
+  });
+
+  it('stays stable across repeated dispatches through one model', async () => {
+    // Retry for this path lives in the router's SDK attempt loop and the `ai`
+    // package, not in the provider factory — this proves the boundary is
+    // per-request and therefore identical on every attempt.
+    const wire = captureWire();
+    const model = await createLanguageModel({
+      npm: '@ai-sdk/anthropic',
+      modelId: 'claude-sonnet-4-6',
+      apiKey: 'sk-test',
+      headers: { 'Anthropic-Beta': 'Cfg-C', 'X-Plan': 'coding' },
+    });
+    const generate = (model as never as { doGenerate: (a: unknown) => Promise<unknown> }).doGenerate;
+    await generate.call(model, { prompt: PROMPT });
+    await generate.call(model, { prompt: PROMPT });
+
+    expect(wire).toHaveLength(2);
+    expect(wire[0]).toEqual(wire[1]);
+    expect(wire[1]!.headers['anthropic-beta']).toBe('Cfg-C');
+  });
+
+  it.each([
+    ['api key', { apiKey: 'sk-test' }, (h: Record<string, string>) => {
+      expect(h['x-api-key']).toBe('sk-test');
+      expect(h).not.toHaveProperty('authorization');
+    }],
+    ['oauth', { apiKey: 'oauth-token', authType: 'oauth' as const }, (h: Record<string, string>) => {
+      expect(h.authorization).toBe('Bearer oauth-token');
+      expect(h).not.toHaveProperty('x-api-key');
+    }],
+    ['anonymous', { apiKey: '', authType: 'none' as const }, (h: Record<string, string>) => {
+      expect(h).not.toHaveProperty('authorization');
+      expect(h).not.toHaveProperty('x-api-key');
+    }],
+  ])('keeps %s credential behavior and ordinary headers correct on the wire', async (_label, spec, assertCredential) => {
+    const wire = captureWire();
+    await dispatch({
+      ...spec,
+      headers: {
+        'Anthropic-Beta': 'Cfg-C',
+        'X-Plan': 'coding',
+        Authorization: 'Bearer configured-secret',
+        'X-API-Key': 'configured-secret',
+      },
+    });
+
+    const headers = wire[0]!.headers;
+    assertCredential(headers);
+    expect(JSON.stringify(headers)).not.toContain('configured-secret');
+    expect(headers['x-plan']).toBe('coding');
+    expect(headers['anthropic-beta']).toBe('Cfg-C');
+    expect(wire[0]!.url).toBe('https://api.anthropic.com/v1/messages');
   });
 });

@@ -1,10 +1,13 @@
 // src/registry/fetch-template-models.ts — test connection and list models for template providers
 
+import { TEST_TIMEOUT_MS } from '../constants.js';
+import { OPENCODE_GO_PROVIDER_ID } from '../data/opencode-go-models.js';
 import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
 import type { ProviderTemplate } from '../provider-templates.js';
 import { normalizeGoogleDisplayName, normalizeGoogleModelId } from './google-model-id.js';
 import type { CachedModel } from './types.js';
+import { openCodeGoPinnedApiUrl } from './resolve-template.js';
 import {
   getProviderDebugLogPath,
   makeTraceLogger,
@@ -12,12 +15,11 @@ import {
 } from '../trace-log.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 
-const TEST_TIMEOUT_MS = 10_000;
 
-interface OpenAiModelListResponse {
+type OpenAiModelListResponse = ProviderModelListRow[] | {
   data?: ProviderModelListRow[];
   models?: ProviderModelListRow[];
-}
+};
 
 interface ProviderModelListRow {
   id?: string;
@@ -101,8 +103,19 @@ function parseNativePricing(pricing: ProviderModelListRow['pricing']): CachedMod
   return cost;
 }
 
-function parseModelList(body: OpenAiModelListResponse, npm: string): CachedModel[] {
-  const rows = body.data ?? body.models ?? [];
+function parseModelList(
+  body: OpenAiModelListResponse,
+  npm: string,
+  allowBareArray: boolean,
+): CachedModel[] {
+  // A bare top-level array is OpenCode Go's documented `/models` shape, and
+  // only its call site opts in. Every other template was reviewed against the
+  // object envelope, so an upstream that starts answering with an array of
+  // something else keeps reporting "no models" instead of turning unreviewed
+  // rows into catalog entries.
+  const rows = Array.isArray(body)
+    ? (allowBareArray ? body : [])
+    : body.data ?? body.models ?? [];
   const format = modelFormatForNpm(npm);
   const models: CachedModel[] = [];
 
@@ -214,7 +227,6 @@ function normalizeTemplateOverlay(
 export function applyTemplateModelMetadata(
   template: ProviderTemplate,
   discovered: CachedModel[],
-  _baseUrl: string,
 ): CachedModel[] {
   const curated = new Map(
     (template.staticModels ?? [])
@@ -262,6 +274,39 @@ export async function fetchTemplateModels(
     };
   }
 
+  // OpenCode Go's endpoints are the reviewed package/destination pairs in the
+  // retained identity authority, and this call puts a live credential on the
+  // wire. `verifyCredential` is
+  // already structurally unredirectable because it takes no URL; discovery
+  // took one, and `refreshApiListProvider` feeds the provider record's stored
+  // `api.url` straight back in here, so a registry that was hand-edited or
+  // imported with a different address was enough to re-aim the key. Refuse
+  // rather than quietly substitute the default: a caller that believed it had
+  // redirected discovery should find out that it had not.
+  if (template.id === OPENCODE_GO_PROVIDER_ID) {
+    const pinned = openCodeGoPinnedApiUrl(template.npm);
+    if (!pinned) {
+      return {
+        models: [],
+        baseUrl: '',
+        error: `${template.name} does not support the ${template.npm || '(missing)'} SDK package.`,
+      };
+    }
+    if (baseUrl !== pinned) {
+      return {
+        models: [],
+        baseUrl: '',
+        error: `${template.name} does not support a custom API base URL.`,
+        hint: 'This provider always uses its own endpoint. Remove the custom URL and try again.',
+      };
+    }
+  }
+
+  // No template declares `static-seed` today, so this arm and
+  // `materializeTemplateModel` are unreachable — kept deliberately, not
+  // overlooked. `static-seed` is a member of ProviderModelSource, and deleting
+  // the arm would make a template that adopts it fall through to the api-list
+  // path and try to fetch a catalog it does not have.
   if (template.modelSource === 'static-seed') {
     const models = (template.staticModels ?? [])
       .map(model => materializeTemplateModel(template, model, baseUrl));
@@ -346,13 +391,27 @@ export async function fetchTemplateModels(
       // Failed to parse, use empty object
     }
 
-    const models = applyTemplateModelMetadata(template, parseModelList(json, template.npm), baseUrl);
+    const discovered = parseModelList(
+      json,
+      template.npm,
+      template.id === OPENCODE_GO_PROVIDER_ID,
+    );
+    const models = applyTemplateModelMetadata(template, discovered);
     if (models.length === 0) {
+      // An allowlist template can end up empty for two very different reasons,
+      // and "no models were returned" points at the wrong one when upstream
+      // answered with a healthy list that simply shares no ids with the
+      // curated catalog — an upstream rename, or a catalog gone stale.
+      const filteredOut = template.staticModelPolicy === 'allowlist' && discovered.length > 0;
       return {
         models: [],
         baseUrl,
-        error: 'Connected but no models were returned.',
-        hint: 'The API key may be valid but model listing is unavailable for this provider.',
+        error: filteredOut
+          ? `Connected, but none of the ${discovered.length} models upstream returned are in this provider's supported list.`
+          : 'Connected but no models were returned.',
+        hint: filteredOut
+          ? 'The upstream catalog may have renamed its models, or clodex\'s list may be out of date.'
+          : 'The API key may be valid but model listing is unavailable for this provider.',
       };
     }
 

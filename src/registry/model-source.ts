@@ -1,7 +1,11 @@
 // src/registry/model-source.ts — resolve how a registry provider refreshes its model list
 
 import { getTemplateById, type ProviderModelSource } from '../provider-templates.js';
-import { resolveProviderTemplate } from './resolve-template.js';
+import {
+  isRetainedOpenCodeGoProvider,
+  retainedOpenCodeGoTemplate,
+  resolveProviderTemplate,
+} from './resolve-template.js';
 import type { RegistryProvider } from './types.js';
 
 const MANUAL_ONLY_TEMPLATE_IDS = new Set(['vertex', 'bedrock', 'azure']);
@@ -13,6 +17,9 @@ const MANUAL_ONLY_NPMS = new Set([
 ]);
 
 export function resolveModelSource(provider: RegistryProvider): ProviderModelSource {
+  if (isRetainedOpenCodeGoProvider(provider)) {
+    return retainedOpenCodeGoTemplate()?.modelSource ?? 'api-list';
+  }
   if (
     MANUAL_ONLY_PROVIDER_IDS.has(provider.id) ||
     MANUAL_ONLY_PROVIDER_IDS.has(provider.templateId) ||

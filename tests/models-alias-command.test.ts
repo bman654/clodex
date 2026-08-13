@@ -35,17 +35,17 @@ describe('models alias command', () => {
           name: 'orbit',
           savedName: 'Orbit',
           sourceNames: ['Orbit', 'ORBIT'],
-          unavailableReason: 'conflicting targets',
+          rejectionReason: 'conflicting-targets',
         },
         {
           name: 'archived',
           savedName: 'ARCHIVED',
-          unavailableReason: 'target unavailable',
+          rejectionReason: 'target-unavailable',
         },
         {
           name: 'claude-sonnet-4',
           savedName: 'CLAUDE-SONNET-4',
-          unavailableReason: 'conflicts with a catalog model id',
+          rejectionReason: 'catalog-id-collision',
         },
       ]);
 
@@ -53,7 +53,7 @@ describe('models alias command', () => {
         '4 saved model aliases inactive. Saved entries were preserved.\n'
         + '  "Orbit" — conflicting targets\n'
         + '  "ORBIT" — conflicting targets\n'
-        + '  "ARCHIVED" — target unavailable\n'
+        + '  "ARCHIVED" — target is unavailable or unsupported\n'
         + '  "CLAUDE-SONNET-4" — conflicts with a catalog model id',
       );
     } finally {
@@ -76,6 +76,30 @@ describe('models alias command', () => {
 
     expect(await runModelsCommand({ unalias: 'Luna' })).toBe(0);
     expect(loadPreferences().modelAliases).toEqual([]);
+  });
+
+  it('warns when an alias target is beyond the first 20 exposed favorites', async () => {
+    const favorites = Array.from({ length: 21 }, (_, index) => ({
+      providerId: 'openai-oauth',
+      modelId: `gpt-5.6-${String(index + 1).padStart(2, '0')}`,
+    }));
+    writeFileSync(getConfigPath(), JSON.stringify({ favoriteModels: favorites }));
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+
+    try {
+      expect(await runModelsCommand({
+        alias: 'tail=clodex:openai-oauth:gpt-5.6-21',
+      })).toBe(0);
+      expect(loadPreferences().modelAliases).toEqual([
+        { name: 'tail', providerId: 'openai-oauth', modelId: 'gpt-5.6-21' },
+      ]);
+      expect(warn).toHaveBeenCalledWith(
+        'Saved model alias "tail" — target is outside the active Claude Code catalog. '
+        + 'The alias was saved and preserved.',
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('rejects aliases whose targets are not saved favorites', async () => {

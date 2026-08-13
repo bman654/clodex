@@ -1,7 +1,12 @@
 // tests/favorites.test.ts
 import { describe, it, expect } from 'vitest';
-import { MAX_MODEL_CATALOG } from '../src/constants.js';
-import { addFavorite, removeFavorite, isFavorite } from '../src/favorites.js';
+import { MAX_FAVORITES, MAX_MODEL_CATALOG } from '../src/constants.js';
+import {
+  addFavorite,
+  isFavorite,
+  projectFavoriteExposure,
+  removeFavorite,
+} from '../src/favorites.js';
 import type { FavoriteModel } from '../src/types.js';
 
 const fav = (providerId: string, modelId: string): FavoriteModel => ({ providerId, modelId });
@@ -43,11 +48,21 @@ describe('addFavorite', () => {
   });
 
   it('returns cap when the list is full', () => {
-    const list: FavoriteModel[] = Array.from({ length: MAX_MODEL_CATALOG }, (_, i) =>
+    const list: FavoriteModel[] = Array.from({ length: MAX_FAVORITES }, (_, i) =>
       fav('provider', `model-${i}`),
     );
     const result = addFavorite(list, fav('provider', 'model-new'));
     expect(result).toEqual({ ok: false, reason: 'cap' });
+  });
+
+  it('allows curation beyond the Claude-facing exposure cap', () => {
+    const list = Array.from({ length: MAX_MODEL_CATALOG }, (_, index) => (
+      fav('provider', `model-${index}`)
+    ));
+
+    const result = addFavorite(list, fav('provider', 'model-20'));
+
+    expect(result.ok).toBe(true);
   });
 
   it('respects a custom cap argument', () => {
@@ -69,6 +84,48 @@ describe('addFavorite', () => {
     if (result.ok) {
       expect(result.list).toEqual([fav('groq', 'a'), fav('deepseek', 'b'), fav('google', 'c')]);
     }
+  });
+});
+
+describe('projectFavoriteExposure', () => {
+  const favorites = Array.from({ length: 25 }, (_, index) => fav('provider', `model-${index}`));
+
+  it('exposes the first catalog-sized window in persisted order and reports every omission', () => {
+    const result = projectFavoriteExposure(favorites);
+
+    expect(result.exposedFavorites).toEqual(favorites.slice(0, MAX_MODEL_CATALOG));
+    expect(result.capacitySkippedFavorites).toEqual(favorites.slice(MAX_MODEL_CATALOG));
+    expect(result.capacitySkippedFavorites.map(favorite => (
+      `clodex:${favorite.providerId}:${favorite.modelId}`
+    ))).toEqual([
+      'clodex:provider:model-20',
+      'clodex:provider:model-21',
+      'clodex:provider:model-22',
+      'clodex:provider:model-23',
+      'clodex:provider:model-24',
+    ]);
+  });
+
+  it('reserves one catalog slot for a separately exposed starting favorite', () => {
+    const result = projectFavoriteExposure(favorites, {
+      max: 4,
+      reservedFavorite: favorites[1],
+      reservedSlots: 1,
+    });
+
+    expect(result.exposedFavorites).toEqual([favorites[0], favorites[2], favorites[3]]);
+    expect(result.capacitySkippedFavorites).toEqual(favorites.slice(4));
+  });
+
+  it('reserves a starting slot even when the starting model is not saved', () => {
+    const result = projectFavoriteExposure(favorites.slice(0, 5), {
+      max: 3,
+      reservedFavorite: fav('other', 'starting'),
+      reservedSlots: 1,
+    });
+
+    expect(result.exposedFavorites).toEqual(favorites.slice(0, 2));
+    expect(result.capacitySkippedFavorites).toEqual(favorites.slice(2, 5));
   });
 });
 
@@ -101,8 +158,9 @@ describe('removeFavorite', () => {
   });
 });
 
-describe('MAX_MODEL_CATALOG', () => {
-  it('is 20', () => {
+describe('favorite and exposure limits', () => {
+  it('allows curating 100 favorites while exposing at most 20', () => {
+    expect(MAX_FAVORITES).toBe(100);
     expect(MAX_MODEL_CATALOG).toBe(20);
   });
 });

@@ -1,11 +1,12 @@
 import { MAX_MODEL_CATALOG } from '../constants.js';
 import { localModelToRoute } from '../catalog.js';
+import { projectFavoriteExposure } from '../favorites.js';
 import { isSdkMigratedNpm } from '../provider-factory.js';
 import { claudeCodeClientModelId } from '../context-model-id.js';
 import type { ProxyRoute } from '../proxy.js';
 import {
   normalizeModelAliases,
-  type StoredModelAlias,
+  type ModelAliasRejection,
 } from '../model-aliases.js';
 import { formatModelLabel } from '../ui.js';
 import type { FavoriteModel, LocalProvider, LocalProviderModel } from '../types.js';
@@ -33,8 +34,9 @@ export interface HttpProxyRouteResult {
   routes: ProxyRoute[];
   unavailable: FavoriteModel[];
   unsupported: FavoriteModel[];
+  capacitySkippedFavorites: FavoriteModel[];
   aliases: ResolvedHttpProxyAlias[];
-  unavailableAliases: StoredModelAlias[];
+  unavailableAliasRejections: ModelAliasRejection[];
 }
 
 export interface ResolvedHttpProxyAlias {
@@ -52,14 +54,14 @@ export function buildHttpProxyRoutes(
   modelAliases: unknown = undefined,
   max = MAX_MODEL_CATALOG,
 ): HttpProxyRouteResult {
+  const projection = projectFavoriteExposure(favorites, { max });
   const routes: ProxyRoute[] = [];
   const unavailable: FavoriteModel[] = [];
   const unsupported: FavoriteModel[] = [];
   const seen = new Set<string>();
   const routesByFavorite = new Map<string, ProxyRoute>();
 
-  for (const favorite of favorites) {
-    if (routes.length >= max) break;
+  for (const favorite of projection.exposedFavorites) {
     const provider = providers.find(item => item.id === favorite.providerId);
     const model = provider?.models.find(item => item.id === favorite.modelId);
     if (!provider || !model) {
@@ -95,11 +97,29 @@ export function buildHttpProxyRoutes(
 
   const aliases: ResolvedHttpProxyAlias[] = [];
   const normalizedAliases = normalizeModelAliases(modelAliases);
-  const unavailableAliases: StoredModelAlias[] = [...normalizedAliases.rejected];
+  const unavailableAliasRejections: ModelAliasRejection[] = [
+    ...normalizedAliases.rejections,
+  ];
+  const favoriteTargets = new Set(
+    favorites.map(favorite => `${favorite.providerId}:${favorite.modelId}`),
+  );
+  const capacitySkippedTargets = new Set(
+    projection.capacitySkippedFavorites.map(favorite => (
+      `${favorite.providerId}:${favorite.modelId}`
+    )),
+  );
   for (const { alias, sources } of normalizedAliases.accepted) {
-    const route = routesByFavorite.get(`${alias.providerId}:${alias.modelId}`);
+    const target = `${alias.providerId}:${alias.modelId}`;
+    const route = routesByFavorite.get(target);
     if (!route) {
-      unavailableAliases.push(...sources);
+      const reason = capacitySkippedTargets.has(target)
+        ? 'target-not-exposed'
+        : !favoriteTargets.has(target)
+          ? 'target-not-favorite'
+          : 'target-unavailable';
+      unavailableAliasRejections.push(
+        ...sources.map(source => ({ alias: source, reason } as const)),
+      );
       continue;
     }
     const sourceNames = [...new Set(sources.map(source => source.name))];
@@ -115,5 +135,12 @@ export function buildHttpProxyRoutes(
     });
   }
 
-  return { routes, unavailable, unsupported, aliases, unavailableAliases };
+  return {
+    routes,
+    unavailable,
+    unsupported,
+    capacitySkippedFavorites: projection.capacitySkippedFavorites,
+    aliases,
+    unavailableAliasRejections,
+  };
 }

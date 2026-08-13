@@ -3,6 +3,7 @@
 import { provisionProviderCredential, saveProviderCredential } from '../env.js';
 import { credentialInstanceAuthRef } from '../credential-helper.js';
 import { isSdkMigratedNpm } from '../provider-factory.js';
+import { registerTraceSecret } from '../trace-log.js';
 import type { ProviderTemplate } from '../provider-templates.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 import {
@@ -25,6 +26,7 @@ import {
   loadPricingCache,
   pricingPlatformForProvider,
 } from './pricing.js';
+import { isProviderConfiguredForTemplate } from './resolve-template.js';
 import type { RegistryProvider } from './types.js';
 
 export interface AddTemplateResult {
@@ -43,8 +45,8 @@ function existingProviderError(
   replaceExisting: boolean | undefined,
 ): AddTemplateResult | null {
   if (!existing) return null;
-  const removeFirst = `Remove it first with: clodex providers remove ${template.id}`;
-  if (!replaceExisting) {
+  const removeFirst = `Remove it first with: clodex providers remove ${existing.id}`;
+  if (!replaceExisting || existing.id !== template.id) {
     return {
       added: false,
       error: `${template.name} is already configured.`,
@@ -110,7 +112,8 @@ export async function addProviderFromTemplate(
 
   const existingState = await withRegistryWriteLock(() => {
     const registry = loadRegistryStrict();
-    const existing = registry.providers.find(p => p.id === template.id);
+    const existing = registry.providers.find(provider =>
+      isProviderConfiguredForTemplate(provider, template.id));
     const error = existingProviderError(template, existing, opts?.replaceExisting);
     if (error) {
       return {
@@ -120,6 +123,23 @@ export async function addProviderFromTemplate(
     return { authRef: existing?.authRef ?? null, error: null };
   });
   if (existingState.error) return existingState.error;
+
+  // Registered before the first authenticated request rather than inside
+  // fetchTemplateModels, which runs after the probe: nothing leaks today (the
+  // probe logs nothing and its error string is a fixed literal), but the
+  // invariant worth holding is "registered before first use", not "registered
+  // before the first call that happens to log".
+  if (trimmedKey) registerTraceSecret(trimmedKey);
+
+  // The probe destination comes from the template alone — `verifyCredential`
+  // takes no base URL — so `opts.baseUrl` deliberately does not reach it. A
+  // caller-supplied address must never receive a live credential.
+  if (trimmedKey && template.verifyCredential) {
+    const credentialError = await template.verifyCredential(trimmedKey);
+    if (credentialError) {
+      return { added: false, error: credentialError };
+    }
+  }
 
   const fetched = await fetchTemplateModels(template, trimmedKey, opts?.baseUrl);
   if (fetched.error || fetched.models.length === 0) {
@@ -153,7 +173,8 @@ export async function addProviderFromTemplate(
   const result: AddTemplateResult = await withProviderMutationLock(template.id, async () => {
     const currentState = await withRegistryWriteLock(() => {
       const registry = loadRegistryStrict();
-      const existing = registry.providers.find(p => p.id === template.id);
+      const existing = registry.providers.find(provider =>
+        isProviderConfiguredForTemplate(provider, template.id));
       const error = existingProviderError(template, existing, opts?.replaceExisting);
       if (error) {
         return {
@@ -184,7 +205,8 @@ export async function addProviderFromTemplate(
 
       return withRegistryWriteLock(async () => {
         const registry = loadRegistryStrict();
-        const existing = registry.providers.find(p => p.id === template.id);
+        const existing = registry.providers.find(provider =>
+          isProviderConfiguredForTemplate(provider, template.id));
         const existingError = existingProviderError(template, existing, opts?.replaceExisting);
         if (existingError) return existingError;
         if ((existing?.authRef ?? null) !== currentState.existingAuthRef) {

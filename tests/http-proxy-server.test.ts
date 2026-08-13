@@ -946,7 +946,28 @@ describe('selective HTTP proxy', () => {
         displayName: 'Llama 3.3 70B (Groq)',
         sourceNames: ['LLaMa', 'LLAMA'],
       }],
-      reservedModelIds: ['missing-route', 'orbit', 'Orbit', 'ORBIT'],
+      modelAliasRejections: [
+        {
+          alias: { name: 'orbit', providerId: 'test', modelId: 'later-model' },
+          reason: 'target-not-exposed',
+        },
+        {
+          alias: { name: 'Orbit', providerId: 'test', modelId: 'later-model' },
+          reason: 'target-not-exposed',
+        },
+        {
+          alias: { name: 'ORBIT', providerId: 'test', modelId: 'later-model' },
+          reason: 'target-not-exposed',
+        },
+        {
+          alias: { name: 'missing-route', providerId: 'test', modelId: 'missing-model' },
+          reason: 'target-unavailable',
+        },
+        {
+          alias: { name: 'DeFaUlT', providerId: 'test', modelId: 'default-model' },
+          reason: 'reserved-name',
+        },
+      ],
       adapterHandle: {
         port: adapterPort,
         token: 'adapter-local-token',
@@ -1085,13 +1106,47 @@ describe('selective HTTP proxy', () => {
         { model: 'clodex:groq:typo', path: '/v1/messages' },
         { model: 'LLaMa', path: '/v1/messages' },
         { model: 'LLAMA', path: '/v1/messages' },
-        { model: 'orbit', path: '/v1/messages' },
-        { model: 'missing-route', path: '/v1/messages' },
-        { model: 'missing-route[1m]', path: '/v1/messages' },
-        { model: 'missing-route[1M]', path: '/v1/messages' },
-        { model: 'models/missing-route[1m]', path: '/v1/messages' },
+        {
+          model: 'orbit',
+          path: '/v1/messages',
+          expectedReason: 'target is outside the active Claude Code catalog',
+        },
+        {
+          model: 'missing-route',
+          path: '/v1/messages',
+          expectedReason: 'target is unavailable or unsupported',
+        },
+        {
+          model: 'DEFAULT',
+          path: '/v1/messages',
+          expectedReason: 'reserved client name',
+        },
+        {
+          model: 'missing-route[1m]',
+          path: '/v1/messages',
+          expectedReason: 'target is unavailable or unsupported',
+        },
+        {
+          model: 'missing-route[1M]',
+          path: '/v1/messages',
+          expectedReason: 'target is unavailable or unsupported',
+        },
+        {
+          model: 'models/missing-route[1m]',
+          path: '/v1/messages',
+          expectedReason: 'target is unavailable or unsupported',
+        },
         { model: 'models/clodex:test:unavailable-model[1M]', path: '/v1/messages' },
-        { model: 'missing-route', path: '/v1/messages/count_tokens' },
+        {
+          model: 'missing-route',
+          path: '/v1/messages/count_tokens',
+          expectedReason: 'target is unavailable or unsupported',
+        },
+        {
+          model: 'DEFAULT',
+          path: '/v1/messages/count_tokens',
+          expectedReason: 'reserved client name',
+        },
         { model: 'models/clodex:test:unavailable-model[1M]', path: '/v1/messages/count_tokens' },
       ];
       for (const testCase of rejectedCases) {
@@ -1104,6 +1159,8 @@ describe('selective HTTP proxy', () => {
         expect(response, `${testCase.path} ${testCase.model}`).toContain('400 Bad Request');
         expect(response).toContain('invalid_request_error');
         expect(response).toContain('clodex models --list');
+        expect(response).toContain(testCase.model);
+        if (testCase.expectedReason) expect(response).toContain(testCase.expectedReason);
         expect(response).not.toContain('clodex patch');
       }
 
@@ -1836,6 +1893,237 @@ describe('selective HTTP proxy', () => {
     } finally {
       if (previous === undefined) delete process.env['CLODEX_SERVICE_TIER'];
       else process.env['CLODEX_SERVICE_TIER'] = previous;
+    }
+  });
+
+  it.each(['/v1/messages', '/v1/messages/count_tokens'])(
+    'normalizes a duplicated client beta across the adapter hop on %s',
+    async path => {
+      const certificates = ensureHttpProxyCertificates();
+      const adapterHeaders: http.IncomingHttpHeaders[] = [];
+      let anthropicRequests = 0;
+
+      const origin = https.createServer({
+        key: certificates.serverKey,
+        cert: certificates.serverCert,
+      }, async (req, res) => {
+        anthropicRequests += 1;
+        req.resume();
+        await once(req, 'end');
+        res.setHeader('Connection', 'close');
+        res.end('{"unexpected":true}');
+      });
+      const originPort = await listen(origin);
+
+      const adapterServer = http.createServer(async (req, res) => {
+        adapterHeaders.push(req.headers);
+        req.resume();
+        await once(req, 'end');
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Connection': 'close' });
+        res.end('{"input_tokens":1}');
+      });
+      const adapterPort = await listen(adapterServer);
+
+      const proxy = await startHttpProxy({
+        routes: [{
+          aliasId: 'clodex:groq:llama-3.3-70b',
+          realModelId: 'llama-3.3-70b-versatile',
+          displayName: 'Llama 3.3 70B (Groq)',
+          upstreamUrl: '',
+          apiKey: 'provider-key',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/groq',
+          providerId: 'groq',
+        }],
+        adapterHandle: {
+          port: adapterPort,
+          token: 'adapter-local-token',
+          close: () => {
+            adapterServer.closeAllConnections();
+            adapterServer.close();
+          },
+        },
+        anthropicOrigin: `https://127.0.0.1:${originPort}`,
+        anthropicRejectUnauthorized: false,
+      });
+
+      try {
+        const body = JSON.stringify({ model: 'clodex:groq:llama-3.3-70b', messages: [] });
+        const secure = await connectMitm(proxy.port, certificates.caCert);
+        let response = '';
+        secure.on('data', chunk => { response += chunk.toString(); });
+        secure.write([
+          `POST ${path} HTTP/1.1`,
+          'Host: api.anthropic.com',
+          // Client credentials and a duplicated, list-form client beta.
+          'Authorization: Bearer client-oauth-token',
+          'x-api-key: client-api-key',
+          'anthropic-beta: client-alpha , client-beta',
+          'Anthropic-Beta: client-beta,client-gamma',
+          'Content-Type: application/json',
+          `Content-Length: ${Buffer.byteLength(body)}`,
+          'Connection: close',
+          '',
+          '',
+        ].join('\r\n') + body);
+        await once(secure, 'close');
+
+        expect(response).toContain('200 OK');
+        expect(anthropicRequests).toBe(0);
+        expect(adapterHeaders).toHaveLength(1);
+        const forwarded = adapterHeaders[0]!;
+        // Non-authoritative context: one normalized, deduped, stable-order value.
+        expect(forwarded['anthropic-beta']).toBe('client-alpha,client-beta,client-gamma');
+        // The adapter sees only clodex's own loopback credential.
+        expect(forwarded['x-api-key']).toBe('adapter-local-token');
+        expect(forwarded.authorization).toBeUndefined();
+      } finally {
+        proxy.close();
+        origin.closeAllConnections();
+        origin.close();
+      }
+    },
+  );
+
+  it('carries capability betas across the adapter hop in their exact spelling', async () => {
+    // Downstream admission is an EXACT token match, so this hop must not fold
+    // case or drop a duplicate spelling in a way that changes the token itself.
+    const certificates = ensureHttpProxyCertificates();
+    const adapterHeaders: http.IncomingHttpHeaders[] = [];
+
+    const origin = https.createServer({
+      key: certificates.serverKey,
+      cert: certificates.serverCert,
+    }, async (req, res) => {
+      req.resume();
+      await once(req, 'end');
+      res.setHeader('Connection', 'close');
+      res.end('{"unexpected":true}');
+    });
+    const originPort = await listen(origin);
+
+    const adapterServer = http.createServer(async (req, res) => {
+      adapterHeaders.push(req.headers);
+      req.resume();
+      await once(req, 'end');
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Connection': 'close' });
+      res.end('{"input_tokens":1}');
+    });
+    const adapterPort = await listen(adapterServer);
+
+    const proxy = await startHttpProxy({
+      routes: [{
+        aliasId: 'clodex:groq:llama-3.3-70b',
+        realModelId: 'llama-3.3-70b-versatile',
+        displayName: 'Llama 3.3 70B (Groq)',
+        upstreamUrl: '',
+        apiKey: 'provider-key',
+        modelFormat: 'openai',
+        npm: '@ai-sdk/groq',
+        providerId: 'groq',
+      }],
+      adapterHandle: {
+        port: adapterPort,
+        token: 'adapter-local-token',
+        close: () => {
+          adapterServer.closeAllConnections();
+          adapterServer.close();
+        },
+      },
+      anthropicOrigin: `https://127.0.0.1:${originPort}`,
+      anthropicRejectUnauthorized: false,
+    });
+
+    try {
+      const body = JSON.stringify({ model: 'clodex:groq:llama-3.3-70b', messages: [] });
+      const secure = await connectMitm(proxy.port, certificates.caCert);
+      let response = '';
+      secure.on('data', chunk => { response += chunk.toString(); });
+      secure.write([
+        'POST /v1/messages HTTP/1.1',
+        'Host: api.anthropic.com',
+        'anthropic-beta: context-1m-2025-08-07 , advanced-tool-use-2025-11-20',
+        'Anthropic-Beta: context-1m-2025-08-07,tool-search-tool-2025-10-19',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n') + body);
+      await once(secure, 'close');
+
+      expect(response).toContain('200 OK');
+      expect(adapterHeaders).toHaveLength(1);
+      expect(adapterHeaders[0]!['anthropic-beta']).toBe(
+        'context-1m-2025-08-07,advanced-tool-use-2025-11-20,tool-search-tool-2025-10-19',
+      );
+      // Still non-authoritative: the hop adds no credential and no identity.
+      expect(adapterHeaders[0]!['x-api-key']).toBe('adapter-local-token');
+      expect(adapterHeaders[0]!.authorization).toBeUndefined();
+    } finally {
+      proxy.close();
+      origin.closeAllConnections();
+      origin.close();
+    }
+  });
+
+  it('leaves an unmatched route-less native passthrough byte-equivalent', async () => {
+    const certificates = ensureHttpProxyCertificates();
+    let seen: http.IncomingHttpHeaders | undefined;
+    let seenBody = '';
+
+    const origin = https.createServer({
+      key: certificates.serverKey,
+      cert: certificates.serverCert,
+    }, async (req, res) => {
+      seen = req.headers;
+      const chunks: Buffer[] = [];
+      req.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      await once(req, 'end');
+      seenBody = Buffer.concat(chunks).toString();
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Connection': 'close' });
+      res.end('{"type":"message"}');
+    });
+    const originPort = await listen(origin);
+
+    const proxy = await startHttpProxy({
+      routes: [],
+      anthropicOrigin: `https://127.0.0.1:${originPort}`,
+      anthropicRejectUnauthorized: false,
+    });
+
+    try {
+      const body = JSON.stringify({ model: 'claude-sonnet-4-6', messages: [] });
+      const secure = await connectMitm(proxy.port, certificates.caCert);
+      let response = '';
+      secure.on('data', chunk => { response += chunk.toString(); });
+      secure.write([
+        'POST /v1/messages HTTP/1.1',
+        'Host: api.anthropic.com',
+        'Authorization: Bearer native-client-token',
+        'anthropic-beta: client-alpha,client-beta',
+        'User-Agent: claude-cli/9.9.9 (external, cli)',
+        'x-app: cli',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        'Connection: close',
+        '',
+        '',
+      ].join('\r\n') + body);
+      await once(secure, 'close');
+
+      expect(response).toContain('200 OK');
+      // A real native client's own request reaches Anthropic untouched: clodex
+      // owns no route here, so it neither adds nor removes identity or beta.
+      expect(seen!.authorization).toBe('Bearer native-client-token');
+      expect(seen!['anthropic-beta']).toBe('client-alpha,client-beta');
+      expect(seen!['user-agent']).toBe('claude-cli/9.9.9 (external, cli)');
+      expect(seen!['x-app']).toBe('cli');
+      expect(seenBody).toBe(body);
+    } finally {
+      proxy.close();
+      origin.closeAllConnections();
+      origin.close();
     }
   });
 

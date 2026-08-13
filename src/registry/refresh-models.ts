@@ -10,7 +10,10 @@ import { resolveModelSource } from './model-source.js';
 import { validateCustomEndpointUrl } from './url-security.js';
 import {
   effectiveProviderBaseUrl,
+  isRetainedOpenCodeGoProvider,
+  openCodeGoPinnedApiUrl,
   resolveProviderTemplate,
+  retainedOpenCodeGoTemplate,
   syntheticTemplate,
 } from './resolve-template.js';
 import {
@@ -19,6 +22,7 @@ import {
   enrichPricingAsync,
   loadPricingCache,
   pricingPlatformForProvider,
+  providerPreservesModelPricing,
 } from './pricing.js';
 import {
   cachedModelCount,
@@ -38,6 +42,7 @@ import { resolveContextWindow } from '../context-window.js';
 import { getInstalledClaudeVersion } from '../launch.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
 import { isLegacyAnonymousCustomEndpoint } from './materialize.js';
+import { OPENCODE_GO_PROVIDER_NAME } from '../data/opencode-go-models.js';
 
 export interface RefreshProviderResult {
   id: string;
@@ -249,15 +254,53 @@ async function refreshApiListProvider(
   apiKey: string,
 ): Promise<{ models: CachedModel[]; baseUrl?: string; error?: string }> {
   const npm = provider.api.npm ?? '@ai-sdk/openai-compatible';
-  const catalogTemplate = resolveProviderTemplate(provider);
-  const baseUrl = effectiveProviderBaseUrl(provider, catalogTemplate);
+  // Resolve the retained built-in's OWN template first. `resolveProviderTemplate`
+  // reads `templateId` ahead of `id`, so a retained record that names another
+  // template resolves to that stranger's entry — and the entry is what carries
+  // OpenCode's committed allowlist, its bare-array parse flag, and the default
+  // URL the pin below compares against. Resolving it here also keeps a drifted
+  // record from being refused for a base URL its real template does allow.
+  const retained = isRetainedOpenCodeGoProvider(provider);
+  const catalogTemplate = (retained ? retainedOpenCodeGoTemplate() : undefined)
+    ?? resolveProviderTemplate(provider);
+  const pinned = retained ? openCodeGoPinnedApiUrl(npm) : undefined;
+  if (retained && pinned === null) {
+    return {
+      models: [],
+      error: `${OPENCODE_GO_PROVIDER_NAME} does not support the ${npm} SDK package.`,
+    };
+  }
+  const configuredUrl = provider.api.url?.trim();
+  const baseUrl = retained
+    ? configuredUrl || pinned || undefined
+    : effectiveProviderBaseUrl(provider, catalogTemplate);
 
   if (!baseUrl) {
     return { models: [], error: 'Provider has no API base URL configured.' };
   }
 
+  // The retained built-in's destination is decided HERE, before any
+  // npm-specific branch below can put the credential on the wire.
+  //
+  // `fetchTemplateModels` enforces the same pin, but only the
+  // openai-compatible branch reaches it: a record storing
+  // `api.npm: '@ai-sdk/anthropic'` took the branch below and handed the key to
+  // `fetchAnthropicModels` at its stored address first. Ordering the check
+  // ahead of the branch — and ahead of `validateCustomEndpointUrl`, so a forged
+  // address is not even resolved — is what makes the pin unconditional.
+  //
+  // Refuse rather than silently substitute the pinned URL: a caller that
+  // believed it had redirected discovery should find out that it had not.
+  if (retained) {
+    if (baseUrl.replace(/\/$/, '') !== pinned) {
+      return {
+        models: [],
+        error: `${OPENCODE_GO_PROVIDER_NAME} does not support a custom API base URL.`,
+      };
+    }
+  }
+
   let safeBaseUrl = baseUrl;
-  const configuredUrl = provider.api.url?.trim();
   const templateDefault = catalogTemplate?.defaultBaseUrl?.trim();
   if (configuredUrl && configuredUrl !== templateDefault) {
     const urlCheck = await validateCustomEndpointUrl(baseUrl, {
@@ -269,9 +312,19 @@ async function refreshApiListProvider(
     safeBaseUrl = urlCheck.normalizedUrl;
   }
 
-  const template = catalogTemplate ?? syntheticTemplate(provider, safeBaseUrl);
+  const template = catalogTemplate
+    ? (retained ? { ...catalogTemplate, npm } : catalogTemplate)
+    : syntheticTemplate(provider, safeBaseUrl);
 
-  if (npm === '@ai-sdk/anthropic') {
+  // The pin above decides WHERE the key goes; it says nothing about which
+  // routine reads the answer. A retained record storing
+  // `api.npm: '@ai-sdk/anthropic'` at the pinned OpenCode Anthropic address
+  // clears the pin and then falls in here, where `fetchAnthropicModels`
+  // expects an Anthropic `{ data: [...] }` envelope that OpenCode does not
+  // send and applies none of the committed allowlist/metadata overlay. The
+  // retained built-in discovers through its template whatever npm it names;
+  // ordinary Anthropic providers keep this branch unchanged.
+  if (!retained && npm === '@ai-sdk/anthropic') {
     const fetched = await fetchAnthropicModels(safeBaseUrl, apiKey);
     if (fetched.error || fetched.models.length === 0) {
       return { models: [], error: fetched.error ?? 'No models returned.', baseUrl: fetched.baseUrl };
@@ -467,7 +520,7 @@ export async function refreshProviderModels(
   }
 
   try {
-    const previousModelCount = cacheProvider.modelsCache?.models.length ?? 0;
+    const previousModelCount = cachedModelCount(cacheProvider);
     const hadPreviousRefresh = isTemporaryAccountSelection(credentialSnapshot)
       ? cacheProvider.modelsCache !== undefined
       : provider.refreshedAt !== undefined;
@@ -584,7 +637,7 @@ export async function refreshProviderModels(
 
     const pricingCache = loadPricingCache();
     const platform = pricingPlatformForProvider(provider.templateId, provider.id);
-    const enriched = provider.preserveModelPricing
+    const enriched = providerPreservesModelPricing(provider)
       ? models
       : enrichModelsWithPricing(models, buildPricingIndex(pricingCache), platform);
 

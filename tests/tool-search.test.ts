@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+  TOOL_SEARCH_TYPE_PREFIX,
   isToolSearchTool,
   extractReferencedToolNames,
   resolveUpstreamTools,
@@ -27,6 +28,15 @@ describe('isToolSearchTool', () => {
 
   it('detects tool search tools by name', () => {
     expect(isToolSearchTool({ name: 'tool_search_tool_bm25' })).toBe(true);
+  });
+
+  it('exports the wire type prefix the beta policy keys its predicate off', () => {
+    // Single-sourced so the capability-beta request-shape predicate cannot
+    // drift from what this module treats as a tool-search tool.
+    expect(TOOL_SEARCH_TYPE_PREFIX).toBe('tool_search_tool');
+    for (const type of ['tool_search_tool_regex_20251119', 'tool_search_tool_bm25_20251119']) {
+      expect(type.startsWith(TOOL_SEARCH_TYPE_PREFIX)).toBe(true);
+    }
   });
 });
 

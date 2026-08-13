@@ -3,8 +3,12 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fetchTemplateModels } from '../src/registry/fetch-template-models.js';
-import type { ProviderTemplate } from '../src/provider-templates.js';
+import { getTemplateById, type ProviderTemplate } from '../src/provider-templates.js';
 import { clearTraceSecrets, getProviderDebugLogPath } from '../src/trace-log.js';
+import {
+  OPENCODE_GO_ANTHROPIC_BASE_URL,
+  OPENCODE_GO_COMPLETIONS_BASE_URL,
+} from '../src/data/opencode-go-models.js';
 
 function template(partial: Partial<ProviderTemplate> & Pick<ProviderTemplate, 'id' | 'name' | 'npm'>): ProviderTemplate {
   return {
@@ -198,6 +202,40 @@ describe('fetchTemplateModels', () => {
     );
   });
 
+  it('accepts a bare model array for OpenCode Go discovery and applies its allowlist', async () => {
+    const openCodeGo = getTemplateById('opencode-go')!;
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([
+        { id: 'qwen3.8-max', name: 'live qwen' },
+        { id: 'deepseek-v4-pro', name: 'live deepseek' },
+        { id: 'grok-4.5', name: 'responses only' },
+      ]),
+    } as Response);
+
+    const result = await fetchTemplateModels(openCodeGo, 'go-key');
+
+    expect(result.error).toBeUndefined();
+    expect(result.models.map(model => model.id)).toEqual(['qwen3.8-max', 'deepseek-v4-pro']);
+    expect(result.models[0]).toMatchObject({
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      apiUrl: 'https://opencode.ai/zen/go',
+    });
+    expect(result.models[1]).toMatchObject({
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      apiUrl: 'https://opencode.ai/zen/go/v1',
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      'https://opencode.ai/zen/go/v1/models',
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: 'Bearer go-key' }),
+      }),
+    );
+  });
+
   it('overlays curated mixed-protocol metadata and allowlists live models', async () => {
     const mixedTemplate = template({
       id: 'mixed-provider',
@@ -301,5 +339,154 @@ describe('fetchTemplateModels', () => {
       freeStatus: 'verified_free',
       cost: { input: 0, output: 0 },
     });
+  });
+});
+
+describe('fetchTemplateModels fixed OpenCode Go destination', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    clearTraceSecrets();
+    vi.unstubAllGlobals();
+  });
+
+  const openCodeGo = () => getTemplateById('opencode-go')!;
+
+  it('refuses a caller-supplied base URL instead of sending the key to it', async () => {
+    // Discovery carries a live credential. `verifyCredential` is already
+    // structurally unredirectable (it takes no URL), but discovery took one,
+    // so the same credential still had a caller-reachable destination. The
+    // refusal has to happen before the request: an "ignored" override would
+    // leave a caller believing it had redirected discovery.
+    const result = await fetchTemplateModels(openCodeGo(), 'go-key', 'https://attacker.example/v1');
+
+    expect(result.models).toEqual([]);
+    expect(result.error).toContain('does not support a custom API base URL');
+    expect(fetch).not.toHaveBeenCalled();
+    // Nothing about the key or the address was put on the wire.
+    expect(JSON.stringify(vi.mocked(fetch).mock.calls)).not.toContain('attacker.example');
+  });
+
+  it('refuses a persisted base URL that drifted off the template literal', async () => {
+    // This is the reachable shape: `refreshApiListProvider` passes the
+    // provider record's stored `api.url` back in as the override, so a
+    // registry edited or imported with a different address would re-send the
+    // credential there on every refresh.
+    const result = await fetchTemplateModels(openCodeGo(), 'go-key', 'https://opencode.ai.evil.example/v1');
+
+    expect(result.error).toContain('does not support a custom API base URL');
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('still discovers against the template literal, with or without a matching override', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([{ id: 'deepseek-v4-pro', name: 'live deepseek' }]),
+    } as Response);
+
+    for (const override of [undefined, 'https://opencode.ai/zen/go/v1', 'https://opencode.ai/zen/go/v1/']) {
+      vi.mocked(fetch).mockClear();
+      const result = await fetchTemplateModels(openCodeGo(), 'go-key', override);
+      expect(result.error, `override=${override}`).toBeUndefined();
+      expect(result.models.map(m => m.id)).toEqual(['deepseek-v4-pro']);
+      expect(fetch).toHaveBeenCalledWith(
+        'https://opencode.ai/zen/go/v1/models',
+        expect.objectContaining({
+          headers: expect.objectContaining({ Authorization: 'Bearer go-key' }),
+        }),
+      );
+    }
+  });
+
+  it('discovers and overlays the allowlist at the approved Anthropic destination', async () => {
+    const anthropicOpenCodeGo = {
+      ...openCodeGo(),
+      npm: '@ai-sdk/anthropic',
+    };
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([
+        { id: 'qwen3.8-max', name: 'live qwen' },
+        { id: 'grok-4.5', name: 'responses only' },
+      ]),
+    } as Response);
+
+    const result = await fetchTemplateModels(
+      anthropicOpenCodeGo,
+      'go-key',
+      OPENCODE_GO_ANTHROPIC_BASE_URL,
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.models.map(model => model.id)).toEqual(['qwen3.8-max']);
+    expect(result.models[0]).toMatchObject({
+      name: 'Qwen3.8 Max',
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      apiUrl: OPENCODE_GO_ANTHROPIC_BASE_URL,
+    });
+    expect(fetch).toHaveBeenCalledWith(
+      `${OPENCODE_GO_ANTHROPIC_BASE_URL}/models`,
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          'x-api-key': 'go-key',
+          'anthropic-version': '2023-06-01',
+        }),
+      }),
+    );
+  });
+
+  it.each([
+    ['@ai-sdk/openai-compatible', OPENCODE_GO_ANTHROPIC_BASE_URL],
+    ['@ai-sdk/anthropic', OPENCODE_GO_COMPLETIONS_BASE_URL],
+    ['@ai-sdk/openai', OPENCODE_GO_COMPLETIONS_BASE_URL],
+    ['', OPENCODE_GO_COMPLETIONS_BASE_URL],
+  ])('refuses the OpenCode package/destination mismatch %s at %s before fetch', async (npm, url) => {
+    const result = await fetchTemplateModels({ ...openCodeGo(), npm }, 'go-key', url);
+
+    expect(result.models).toEqual([]);
+    expect(result.error).toMatch(/does not support/i);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('leaves every other template free to use a caller-supplied base URL', async () => {
+    // Conservation: the fixed destination is a property of this one named
+    // template, not a new rule for template providers in general.
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ data: [{ id: 'model-a', name: 'Model A' }] }),
+    } as Response);
+
+    const result = await fetchTemplateModels(openaiCompatTemplate, 'sk-test', 'https://self-hosted.example/v1');
+
+    expect(result.error).toBeUndefined();
+    expect(result.baseUrl).toBe('https://self-hosted.example/v1');
+    expect(fetch).toHaveBeenCalledWith(
+      'https://self-hosted.example/v1/models',
+      expect.anything(),
+    );
+  });
+
+  it('accepts a bare model array only for the named OpenCode Go template', async () => {
+    // The bare-array body is OpenCode Go's documented `/models` shape. Every
+    // other template keeps the object-envelope contract it was reviewed
+    // against, so an upstream that starts answering with a bare array of
+    // something else still reports "no models" rather than parsing rows
+    // nobody checked.
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([{ id: 'model-a', name: 'Model A' }]),
+    } as Response);
+
+    const result = await fetchTemplateModels(openaiCompatTemplate, 'sk-test');
+
+    expect(result.models).toEqual([]);
+    expect(result.error).toBe('Connected but no models were returned.');
   });
 });

@@ -8,7 +8,7 @@ import { findClaudeBinary, launchClaude } from './launch.js';
 import { detectConflicts, buildChildEnv, buildHttpProxyChildEnv } from './env.js';
 import { claudeCodeClientModelId } from './context-model-id.js';
 import { needsFirstRunSetup, runFirstRunWizard } from './first-run.js';
-import { MAX_MODEL_CATALOG } from './constants.js';
+import { MAX_FAVORITES, MAX_MODEL_CATALOG } from './constants.js';
 import { startProxy, startProxyCatalog } from './proxy.js';
 import type { ProxyHandle, ProxyModelAlias, ProxyRoute } from './proxy.js';
 import {
@@ -22,9 +22,11 @@ import { pickLocalModel } from './prompts.js';
 import { fetchProviderCatalog, providersForPicker, resolveLocalProviderApiKey } from './provider-catalog.js';
 import { VERSION } from './constants.js';
 import type { ParsedArgs, FavoriteModel, LocalProvider, LocalProviderModel } from './types.js';
-import { addFavorite, removeFavorite, isFavorite } from './favorites.js';
+import { addFavorite, isFavorite, projectFavoriteExposure, removeFavorite } from './favorites.js';
+import { httpProxyModelId } from './http-proxy/routes.js';
 import {
   canonicalModelAliasName,
+  describeModelAliasRejection,
   modelAliasMatchesName,
   modelAliasMatchesStoredName,
   modelAliasTarget,
@@ -344,7 +346,7 @@ export function parseArgs(args: string[]): ParsedArgs {
 
 export function rootHelpText(): string {
   return `${pc.bold('clodex')} v${VERSION}
-Bridge Claude Code to OpenAI models — OpenAI API key or ChatGPT/Codex-plan OAuth.
+Bridge Claude Code to OpenAI and OpenCode Go models.
 
 ${pc.bold('Usage:')}
   clodex claude [options] [claude-flags]
@@ -361,18 +363,18 @@ ${pc.bold('Root options:')}
   -v, --version    Show version
 
 ${pc.bold('Commands:')}
-  claude      Launch Claude Code bridged to OpenAI models
+  claude      Launch Claude Code bridged to configured model providers
   server      Run a foreground gateway (endpoint or proxy mode)
   patch       Patch the Claude Code binary so clodex models are first-class
-  models      Manage favorite models and aliases (max ${MAX_MODEL_CATALOG})
+  models      Curate favorite models (max ${MAX_FAVORITES}; up to ${MAX_MODEL_CATALOG} exposed) and aliases
   favorites   Alias for models
-  providers   Add or sign in to your OpenAI providers
+  providers   Add or sign in to model providers
 
 ${pc.bold('Bridge modes (claude and server):')}
   --endpoint   Local Anthropic-format gateway; Claude Code launches with
                ANTHROPIC_BASE_URL pointed at it
   --proxy      Selective MITM of api.anthropic.com; Claude Code keeps its
-               normal Anthropic auth, clodex: models route to OpenAI
+               normal Anthropic auth, clodex: models route to configured providers
                (default when nothing is saved)
   --save-mode  Persist the mode given by --endpoint/--proxy as that
                command's default. Without --save-mode a mode flag applies
@@ -390,7 +392,7 @@ ${pc.bold('Examples:')}
 
 export function claudeHelpText(): string {
   return `${pc.bold('clodex claude')} v${VERSION}
-Launch Claude Code bridged to OpenAI models.
+Launch Claude Code bridged to configured model providers.
 
 ${pc.bold('Usage:')}
   clodex claude [options] [claude-flags]
@@ -400,7 +402,7 @@ ${pc.bold('Usage:')}
 ${pc.bold('Options:')}
   --endpoint   Endpoint bridge mode for this run: local gateway + ANTHROPIC_BASE_URL
   --proxy      Proxy bridge mode for this run: keep Claude Code's Anthropic auth;
-               route clodex: models to OpenAI (default when nothing is saved)
+               route clodex: models to configured providers (default when nothing is saved)
   --save-mode  With --endpoint/--proxy: save that mode as the claude default
   --dry-run    Run the wizard but show a preview instead of launching Claude Code
   --trace      Write debug logs to ~/.clodex/logs/ and show errors on exit
@@ -414,16 +416,17 @@ ${pc.bold('Options:')}
 ${pc.bold('Providers:')}
   openai         OpenAI API key (platform.openai.com)
   openai-oauth   ChatGPT/Codex plan OAuth — sign in with clodex providers auth openai
+  opencode-go    OpenCode Go API key — add with clodex providers add
 
 ${pc.bold('Model switching:')}
-  Run clodex models to save favorites (max ${MAX_MODEL_CATALOG}).
+  Run clodex models to save favorites (max ${MAX_FAVORITES}; up to ${MAX_MODEL_CATALOG} exposed).
   When favorites exist, endpoint mode starts a multi-route proxy and Claude
   Code /model lists your starting model plus favorites for live switching.
   With no favorites, launch uses a single model.
 
 ${pc.bold('Proxy mode:')}
   clodex claude --proxy leaves ANTHROPIC_BASE_URL unset and launches
-  Claude Code with its normal Anthropic login. Favorite OpenAI models are
+  Claude Code with its normal Anthropic login. Favorite clodex models are
   available by typing /model clodex:<provider-id>:<model-id>.
   Save short names with clodex models --alias, and run --list to print them.
   Run clodex patch to make those names first-class inside Claude Code.
@@ -447,10 +450,10 @@ ${pc.bold('Examples:')}
 
 export function serverHelpText(): string {
   return `${pc.bold('clodex server')} v${VERSION}
-Run a foreground gateway bridging Anthropic-format requests to OpenAI models.
+Run a foreground gateway bridging Anthropic-format requests to configured providers.
 Two modes: ${pc.bold('endpoint')} (an Anthropic-format HTTP gateway you point clients at) and
 ${pc.bold('proxy')} (a selective api.anthropic.com MITM proxy; clients keep their Anthropic
-auth while clodex: models route to OpenAI).
+auth while clodex: models route to configured providers).
 
 ${pc.bold('Usage:')}
   clodex server [--endpoint | --proxy] [options]
@@ -538,7 +541,9 @@ ${pc.bold('Usage:')}
 ${pc.bold('Behavior:')}
   Opens an interactive manager to add or remove favorites.
   Search all providers at once (paginated results) or browse one provider at a time.
-  Favorites are saved to ~/.clodex/config.json (max ${MAX_MODEL_CATALOG}).
+  Favorites are saved to ~/.clodex/config.json (max ${MAX_FAVORITES}).
+  Claude-facing catalogs and patches expose up to the first ${MAX_MODEL_CATALOG} in saved order.
+  In endpoint launch mode, the selected starting model consumes one catalog slot.
   --list prints the exact clodex:<provider-id>:<model-id> names available in
   proxy mode, without opening the interactive manager.
   --alias <name=target> saves a short name for a proxy-mode favorite. The
@@ -595,17 +600,18 @@ function printHelp(text: string): void {
 }
 
 export function reportInactiveCatalogAliases(modelAliases: ProxyModelAlias[]): void {
-  const unavailableAliases = modelAliases.filter(alias => alias.unavailableReason !== undefined);
+  const unavailableAliases = modelAliases.filter(alias => alias.rejectionReason !== undefined);
   if (unavailableAliases.length === 0) return;
-  const warningLines = unavailableAliases.flatMap(alias => (
-    alias.sourceNames?.length
+  const warningLines = unavailableAliases.flatMap(alias => {
+    const reason = describeModelAliasRejection(alias.rejectionReason!);
+    return alias.sourceNames?.length
       ? alias.sourceNames.map(name => (
-          `  ${JSON.stringify(name)} — ${alias.unavailableReason}`
+          `  ${JSON.stringify(name)} — ${reason}`
         ))
       : [
-          `  ${JSON.stringify(alias.savedName ?? alias.name)} — ${alias.unavailableReason}`,
-        ]
-  ));
+          `  ${JSON.stringify(alias.savedName ?? alias.name)} — ${reason}`,
+        ];
+  });
 
   p.log.warn(
     `${warningLines.length} saved model alias${warningLines.length === 1 ? '' : 'es'} inactive. `
@@ -702,6 +708,16 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
     modelAliases.push(parsed);
     savePreferences({ modelAliases });
     p.log.success(`Saved model alias ${parsed.name} → ${modelAliasTarget(parsed)}.`);
+    const exposure = projectFavoriteExposure(prefs.favoriteModels ?? []);
+    const targetExposed = exposure.exposedFavorites.some(
+      favorite => favorite.providerId === parsed.providerId && favorite.modelId === parsed.modelId,
+    );
+    if (!targetExposed) {
+      p.log.warn(
+        `Saved model alias ${JSON.stringify(parsed.name)} — `
+        + `${describeModelAliasRejection('target-not-exposed')}. The alias was saved and preserved.`,
+      );
+    }
     return 0;
   }
   if (opts.unalias !== undefined) {
@@ -738,7 +754,7 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
       return 1;
     }
   }
-  const maxFavorites = MAX_MODEL_CATALOG;
+  const maxFavorites = MAX_FAVORITES;
   const scopeName = 'Favorite Models';
   relayIntro(scopeName);
 
@@ -1279,11 +1295,36 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
       p.log.error('Could not resolve a proxy route for the selected model.');
       return 1;
     }
-    const { routes: catalogRoutes, droppedFavorites } = buildCatalogRoutes(startingRoute, favorites, resolveRoute);
+    const {
+      routes: catalogRoutes,
+      droppedFavorites,
+      capacitySkippedFavorites,
+    } = buildCatalogRoutes(
+      startingRoute,
+      favorites,
+      resolveRoute,
+      MAX_MODEL_CATALOG,
+      { providerId: activeProvider.id, modelId: selectedModel.id },
+    );
     if (droppedFavorites.length > 0) {
       p.log.warn(
         `Skipping ${droppedFavorites.length} favorite${droppedFavorites.length === 1 ? '' : 's'} `
-        + 'that are no longer available in /model',
+        + 'that are no longer available in /model. Saved entries were preserved:\n'
+        + droppedFavorites
+          .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+          .join('\n'),
+      );
+    }
+    if (capacitySkippedFavorites.length > 0) {
+      p.log.warn(
+        `${capacitySkippedFavorites.length} saved favorite${capacitySkippedFavorites.length === 1 ? '' : 's'} `
+        + `not exposed because clodex limits this /model catalog to ${MAX_MODEL_CATALOG} models. `
+        + 'Capacity is selected from saved order before availability and support checks; unavailable '
+        + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+        + 'entries reclaims positions. Skipped entries were preserved:\n'
+        + capacitySkippedFavorites
+          .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+          .join('\n'),
       );
     }
 
@@ -1310,6 +1351,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
         prefs.modelAliases,
         resolveRoute,
         catalogRoutes,
+        { favorites, capacitySkippedFavorites },
       ),
       selectedModel.contextWindow,
       trace,
@@ -1319,10 +1361,24 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
 
   // ── Single-model path ──
 
+  const anonymousProvider = activeProvider.authType === 'none';
+  const isOAuthAnthropic = selectedModel.modelFormat === 'anthropic' && activeProvider.authType === 'oauth';
+  const requiresLocalCountEstimate = selectedModel.modelFormat === 'anthropic'
+    && selectedModel.compatibility?.supportsCountTokens === false;
+  // Configured provider headers — including a configured Anthropic-Beta — are
+  // only applied at clodex's own routed boundary. Launching direct points the
+  // child straight at the provider base URL, where clodex never sees the
+  // request and the configured contract would silently never be honoured.
+  const hasConfiguredHeaders = Object.keys(activeProvider.headers ?? {}).length > 0;
+  const usesAnthropicProxy = selectedModel.modelFormat === 'anthropic' &&
+    (isOAuthAnthropic || anonymousProvider || requiresLocalCountEstimate || hasConfiguredHeaders);
+
   if (dryRun) {
-    const formatDesc = selectedModel.modelFormat === 'anthropic'
-      ? 'direct passthrough'
-      : 'via SDK adapter proxy';
+    const formatDesc = usesAnthropicProxy
+      ? 'via local passthrough proxy'
+      : selectedModel.modelFormat === 'anthropic'
+        ? 'direct passthrough'
+        : 'via SDK adapter proxy';
     const endpoint = selectedModel.modelFormat === 'anthropic'
       ? (selectedModel.baseUrl ?? '(unknown)')
       : (selectedModel.npm ?? 'SDK');
@@ -1341,7 +1397,6 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
   }
 
   const launchApiKey = await resolveLocalProviderApiKey(activeProvider);
-  const anonymousProvider = activeProvider.authType === 'none';
   if (!anonymousProvider && !launchApiKey?.trim()) {
     p.log.error(
       `No credential found for ${activeProvider.name}. Add a key or sign in with clodex providers.`,
@@ -1351,10 +1406,6 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
 
   let proxyHandle: ProxyHandle | null = null;
   let childEnv: NodeJS.ProcessEnv;
-
-  const isOAuthAnthropic = selectedModel.modelFormat === 'anthropic' && activeProvider.authType === 'oauth';
-  const usesAnthropicProxy = selectedModel.modelFormat === 'anthropic' &&
-    (isOAuthAnthropic || anonymousProvider);
 
   // Static provider headers remain part of the proxied endpoint contract,
   // including OAuth routes. Anonymous dispatch filters credential-bearing
@@ -1374,6 +1425,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
           oauthAccountId: activeProvider.oauthAccountId,
           providerData: activeProvider.providerData,
           modelFormat: 'anthropic',
+          compatibility: selectedModel.compatibility,
           headers: activeProvider.headers,
         },
         launchApiKey ?? '',

@@ -13,6 +13,11 @@ import {
 } from './context-model-id.js';
 import { routeUnavailableMessage } from './route-unavailable.js';
 import {
+  describeModelAliasRejection,
+  modelAliasLookupKey,
+  type ModelAliasRejectionReason,
+} from './model-aliases.js';
+import {
   getProxyDebugLogPath,
   INFERENCE_PROGRESS_INTERVAL_MS,
   redactTraceLine,
@@ -27,11 +32,10 @@ import {
   UpstreamUnreachableError,
 } from './upstream-forward.js';
 import {
-  CLAUDE_CODE_CLI_VERSION,
-  injectClaudeCodeBillingSystemLine,
-  injectClaudeIdentity,
-  selectBetaFlags,
-} from './oauth/claude-identity.js';
+  normalizeBetaTokens,
+  resolveCapabilityBetaTokens,
+  resolveNativeIdentitySuppression,
+} from './anthropic-beta-policy.js';
 import { createLanguageModel, isSdkMigratedNpm, maxToolsForNpm } from './provider-factory.js';
 import { randomUUID } from 'node:crypto';
 import {
@@ -282,19 +286,15 @@ export interface ProxyModelAlias {
   /** All exact saved spellings represented by this canonical alias. Never routed. */
   sourceNames?: string[];
   routeId?: string;
-  unavailableReason?: string;
+  rejectionReason?: ModelAliasRejectionReason;
 }
 
-function configuredAliasLookupNames(alias: ProxyModelAlias): string[] {
-  const sourceNames = [
+function configuredAliasLookupKeys(alias: ProxyModelAlias): string[] {
+  return [...new Set([
     alias.name,
     ...(alias.savedName === undefined ? [] : [alias.savedName]),
     ...(alias.sourceNames ?? []),
-  ];
-  return [...new Set(sourceNames.flatMap(name => {
-    const trimmed = name.trim();
-    return trimmed === name ? [name] : [name, trimmed];
-  }))].map(normalizeRouteLookupId);
+  ].map(name => modelAliasLookupKey(normalizeRouteLookupId(name))))];
 }
 
 /** Multi-model proxy: routes each request by body.model to the correct upstream. */
@@ -316,17 +316,17 @@ export async function startProxyCatalog(
 
   const byAlias = new Map(routes.map(r => [normalizeRouteLookupId(r.aliasId), r]));
   const configuredAliasNames = new Set(
-    (modelAliases ?? []).flatMap(configuredAliasLookupNames),
+    (modelAliases ?? []).flatMap(configuredAliasLookupKeys),
   );
   const unavailableAliasReasons = new Map(
     (modelAliases ?? [])
-      .filter(alias => alias.unavailableReason !== undefined)
-      .flatMap(alias => configuredAliasLookupNames(alias).map(name => (
-        [name, alias.unavailableReason!] as const
+      .filter(alias => alias.rejectionReason !== undefined)
+      .flatMap(alias => configuredAliasLookupKeys(alias).map(name => (
+        [name, describeModelAliasRejection(alias.rejectionReason!)] as const
       ))),
   );
   for (const alias of modelAliases ?? []) {
-    if (alias.routeId === undefined || alias.unavailableReason !== undefined) continue;
+    if (alias.routeId === undefined || alias.rejectionReason !== undefined) continue;
     const route = lookupRoute(byAlias, alias.routeId);
     const aliasId = normalizeRouteLookupId(alias.name);
     if (route && !byAlias.has(aliasId)) byAlias.set(aliasId, route);
@@ -417,10 +417,19 @@ export async function startProxyCatalog(
       const resolvedRoute = typeof originalModel === 'string'
         ? lookupRoute(byAlias, originalModel)
         : undefined;
-      const configuredModelUnavailable = typeof originalModel === 'string'
+      const originalModelLookupId = typeof originalModel === 'string'
+        ? normalizeRouteLookupId(originalModel)
+        : undefined;
+      const originalAliasLookupKey = originalModelLookupId === undefined
+        ? undefined
+        : modelAliasLookupKey(originalModelLookupId);
+      const configuredModelUnavailable = originalModelLookupId !== undefined
         && (
-          normalizeRouteLookupId(originalModel).startsWith('clodex:')
-          || configuredAliasNames.has(normalizeRouteLookupId(originalModel))
+          originalModelLookupId.startsWith('clodex:')
+          || (
+            originalAliasLookupKey !== undefined
+            && configuredAliasNames.has(originalAliasLookupKey)
+          )
         );
       if (!resolvedRoute && configuredModelUnavailable) {
         anthropicError(
@@ -428,13 +437,36 @@ export async function startProxyCatalog(
           400,
           routeUnavailableMessage(
             originalModel,
-            unavailableAliasReasons.get(normalizeRouteLookupId(originalModel)),
+            originalAliasLookupKey === undefined
+              ? undefined
+              : unavailableAliasReasons.get(originalAliasLookupKey),
           ),
         );
         return;
       }
       const route = resolvedRoute ?? defaultRoute;
-      if (messagesEndpoint === 'count_tokens' && route.modelFormat !== 'anthropic') {
+      // The identity a translated response reports. A request that named a
+      // route we honoured keeps its public id — patched Claude Code preflights
+      // with the request alias and resolves context windows from the response
+      // `model`, so rewriting it there would break auto-compaction.
+      // On a default-route fallback, report the answering/default model rather
+      // than the unresolved requested id. Built-in Anthropic-format fallback is
+      // routine in this PR, so the translated path must make that identity explicit.
+      const responseModelId = resolvedRoute && typeof originalModel === 'string'
+        ? originalModel
+        : route.realModelId;
+      // Anthropic-format is not the same question as "implements
+      // count_tokens". Before third-party anthropic-format routes existed the
+      // local path was the only one ever taken; now a route whose upstream
+      // documents no token-counting endpoint would forward the count and
+      // answer Claude Code's token accounting with a 404. Only an explicit
+      // `false` diverts — an unset capability keeps forwarding, so a custom
+      // Anthropic-compatible endpoint that does implement it is unaffected.
+      if (
+        messagesEndpoint === 'count_tokens'
+        && (route.modelFormat !== 'anthropic'
+          || route.compatibility?.supportsCountTokens === false)
+      ) {
         const inputTokens = estimateAnthropicInputTokens(anthropicBody);
         plog(() => `token-count: local estimate model=${originalModel} input_tokens=${inputTokens}`);
         res.setHeader('x-relay-token-count-source', 'local-estimate');
@@ -476,17 +508,32 @@ export async function startProxyCatalog(
           return;
         }
 
-        const betaHeaderRaw = req.headers['anthropic-beta'];
-        const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
         const forwardBody = { ...anthropicBody, model: route.realModelId };
         const targetUrl = `${upstreamUrl}/v1/messages/count_tokens`;
-        const isOAuth = routeAuthType === 'oauth';
+        // The client beta arrives as non-authoritative context (possibly
+        // duplicated across the internal adapter hop); the relay recomputes the
+        // outbound set from the configured headers plus whatever this exact
+        // count_tokens request earns, and drops everything else.
+        const clientBeta = normalizeBetaTokens(req.headers['anthropic-beta']);
+        const suppression = resolveNativeIdentitySuppression(upstreamUrl);
+        const capability = {
+          clientBeta,
+          requestedModelId: typeof originalModel === 'string' ? originalModel : undefined,
+          advertisedModelId: route.aliasId,
+          advertisedContextWindow: route.contextWindow,
+        };
+        plog(() =>
+          `anthropic token-count: model=${route.realModelId}, auth=${routeAuthType}, `
+          + `native-identity=suppressed(${suppression.reason}), `
+          + `client-beta=${clientBeta.length}, `
+          + `capability-beta=${resolveCapabilityBetaTokens({ ...capability, url: targetUrl, body: forwardBody }).join('|') || 'none'}`,
+        );
         try {
           await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, false, {
-            inboundBeta,
             authType: routeAuthType,
             log: message => plog(message),
             extraHeaders: route.headers,
+            capability,
             refreshToken: route.refreshToken,
             onTokenRefreshed: refreshed => { route.apiKey = refreshed; },
             signal: clientAbort.signal,
@@ -509,42 +556,49 @@ export async function startProxyCatalog(
       // Forward raw Anthropic body (with real model id) directly to the upstream.
       // No translation needed — the upstream speaks Anthropic natively.
       if (route.modelFormat === 'anthropic') {
-        const betaHeaderRaw = req.headers['anthropic-beta'];
-        const inboundBeta = Array.isArray(betaHeaderRaw) ? betaHeaderRaw.join(',') : betaHeaderRaw;
         const forwardBody = { ...anthropicBody, model: route.realModelId };
         const targetUrl = `${upstreamUrl}/v1/messages`;
-        const isOAuth = routeAuthType === 'oauth';
-
-        let effectiveBeta = inboundBeta;
-        let claudeCodeSessionId: string | undefined;
-        if (isOAuth) {
-          // Identity injection and beta selection for Claude Code OAuth.
-          const seed = route.providerId ?? route.realModelId;
-          const identity = injectClaudeIdentity(forwardBody, route.providerData, seed);
-          if (route.providerId === 'claude-code') injectClaudeCodeBillingSystemLine(forwardBody);
-          claudeCodeSessionId = identity.sessionId;
-          effectiveBeta = selectBetaFlags(forwardBody, route.realModelId, inboundBeta);
-          plog(() => `anthropic-oauth: model=${route.realModelId}, beta=${effectiveBeta}`);
-          plog(() => `anthropic-oauth headers: user-agent=claude-cli/${CLAUDE_CODE_CLI_VERSION} x-app=cli session-header=${claudeCodeSessionId ? 'set' : 'missing'}`);
-        } else {
-          plog(() => `anthropic-passthrough: model=${route.realModelId}, stream=${clientWantsStream}`);
-        }
+        // The request body is forwarded as the client wrote it: no metadata
+        // user identity and no billing system line. Both asserted a native
+        // Claude lineage that no supported clodex producer can establish, and
+        // the route's provider id or auth type is a label, not proof of one.
+        const clientBeta = normalizeBetaTokens(req.headers['anthropic-beta']);
+        const suppression = resolveNativeIdentitySuppression(upstreamUrl);
+        const capability = {
+          clientBeta,
+          requestedModelId: typeof originalModel === 'string' ? originalModel : undefined,
+          advertisedModelId: route.aliasId,
+          advertisedContextWindow: route.contextWindow,
+        };
+        plog(() =>
+          `anthropic-passthrough: model=${route.realModelId}, stream=${clientWantsStream}, `
+          + `auth=${routeAuthType}, native-identity=suppressed(${suppression.reason}), `
+          + `client-beta=${clientBeta.length}, `
+          + `capability-beta=${resolveCapabilityBetaTokens({ ...capability, url: targetUrl, body: forwardBody }).join('|') || 'none'}`,
+        );
 
         try {
           await relayAnthropicMessages(res, targetUrl, forwardBody, apiKey, clientWantsStream, {
-            inboundBeta: effectiveBeta,
             authType: routeAuthType,
             log: message => plog(message),
-            claudeCodeSessionId,
             extraHeaders: route.headers,
+            capability,
             refreshToken: route.refreshToken,
             onTokenRefreshed: refreshed => { route.apiKey = refreshed; },
             signal: clientAbort.signal,
             // A route selected through a clodex: id or short alias must echo the
             // exact requested id back, or patched Claude Code misses the alias
             // context-window key and can skip auto-compaction.
+            //
+            // Only when the alias actually resolved. On the default-route
+            // fallback the requested id names no route we honoured, so echoing
+            // it would report the request's identity as the answering model —
+            // the client would believe it reached a model it never reached, and
+            // would key its context window off that phantom id.
             responseModelOverride:
-              typeof originalModel === 'string' && originalModel !== route.realModelId
+              resolvedRoute
+                && typeof originalModel === 'string'
+                && originalModel !== route.realModelId
                 ? originalModel
                 : undefined,
             onUpstreamError: inferenceLogPath
@@ -662,7 +716,7 @@ export async function startProxyCatalog(
                 () => streamAnthropicResponse(
                   model,
                   params,
-                  originalModel,
+                  responseModelId,
                   writeStreamChunk,
                   plog,
                   {
@@ -690,7 +744,7 @@ export async function startProxyCatalog(
               () => generateAnthropicResponse(
                 model,
                 params,
-                originalModel,
+                responseModelId,
                 {
                   forceStream: openAiOAuth,
                   abortSignal: clientAbort.signal,
