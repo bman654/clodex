@@ -4,7 +4,8 @@
 // The bundle is compressed inside the native binary, so raw byte greps do not work — this is the
 // only way to read what the client actually does. See .claude/docs/claude-code-internals.md.
 //
-// Must run from inside this repo so `tweakcc` resolves from node_modules.
+// Must run from inside this repo so `tweakcc` resolves from node_modules. Needs Node >= 22.18
+// (or `--experimental-strip-types`) for the .ts import below; .nvmrc pins 24.
 //
 //   node scripts/extract-cc-bundles.mjs [outDir]
 //
@@ -16,9 +17,19 @@
 // harnesses will find them.
 
 import { tryDetectInstallation, readContent } from 'tweakcc';
-import { readdirSync, writeFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
+import {
+  readdirSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  statSync,
+  copyFileSync,
+  rmSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
+import { inspectEntryModule, shimEntryModuleName } from '../src/bun-entry-module.ts';
 
 const args = process.argv.slice(2);
 if (args.includes('-h') || args.includes('--help')) {
@@ -85,8 +96,26 @@ for (const f of files) {
     }
     console.log(`re-extracting ${f}: cached file is only ${size} bytes`);
   }
+  // Claude Code 2.1.231 renamed the module tweakcc looks for. The rename that makes it
+  // readable again is a write, so it happens on a scratch copy — these backups are the only
+  // pristine bytes on the machine and nothing here may touch them.
+  let readFrom = path.join(srcDir, f);
+  let scratchDir;
   try {
-    const inst = await tryDetectInstallation({ path: path.join(srcDir, f) });
+    const state = inspectEntryModule(readFrom);
+    if (state === 'unparseable') {
+      // Distinguishing this from a name mismatch matters: tweakcc reports the same
+      // "Failed to extract JavaScript" for both, and for the unrelated node-gyp-build fault.
+      console.log(`NOTE ${f} has no readable Bun module list — extraction below is unshimmed`);
+    }
+    if (state === 'needs-shim') {
+      scratchDir = mkdtempSync(path.join(tmpdir(), 'cc-bundle-'));
+      const scratch = path.join(scratchDir, f);
+      copyFileSync(readFrom, scratch);
+      shimEntryModuleName(scratch);
+      readFrom = scratch;
+    }
+    const inst = await tryDetectInstallation({ path: readFrom });
     if (!inst) throw new Error('tweakcc did not recognize the binary');
     const src = await readContent(inst);
     if (!src) throw new Error('readContent returned nothing');
@@ -103,6 +132,8 @@ for (const f of files) {
   } catch (e) {
     console.log('FAIL', f, String(e).slice(0, 200));
     failed++;
+  } finally {
+    if (scratchDir) rmSync(scratchDir, { recursive: true, force: true });
   }
 }
 

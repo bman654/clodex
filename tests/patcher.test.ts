@@ -1,4 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { tweakccRecognizesModuleName } from '../src/bun-entry-module.js';
+import {
+  buildFakeNativeClaude,
+  MACHO_MAGIC,
+  parseBunBlob,
+  rebuildFakeNativeClaude,
+} from './bun-blob-fixture.js';
+import { execFileSync } from 'node:child_process';
 import * as p from '@clack/prompts';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -54,6 +62,10 @@ const tweakccMocks = vi.hoisted(() => ({
 }));
 
 vi.mock('tweakcc', () => tweakccMocks);
+
+// The entry-module shim re-signs a Mach-O candidate after repacking it; nothing here should ever
+// shell out for real, and asserting on the call is how the resign decision gets discriminated.
+vi.mock('node:child_process', () => ({ execFileSync: vi.fn() }));
 
 describe('buildPatchModelConfig', () => {
   const favorites = [
@@ -948,6 +960,118 @@ describe('applyPatch', () => {
         backupPath: pristinePath,
       });
     } finally {
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * Claude Code 2.1.231 renamed the module tweakcc identifies the bundle by, so extraction and
+   * repacking both stopped finding it. The stand-in below reproduces that: it resolves the module
+   * BY NAME, exactly as tweakcc does, and — also exactly as tweakcc does — repacks the original
+   * contents rather than erroring when no name matches.
+   *
+   * Without this, the shim is unpinned: removing both calls from `applyPatch` leaves every other
+   * patcher test green, because they all hand `readContent` a fixture instead of a binary.
+   */
+  it('patches a binary whose entry module tweakcc cannot name, and publishes the real name', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-entry-module-'));
+    const binaryPath = join(dir, 'claude');
+    const tweakccHome = join(dir, 'tweakcc-home');
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    const RENAMED_ENTRY = '/$bunfs/root/cli';
+    const pristine = Buffer.concat([MACHO_MAGIC, buildFakeNativeClaude('test-version', [
+      { name: RENAMED_ENTRY, contents: CLAUDE_FIXTURE },
+      { name: '/$bunfs/root/image-processor.js', contents: 'native helper' },
+    ])]);
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+    vi.mocked(execFileSync).mockClear();
+    mkdirSync(tweakccHome, { recursive: true });
+    writeFileSync(binaryPath, pristine, { mode: 0o755 });
+    process.env.CLODEX_HOME = dir;
+    process.env.TWEAKCC_CONFIG_DIR = tweakccHome;
+
+    tweakccMocks.tryDetectInstallation.mockReset();
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+    tweakccMocks.tryDetectInstallation.mockImplementation(
+      async ({ path }: { path: string }) => ({ path, version: 'test-version', kind: 'native' }),
+    );
+    tweakccMocks.readContent.mockImplementation(async ({ path }: { path: string }) => {
+      const parsed = parseBunBlob(readFileSync(path));
+      const index = parsed.names.findIndex(tweakccRecognizesModuleName);
+      if (index < 0) {
+        throw new Error(`Failed to extract JavaScript from native installation: ${path}`);
+      }
+      return parsed.contents[index]!;
+    });
+    tweakccMocks.writeContent.mockImplementation(
+      async ({ path }: { path: string }, content: string) => {
+        const parsed = parseBunBlob(readFileSync(path));
+        const target = parsed.names.findIndex(tweakccRecognizesModuleName);
+        writeFileSync(
+          path,
+          Buffer.concat([MACHO_MAGIC, rebuildFakeNativeClaude(
+            readFileSync(path),
+            'test-version',
+            (index, previous) => (index === target ? content : previous),
+          )]),
+          { mode: 0o755 },
+        );
+      },
+    );
+
+    try {
+      const outcome = await applyPatch(
+        binaryPath,
+        'test-version',
+        {
+          config: {
+            'clodex:test:extended': {
+              alias: 'extended',
+              effort: {
+                levels: ['low', 'medium', 'high', 'xhigh', 'max'],
+                defaultLevel: 'high',
+              },
+            },
+          },
+          unknownWindows: [],
+        },
+        'desired-config-hash',
+        { trace: false, manifest: null },
+      );
+
+      expect(outcome.ok).toBe(true);
+      const published = parseBunBlob(readFileSync(binaryPath));
+      // The published binary must carry Claude Code's own module name: its sibling native modules
+      // resolve against the entry module's directory.
+      expect(published.names[published.entryPointId]).toBe(RENAMED_ENTRY);
+      expect(published.names.some(name => name.includes('clodex'))).toBe(false);
+      // ...and the bundle inside it must actually be the patched one, which pins the shim around
+      // the repack: without it the stand-in silently republishes the original contents.
+      expect(published.contents[published.entryPointId]).toContain('/*ccpatch:');
+      expect(published.contents[published.entryPointId]).not.toBe(CLAUDE_FIXTURE);
+      // The untouched sibling survives the round trip.
+      expect(published.contents[1]).toBe('native helper');
+
+      // The pristine backup is the install's own bytes, not a shimmed or re-signed variant.
+      const backup = readFileSync(join(tweakccHome, 'native-binary.backup'));
+      expect(backup.equals(pristine)).toBe(true);
+      const manifest = JSON.parse(readFileSync(getPatchManifestPath(), 'utf8')) as PatchManifest;
+      expect(readFileSync(manifest.backupPath).equals(pristine)).toBe(true);
+      expect(manifest.pristineSha256).toBe(createHash('sha256').update(pristine).digest('hex'));
+
+      // Exactly one re-sign, for the repack. Signing after the read would have replaced Claude
+      // Code's own signature and made the bytes above stop matching the install they came from.
+      const signings = vi.mocked(execFileSync).mock.calls.filter(([command]) => command === 'codesign');
+      expect(signings).toHaveLength(1);
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
       if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
       else process.env.CLODEX_HOME = previousAppHome;
       if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;

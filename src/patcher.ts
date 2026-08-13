@@ -53,6 +53,7 @@ import {
 import { loadRegistry } from './registry/io.js';
 import { findModelsDevModel } from './registry/models-dev.js';
 import { findClaudeBinary, getClaudeVersionForBinary } from './launch.js';
+import { restoreEntryModuleName, shimEntryModuleName } from './bun-entry-module.js';
 import {
   backupDir,
   collectPristineFacts,
@@ -627,8 +628,17 @@ export async function applyPatch(
     const candidatePath = join(candidateDir, basename(binaryPath));
     const seedCandidate = async (from: string): Promise<{ installation: Installation; source: string }> => {
       copyFileSync(from, candidatePath);
+      // Claude Code 2.1.231 renamed the module tweakcc looks for; the shim is a
+      // same-length rename that only has to be in place while tweakcc reads. It
+      // is undone immediately so the seeded candidate stays byte-identical to
+      // `from` — the snapshot path publishes these exact bytes as the pristine
+      // backup under a content address, so re-signing here (which would swap
+      // Claude Code's signature for an ad-hoc one) must not happen.
+      const shim = shimEntryModuleName(candidatePath);
       const installation = await tryDetectInstallation({ path: candidatePath });
-      return { installation, source: await readContent(installation) };
+      const source = await readContent(installation);
+      if (shim) restoreEntryModuleName(candidatePath, shim, { resign: false });
+      return { installation, source };
     };
 
     const facts: PristineFacts = collectPristineFacts({
@@ -697,6 +707,18 @@ export async function applyPatch(
       // Written unconditionally: this branch is only reached when no VALID backup
       // holds these bytes, so an existing file at this content address is a
       // corrupt one being replaced by the bytes its name asserts.
+      //
+      // The candidate has been read from and written to by now (the entry-module shim, at least),
+      // so prove it still IS those bytes rather than assuming it. `plan.pristineSha256` is the
+      // live binary's hash and the name this is about to be filed under, so a mismatch would mean
+      // publishing a backup that lies about its own contents — which only a much later run would
+      // notice, as a backup nobody can trust.
+      if (sha256File(candidatePath) !== plan.pristineSha256) {
+        throw new Error(
+          `the patch candidate no longer matches the pristine bytes it was seeded from; refusing `
+          + `to publish it as ${plan.backupPath}`,
+        );
+      }
       publishBackupFile(candidatePath, plan.backupPath);
     }
 
@@ -767,7 +789,13 @@ export async function applyPatch(
       local = discardLocalPatchOutcome(builtIn.content, local.results);
     }
     results = [...results, ...local.results];
+    // Repacking reads the module list back off the candidate, so the shim has to
+    // be in place again — and undone again before the candidate is published,
+    // because Claude Code's sibling native modules resolve against the entry
+    // module's own path.
+    const writeShim = shimEntryModuleName(candidatePath);
     await writeContent(loaded.installation, local.content);
+    if (writeShim) restoreEntryModuleName(candidatePath, writeShim, { resign: true });
     patchedSize = statSync(candidatePath).size;
     patchedSha256 = sha256File(candidatePath);
     renameSync(candidatePath, binaryPath);

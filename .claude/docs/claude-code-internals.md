@@ -34,6 +34,36 @@ Then **enumerate every branch of the function yourself.** Shipped bugs have come
 gates that happened to be visible, and from grepping one syntactic form of a comparison — grep the
 *value*, then trace every hit.
 
+## The entry module's name is not stable (renamed in 2.1.231)
+
+The bundle lives in a Bun data blob as one module among ~15, and tweakcc finds it **by name**:
+`/claude`, `claude`, `/claude.exe`, `claude.exe`, `/src/entrypoints/cli.js`, `src/entrypoints/cli.js`.
+
+| Version | Entry module |
+| --- | --- |
+| 2.1.224, 2.1.226, 2.1.228 | `/$bunfs/root/src/entrypoints/cli.js` |
+| 2.1.231 | `/$bunfs/root/cli` |
+
+(Those are the versions actually inspected; 2.1.229 and 2.1.230 were never available here.)
+
+2.1.231 matches none of them, so `readContent` threw and every patch failed with
+"Failed to extract JavaScript from native installation" — which reads like the `node-gyp-build`
+packaging fault described in `patcher.md` and is not it. tweakcc 4.3.2, the latest release, still
+carries the old list. `src/bun-entry-module.ts` works around it; see `patcher.md`.
+
+Two things that are easy to assume wrongly about the blob:
+
+- **The entry module also carries ~190 MB of Bun bytecode** (`// @bun @bytecode @bun-cjs`), and
+  repacking preserves it verbatim. It does **not** win over the patched source — a canary injected
+  into the JS prints at startup on a repacked 2.1.231 (verified twice on macOS arm64 — once by
+  hand and once through clodex's own local-patches feature, both printing the canary on stderr
+  ahead of `--version`). Bytecode has been present since at least 2.1.226, so this was never the
+  thing standing between clodex and a working patch.
+- The blob's own 32-byte offsets record where it starts, and it ends with a fixed `---- Bun! ----`
+  trailer, so it can be located by scanning back from EOF with no Mach-O/ELF/PE parsing at all.
+  `entryPointId` names the entry module directly and survives renames; the *name* is only how
+  tweakcc happens to look it up.
+
 ## Unknown-model context-window enforcement (verified 2.1.223+)
 
 Enforcement hangs off a single gate: `KJe(e,t)` returns `Q9(e,t).source !== "auto"`. `Q9` returns

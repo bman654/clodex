@@ -1,10 +1,10 @@
 <!-- Read when changing src/patcher.ts, patch-transforms.ts, patch-backup.ts, local-patches.ts,
-     built-in-patch-proofs.ts, or anything about `clodex patch`. -->
+     built-in-patch-proofs.ts, bun-entry-module.ts, or anything about `clodex patch`. -->
 
 # Patcher
 
 `src/patcher.ts` + `src/patch-transforms.ts` + `src/built-in-patch-proofs.ts` +
-`src/local-patches.ts` + `src/patch-backup.ts`.
+`src/local-patches.ts` + `src/patch-backup.ts` + `src/bun-entry-module.ts`.
 
 `clodex patch` uses tweakcc's programmatic API — an exact-pinned, declared runtime dependency
 (externalized in `tsup.config.ts`; it brings `node-lief` for native repacking and `ink`/`react` for
@@ -12,7 +12,9 @@ its picker, which is why `patcher.ts` loads it via lazy `import()`). **Never `np
 network.** Flow: `tryDetectInstallation({ path })` → `readContent` → `applyClodexPatches(source,
 config)` (in-process pure function applying built-in PATCH 1–10 sites) → optional
 `applyLocalPatches` transaction with built-in postcondition verification → `writeContent` (repacks
-the native binary). Both layers return per-site OK/SKIP/FAIL results shown by `--trace`.
+the native binary). Both layers return per-site OK/SKIP/FAIL results shown by `--trace`. Since
+2.1.231, the reads and the repack are each wrapped in the entry-module shim below, without which
+tweakcc cannot find the bundle at all.
 
 tweakcc ships no `.d.ts` despite its `types` field — `src/tweakcc.d.ts` declares the verified API
 surface; re-verify when bumping the pin. `node-gyp-build` is a deliberate direct dependency even
@@ -20,7 +22,9 @@ though no clodex source imports it: a node-lief release demoted it to a devDepen
 `require`-ing it at runtime (reported against 1.3.1; the lockfile currently resolves 1.3.0), so
 fresh installs resolved a node-lief throwing
 `Cannot find module 'node-gyp-build'` — which tweakcc's lazy loader swallows into a null and clodex
-surfaces as the misleading "Failed to extract JavaScript from native installation". Declaring it
+surfaces as the misleading "Failed to extract JavaScript from native installation" (the same message
+a module-name mismatch produces, so read the entry-module section below before chasing this one).
+Declaring it
 ourselves guarantees it lands somewhere node-lief's `require` can resolve — that is the invariant to
 check any alternative fix against, which matters because this repo uses pnpm's strict non-hoisted
 layout with exact pins. Keep it even after node-lief fixes the packaging.
@@ -28,6 +32,61 @@ layout with exact pins. Keep it even after node-lief fixes the packaging.
 The built-ins bake favorites + aliases into the binary: model validation, `/model` listing, alias
 resolution, context windows via a `/*ccpatch:ctx*/`-marked map, per-model effort
 capabilities/defaults, and child-command network isolation.
+
+## The entry-module shim (`bun-entry-module.ts`)
+
+tweakcc finds the module holding the bundle **by name**, and Claude Code 2.1.231 renamed it from
+`/$bunfs/root/src/entrypoints/cli.js` to `/$bunfs/root/cli`, which none of tweakcc's six accepted
+names match — so `readContent` threw and 2.1.231 could not be patched at all.
+The upstream list is unchanged as of tweakcc 4.3.2; `.claude/docs/claude-code-internals.md` has the
+bundle-side detail. **Delete this shim once tweakcc identifies the module by `entryPointId`.**
+
+The name is used for identification only, so `shimEntryModuleName` swaps it for a stand-in of
+**identical byte length** (`/clodex--/claude` for a 16-byte original) that tweakcc does recognize,
+and `restoreEntryModuleName` puts the real name back. Equal length is the whole safety argument: no
+offset, length, or size field in the blob changes, so the edit is a pure byte overwrite that
+tweakcc's own repack reads back as an ordinary module name.
+
+- **The shim must never survive into a published binary.** Claude Code's other modules
+  (`image-processor.node`, `audio-capture.node`, …) live at `/$bunfs/root/*` and resolve against the
+  entry module's own directory, so shipping the stand-in name would break them. It is applied twice —
+  around `readContent`, and again around `writeContent`, which re-parses the candidate — and undone
+  after each.
+- **`restoreEntryModuleName`'s `resign` flag is load-bearing, and `false` is not the safe default.**
+  Re-signing is *required* after a repack, because the write invalidates the ad-hoc signature and an
+  unsigned Mach-O will not run. It is *forbidden* on the read path, because `codesign` replaces
+  Claude Code's own signature: the seeded candidate stops being byte-identical to the install it came
+  from, and the bootstrap path publishes exactly those bytes as the content-addressed pristine
+  backup. In development this produced a backup whose content hash did not match the hash in its
+  own name; it never shipped, and only an end-to-end run caught it, because a synthetic non-Mach-O
+  fixture never reaches `codesign`. The candidate is now re-hashed against `plan.pristineSha256`
+  immediately before it is published as a backup, so drifted bytes fail loudly instead.
+- **Only rename when tweakcc would otherwise find nothing.** If any module name already matches, the
+  shim is a no-op — a second match could hand tweakcc a different module than it picks today, and
+  every release before 2.1.231 must keep behaving exactly as it did. This is also what makes the
+  two selectors agree: tweakcc *reads* the first name-matching module but *rewrites every* one,
+  while the shim renames the entry module specifically. Refusing to fire when a match already
+  exists guarantees exactly one match, so all three always mean the same module.
+- Locating the name parses the Bun blob directly (scan back from EOF for the trailer, recover the
+  blob start from its own `byteCount`) rather than the executable container, so it needs no
+  `node-lief`. **Verified on Mach-O only** — ELF and PE are inferred from tweakcc's own reader.
+  Every derived offset is bounds-checked and every name must be printable and NUL-terminated: a
+  misparse returns null — leaving tweakcc's own error — instead of overwriting sixteen bytes at a
+  guessed offset.
+- **More than one trailer can be in the file, so the scan validates rather than trusting position.**
+  Repacking is not size-neutral (an identity repack of 2.1.231 *shrinks* the blob by 61 bytes) and
+  the replacement section content is written over the old, so the previous blob's trailer survives at
+  a **higher** offset. Real binaries also carry a decoy `---- Bun! ----` around 55 MB — Bun's runtime
+  ships the literal in `__TEXT`. Candidates are therefore tried from EOF backwards and the first one
+  that validates wins. `TAIL_SCAN_BYTES` is a cost bound with a hard floor: the last trailer sits
+  683–802 KB from EOF on real binaries, and a window below that silently disables the shim.
+- **Restoration is proven, not assumed.** After writing the real name back, the whole file is scanned
+  for the stand-in. Locating the blob is a search, so "I wrote the name where I found the marker" is
+  weaker than it sounds — it is also true of a write into a stale copy while the live blob stays
+  shimmed. The scan is what actually holds the never-publish-the-stand-in rule up.
+- `scripts/extract-cc-bundles.mjs` needs the same shim to read a 2.1.231 bundle. It shims a **scratch
+  copy**; the `.orig` backups are the only pristine bytes on the machine and nothing may write to
+  them.
 
 ## Patcher invariants
 
