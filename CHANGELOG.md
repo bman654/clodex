@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.0](https://github.com/bman654/clodex/compare/v2.5.2...v2.6.0) (2026-08-13)
+
+
+### Features
+
+* **providers:** add OpenCode Go so you can use its 17 models in Claude Code ([c38e3c5](https://github.com/bman654/clodex/commit/c38e3c564f37d7213407f2f18583c79f99711c60))
+
 ## [2.5.2](https://github.com/bman654/clodex/compare/v2.5.1...v2.5.2) (2026-08-13)
 
 
