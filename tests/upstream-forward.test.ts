@@ -1,6 +1,6 @@
 // tests/upstream-forward.test.ts
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import type { Transform } from 'node:stream';
+import { Writable, type Transform } from 'node:stream';
 import {
   anthropicUpstreamHeaders,
   fetchWithOAuthRetry,
@@ -175,6 +175,93 @@ describe('anthropicSseModelRewrite', () => {
     const out = await collect(anthropicSseModelRewrite('alias-x'), [malformed]);
     expect(out).toBe(malformed);
   });
+
+  it('keeps CRLF line endings on the line it rewrites', async () => {
+    // Splitting on \n leaves the \r on every line. Dropping it only from the
+    // rewritten line would emit a stream with mixed endings, which is a framing
+    // change rather than a model-id change.
+    const crlf = 'event: message_start\r\n'
+      + 'data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5"}}\r\n\r\n';
+    const out = await collect(anthropicSseModelRewrite('alias-x'), [crlf]);
+    expect(out).toContain('"model":"alias-x"');
+    expect(out).not.toContain('"model":"claude-sonnet-4-5"');
+    // Every original line ending survives: no bare \n was introduced.
+    expect(out.split('\n').length).toBe(crlf.split('\n').length);
+    expect(out.replace(/\r\n/g, '')).not.toContain('\n');
+  });
+
+  // Collect what reached the client *before* the stream ended, which is what a
+  // relay is for. `collect` cannot see a stall: it ends the transform, so a
+  // transform that emitted nothing until flush still returns the whole body.
+  const collectBeforeEnd = async (
+    transform: Transform,
+    chunks: string[],
+  ): Promise<{ streamed: string; total: string }> => {
+    const out: Buffer[] = [];
+    transform.on('data', chunk => out.push(Buffer.from(chunk)));
+    for (const chunk of chunks) transform.write(Buffer.from(chunk, 'utf8'));
+    await new Promise(resolve => setImmediate(resolve));
+    const streamed = Buffer.concat(out).toString('utf8');
+    await new Promise<void>((resolve, reject) => {
+      transform.on('end', resolve);
+      transform.on('error', reject);
+      transform.end();
+    });
+    return { streamed, total: Buffer.concat(out).toString('utf8') };
+  };
+
+  const crOnly = 'event: message_start\r'
+    + 'data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5"}}\r\r'
+    + 'event: ping\rdata: {"type":"ping"}\r\r';
+
+  it('frames a CR-delimited stream instead of holding it until the upstream closes', async () => {
+    // SSE terminates a line with CRLF, LF, or a bare CR. Splitting on \n alone
+    // finds no line boundary at all in a CR-framed stream, so every byte
+    // accumulates in the tail buffer and the client receives nothing until the
+    // upstream closes — a stalled relay, not just a missed rewrite.
+    const { streamed } = await collectBeforeEnd(anthropicSseModelRewrite('alias-x'), [crOnly]);
+    expect(streamed).not.toBe('');
+    expect(streamed).toContain('"model":"alias-x"');
+  });
+
+  it('emits a complete CR-delimited event before the upstream closes', async () => {
+    const event = 'event: message_start\r'
+      + 'data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5"}}\r\r';
+    const { streamed } = await collectBeforeEnd(anthropicSseModelRewrite('alias-x'), [event]);
+    expect(streamed).toBe(event.replace('"model":"claude-sonnet-4-5"', '"model":"alias-x"'));
+  });
+
+  it('keeps CR-only line endings on the line it rewrites', async () => {
+    const out = await collect(anthropicSseModelRewrite('alias-x'), [crOnly]);
+    expect(out).toContain('"model":"alias-x"');
+    expect(out).not.toContain('"model":"claude-sonnet-4-5"');
+    // Framing is preserved exactly: no \n was introduced and no \r was lost.
+    expect(out).not.toContain('\n');
+    expect(out.split('\r').length).toBe(crOnly.split('\r').length);
+  });
+
+  it('does not split a CRLF whose halves land in different chunks', async () => {
+    // Holding the trailing CR keeps a split CRLF as one internal delimiter in
+    // spec-shaped framing; the emitted bytes are equivalent without the guard.
+    const crlf = 'event: message_start\r\n'
+      + 'data: {"type":"message_start","message":{"id":"msg_1","model":"claude-sonnet-4-5"}}\r\n\r\n';
+    const boundary = crlf.indexOf('\r\n') + 1;
+    const out = await collect(
+      anthropicSseModelRewrite('alias-x'),
+      [crlf.slice(0, boundary), crlf.slice(boundary)],
+    );
+    expect(out).toContain('"model":"alias-x"');
+    expect(out.replace(/\r\n/g, '')).not.toContain('\r');
+    expect(out.replace(/\r\n/g, '')).not.toContain('\n');
+    expect(out.split('\r\n').length).toBe(crlf.split('\r\n').length);
+  });
+
+  it('passes an LF stream through with its framing byte-for-byte', async () => {
+    // Conservation for the ending Anthropic actually sends.
+    const out = await collect(anthropicSseModelRewrite('alias-x'), [messageStart + textDelta]);
+    expect(out).not.toContain('\r');
+    expect(out).toBe((messageStart + textDelta).replace('"model":"claude-sonnet-4-5"', '"model":"alias-x"'));
+  });
 });
 
 describe('relayAnthropicMessages responseModelOverride', () => {
@@ -238,5 +325,142 @@ describe('relayAnthropicMessages responseModelOverride', () => {
       {},
     );
     expect(res.body()).toBe(raw);
+  });
+
+  it('leaves a non-message JSON envelope untouched even with an override', async () => {
+    // The SSE path only ever rewrites `message_start`; the JSON path must agree
+    // and only rewrite an Anthropic Message. An error envelope that happens to
+    // carry a `model` is not the assistant's answer, and rewriting it would
+    // misreport which model produced the failure.
+    const raw = JSON.stringify({
+      type: 'error',
+      model: 'claude-sonnet-4-5',
+      error: { type: 'overloaded_error', message: 'upstream busy' },
+    });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(raw, {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+    const res = makeRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'claude-sonnet-4-5' },
+      'key',
+      false,
+      { responseModelOverride: 'clodex:acme:sonnet[200k]' },
+    );
+    expect(res.body()).toBe(raw);
+    expect(res.body()).not.toContain('clodex:acme:sonnet[200k]');
+  });
+
+  it('leaves a count_tokens-shaped body untouched even with an override', async () => {
+    const raw = JSON.stringify({ input_tokens: 42, model: 'claude-sonnet-4-5' });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(raw, {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    })));
+    const res = makeRes();
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages/count_tokens',
+      { model: 'claude-sonnet-4-5' },
+      'key',
+      false,
+      { responseModelOverride: 'clodex:acme:sonnet[200k]' },
+    );
+    expect(res.body()).toBe(raw);
+  });
+});
+
+describe('relayAnthropicMessages streaming', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * A REAL Writable, unlike the object mock above: the streaming path reaches
+   * the client through `.pipe(res)`, so a plain object never exercises it.
+   * That is the gap this suite had — `anthropicSseModelRewrite` was well
+   * covered directly, but deleting the `.pipe(...)` that installs it in the
+   * relay left every test green.
+   */
+  function makeStreamRes() {
+    const chunks: Buffer[] = [];
+    let status = 0;
+    let headers: Record<string, string> = {};
+    const res = new Writable({
+      write(chunk: Buffer, _enc, cb) { chunks.push(Buffer.from(chunk)); cb(); },
+    }) as Writable & {
+      writeHead: (code: number, hdrs?: Record<string, string>) => unknown;
+      body: () => string;
+      status: () => number;
+      headers: () => Record<string, string>;
+    };
+    res.writeHead = (code, hdrs) => { status = code; headers = hdrs ?? {}; return res; };
+    res.body = () => Buffer.concat(chunks).toString('utf8');
+    res.status = () => status;
+    res.headers = () => headers;
+    return res;
+  }
+
+  const SSE = [
+    'event: message_start',
+    'data: {"type":"message_start","message":{"id":"msg_1","model":"qwen3.8-max","content":[]}}',
+    '',
+    'event: content_block_delta',
+    'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}',
+    '',
+    'event: message_stop',
+    'data: {"type":"message_stop"}',
+    '',
+  ].join('\n');
+
+  it('pipes the streaming body through the model rewrite', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(SSE, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })));
+    const res = makeStreamRes();
+    const done = new Promise<void>(resolve => res.on('finish', () => resolve()));
+
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'qwen3.8-max', stream: true },
+      'key',
+      true,
+      { responseModelOverride: 'clodex:opencode-go:qwen3.8-max[1m]' },
+    );
+    await done;
+
+    expect(res.status()).toBe(200);
+    expect(res.headers()['Content-Type']).toBe('text/event-stream');
+    const body = res.body();
+    // The echo invariant: the client sees back exactly the id it asked for.
+    expect(body).toContain('"model":"clodex:opencode-go:qwen3.8-max[1m]"');
+    expect(body).not.toContain('"model":"qwen3.8-max"');
+    // Every other line survives byte-for-byte.
+    expect(body).toContain('data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}');
+    expect(body).toContain('event: message_stop');
+  });
+
+  it('streams through untouched without an override', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(SSE, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })));
+    const res = makeStreamRes();
+    const done = new Promise<void>(resolve => res.on('finish', () => resolve()));
+
+    await relayAnthropicMessages(
+      res as never,
+      'https://upstream.example/v1/messages',
+      { model: 'qwen3.8-max', stream: true },
+      'key',
+      true,
+      {},
+    );
+    await done;
+
+    expect(res.body()).toBe(SSE);
   });
 });

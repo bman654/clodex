@@ -16,12 +16,25 @@ export interface ModelRuntimeCompatibility {
   requiresReasoningContentOnAssistantMessages?: boolean;
   /** Whether the upstream accepts the OpenAI `store` request field. */
   supportsStore?: boolean;
+  /** Whether the upstream accepts the Chat Completions `temperature` request field. */
+  supportsTemperature?: boolean;
   /** Whether the upstream accepts Chat Completions `developer` messages. */
   supportsDeveloperRole?: boolean;
   /** Output-token field accepted by the upstream Chat Completions endpoint. */
   maxTokensField?: 'max_tokens' | 'max_completion_tokens';
   /** Whether the upstream accepts long prompt-cache retention controls. */
   supportsLongCacheRetention?: boolean;
+  /**
+   * Whether an anthropic-format upstream implements
+   * `POST /v1/messages/count_tokens`. Speaking the Messages API does not imply
+   * it — OpenCode Zen documents `/v1/responses`, `/v1/chat/completions` and
+   * `/v1/messages` and no token-counting endpoint — and forwarding a count to
+   * an upstream without it answers the client's token accounting with a 404
+   * instead of a number. Only an explicit `false` diverts to the local
+   * estimate; unset keeps forwarding, so a custom Anthropic-compatible
+   * endpoint that does implement it is unaffected.
+   */
+  supportsCountTokens?: boolean;
 }
 
 export type OpenAiCompatibleRequestBody = Record<string, unknown>;
@@ -88,7 +101,25 @@ export function transformOpenAiCompatibleRequestBody(
 ): OpenAiCompatibleRequestBody {
   const transformed = { ...body };
 
+  const reasoningEffort = transformed.reasoning_effort;
+  const reasoningEffortMap = compatibility.reasoningEffortMap;
+  if (compatibility.supportsReasoningEffort === false) {
+    delete transformed.reasoning_effort;
+  } else if (
+    typeof reasoningEffort === 'string'
+    && reasoningEffortMap !== undefined
+    && Object.prototype.hasOwnProperty.call(reasoningEffortMap, reasoningEffort)
+  ) {
+    const mapped = reasoningEffortMap[reasoningEffort];
+    if (mapped === null) {
+      delete transformed.reasoning_effort;
+    } else {
+      transformed.reasoning_effort = mapped;
+    }
+  }
+
   if (compatibility.supportsStore === false) delete transformed.store;
+  if (compatibility.supportsTemperature === false) delete transformed.temperature;
   if (compatibility.supportsLongCacheRetention === false) {
     delete transformed.prompt_cache_retention;
     delete transformed.promptCacheRetention;

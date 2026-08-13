@@ -39,6 +39,61 @@ describe('buildCatalogRoutes', () => {
     expect(routes).toHaveLength(2);
     expect(droppedFavorites).toEqual([{ providerId: 'zen', modelId: 'claude-sonnet-4' }]);
   });
+
+  it('reserves the starting-model slot and reports capacity omissions in saved order', () => {
+    const favorites = Array.from({ length: 5 }, (_, index) => ({
+      providerId: 'provider',
+      modelId: `model-${index}`,
+    }));
+    const result = buildCatalogRoutes(
+      starting,
+      favorites,
+      (providerId, modelId) => ({
+        ...starting,
+        aliasId: `anthropic-${providerId}__${modelId}`,
+        realModelId: modelId,
+      }),
+      3,
+      { providerId: 'starting-provider', modelId: 'starting-model' },
+    );
+
+    expect(result.routes.map(route => route.aliasId)).toEqual([
+      'claude-sonnet-4',
+      'anthropic-provider__model-0',
+      'anthropic-provider__model-1',
+    ]);
+    expect(result.capacitySkippedFavorites).toEqual(favorites.slice(2));
+  });
+
+  it('keeps the saved launching model off the capacity-selected tail', () => {
+    const startingFavorite = { providerId: 'launch', modelId: 'launch-model' };
+    const favorites = [
+      startingFavorite,
+      ...Array.from({ length: 24 }, (_, index) => ({
+        providerId: 'provider',
+        modelId: `model-${index}`,
+      })),
+    ];
+    const result = buildCatalogRoutes(
+      starting,
+      favorites,
+      (providerId, modelId) =>
+        providerId === startingFavorite.providerId && modelId === startingFavorite.modelId
+          ? starting
+          : {
+              ...starting,
+              aliasId: `anthropic-${providerId}__${modelId}`,
+              realModelId: modelId,
+            },
+      MAX_MODEL_CATALOG,
+      startingFavorite,
+    );
+
+    expect(result.routes).toHaveLength(MAX_MODEL_CATALOG);
+    expect(new Set(result.routes.map(route => route.aliasId)).size).toBe(MAX_MODEL_CATALOG);
+    expect(result.routes.filter(route => route.aliasId === starting.aliasId)).toHaveLength(1);
+    expect(result.capacitySkippedFavorites).toEqual(favorites.slice(MAX_MODEL_CATALOG));
+  });
 });
 
 describe('resolveCatalogModelAliases', () => {
@@ -82,7 +137,7 @@ describe('resolveCatalogModelAliases', () => {
       },
       {
         name: 'best',
-        unavailableReason: 'reserved client name',
+        rejectionReason: 'reserved-name',
       },
     ]);
     expect(resolved[0]?.routeId).not.toBe('clodex:test-provider:model-v1');
@@ -95,10 +150,15 @@ describe('resolveCatalogModelAliases', () => {
       modelId: 'missing-model',
     };
 
-    expect(resolveCatalogModelAliases([alias], makeRouteResolver([]))).toEqual([{
+    expect(resolveCatalogModelAliases(
+      [alias],
+      makeRouteResolver([]),
+      undefined,
+      { favorites: [alias], capacitySkippedFavorites: [] },
+    )).toEqual([{
       name: 'archived',
       routeId: modelAliasTarget(alias),
-      unavailableReason: 'target unavailable',
+      rejectionReason: 'target-unavailable',
     }]);
   });
 
@@ -110,23 +170,31 @@ describe('resolveCatalogModelAliases', () => {
       { name: 'ARCHIVED', providerId: 'missing-provider', modelId: 'missing-model' },
     ];
 
-    expect(resolveCatalogModelAliases(aliases, makeRouteResolver([]))).toEqual([
+    expect(resolveCatalogModelAliases(
+      aliases,
+      makeRouteResolver([]),
+      undefined,
+      {
+        favorites: [{ providerId: 'missing-provider', modelId: 'missing-model' }],
+        capacitySkippedFavorites: [],
+      },
+    )).toEqual([
       {
         name: 'archived',
         savedName: 'ArChIvEd',
         sourceNames: ['ArChIvEd', 'ARCHIVED'],
         routeId: 'clodex:missing-provider:missing-model',
-        unavailableReason: 'target unavailable',
+        rejectionReason: 'target-unavailable',
       },
       {
         name: 'orbit',
         savedName: 'Orbit',
-        unavailableReason: 'conflicting targets',
+        rejectionReason: 'conflicting-targets',
       },
       {
         name: 'orbit',
         savedName: 'ORBIT',
-        unavailableReason: 'conflicting targets',
+        rejectionReason: 'conflicting-targets',
       },
     ]);
   });
@@ -162,7 +230,101 @@ describe('resolveCatalogModelAliases', () => {
         savedName: 'CLAUDE-SONNET-4',
         sourceNames: ['CLAUDE-SONNET-4'],
         routeId: 'anthropic-other__model-a',
-        unavailableReason: 'conflicts with a catalog model id',
+        rejectionReason: 'catalog-id-collision',
+      },
+    ]);
+  });
+
+  it('keeps an alias inactive when its favorite target is outside the exposed catalog', () => {
+    const target = { providerId: 'other', modelId: 'model-b' };
+    const targetRoute = {
+      aliasId: 'anthropic-other__model-b',
+      realModelId: 'model-b',
+      displayName: 'Model B',
+      upstreamUrl: 'https://example.com',
+      apiKey: 'key',
+      modelFormat: 'openai' as const,
+    };
+
+    expect(resolveCatalogModelAliases(
+      [{ name: 'later', ...target }],
+      () => targetRoute,
+      [{ aliasId: 'anthropic-other__model-a' }],
+      { favorites: [target], capacitySkippedFavorites: [target] },
+    )).toEqual([{
+      name: 'later',
+      routeId: targetRoute.aliasId,
+      rejectionReason: 'target-not-exposed',
+    }]);
+  });
+
+  it('does not guess that a target is unavailable when availability metadata is omitted', () => {
+    const targetRoute = {
+      aliasId: 'anthropic-other__model-b',
+      realModelId: 'model-b',
+      displayName: 'Model B',
+      upstreamUrl: 'https://example.com',
+      apiKey: 'key',
+      modelFormat: 'openai' as const,
+    };
+
+    expect(resolveCatalogModelAliases(
+      [{ name: 'later', providerId: 'other', modelId: 'model-b' }],
+      () => targetRoute,
+      [{ aliasId: 'anthropic-other__model-a' }],
+    )).toEqual([{
+      name: 'later',
+      routeId: targetRoute.aliasId,
+    }]);
+  });
+
+  it('distinguishes a capacity-skipped target from an unavailable selected target', () => {
+    const availableRoute = {
+      aliasId: 'anthropic-other__model-c',
+      realModelId: 'model-c',
+      displayName: 'Model C',
+      upstreamUrl: '',
+      apiKey: 'key',
+      modelFormat: 'openai' as const,
+    };
+    const activeRoute = {
+      ...availableRoute,
+      aliasId: 'anthropic-other__model-a',
+      realModelId: 'model-a',
+      displayName: 'Model A',
+    };
+    const favorites = [
+      { providerId: 'other', modelId: 'missing-selected' },
+      { providerId: 'other', modelId: 'model-c' },
+      { providerId: 'other', modelId: 'model-a' },
+    ];
+    const capacitySkippedFavorites = [favorites[1]!, favorites[2]!];
+
+    expect(resolveCatalogModelAliases(
+      [
+        { name: 'missing', ...favorites[0]! },
+        { name: 'later', ...favorites[1]! },
+        { name: 'active', ...favorites[2]! },
+      ],
+      (_providerId, modelId) => (
+        modelId === 'model-c' ? availableRoute : modelId === 'model-a' ? activeRoute : undefined
+      ),
+      [activeRoute],
+      { favorites, capacitySkippedFavorites },
+    )).toEqual([
+      {
+        name: 'missing',
+        routeId: 'clodex:other:missing-selected',
+        rejectionReason: 'target-unavailable',
+      },
+      {
+        name: 'later',
+        routeId: availableRoute.aliasId,
+        rejectionReason: 'target-not-exposed',
+      },
+      {
+        name: 'active',
+        routeId: activeRoute.aliasId,
       },
     ]);
   });

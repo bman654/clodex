@@ -3,11 +3,27 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import * as p from '@clack/prompts';
 import { parseArgs, rootHelpText, claudeHelpText, serverHelpText, modelsHelpText, patchHelpText, main, runClaudeCommand } from '../src/cli.js';
 import { VERSION } from '../src/constants.js';
-import { fetchProviderCatalog } from '../src/provider-catalog.js';
+import { fetchProviderCatalog, resolveLocalProviderApiKey } from '../src/provider-catalog.js';
+import { startProxy } from '../src/proxy.js';
+import { launchClaude } from '../src/launch.js';
 
 vi.mock('../src/launch.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/launch.js')>();
-  return { ...actual, findClaudeBinary: vi.fn(() => '/fake/claude') };
+  return {
+    ...actual,
+    findClaudeBinary: vi.fn(() => '/fake/claude'),
+    launchClaude: vi.fn(async () => 0),
+  };
+});
+
+vi.mock('../src/proxy.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/proxy.js')>();
+  return { ...actual, startProxy: vi.fn() };
+});
+
+vi.mock('../src/first-run.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/first-run.js')>();
+  return { ...actual, needsFirstRunSetup: vi.fn(async () => false) };
 });
 
 vi.mock('../src/patcher.js', async importOriginal => {
@@ -17,7 +33,11 @@ vi.mock('../src/patcher.js', async importOriginal => {
 
 vi.mock('../src/provider-catalog.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/provider-catalog.js')>();
-  return { ...actual, fetchProviderCatalog: vi.fn() };
+  return {
+    ...actual,
+    fetchProviderCatalog: vi.fn(),
+    resolveLocalProviderApiKey: vi.fn(),
+  };
 });
 
 afterEach(() => {
@@ -254,7 +274,6 @@ describe('help text', () => {
     for (const help of helps) {
       expect(help).not.toContain('antigravity');
       expect(help).not.toContain('Gemini');
-      expect(help).not.toContain('OpenCode');
       expect(help).not.toContain('Zen');
       expect(help).not.toContain('--vertex');
       expect(help).not.toContain('subscription tier');
@@ -268,6 +287,7 @@ describe('help text', () => {
     expect(root).toContain('clodex patch');
     expect(root).toContain('clodex models');
     expect(root).toContain('clodex providers');
+    expect(root).toContain('OpenCode Go');
     expect(root).toContain('--endpoint');
     expect(root).toContain('--proxy');
     expect(root).toContain('--save-mode');
@@ -349,6 +369,107 @@ describe('main dispatch', () => {
       '--model', 'llama-test',
     ])).resolves.toBe(0);
     expect(log.mock.calls.flat().join('\n')).toContain('DRY RUN — would execute');
+  });
+
+  it('routes API-key Anthropic models without count_tokens support through the local estimator proxy', async () => {
+    vi.clearAllMocks();
+    const compatibility = { supportsCountTokens: false };
+    const model = {
+      id: 'opencode-go/qwen3.8-max',
+      name: 'Qwen 3.8 Max',
+      family: 'qwen',
+      brand: 'Qwen',
+      modelFormat: 'anthropic' as const,
+      upstreamModelId: 'qwen3.8-max',
+      baseUrl: 'https://api.opencode.ai',
+      compatibility,
+    };
+    const provider = {
+      id: 'opencode-go',
+      name: 'OpenCode Go',
+      apiKey: 'catalog-api-key',
+      authType: 'api' as const,
+      models: [model],
+    };
+    const catalog = Object.assign([provider], { blockedProviders: new Map() });
+    const close = vi.fn();
+    vi.mocked(fetchProviderCatalog).mockResolvedValue(catalog);
+    vi.mocked(resolveLocalProviderApiKey).mockResolvedValue('opencode-api-key');
+    vi.mocked(startProxy).mockResolvedValue({ port: 43123, token: 'proxy-token', close });
+    vi.mocked(launchClaude).mockResolvedValue(0);
+
+    const code = await runClaudeCommand(parseArgs([
+      'claude',
+      '--endpoint',
+      '--provider', 'opencode-go',
+      '--model', 'opencode-go/qwen3.8-max',
+    ]));
+
+    expect(code).toBe(0);
+    expect(startProxy).toHaveBeenCalledWith(
+      'https://api.opencode.ai',
+      'opencode-go/qwen3.8-max',
+      false,
+      undefined,
+      expect.objectContaining({
+        authType: 'api',
+        modelFormat: 'anthropic',
+        compatibility,
+      }),
+      'opencode-api-key',
+    );
+    expect(launchClaude).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:43123',
+        ANTHROPIC_API_KEY: 'proxy-token',
+      }),
+      'opencode-go/qwen3.8-max',
+      [],
+    );
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('keeps API-key Anthropic models with unset count_tokens capability direct and beta-gated', async () => {
+    vi.clearAllMocks();
+    const model = {
+      id: 'anthropic-direct-model',
+      name: 'Anthropic Direct Model',
+      family: 'claude',
+      brand: 'Anthropic',
+      modelFormat: 'anthropic' as const,
+      upstreamModelId: 'anthropic-direct-model',
+      baseUrl: 'https://api.anthropic.com',
+    };
+    const provider = {
+      id: 'anthropic-api',
+      name: 'Anthropic API',
+      apiKey: 'anthropic-api-key',
+      authType: 'api' as const,
+      models: [model],
+    };
+    const catalog = Object.assign([provider], { blockedProviders: new Map() });
+    vi.mocked(fetchProviderCatalog).mockResolvedValue(catalog);
+    vi.mocked(resolveLocalProviderApiKey).mockResolvedValue('anthropic-api-key');
+    vi.mocked(launchClaude).mockResolvedValue(0);
+
+    const code = await runClaudeCommand(parseArgs([
+      'claude',
+      '--endpoint',
+      '--provider', 'anthropic-api',
+      '--model', 'anthropic-direct-model',
+    ]));
+
+    expect(code).toBe(0);
+    expect(startProxy).not.toHaveBeenCalled();
+    expect(launchClaude).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ANTHROPIC_BASE_URL: 'https://api.anthropic.com',
+        ANTHROPIC_API_KEY: 'anthropic-api-key',
+        CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1',
+      }),
+      'anthropic-direct-model',
+      [],
+    );
   });
 
   it('prints patch help', async () => {

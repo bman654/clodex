@@ -12,6 +12,7 @@ import {
   thinkingProviderOptions,
 } from '../src/provider-factory.js';
 import { VERTEX_ANTHROPIC_NPM } from '../src/constants.js';
+import { buildOpenCodeGoModels } from '../src/data/opencode-go-models.js';
 
 async function expectCredentialHeadersStripped(
   fetchImpl: typeof fetch,
@@ -274,6 +275,41 @@ describe('getReasoningCapabilities', () => {
       openaiCompatible: { reasoningEffort: 'max' },
     });
     expect(effortProviderOptions('@ai-sdk/openai-compatible', 'low', 'glm-5.2')).toBeUndefined();
+  });
+
+  it('lets a wire-shape-only compatibility block keep suppressing effort options', () => {
+    // Conservation. A compatibility block that says nothing about reasoning
+    // still owns the answer for an openai-compatible route: the compatibility
+    // path returns "no effort", and the model-name rules below must not get a
+    // second vote. Treating such a block as "no opinion" would start emitting
+    // DeepSeek/Kimi/GLM options for custom providers that had none, which is a
+    // wire change to routes this work never looked at.
+    for (const modelId of ['deepseek-v4-pro', 'kimi-k3', 'glm-5.2']) {
+      expect(
+        effortProviderOptions('@ai-sdk/openai-compatible', 'high', modelId, {
+          providerId: 'some-custom-provider',
+          compatibility: { supportsStore: false, maxTokensField: 'max_tokens' },
+        }),
+        modelId,
+      ).toBeUndefined();
+    }
+  });
+
+  it('keeps every OpenCode Go catalog block expressing an explicit reasoning opinion', () => {
+    // Why the conservation above costs OpenCode Go nothing: each shipped entry
+    // states supportsReasoningEffort, a reasoningEffortMap, or a
+    // thinkingFormat, so none of them is a wire-shape-only block and none
+    // depends on the model-name fallback.
+    for (const model of buildOpenCodeGoModels()) {
+      const compatibility = model.compatibility;
+      expect(compatibility, model.id).toBeDefined();
+      expect(
+        compatibility!.supportsReasoningEffort !== undefined
+        || compatibility!.reasoningEffortMap !== undefined
+        || compatibility!.thinkingFormat !== undefined,
+        model.id,
+      ).toBe(true);
+    }
   });
 
 

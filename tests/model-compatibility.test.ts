@@ -62,6 +62,25 @@ describe('models.dev capability rules', () => {
     })).toBe(true);
   });
 
+  it('lets pinned capabilities bypass models.dev vetoes but not the blacklist', () => {
+    const candidate = {
+      providerId: 'requesty',
+      modelId: 'openai/gpt-5-chat',
+      agent: 'claude' as const,
+    };
+    const entry = findModelsDevModel(candidate.providerId, candidate.modelId, cache);
+    expect(entry).not.toBeNull();
+    expect(shouldHideByModelsDevCapabilities(entry!)).toBe(true);
+    expect(shouldHideModel(candidate)).toBe(true);
+    expect(shouldHideModel({ ...candidate, ignoreModelsDevCapabilities: true })).toBe(false);
+    expect(shouldHideModel({
+      providerId: 'openai',
+      modelId: 'z-ai/glm4.7',
+      agent: 'claude',
+      ignoreModelsDevCapabilities: true,
+    })).toBe(true);
+  });
+
   it('does not hide text-output models with missing tool_call field', () => {
     const entry = findModelsDevModel('google', 'gemini-2.5-pro', cache);
     expect(entry).not.toBeNull();

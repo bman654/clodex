@@ -11,6 +11,11 @@ import { decodeRequestBody } from '../http-utils.js';
 import { ensureHttpProxyCertificates } from './ca.js';
 import { normalizeRouteLookupId } from '../context-model-id.js';
 import { listenTcpServer } from '../listener-ready.js';
+import {
+  describeModelAliasRejection,
+  modelAliasLookupKey,
+  type ModelAliasRejection,
+} from '../model-aliases.js';
 import { routeUnavailableMessage } from '../route-unavailable.js';
 import {
   outboundHttpProxyAgent,
@@ -153,7 +158,9 @@ export interface HttpProxyOptions {
   routes: ProxyRoute[];
   /** Short incoming model names mapped to canonical adapter route ids. */
   modelAliases?: ResolvedHttpProxyAlias[];
-  /** Configured local model ids that must never fall through to Anthropic. */
+  /** Configured rejected aliases that must never fall through to Anthropic. */
+  modelAliasRejections?: readonly ModelAliasRejection[];
+  /** Other configured local model ids that must never fall through to Anthropic. */
   reservedModelIds?: string[];
   debug?: boolean;
   /** Per-process translated-adapter debug log used when debug is enabled. */
@@ -713,20 +720,26 @@ function forwardPlainHttp(req: http.IncomingMessage, res: http.ServerResponse): 
 export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpProxyHandle> {
   const certificates = ensureHttpProxyCertificates();
   const routesById = new Map<string, ProxyRoute>();
+  const rejectedAliasReasons = new Map<string, ModelAliasRejection['reason']>();
+  const reservedAliasLookupKeys = new Set<string>();
   const reservedModelIds = new Set<string>();
   for (const route of options.routes) {
     routesById.set(normalizeRouteLookupId(route.aliasId), route);
   }
   for (const alias of options.modelAliases ?? []) {
     const aliasId = normalizeRouteLookupId(alias.name);
-    reservedModelIds.add(aliasId);
-    for (const sourceName of alias.sourceNames ?? []) {
-      reservedModelIds.add(normalizeRouteLookupId(sourceName));
-      reservedModelIds.add(normalizeRouteLookupId(sourceName.trim()));
+    for (const name of [alias.name, ...(alias.sourceNames ?? [])]) {
+      reservedAliasLookupKeys.add(modelAliasLookupKey(normalizeRouteLookupId(name)));
     }
     const route = routesById.get(normalizeRouteLookupId(alias.routeId));
     if (!route) continue;
     routesById.set(aliasId, route);
+  }
+  for (const rejection of options.modelAliasRejections ?? []) {
+    const lookupKey = modelAliasLookupKey(normalizeRouteLookupId(rejection.alias.name));
+    if (lookupKey && !rejectedAliasReasons.has(lookupKey)) {
+      rejectedAliasReasons.set(lookupKey, rejection.reason);
+    }
   }
   for (const modelId of options.reservedModelIds ?? []) {
     reservedModelIds.add(normalizeRouteLookupId(modelId));
@@ -800,17 +813,36 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         ? extractClaudeSessionId(parsed, claudeSessionIdHeader)
         : undefined;
       const requestedModel = typeof parsed?.model === 'string' ? parsed.model : undefined;
-      const unresolvedRoutedModel = !route && requestedModel !== undefined && (
-        normalizeRouteLookupId(requestedModel).startsWith(HTTP_PROXY_MODEL_PREFIX)
-        || reservedModelIds.has(normalizeRouteLookupId(requestedModel))
+      const requestedModelLookupId = requestedModel === undefined
+        ? undefined
+        : normalizeRouteLookupId(requestedModel);
+      const requestedAliasLookupKey = requestedModelLookupId === undefined
+        ? undefined
+        : modelAliasLookupKey(requestedModelLookupId);
+      const aliasRejectionReason = requestedAliasLookupKey === undefined
+        ? undefined
+        : rejectedAliasReasons.get(requestedAliasLookupKey);
+      const unresolvedRoutedModel = !route && requestedModelLookupId !== undefined && (
+        aliasRejectionReason !== undefined
+        || requestedModelLookupId.startsWith(HTTP_PROXY_MODEL_PREFIX)
+        || reservedModelIds.has(requestedModelLookupId)
+        || (
+          requestedAliasLookupKey !== undefined
+          && reservedAliasLookupKeys.has(requestedAliasLookupKey)
+        )
       );
 
       if (unresolvedRoutedModel) {
-        const message = routeUnavailableMessage(requestedModel);
+        const message = routeUnavailableMessage(
+          requestedModel!,
+          aliasRejectionReason === undefined
+            ? undefined
+            : describeModelAliasRejection(aliasRejectionReason),
+        );
         if (messagesEndpoint === 'messages' && options.inferenceLogPath) {
           writeInferenceRouteUnavailableLog(options.inferenceLogPath, {
             requestId,
-            modelId: requestedModel,
+            modelId: requestedModel!,
             statusCode: 400,
           });
         }

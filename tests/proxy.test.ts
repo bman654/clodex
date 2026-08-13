@@ -251,6 +251,44 @@ describe('SDK anonymous route handling', () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it('answers count_tokens locally when the route declares no upstream support', async () => {
+    // Speaking the Messages API does not imply implementing count_tokens.
+    // Forwarding it to an upstream without the endpoint answers Claude Code's
+    // token accounting with a 404 instead of a number, which is the failure
+    // this capability exists to avoid.
+    const fetchMock = vi.fn(async () => new Response('not found', { status: 404 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const handle = await startProxy(
+      'https://anonymous.example',
+      'anonymous-model',
+      false,
+      undefined,
+      {
+        providerId: 'local',
+        authType: 'none',
+        modelFormat: 'anthropic',
+        compatibility: { supportsCountTokens: false },
+      },
+      '',
+    );
+
+    try {
+      const tokens = await postToProxy(handle.port, handle.token, {
+        model: 'anonymous-model',
+        messages: [{ role: 'user', content: 'count this' }],
+      }, undefined, '/v1/messages/count_tokens');
+
+      expect(tokens.status).toBe(200);
+      expect(JSON.parse(tokens.body).input_tokens).toBeGreaterThan(0);
+      // The point of the capability: upstream is never asked.
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe('catalog model aliases', () => {
@@ -309,6 +347,58 @@ describe('catalog model aliases', () => {
         });
         expect(response.body).not.toContain('clodex patch');
       }
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('renders distinct structured reasons for capacity and unavailable alias targets', async () => {
+    const route: ProxyRoute = {
+      aliasId: 'clodex:test:default-model',
+      realModelId: 'default-model',
+      displayName: 'Default Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'anthropic',
+      providerId: 'test-provider',
+    };
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const handle = await startProxyCatalog(
+      [route],
+      route.aliasId,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      [
+        { name: 'later', rejectionReason: 'target-not-exposed' },
+        { name: 'missing', rejectionReason: 'target-unavailable' },
+      ],
+    );
+
+    try {
+      const capacity = await postToProxy(handle.port, handle.token, {
+        model: 'later',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+      const unavailable = await postToProxy(handle.port, handle.token, {
+        model: 'missing',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+
+      expect(JSON.parse(capacity.body).error.message).toContain(
+        'target is outside the active Claude Code catalog',
+      );
+      expect(JSON.parse(unavailable.body).error.message).toContain(
+        'target is unavailable or unsupported',
+      );
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       handle.close();
@@ -407,6 +497,52 @@ describe('catalog model aliases', () => {
       expect(message).toContain('orbit');
       expect(message).toMatch(/conflict/i);
       expect(message).not.toContain('clodex patch');
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('rejects every case-equivalent spelling of a configured rejected alias without using the default route', async () => {
+    const defaultRoute: ProxyRoute = {
+      aliasId: 'clodex:test:default-model',
+      realModelId: 'default-model',
+      displayName: 'Default Model',
+      upstreamUrl: 'https://default.example',
+      apiKey: 'provider-key',
+      modelFormat: 'anthropic',
+      providerId: 'test-provider',
+    };
+    const modelAliases = resolveCatalogModelAliases([
+      { name: 'DeFaUlT', providerId: 'test-provider', modelId: 'default-model' },
+    ], () => defaultRoute);
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const handle = await startProxyCatalog(
+      [defaultRoute],
+      defaultRoute.aliasId,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      modelAliases,
+    );
+
+    try {
+      for (const path of ['/v1/messages', '/v1/messages/count_tokens']) {
+        const response = await postToProxy(handle.port, handle.token, {
+          model: 'DEFAULT',
+          max_tokens: 100,
+          messages: [{ role: 'user', content: 'hi' }],
+          stream: false,
+        }, undefined, path);
+
+        expect(response.status, path).toBe(400);
+        expect(JSON.parse(response.body).error.message).toBe(
+          "Clodex model route 'DEFAULT' is unavailable: reserved client name. Run `clodex models --list` to inspect saved routes and aliases.",
+        );
+      }
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       handle.close();
@@ -556,6 +692,100 @@ describe('catalog model aliases', () => {
         ).on('error', reject);
       });
       expect(modelLookup).toBe(200);
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('does not echo the requested id when the request fell back to the default route', async () => {
+    // The alias did not resolve, so the default route answered. Echoing the
+    // requested id here would report a model the request never reached, and
+    // patched Claude Code keys its context window off that id.
+    const defaultRoute: ProxyRoute = {
+      aliasId: 'anthropic-test-provider__default-model',
+      realModelId: 'default-model',
+      displayName: 'Default Model',
+      upstreamUrl: 'https://upstream-default.example',
+      apiKey: 'provider-key',
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      providerId: 'test-provider',
+    };
+    const fetchMock = vi.fn(async () => new Response(
+      JSON.stringify({ id: 'msg_1', type: 'message', role: 'assistant', model: 'default-model', content: [], usage: { input_tokens: 1, output_tokens: 1 } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const handle = await startProxyCatalog([defaultRoute], defaultRoute.aliasId, false);
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: 'some-unconfigured-model',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+      expect(res.status).toBe(200);
+      // The upstream still receives the route's real model id.
+      const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+      expect(JSON.parse(init.body as string).model).toBe('default-model');
+      // The response reports what actually answered, not what was asked for.
+      const body = JSON.parse(res.body) as { model: string };
+      expect(body.model).toBe('default-model');
+      expect(body.model).not.toBe('some-unconfigured-model');
+    } finally {
+      handle.close();
+    }
+  });
+
+  it('still echoes the requested id when an alias actually resolved', async () => {
+    // The other half of the guard: adding `resolvedRoute &&` must not stop a
+    // genuinely resolved alias from echoing, which is the behaviour the
+    // override exists for.
+    const providers: LocalProvider[] = [{
+      id: 'Test-Provider',
+      name: 'Test Provider',
+      apiKey: 'provider-key',
+      models: [{
+        id: 'Solver-V1',
+        name: 'Solver V1',
+        family: 'test',
+        brand: 'Other',
+        modelFormat: 'anthropic',
+        upstreamModelId: 'Solver-V1',
+        baseUrl: 'https://upstream-solver.example',
+        contextWindow: 1_000_000,
+      }],
+    }];
+    const resolveRoute = makeRouteResolver(providers);
+    const aliasTarget = resolveRoute('Test-Provider', 'Solver-V1')!;
+    const modelAliases = resolveCatalogModelAliases(
+      [{ name: 'sol', providerId: 'Test-Provider', modelId: 'Solver-V1' }],
+      resolveRoute,
+    );
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      JSON.stringify({ id: 'msg_1', type: 'message', role: 'assistant', model: 'Solver-V1', content: [], usage: { input_tokens: 1, output_tokens: 1 } }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )));
+
+    const handle = await startProxyCatalog(
+      [aliasTarget],
+      aliasTarget.aliasId,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      modelAliases,
+    );
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: 'sol',
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      });
+      expect(res.status).toBe(200);
+      expect((JSON.parse(res.body) as { model: string }).model).toBe('sol');
     } finally {
       handle.close();
     }

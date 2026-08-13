@@ -118,10 +118,19 @@ export interface RelayAnthropicOptions {
 }
 
 /**
+ * An event-stream line ends with CRLF, LF, or a bare CR. Splitting on \n alone
+ * finds no boundary at all in a CR-framed stream: every byte accumulates in the
+ * tail buffer and the client sees nothing until the upstream closes, which
+ * stalls the relay rather than merely missing a rewrite. Capturing the
+ * separator lets each line be re-emitted with the exact ending it arrived with.
+ */
+const SSE_LINE_SPLIT = /(\r\n|\r|\n)/;
+
+/**
  * Line-preserving SSE transform that rewrites the `message_start` event's
  * `message.model` to the requested id. Buffers only up to one line; every
  * line that is not a parseable `message_start` data line passes through
- * byte-for-byte.
+ * byte-for-byte, with its original line ending.
  */
 export function anthropicSseModelRewrite(override: string): Transform {
   const decoder = new StringDecoder('utf8');
@@ -129,6 +138,9 @@ export function anthropicSseModelRewrite(override: string): Transform {
   const rewriteLine = (line: string): string => {
     if (!line.startsWith('data:') || !line.includes('"message_start"')) return line;
     try {
+      // A multi-line `data:` payload (legal SSE, never emitted by Anthropic)
+      // fails to parse here and relays untouched — fail-open, so the worst
+      // case is an un-rewritten model id rather than a corrupted stream.
       const parsed = JSON.parse(line.slice(5)) as { type?: string; message?: { model?: unknown } };
       if (parsed.type === 'message_start' && parsed.message && typeof parsed.message.model === 'string') {
         parsed.message.model = override;
@@ -139,16 +151,33 @@ export function anthropicSseModelRewrite(override: string): Transform {
     }
     return line;
   };
+  // Split preserves separators at odd indices, so a line and its exact ending
+  // are re-joined unchanged; the final element is the unterminated remainder.
+  const rewriteTerminated = (parts: string[]): string => {
+    let out = '';
+    for (let i = 0; i + 1 < parts.length; i += 2) out += rewriteLine(parts[i]!) + parts[i + 1]!;
+    return out;
+  };
   return new Transform({
     transform(chunk: Buffer, _encoding, callback) {
-      const lines = (tail + decoder.write(chunk)).split('\n');
-      tail = lines.pop() ?? '';
-      const rewritten = lines.map(rewriteLine);
-      callback(null, rewritten.length ? rewritten.join('\n') + '\n' : '');
+      const buffered = tail + decoder.write(chunk);
+      // Emit every observed line ending immediately. If a CRLF is split across
+      // chunks, the CR and later LF still pass through in their original order;
+      // treating the LF as an empty internal line is harmless because this
+      // transform carries no event-level state.
+      const parts = buffered.split(SSE_LINE_SPLIT);
+      tail = parts.pop() ?? '';
+      callback(null, rewriteTerminated(parts));
     },
     flush(callback) {
       const rest = tail + decoder.end();
-      callback(null, rest ? rewriteLine(rest) : '');
+      if (!rest) {
+        callback(null, '');
+        return;
+      }
+      const parts = rest.split(SSE_LINE_SPLIT);
+      const remainder = parts.length % 2 === 1 ? parts.pop()! : '';
+      callback(null, rewriteTerminated(parts) + (remainder ? rewriteLine(remainder) : ''));
     },
   });
 }
@@ -227,9 +256,15 @@ export async function relayAnthropicMessages(
     res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: 'Upstream response was not valid JSON' } }));
     return;
   }
+  // Narrowed to an Anthropic Message, matching what the SSE path already
+  // requires of `message_start`. Any JSON object with a string `model` used to
+  // qualify, so an error envelope or a count_tokens-shaped body that happened
+  // to carry one had its `model` rewritten too — the two directions of the same
+  // relay disagreed about what they were allowed to touch.
   if (
     options.responseModelOverride
     && parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    && (parsed as Record<string, unknown>).type === 'message'
     && typeof (parsed as Record<string, unknown>).model === 'string'
   ) {
     (parsed as Record<string, unknown>).model = options.responseModelOverride;
