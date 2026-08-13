@@ -6,9 +6,16 @@ import { resolveContextWindow } from '../context-window.js';
 import type { LocalProvider, LocalProviderModel } from '../types.js';
 import { normalizeGoogleDisplayName, normalizeGoogleModelId } from './google-model-id.js';
 import { findModelsDevModel } from './models-dev.js';
+import { applyTemplateModelMetadata } from './fetch-template-models.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js';
 import { isValidProviderId } from './validate.js';
+import {
+  isRetainedOpenCodeGoProvider,
+  openCodeGoPinnedApiUrl,
+  retainedOpenCodeGoTemplate,
+} from './resolve-template.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
+import { openCodeGoEffortProfile } from '../data/opencode-go-effort-profiles.js';
 import { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
 
 export { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
@@ -42,6 +49,31 @@ export interface MaterializeOptions {
   agent?: CompatibilityAgent;
 }
 
+export { openCodeGoPinnedApiUrl } from './resolve-template.js';
+
+/**
+ * Project persisted model caches onto the authority that owns their provider identity.
+ * Ordinary and custom providers retain their cache array unchanged; retained OpenCode
+ * identities are fail-closed against the committed template catalog.
+ */
+export function projectProviderCachedModels(provider: RegistryProvider): CachedModel[] {
+  const cached = provider.modelsCache?.models ?? [];
+  if (!isRetainedOpenCodeGoProvider(provider)) return cached;
+  const template = retainedOpenCodeGoTemplate();
+  return template ? applyTemplateModelMetadata(template, cached) : [];
+}
+
+function resolveMaterializedApiUrl(
+  cached: CachedModel,
+  provider: RegistryProvider,
+  npm: string,
+): string | null {
+  if (!isRetainedOpenCodeGoProvider(provider)) {
+    return cached.apiUrl ?? provider.api.url ?? '';
+  }
+  return openCodeGoPinnedApiUrl(npm);
+}
+
 export function cachedModelToLocal(
   cached: CachedModel,
   provider: RegistryProvider,
@@ -53,11 +85,13 @@ export function cachedModelToLocal(
   });
 
   const npm = cached.npm ?? provider.api.npm ?? '';
-  const apiUrl = cached.apiUrl ?? provider.api.url ?? '';
+  const apiUrl = resolveMaterializedApiUrl(cached, provider, npm);
+  if (apiUrl === null) return null;
   const endpoint = resolveEndpoint(npm, apiUrl);
   if (endpoint === null) return null;
 
-  const modelsDev = findModelsDevModel(provider.id, cached.id);
+  const retainedOpenCodeGo = isRetainedOpenCodeGoProvider(provider);
+  const modelsDev = retainedOpenCodeGo ? null : findModelsDevModel(provider.id, cached.id);
   const { id, upstreamModelId } = normalizeGoogleModelId(cached.id, npm);
   const normalizedUpstream = normalizeGoogleModelId(cached.upstreamModelId ?? cached.id, npm).upstreamModelId;
   const family = npm === '@ai-sdk/google' ? (id.split(/[-/:]/)[0] ?? id) : (cached.family ?? '');
@@ -80,10 +114,16 @@ export function cachedModelToLocal(
     supportedParameters: cached.supportedParameters,
     reasoning: cached.reasoning ?? modelsDev?.reasoning,
     interleavedReasoningField: cached.interleavedReasoningField ?? modelsDev?.interleaved?.field,
+    ignoreModelsDevCapabilities: retainedOpenCodeGo || undefined,
     useResponsesLite: cached.useResponsesLite,
     preferWebSockets: cached.preferWebSockets,
     modalities: cached.modalities,
     compatibility: cached.compatibility,
+    // Attached from the generated authority by retained IDENTITY, after the
+    // template projection above has already decided which rows this provider
+    // really owns. Deriving it from the persisted cache row instead would let a
+    // stale or hand-edited cache state what a model's effort control is.
+    effortProfile: retainedOpenCodeGo ? openCodeGoEffortProfile(id) : undefined,
   };
 }
 
@@ -222,7 +262,7 @@ function materializeOne(
   const anonymous = explicitAnonymous || legacyAnonymous;
   const apiKey = anonymous ? '' : credential ?? '';
   const models: LocalProviderModel[] = [];
-  for (const cached of provider.modelsCache?.models ?? []) {
+  for (const cached of projectProviderCachedModels(provider)) {
     const freeStatus = classifyFreeStatus({
       model: cached,
       providerId: provider.id,
@@ -231,7 +271,12 @@ function materializeOne(
     if (freeOnly && !isFreeStatus(freeStatus)) continue;
     const model = cachedModelToLocal(cached, provider);
     if (!model) continue;
-    if (shouldHideModel({ providerId: provider.id, modelId: model.id, agent })) continue;
+    if (shouldHideModel({
+      providerId: provider.id,
+      modelId: model.id,
+      agent,
+      ignoreModelsDevCapabilities: model.ignoreModelsDevCapabilities,
+    })) continue;
     models.push(model);
   }
   if (models.length === 0) return null;

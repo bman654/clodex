@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   canonicalModelAliasName,
+  describeModelAliasRejection,
   isValidModelAlias,
+  modelAliasLookupKey,
   modelAliasTarget,
   normalizeModelAliases,
   parseModelAliasAssignment,
@@ -48,6 +50,15 @@ describe('model aliases', () => {
         error: 'That alias name is reserved by the client.',
       });
     }
+  });
+
+  it('shares writer identity for valid spellings without absorbing route or malformed identities', () => {
+    expect(modelAliasLookupKey(' DeFaUlT ')).toBe('default');
+    expect(modelAliasLookupKey('DEFAULT')).toBe('default');
+    expect(modelAliasLookupKey('luna')).not.toBe(modelAliasLookupKey('orbit'));
+    expect(modelAliasLookupKey('DeFaUlT[1m]')).toBe('DeFaUlT[1m]');
+    expect(modelAliasLookupKey('clodex:Provider:Model')).toBe('clodex:Provider:Model');
+    expect(modelAliasLookupKey('Bad Alias')).toBe('Bad Alias');
   });
 
   it('collapses equivalent case variants and rejects ambiguous collisions', () => {
@@ -141,6 +152,13 @@ describe('model aliases', () => {
     ])).toThrow(
       'Saved model aliases are malformed: "modelAliases[1]" must be an object with a string "name".',
     );
+  });
+
+  it('keeps capacity omission distinct from target unavailability', () => {
+    expect(describeModelAliasRejection('target-not-exposed'))
+      .toBe('target is outside the active Claude Code catalog');
+    expect(describeModelAliasRejection('target-unavailable'))
+      .toBe('target is unavailable or unsupported');
   });
 
   it('formats a canonical HTTP-proxy target', () => {

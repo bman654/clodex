@@ -145,6 +145,26 @@ describe('provider-catalog-display', () => {
     expect(models[0]?.authRef).toBe(TEST_HELPER_REF);
   });
 
+  it('propagates count-token compatibility to standalone server models', () => {
+    const models = localProvidersToServerModels([{
+      id: 'anthropic-compatible',
+      name: 'Anthropic Compatible',
+      apiKey: 'api-key',
+      models: [{
+        id: 'claude-count-tokens-disabled',
+        name: 'Claude Count Tokens Disabled',
+        family: 'claude',
+        brand: 'Anthropic',
+        modelFormat: 'anthropic',
+        upstreamModelId: 'claude-count-tokens-disabled',
+        compatibility: { supportsCountTokens: false },
+      }],
+    }]);
+
+    expect(models[0]?.compatibility).toEqual({ supportsCountTokens: false });
+    expect(models[0]?.id).toBe('claude-count-tokens-disabled');
+  });
+
   describe('formatRegistryAuthLabel', () => {
     it('distinguishes OAuth, API key, and env refs', () => {
       expect(formatRegistryAuthLabel({
@@ -301,6 +321,58 @@ describe('provider-catalog-display', () => {
       expect((await resolveProvidersForDisplay())[0]?.modelCount).toBe(1);
       },
     );
+
+    it('counts only authority-backed retained models while preserving ordinary unknown models', async () => {
+      const registry = emptyRegistry();
+      registry.providers.push({
+        id: 'imported-opencode',
+        templateId: 'opencode-go',
+        name: 'Imported OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:imported-opencode',
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-12T00:00:00.000Z',
+          models: [{
+            id: 'deepseek-v4-pro',
+            name: 'DeepSeek V4 Pro',
+            upstreamModelId: 'deepseek-v4-pro',
+            modelFormat: 'openai',
+          }, {
+            id: 'stale-future-model',
+            name: 'Stale future model',
+            upstreamModelId: 'stale-future-model',
+            modelFormat: 'openai',
+          }],
+        },
+        addedAt: '2026-08-12T00:00:00.000Z',
+      });
+      registry.providers.push({
+        id: 'custom-provider',
+        templateId: 'custom-openai',
+        name: 'Custom provider',
+        enabled: true,
+        authRef: 'keyring:provider:custom-provider',
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://custom.invalid/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-12T00:00:00.000Z',
+          models: [{
+            id: 'custom-unknown-model',
+            name: 'Custom unknown model',
+            upstreamModelId: 'custom-unknown-model',
+            modelFormat: 'openai',
+          }],
+        },
+        addedAt: '2026-08-12T00:00:00.000Z',
+      });
+      withRegistryWriteLockSync(() => saveRegistry(registry));
+
+      const entries = await resolveProvidersForDisplay();
+      expect(entries.find(entry => entry.id === 'imported-opencode')?.modelCount).toBe(1);
+      expect(entries.find(entry => entry.id === 'custom-provider')?.modelCount).toBe(1);
+    });
 
     it('does not count an OAuth account cache for a provider-key credential', async () => {
       const registry = emptyRegistry();

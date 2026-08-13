@@ -17,15 +17,29 @@ import {
   thinkingProviderOptions,
   type ReasoningMetadata,
 } from './provider-factory.js';
+import {
+  DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+  resolveRequestEffort,
+  type UnsupportedEffortPolicy,
+} from './effort-policy.js';
 import { resolveUpstreamTools } from './tool-search.js';
 import { sanitizeToolInput } from './tool-input-sanitize.js';
 import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-types.js';
 import { anthropicErrorType, upstreamHttpStatus } from './upstream-error.js';
 import { upstreamMaxRetries } from './upstream-retry.js';
 import { emitParentNotice } from './parent-notice.js';
-import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
 
 export { silenceSdkWarnings };
+
+/**
+ * Prefix of the Claude Code billing-attribution system line.
+ *
+ * clodex never emits this line; it only STRIPS one a client already sent, so a
+ * volatile per-request attribution string can never head a translated prompt
+ * and churn an upstream's implicit cache prefix. Private to this module on
+ * purpose — it is a recognizer, and nothing may import it to build the line.
+ */
+const CLAUDE_CODE_BILLING_HEADER_PREFIX = 'x-anthropic-billing-header:';
 
 export type SdkTranslationErrorSignature =
   | 'reasoning_part_not_found'
@@ -83,6 +97,12 @@ export interface AnthropicRequest {
 export interface TranslateRequestOptions {
   /** Fallback when the client omits effort (e.g. Claude Desktop gateway). */
   defaultEffort?: string;
+  /**
+   * Global behavior for an explicit effort the target model cannot run. Applies
+   * only where the model carries a reviewed effort profile; everywhere else the
+   * existing per-provider mapping is unchanged.
+   */
+  effortPolicy?: UnsupportedEffortPolicy;
   reasoningMetadata?: ReasoningMetadata;
   /** ChatGPT Codex OAuth requires instructions and manages its own output limit. */
   openAiOAuth?: boolean;
@@ -465,6 +485,30 @@ function isClaudeCodeStructuredOutputCompactRequest(body: AnthropicRequest): boo
   return text.includes(COMPACT_TEXT_ONLY_START) && text.includes(COMPACT_TEXT_ONLY_END);
 }
 
+/**
+ * The effort level this request should send, after the global policy has had
+ * its say.
+ *
+ * Without a reviewed profile this is the historical behavior verbatim: the
+ * client's effort, or the caller's fallback. With one, an unsupported level is
+ * resolved by policy — omitted, rounded along the executable ladder, or
+ * refused — and an omitted effort uses only a DECLARED default.
+ */
+function resolveTranslatedEffort(
+  body: AnthropicRequest,
+  options?: TranslateRequestOptions,
+): string | undefined {
+  const requested = anthropicEffortFromRequest(body) ?? options?.defaultEffort;
+  const profile = options?.reasoningMetadata?.effortProfile;
+  if (!profile) return requested;
+  const resolution = resolveRequestEffort(
+    requested,
+    profile,
+    options?.effortPolicy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+  );
+  return resolution?.resolved;
+}
+
 export function translateRequest(
   body: AnthropicRequest,
   npm: string,
@@ -498,7 +542,11 @@ export function translateRequest(
   if (options?.maxTools !== undefined && upstreamTools.length > options.maxTools) {
     upstreamTools = upstreamTools.slice(0, options.maxTools);
   }
-  const effort = anthropicEffortFromRequest(body) ?? options?.defaultEffort;
+  // Resolve the global effort EXACTLY ONCE, before anything is serialized. The
+  // direct chat-completions forward resolves at its own boundary and then hands
+  // the same already-resolved level to the same wire map, which is what makes
+  // the two paths produce byte-identical bodies.
+  const effort = resolveTranslatedEffort(body, options);
   let providerOptions = deepMergeProviderOptions(
     thinkingProviderOptions(npm),
     effortProviderOptions(npm, effort, options?.reasoningMetadata?.upstreamModelId ?? body.model, options?.reasoningMetadata),

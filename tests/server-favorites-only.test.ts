@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { filterServerModelsByFavorites } from '../src/server/catalog-filter.js';
+import { buildServerFavoriteCatalog } from '../src/server/catalog-filter.js';
 import { MAX_MODEL_CATALOG } from '../src/constants.js';
 import { getServerFavoritesOnly, setServerFavoritesOnly } from '../src/config.js';
 import type { ServerModelInfo } from '../src/server/models.js';
@@ -27,8 +27,12 @@ describe('server favorites-only catalog', () => {
       modelId: m.id,
     }));
 
-    const filtered = filterServerModelsByFavorites(models, favorites).slice(0, MAX_MODEL_CATALOG);
+    const result = buildServerFavoriteCatalog(models, favorites);
 
-    expect(filtered).toHaveLength(MAX_MODEL_CATALOG);
+    expect(result.models).toHaveLength(MAX_MODEL_CATALOG);
+    expect(result.models.map(model => model.id)).toEqual(
+      favorites.slice(0, MAX_MODEL_CATALOG).map(favorite => favorite.modelId),
+    );
+    expect(result.capacitySkippedFavorites).toEqual(favorites.slice(MAX_MODEL_CATALOG));
   });
 });

@@ -106,11 +106,16 @@ function installClaude(version: string, bundle = PRISTINE_BUNDLE): string {
   return realpathSync(real);
 }
 
-function saveFavorites(): void {
+function saveFavorites(
+  favorites: Array<{ providerId: string; modelId: string }> = [
+    { providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' },
+  ],
+  modelAliases = [{ name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
+): void {
   mkdirSync(clodexHome, { recursive: true });
   writeFileSync(join(clodexHome, 'config.json'), JSON.stringify({
-    favoriteModels: [{ providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
-    modelAliases: [{ name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }],
+    favoriteModels: favorites,
+    modelAliases,
   }));
 }
 
@@ -730,5 +735,97 @@ describe('runPatchCommand backup directory integrity', () => {
     // Backups are published temp-then-rename, so no `.tmp-*` may survive.
     expect(backupFiles().filter(name => name.includes('.tmp-'))).toEqual([]);
     expect(bundleOf(real)).toContain('"sol"');
+  });
+});
+
+describe('runPatchCommand patch exposure warning', () => {
+  it('keeps unavailable retained favorites in saved-order capacity without backfill', async () => {
+    const real = installClaude('2.1.220');
+    const ordinaryFavorites = Array.from({ length: 19 }, (_, index) => ({
+      providerId: 'custom-provider',
+      modelId: `custom-${index}`,
+    }));
+    const staleFavorite = { providerId: 'opencode-go', modelId: 'stale-future-model' };
+    const lateFavorite = { providerId: 'opencode-go', modelId: 'qwen3.8-max' };
+    writeFileSync(join(clodexHome, 'config.json'), JSON.stringify({
+      favoriteModels: [staleFavorite, ...ordinaryFavorites, lateFavorite],
+      modelAliases: [
+        { name: 'stale', ...staleFavorite },
+        { name: 'late', ...lateFavorite },
+      ],
+    }));
+    writeFileSync(join(clodexHome, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: 'opencode-go',
+        templateId: 'opencode-go',
+        name: 'OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:opencode-go',
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-12T00:00:00.000Z',
+          models: [{
+            id: staleFavorite.modelId,
+            name: 'Stale future model',
+            modelFormat: 'openai',
+          }, {
+            id: lateFavorite.modelId,
+            name: 'Qwen 3.8 Max',
+            modelFormat: 'openai',
+          }],
+        },
+        addedAt: '2026-08-12T00:00:00.000Z',
+      }],
+    }));
+
+    expect(await runPatchCommand({})).toBe(0);
+
+    const warning = logs.join('\n');
+    expect(warning).toMatch(
+      /warn: 1 saved favorite not patched because clodex limits the Claude-facing patch catalog to 20 models/,
+    );
+    expect(warning).toMatch(/Capacity is selected from saved order before availability and support checks/);
+    expect(warning).toMatch(/unavailable entries keep a position and can leave fewer active models/);
+    expect(warning).toMatch(/Removing or reordering those entries reclaims positions/);
+    expect(warning).toContain('  clodex:opencode-go:qwen3.8-max');
+    expect(warning).toMatch(/Saved model alias "stale" was not patched.*outside the active Claude Code catalog/);
+    expect(warning).toMatch(/Saved model alias "late" was not patched.*outside the active Claude Code catalog/);
+    expect(bundleOf(real)).toContain('"clodex:custom-provider:custom-18"');
+    expect(bundleOf(real)).not.toContain('stale-future-model');
+    expect(bundleOf(real)).not.toContain('qwen3.8-max');
+  });
+
+  it('warns that capacity is selected from saved order and lists the skipped favorite', async () => {
+    const real = installClaude('2.1.220');
+    const favorites = [{ providerId: 'openai-oauth', modelId: 'gpt-5.6-sol' }];
+    for (let n = 2; n <= 21; n++) {
+      favorites.push({ providerId: 'openai-oauth', modelId: `gpt-5.6-sol-${n}` });
+    }
+    saveFavorites(favorites, [{
+      name: 'late',
+      providerId: 'openai-oauth',
+      modelId: 'gpt-5.6-sol-21',
+    }]);
+
+    expect(await runPatchCommand({})).toBe(0);
+
+    const warning = logs.join('\n');
+    expect(warning).toMatch(
+      /warn: 1 saved favorite not patched because clodex limits the Claude-facing patch catalog to 20 models/,
+    );
+    // Capacity is selected from saved order BEFORE availability/support checks, so
+    // unavailable entries can leave fewer active models than the catalog allows.
+    expect(warning).toMatch(/Capacity is selected from saved order before availability and support checks/);
+    expect(warning).toMatch(/unavailable entries keep a position and can leave fewer active models/);
+    expect(warning).toMatch(/Removing or reordering those entries reclaims positions/);
+    // The 21st saved favorite is omitted from the patch and listed as skipped.
+    expect(warning).toContain('  clodex:openai-oauth:gpt-5.6-sol-21');
+    expect(warning).toContain(
+      'Saved model alias "late" was not patched — target is outside the active Claude Code catalog.',
+    );
+    expect(bundleOf(real)).toContain('"clodex:openai-oauth:gpt-5.6-sol-20"');
+    expect(bundleOf(real)).not.toContain('clodex:openai-oauth:gpt-5.6-sol-21');
   });
 });

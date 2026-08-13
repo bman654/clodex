@@ -4,11 +4,25 @@
 
 ## Provider registry
 
-`src/registry/`. The shipped registry has two provider templates in `src/provider-templates.ts`:
-`openai` (API key, `https://api.openai.com/v1`) and `openai-oauth`. `provider-auth.ts` implements
-the OpenAI device-code OAuth flow; `refresh-models.ts` fetches the model list (3-tier fetch for
-OAuth). Materialization (`materialize.ts`) turns registry providers into `LocalProvider`s with
-per-model `npm`/`baseUrl`/`upstreamModelId`.
+`src/registry/`. The shipped registry has three provider templates in `src/provider-templates.ts`:
+`openai` (API key), `openai-oauth`, and `opencode-go`. `provider-auth.ts` implements the OpenAI
+device-code OAuth flow; `refresh-models.ts` fetches the model list (3-tier fetch for OAuth).
+Materialization (`materialize.ts`) turns registry providers into `LocalProvider`s with per-model
+`npm`/`baseUrl`/`upstreamModelId`.
+
+Provider templates can declare reusable controls for non-default behavior:
+
+- **`verifyCredential`** runs an optional template-owned probe before a credential is persisted. It
+  receives only the key: a caller-provided base URL must never redirect a live credential.
+- **`staticModelPolicy` / `preserveModelPricing`** let a template restrict live discovery to its
+  committed allowlist and retain provider-supplied prices. Read pricing preservation through
+  `providerPreservesModelPricing()`, which falls back to the template when persisted state predates
+  the flag.
+
+`ModelRuntimeCompatibility` (`src/model-runtime-compatibility.ts`) holds provider-neutral per-model
+wire quirks consumed by runtime adapters, including reasoning/request-shape controls and whether an
+Anthropic-format upstream supports token counting. An explicit `supportsCountTokens: false` selects
+clodex's local estimate; an unset value preserves forwarding for custom compatible endpoints.
 
 Registry writes use atomic hard-link lock publication, so the filesystem containing `CLODEX_HOME`
 must support hard links. **A parseable lock owned by a live PID is never reclaimed based on age;**

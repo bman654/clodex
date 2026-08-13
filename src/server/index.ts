@@ -30,6 +30,7 @@ import {
   buildDedupedModelRows,
 } from './models.js';
 import { getReasoningCapabilities } from '../provider-factory.js';
+import { DEFAULT_UNSUPPORTED_EFFORT_POLICY } from '../effort-policy.js';
 import {
   askFavoritesOnly,
   askListenMode,
@@ -42,10 +43,11 @@ import {
 import { createGatewayModelCatalog } from './models.js';
 import { startServer } from './router.js';
 import {
-  filterServerModelsByFavorites,
+  buildServerFavoriteCatalog,
   filterServerModelsByProviders,
   summarizeServerProviders,
 } from './catalog-filter.js';
+import { httpProxyModelId } from '../http-proxy/routes.js';
 import { selectServerProviders, type ServerProviderOption } from './provider-select.js';
 import { runHttpProxyServerCommand } from '../http-proxy/index.js';
 import {
@@ -57,6 +59,7 @@ import { getInferenceRequestLogPath, getSessionLogPath } from '../trace-log.js';
 import {
   describeModelAliasRejection,
   normalizeModelAliases,
+  type ModelAliasRejection,
 } from '../model-aliases.js';
 
 export interface ServerRunConfig {
@@ -175,6 +178,15 @@ export async function loadServerModels(): Promise<ServerModelInfo[]> {
 
 export function enrichServerModelReasoning(model: ServerModelInfo): ServerModelInfo {
   if (!model.npm || model.modelFormat !== 'openai') return model;
+  // A reviewed profile states the provider's default explicitly, including the
+  // explicit "there isn't one". The heuristic below picks a plausible level for
+  // models that have no such statement; running it over a model that DOES have
+  // one would inject an effort the provider never asked for on every request
+  // that omitted it.
+  if (model.effortProfile) {
+    const declared = model.effortProfile.defaultLevel;
+    return declared === null ? model : { ...model, defaultEffort: declared };
+  }
   const caps = getReasoningCapabilities(model.npm, upstreamModelId(model), {
     providerId: model.providerId,
     apiBaseUrl: model.apiBaseUrl,
@@ -400,6 +412,8 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   spinner.start('Fetching available models...');
 
   let models: ServerModelInfo[];
+  let favoriteTargets: Set<string> | undefined;
+  let capacitySkippedTargets: Set<string> | undefined;
   try {
     models = await loadServerModels();
     if (runConfig.exposedProviders) {
@@ -412,7 +426,38 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
         p.log.error('Run `clodex models` to add favorites, or turn off favorites-only in the server wizard.');
         return 1;
       }
-      models = filterServerModelsByFavorites(models, favorites).slice(0, MAX_MODEL_CATALOG);
+      const favoriteCatalog = buildServerFavoriteCatalog(models, favorites);
+      favoriteTargets = new Set(
+        favorites.map(favorite => `${favorite.providerId}:${favorite.modelId}`),
+      );
+      capacitySkippedTargets = new Set(
+        favoriteCatalog.capacitySkippedFavorites.map(favorite => (
+          `${favorite.providerId}:${favorite.modelId}`
+        )),
+      );
+      models = favoriteCatalog.models;
+      if (favoriteCatalog.unavailableFavorites.length > 0) {
+        p.log.warn(
+          `${favoriteCatalog.unavailableFavorites.length} favorite${favoriteCatalog.unavailableFavorites.length === 1 ? '' : 's'} `
+          + 'not exposed because the target is unavailable under the current provider filter. '
+          + 'Saved entries were preserved:\n'
+          + favoriteCatalog.unavailableFavorites
+            .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+            .join('\n'),
+        );
+      }
+      if (favoriteCatalog.capacitySkippedFavorites.length > 0) {
+        p.log.warn(
+          `${favoriteCatalog.capacitySkippedFavorites.length} saved favorite${favoriteCatalog.capacitySkippedFavorites.length === 1 ? '' : 's'} `
+          + `not exposed because clodex limits this Claude-facing catalog to ${MAX_MODEL_CATALOG} models. `
+          + 'Capacity is selected from saved order before availability and support checks; unavailable '
+          + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+          + 'entries reclaims positions. Skipped entries were preserved:\n'
+          + favoriteCatalog.capacitySkippedFavorites
+            .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+            .join('\n'),
+        );
+      }
       if (models.length === 0) {
         spinner.stop(pc.red('No favorite models matched the current provider filter'));
         p.log.error('Adjust favorites with `clodex models` or change exposed providers in the server wizard.');
@@ -453,41 +498,43 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   // advertised in /models listings; see createGatewayModelCatalog.
   const normalizedAliases = normalizeModelAliases(loadPreferences().modelAliases);
   const baseCatalog = createGatewayModelCatalog(models, gateway);
-  const unavailableAliases = normalizedAliases.accepted.filter(({ alias }) => (
-    !models.some(model => (
-      gatewayProviderId(model) === alias.providerId
-      && model.id === alias.modelId
-    ))
-  ));
-  const collidingAliases = normalizedAliases.accepted.filter(({ alias }) => (
-    baseCatalog.get(alias.name) !== undefined
-  ));
-  const collidingAliasNames = new Set(collidingAliases.map(({ alias }) => alias.name));
-  const targetUnavailableAliases = unavailableAliases.filter(({ alias }) => (
-    !collidingAliasNames.has(alias.name)
-  ));
-  const inactiveAliasNames = new Set([
-    ...targetUnavailableAliases.map(({ alias }) => alias.name),
-    ...collidingAliasNames,
-  ]);
+  const availableTargets = new Set(models.map(model => (
+    `${gatewayProviderId(model)}:${model.id}`
+  )));
+  const inactiveAliasNames = new Set<string>();
+  const targetAliasRejections: ModelAliasRejection[] = [];
+  for (const { alias, sources } of normalizedAliases.accepted) {
+    const target = `${alias.providerId}:${alias.modelId}`;
+    let reason: ModelAliasRejection['reason'] | undefined;
+    if (baseCatalog.get(alias.name) !== undefined) reason = 'catalog-id-collision';
+    else if (availableTargets.has(target)) reason = undefined;
+    else if (capacitySkippedTargets?.has(target)) reason = 'target-not-exposed';
+    else if (favoriteTargets !== undefined && !favoriteTargets.has(target)) {
+      reason = 'target-not-favorite';
+    } else reason = 'target-unavailable';
+    if (reason === undefined) continue;
+    inactiveAliasNames.add(alias.name);
+    targetAliasRejections.push(
+      ...sources.map(source => ({ alias: source, reason })),
+    );
+  }
   const modelAliases = normalizedAliases.aliases.filter(alias => !inactiveAliasNames.has(alias.name));
-  const aliasWarnings = [
-    ...normalizedAliases.rejections.map(rejection => (
-      `${JSON.stringify(rejection.alias.name)} — ${describeModelAliasRejection(rejection.reason)}`
-    )),
-    ...targetUnavailableAliases.flatMap(({ sources }) => sources.map(source => (
-      `${JSON.stringify(source.name)} — target unavailable`
-    ))),
-    ...collidingAliases.flatMap(({ sources }) => sources.map(source => (
-      `${JSON.stringify(source.name)} — conflicts with a catalog model id`
-    ))),
+  const aliasRejections = [
+    ...normalizedAliases.rejections,
+    ...targetAliasRejections,
   ];
+  const aliasWarnings = aliasRejections.map(rejection => (
+    `${JSON.stringify(rejection.alias.name)} — ${describeModelAliasRejection(rejection.reason)}`
+  ));
   if (aliasWarnings.length > 0) {
     p.log.warn(
       `${aliasWarnings.length} saved model alias${aliasWarnings.length === 1 ? '' : 'es'} inactive. `
       + `Saved entries were preserved.\n  ${aliasWarnings.join('\n  ')}`,
     );
   }
+  // Startup snapshot: a running server keeps the policy it launched with, so
+  // one long-lived process cannot change how requests resolve halfway through.
+  const effortPolicy = loadPreferences().effortPolicy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY;
   const inferenceLogPath = getInferenceRequestLogPath();
   const webSocketDiagnosticsLogPath = options.wsDiagnostics
     ? getSessionLogPath('server-websocket-diagnostics', 'jsonl')
@@ -500,8 +547,10 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     catalog: createGatewayModelCatalog(models, gateway, modelAliases),
     gateway,
     aliasNames: new Set(modelAliases.map(alias => alias.name)),
+    modelAliasRejections: aliasRejections,
     inferenceLogPath,
     webSocketDiagnosticsLogPath,
+    effortPolicy,
   });
 
   console.log('');

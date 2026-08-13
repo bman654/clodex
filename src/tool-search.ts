@@ -7,7 +7,13 @@
 
 import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-types.js';
 
-const TOOL_SEARCH_TYPE_PREFIX = 'tool_search_tool';
+/**
+ * Prefix of every Anthropic tool-search server-tool wire type
+ * (`tool_search_tool_regex_20251119`, `tool_search_tool_bm25_20251119`).
+ * Exported so the beta policy can key its request-shape predicate off exactly
+ * this spelling instead of carrying a second copy of it.
+ */
+export const TOOL_SEARCH_TYPE_PREFIX = 'tool_search_tool';
 
 export function isToolSearchTool(tool: AnthropicToolDefinition): boolean {
   if (typeof tool.type === 'string' && tool.type.startsWith(TOOL_SEARCH_TYPE_PREFIX)) return true;

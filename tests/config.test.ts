@@ -89,6 +89,28 @@ describe('dotfolder config', () => {
     expect(loadPreferences().localPatchesEnabled).toBe(false);
   });
 
+  it('persists the global effort policy and defaults when none is saved', () => {
+    expect(loadPreferences().effortPolicy).toBe('provider-default');
+
+    savePreferences({ effortPolicy: 'up' });
+    expect(loadPreferences().effortPolicy).toBe('up');
+    expect(JSON.parse(readFileSync(getConfigPath(), 'utf8')).effortPolicy).toBe('up');
+
+    savePreferences({ effortPolicy: 'exact' });
+    expect(loadPreferences().effortPolicy).toBe('exact');
+  });
+
+  it('falls back to the default rather than honouring an unknown saved policy', () => {
+    // A hand-edited or newer-version config must not reach a request path with
+    // a behavior this build cannot interpret.
+    savePreferences({ lastProvider: 'openai-oauth' });
+    writeFileSync(
+      getConfigPath(),
+      JSON.stringify({ lastProvider: 'openai-oauth', effortPolicy: 'nearest' }),
+    );
+    expect(loadPreferences().effortPolicy).toBe('provider-default');
+  });
+
   it('loads legacy aliases without mutating or filtering their stored form', () => {
     savePreferences({ lastProvider: 'openai-oauth' });
     const legacyPayload = JSON.stringify({

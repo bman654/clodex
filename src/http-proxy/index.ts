@@ -1,11 +1,15 @@
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import { loadPreferences } from '../config.js';
-import { DEFAULT_SERVER_PORT } from '../constants.js';
+import { DEFAULT_SERVER_PORT, MAX_MODEL_CATALOG } from '../constants.js';
 import { fetchProviderCatalog, resolveLocalProviderApiKey } from '../provider-catalog.js';
 import { providersForTarget } from '../target-compatibility.js';
 import type { ProxyRoute } from '../proxy.js';
-import { buildHttpProxyRoutes, type HttpProxyRouteResult } from './routes.js';
+import {
+  buildHttpProxyRoutes,
+  httpProxyModelId,
+  type HttpProxyRouteResult,
+} from './routes.js';
 import { startHttpProxy, type HttpProxyHandle, type HttpProxyOptions } from './server.js';
 import { ensureHttpProxyCaBundle } from './ca.js';
 import { registerServerRuntimeState, unregisterServerRuntimeState } from '../server-runtime.js';
@@ -16,13 +20,18 @@ import {
 } from '../trace-log.js';
 import { removeAnthropicProxyBypass } from '../wrapper-env.js';
 import {
-  canonicalModelAliasName,
+  DEFAULT_UNSUPPORTED_EFFORT_POLICY,
+  type UnsupportedEffortPolicy,
+} from '../effort-policy.js';
+import {
   describeModelAliasRejection,
   normalizeModelAliases,
 } from '../model-aliases.js';
 
 export interface LoadedHttpProxyRoutes extends HttpProxyRouteResult {
   favoriteCount: number;
+  /** Startup snapshot of the global unsupported-effort policy. */
+  effortPolicy: UnsupportedEffortPolicy;
 }
 
 export async function loadHttpProxyRoutes(): Promise<LoadedHttpProxyRoutes> {
@@ -34,12 +43,16 @@ export async function loadHttpProxyRoutes(): Promise<LoadedHttpProxyRoutes> {
       routes: [],
       unavailable: [],
       unsupported: [],
+      capacitySkippedFavorites: [],
       aliases: [],
-      unavailableAliases: [
-        ...normalizedAliases.rejected,
-        ...normalizedAliases.accepted.flatMap(({ sources }) => sources),
+      unavailableAliasRejections: [
+        ...normalizedAliases.rejections,
+        ...normalizedAliases.accepted.flatMap(({ sources }) => (
+          sources.map(alias => ({ alias, reason: 'target-not-favorite' as const }))
+        )),
       ],
       favoriteCount: 0,
+      effortPolicy: prefs.effortPolicy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY,
     };
   }
   const rawCatalog = providersForTarget(await fetchProviderCatalog({ agent: 'claude' }), 'claude');
@@ -50,6 +63,7 @@ export async function loadHttpProxyRoutes(): Promise<LoadedHttpProxyRoutes> {
   return {
     ...buildHttpProxyRoutes(catalog, favorites, prefs.modelAliases),
     favoriteCount: favorites.length,
+    effortPolicy: prefs.effortPolicy ?? DEFAULT_UNSUPPORTED_EFFORT_POLICY,
   };
 }
 
@@ -87,27 +101,44 @@ export function printHttpProxyModels(
 
 export function reportSkippedHttpProxyFavorites(loaded: LoadedHttpProxyRoutes): void {
   if (loaded.unavailable.length > 0) {
-    p.log.warn(`${loaded.unavailable.length} favorite${loaded.unavailable.length === 1 ? '' : 's'} unavailable or missing credentials.`);
+    p.log.warn(
+      `${loaded.unavailable.length} favorite${loaded.unavailable.length === 1 ? '' : 's'} unavailable or missing credentials. `
+      + 'Saved entries were preserved:\n'
+      + loaded.unavailable
+        .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+        .join('\n'),
+    );
   }
   if (loaded.unsupported.length > 0) {
     p.log.warn(
       `${loaded.unsupported.length} favorite${loaded.unsupported.length === 1 ? '' : 's'} skipped — `
-      + 'HTTP proxy mode supports non-Anthropic AI SDK routes only.',
+      + 'HTTP proxy mode supports non-Anthropic AI SDK routes only. Saved entries were preserved:\n'
+      + loaded.unsupported
+        .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+        .join('\n'),
     );
   }
-  if (loaded.unavailableAliases.length > 0) {
-    const normalizedAliases = normalizeModelAliases(loaded.unavailableAliases);
-    const reasonByAlias = new Map(
-      normalizedAliases.rejections.map(rejection => [
-        rejection.alias,
-        describeModelAliasRejection(rejection.reason),
-      ]),
-    );
+  if (loaded.capacitySkippedFavorites.length > 0) {
     p.log.warn(
-      `${loaded.unavailableAliases.length} model alias${loaded.unavailableAliases.length === 1 ? '' : 'es'} skipped. `
+      `${loaded.capacitySkippedFavorites.length} saved favorite${loaded.capacitySkippedFavorites.length === 1 ? '' : 's'} `
+      + `not exposed because clodex limits this Claude-facing catalog to ${MAX_MODEL_CATALOG} models. `
+      + 'Capacity is selected from saved order before availability and support checks; unavailable '
+      + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+      + 'entries reclaims positions. Skipped entries were preserved:\n'
+      + loaded.capacitySkippedFavorites
+        .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+        .join('\n'),
+    );
+  }
+  if (loaded.unavailableAliasRejections.length > 0) {
+    p.log.warn(
+      `${loaded.unavailableAliasRejections.length} model alias${loaded.unavailableAliasRejections.length === 1 ? '' : 'es'} skipped. `
       + 'Saved entries were preserved.\n'
-      + loaded.unavailableAliases
-        .map(alias => `  ${JSON.stringify(alias.name)} — ${reasonByAlias.get(alias) ?? 'target unavailable'}`)
+      + loaded.unavailableAliasRejections
+        .map(rejection => (
+          `  ${JSON.stringify(rejection.alias.name)} — `
+          + describeModelAliasRejection(rejection.reason)
+        ))
         .join('\n'),
     );
   }
@@ -126,18 +157,12 @@ export function buildConfiguredHttpProxyOptions(
     port,
     routes: loaded.routes,
     modelAliases: loaded.aliases,
-    reservedModelIds: [...new Set([
-      ...loaded.aliases.flatMap(alias => alias.sourceNames ?? []),
-      ...loaded.unavailableAliases.map(alias => alias.name),
-    ].flatMap(name => {
-      const trimmedName = name.trim();
-      const canonicalName = canonicalModelAliasName(name);
-      return [name, trimmedName, canonicalName].filter(Boolean);
-    }))],
+    modelAliasRejections: loaded.unavailableAliasRejections,
     debug,
     debugLogPath,
     inferenceLogPath,
     webSocketDiagnosticsLogPath,
+    effortPolicy: loaded.effortPolicy,
   };
 }
 

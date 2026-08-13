@@ -11,6 +11,11 @@ import { decodeRequestBody } from '../http-utils.js';
 import { ensureHttpProxyCertificates } from './ca.js';
 import { normalizeRouteLookupId } from '../context-model-id.js';
 import { listenTcpServer } from '../listener-ready.js';
+import {
+  describeModelAliasRejection,
+  modelAliasLookupKey,
+  type ModelAliasRejection,
+} from '../model-aliases.js';
 import { routeUnavailableMessage } from '../route-unavailable.js';
 import {
   outboundHttpProxyAgent,
@@ -19,7 +24,9 @@ import {
 } from '../outbound-proxy.js';
 import { HTTP_PROXY_MODEL_PREFIX, type ResolvedHttpProxyAlias } from './routes.js';
 import { anthropicEffortFromRequest, extractClaudeSessionId, type AnthropicRequest } from '../sdk-adapter.js';
+import type { UnsupportedEffortPolicy } from '../effort-policy.js';
 import { anthropicMessagesEndpoint } from '../anthropic-endpoints.js';
+import { ANTHROPIC_BETA_HEADER, normalizeBetaTokens } from '../anthropic-beta-policy.js';
 import { isOpenAiOAuthRoute, oauthServiceTier } from '../sdk-adapter.js';
 import {
   getLatestMessagePreview,
@@ -153,7 +160,9 @@ export interface HttpProxyOptions {
   routes: ProxyRoute[];
   /** Short incoming model names mapped to canonical adapter route ids. */
   modelAliases?: ResolvedHttpProxyAlias[];
-  /** Configured local model ids that must never fall through to Anthropic. */
+  /** Configured rejected aliases that must never fall through to Anthropic. */
+  modelAliasRejections?: readonly ModelAliasRejection[];
+  /** Other configured local model ids that must never fall through to Anthropic. */
   reservedModelIds?: string[];
   debug?: boolean;
   /** Per-process translated-adapter debug log used when debug is enabled. */
@@ -162,6 +171,8 @@ export interface HttpProxyOptions {
   inferenceLogPath?: string;
   /** Opt-in request-envelope and WebSocket head-decision diagnostics. */
   webSocketDiagnosticsLogPath?: string;
+  /** Global behavior for an explicit effort the target model cannot run. */
+  effortPolicy?: UnsupportedEffortPolicy;
   /** Test hook; production always uses https://api.anthropic.com. */
   anthropicOrigin?: string;
   /** Test hook for a local self-signed Anthropic origin. */
@@ -588,6 +599,14 @@ function forwardToAdapter(
       resolve();
     };
 
+    // The client's beta travels this internal hop as NON-AUTHORITATIVE context,
+    // normalized to one deduped stable-order value so a duplicated or list-form
+    // client header cannot arrive as two case-variant keys. The adapter is the
+    // final routed boundary and recomputes the outbound set from the provider's
+    // configured headers, dropping this one. Client credentials and identity are
+    // never forwarded: the adapter is authenticated by clodex's own loopback
+    // token and nothing else.
+    const clientBeta = normalizeBetaTokens(req.headers['anthropic-beta']);
     upstream = adapterRequest({
       hostname: '127.0.0.1',
       port: adapter.port,
@@ -598,6 +617,7 @@ function forwardToAdapter(
         'Content-Type': 'application/json',
         'Content-Length': String(rawBody.length),
         'x-api-key': adapter.token,
+        ...(clientBeta.length > 0 ? { [ANTHROPIC_BETA_HEADER]: clientBeta.join(',') } : {}),
         ...(typeof req.headers['x-claude-code-session-id'] === 'string'
           ? { 'x-claude-code-session-id': req.headers['x-claude-code-session-id'] }
           : {}),
@@ -713,20 +733,26 @@ function forwardPlainHttp(req: http.IncomingMessage, res: http.ServerResponse): 
 export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpProxyHandle> {
   const certificates = ensureHttpProxyCertificates();
   const routesById = new Map<string, ProxyRoute>();
+  const rejectedAliasReasons = new Map<string, ModelAliasRejection['reason']>();
+  const reservedAliasLookupKeys = new Set<string>();
   const reservedModelIds = new Set<string>();
   for (const route of options.routes) {
     routesById.set(normalizeRouteLookupId(route.aliasId), route);
   }
   for (const alias of options.modelAliases ?? []) {
     const aliasId = normalizeRouteLookupId(alias.name);
-    reservedModelIds.add(aliasId);
-    for (const sourceName of alias.sourceNames ?? []) {
-      reservedModelIds.add(normalizeRouteLookupId(sourceName));
-      reservedModelIds.add(normalizeRouteLookupId(sourceName.trim()));
+    for (const name of [alias.name, ...(alias.sourceNames ?? [])]) {
+      reservedAliasLookupKeys.add(modelAliasLookupKey(normalizeRouteLookupId(name)));
     }
     const route = routesById.get(normalizeRouteLookupId(alias.routeId));
     if (!route) continue;
     routesById.set(aliasId, route);
+  }
+  for (const rejection of options.modelAliasRejections ?? []) {
+    const lookupKey = modelAliasLookupKey(normalizeRouteLookupId(rejection.alias.name));
+    if (lookupKey && !rejectedAliasReasons.has(lookupKey)) {
+      rejectedAliasReasons.set(lookupKey, rejection.reason);
+    }
   }
   for (const modelId of options.reservedModelIds ?? []) {
     reservedModelIds.add(normalizeRouteLookupId(modelId));
@@ -744,6 +770,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       options.debugLogPath,
       options.webSocketDiagnosticsLogPath,
       options.modelAliases,
+      options.effortPolicy,
     );
   }
   const adapterAgent = adapter ? new http.Agent({ keepAlive: true }) : undefined;
@@ -800,17 +827,36 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         ? extractClaudeSessionId(parsed, claudeSessionIdHeader)
         : undefined;
       const requestedModel = typeof parsed?.model === 'string' ? parsed.model : undefined;
-      const unresolvedRoutedModel = !route && requestedModel !== undefined && (
-        normalizeRouteLookupId(requestedModel).startsWith(HTTP_PROXY_MODEL_PREFIX)
-        || reservedModelIds.has(normalizeRouteLookupId(requestedModel))
+      const requestedModelLookupId = requestedModel === undefined
+        ? undefined
+        : normalizeRouteLookupId(requestedModel);
+      const requestedAliasLookupKey = requestedModelLookupId === undefined
+        ? undefined
+        : modelAliasLookupKey(requestedModelLookupId);
+      const aliasRejectionReason = requestedAliasLookupKey === undefined
+        ? undefined
+        : rejectedAliasReasons.get(requestedAliasLookupKey);
+      const unresolvedRoutedModel = !route && requestedModelLookupId !== undefined && (
+        aliasRejectionReason !== undefined
+        || requestedModelLookupId.startsWith(HTTP_PROXY_MODEL_PREFIX)
+        || reservedModelIds.has(requestedModelLookupId)
+        || (
+          requestedAliasLookupKey !== undefined
+          && reservedAliasLookupKeys.has(requestedAliasLookupKey)
+        )
       );
 
       if (unresolvedRoutedModel) {
-        const message = routeUnavailableMessage(requestedModel);
+        const message = routeUnavailableMessage(
+          requestedModel!,
+          aliasRejectionReason === undefined
+            ? undefined
+            : describeModelAliasRejection(aliasRejectionReason),
+        );
         if (messagesEndpoint === 'messages' && options.inferenceLogPath) {
           writeInferenceRouteUnavailableLog(options.inferenceLogPath, {
             requestId,
-            modelId: requestedModel,
+            modelId: requestedModel!,
             statusCode: 400,
           });
         }

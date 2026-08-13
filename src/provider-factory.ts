@@ -10,10 +10,13 @@ import {
   type ResponsesWebSocketDiagnosticEvent,
 } from './oauth/responses-websocket.js';
 import {
-  CLAUDE_CODE_USER_AGENT,
-  injectClaudeIdentity,
-} from './oauth/claude-identity.js';
+  ANTHROPIC_BETA_HEADER,
+  isAnthropicBetaHeaderName,
+  isRouteOwnedCredentialHeaderName,
+  resolveOutboundBeta,
+} from './anthropic-beta-policy.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
+import type { EffortProfile } from './effort-policy.js';
 import {
   transformOpenAiCompatibleRequestBody,
   type ModelRuntimeCompatibility,
@@ -42,6 +45,53 @@ type SdkProviderFactory = (options: {
 
 const factoryCache = new Map<string, Promise<SdkProviderFactory>>();
 
+/**
+ * A route owns its credential only when it actually supplies one. An anonymous
+ * route supplies none and relies on the wire-level strip below; a route left
+ * without a key supplies none either, and there the provider's configured
+ * header is the only authority — removing it would break the route outright.
+ */
+function routeSuppliesCredential(spec: ProviderModelSpec): boolean {
+  return spec.authType !== 'none' && spec.apiKey.trim() !== '';
+}
+
+/**
+ * The configured headers an SDK provider may be constructed with.
+ *
+ * Drops every spelling of a credential name the route itself will set, so the
+ * SDK's own credential can never be appended to a configured one. Ordinary
+ * configured headers are preserved exactly as given.
+ */
+function configuredSdkHeaders(spec: ProviderModelSpec): Record<string, string> | undefined {
+  if (!spec.headers || !routeSuppliesCredential(spec)) return spec.headers;
+  return Object.fromEntries(
+    Object.entries(spec.headers).filter(([name]) => !isRouteOwnedCredentialHeaderName(name)),
+  );
+}
+
+/**
+ * Configured headers for the Anthropic SDK: the same credential-collision
+ * denial, plus the single canonical `anthropic-beta` this provider configured.
+ * A client beta cannot participate — none is visible at SDK construction.
+ *
+ * NOT authoritative for the beta. `@ai-sdk/anthropic` reads this header back,
+ * LOWERCASES its tokens, and unions them with its own generated and
+ * per-request betas, emitting that set with precedence over what was
+ * configured. `anthropicWireFetch` below is the authority; this only keeps the
+ * value the SDK reads canonical and free of credential collisions.
+ */
+function configuredAnthropicSdkHeaders(spec: ProviderModelSpec): Record<string, string> | undefined {
+  const configured = configuredSdkHeaders(spec);
+  if (!configured) return undefined;
+  const withoutBeta = Object.fromEntries(
+    Object.entries(configured).filter(([name]) => !isAnthropicBetaHeaderName(name)),
+  );
+  const outboundBeta = resolveOutboundBeta(spec.headers);
+  return outboundBeta.source === 'configured'
+    ? { ...withoutBeta, [ANTHROPIC_BETA_HEADER]: outboundBeta.value }
+    : withoutBeta;
+}
+
 const fetchWithoutCredentialHeaders: typeof fetch = (input, init) => {
   const headers = new Headers(
     init?.headers ?? (input instanceof Request ? input.headers : undefined),
@@ -51,6 +101,39 @@ const fetchWithoutCredentialHeaders: typeof fetch = (input, init) => {
   }
   return fetch(input, { ...init, headers });
 };
+
+/**
+ * The FINAL Anthropic wire boundary: the last point before the request leaves.
+ *
+ * `@ai-sdk/anthropic` does not treat a configured `anthropic-beta` as final. It
+ * parses the header back out, lowercases every token, unions it with betas it
+ * generated for the request shape and with any per-request beta, then emits
+ * that union LAST so it wins. A provider that configured `Cfg-C` therefore puts
+ * `cfg-c` on the wire, alongside betas nobody configured. Only inspecting the
+ * outgoing request can see this, which is why it survived constructor-option
+ * tests.
+ *
+ * So this drops every outgoing spelling of the header — `Headers` is
+ * case-insensitive, so one delete removes them all — and re-emits only the
+ * configured result, verbatim. No configured beta means no beta at all. Header
+ * VALUES are never case-folded by `Headers`, so exact token case, order, and
+ * dedupe survive. Everything else about the request is untouched, and the
+ * wrapped `inner` keeps each branch's existing fetch behavior (the anonymous
+ * route still strips credential-bearing headers underneath this).
+ */
+function anthropicWireFetch(spec: ProviderModelSpec, inner: typeof fetch = fetch): typeof fetch {
+  const outboundBeta = resolveOutboundBeta(spec.headers);
+  return (input, init) => {
+    const headers = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
+    headers.delete(ANTHROPIC_BETA_HEADER);
+    if (outboundBeta.source === 'configured') {
+      headers.set(ANTHROPIC_BETA_HEADER, outboundBeta.value);
+    }
+    return inner(input, { ...init, headers });
+  };
+}
 
 /**
  * True when a model id must use the OpenAI/xAI Responses API instead of
@@ -105,6 +188,11 @@ export interface ProviderModelSpec {
   /** Registry authentication mode. OpenAI OAuth uses the ChatGPT Codex backend. */
   authType?: 'api' | 'oauth' | 'none';
   oauthAccountId?: string;
+  /**
+   * Stored per-provider registry data. Non-authoritative and deliberately
+   * unread here: it cannot select a destination, an auth scheme, or an
+   * identity, so no value a caller places in it can enable synthesis.
+   */
   providerData?: Record<string, unknown>;
   /** Google Vertex AI — uses Application Default Credentials, not apiKey. */
   vertex?: VertexProviderConfig;
@@ -163,6 +251,9 @@ async function loadSdkProviderFactory(npm: string): Promise<SdkProviderFactory> 
 
 export async function createLanguageModel(spec: ProviderModelSpec): Promise<LanguageModel> {
   const { npm, modelId, apiKey, baseURL } = spec;
+  // Configured headers, minus any credential name this route's own auth
+  // ownership will set. Computed once so every SDK branch closes the same hole.
+  const sdkHeaders = configuredSdkHeaders(spec);
 
   if (npm === '@ai-sdk/openai') {
     const { createOpenAI } = await import('@ai-sdk/openai');
@@ -178,7 +269,7 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
           apiKey,
           baseURL: 'https://chatgpt.com/backend-api/codex',
           headers: {
-            ...spec.headers,
+            ...sdkHeaders,
             ...(accountId ? { 'ChatGPT-Account-Id': accountId } : {}),
             originator: 'clodex',
             // Responses-Lite models (backend prefer_websockets/use_responses_lite,
@@ -204,10 +295,10 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
       : spec.authType === 'none'
         ? {
             apiKey: '',
-            ...(spec.headers ? { headers: spec.headers } : {}),
+            ...(sdkHeaders ? { headers: sdkHeaders } : {}),
             fetch: fetchWithoutCredentialHeaders,
           }
-        : { apiKey, ...(spec.headers ? { headers: spec.headers } : {}) };
+        : { apiKey, ...(sdkHeaders ? { headers: sdkHeaders } : {}) };
     const openai = createOpenAI(oauthOptions);
     return useResponsesEndpoint ? openai.responses(modelId) : openai.chat(modelId);
   }
@@ -216,28 +307,20 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
   if (npm === '@ai-sdk/anthropic') {
     const { createAnthropic } = await import('@ai-sdk/anthropic');
     const root = baseURL?.replace(/\/v1\/?$/, '').replace(/\/$/, '');
+    // OAuth keeps its Bearer credential scheme (authToken, never apiKey) and
+    // gains no synthesized native-client identity: a `claude-code` provider id
+    // is a route label, not proof of credential lineage, and clodex has no
+    // supported producer of native Claude credentials for it to stand for.
+    // One wire boundary for every construction below, composed over whatever
+    // fetch the branch already needed, so no branch can drift from the others.
     const anthropicOptions: Parameters<typeof createAnthropic>[0] = spec.authType === 'oauth'
-      ? {
-          authToken: apiKey,
-          ...(spec.providerId === 'claude-code'
-            ? {
-                headers: {
-                  'User-Agent': CLAUDE_CODE_USER_AGENT,
-                  'x-app': 'cli',
-                  'X-Claude-Code-Session-Id': injectClaudeIdentity(
-                    {},
-                    spec.providerData,
-                    spec.oauthAccountId ?? apiKey,
-                  ).sessionId,
-                },
-              }
-            : {}),
-        }
+      ? { authToken: apiKey, fetch: anthropicWireFetch(spec) }
       : spec.authType === 'none'
-        ? { apiKey: '', fetch: fetchWithoutCredentialHeaders }
-        : { apiKey };
-    if (spec.headers) {
-      anthropicOptions.headers = { ...anthropicOptions.headers, ...spec.headers };
+        ? { apiKey: '', fetch: anthropicWireFetch(spec, fetchWithoutCredentialHeaders) }
+        : { apiKey, fetch: anthropicWireFetch(spec) };
+    const anthropicHeaders = configuredAnthropicSdkHeaders(spec);
+    if (anthropicHeaders) {
+      anthropicOptions.headers = { ...anthropicOptions.headers, ...anthropicHeaders };
     }
     if (!root || root === 'https://api.anthropic.com') {
       return createAnthropic(anthropicOptions)(modelId);
@@ -254,7 +337,7 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
       baseURL: baseURL ?? '',
       ...(spec.authType !== 'none' && apiKey.trim() ? { apiKey } : {}),
       ...(spec.authType === 'none' ? { fetch: fetchWithoutCredentialHeaders } : {}),
-      ...(spec.headers ? { headers: spec.headers } : {}),
+      ...(sdkHeaders ? { headers: sdkHeaders } : {}),
       ...(spec.compatibility
         ? {
             transformRequestBody: (body: Record<string, unknown>) =>
@@ -271,7 +354,7 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
       apiKey: spec.authType === 'none' ? '' : apiKey,
       ...(spec.authType === 'none' ? { fetch: fetchWithoutCredentialHeaders } : {}),
       ...(baseURL ? { baseURL } : {}),
-      ...(spec.headers ? { headers: spec.headers } : {}),
+      ...(sdkHeaders ? { headers: sdkHeaders } : {}),
     });
     model = provider(modelId);
   }
@@ -306,6 +389,12 @@ export interface ReasoningMetadata {
   interleavedReasoningField?: string;
   /** Provider-neutral per-model wire quirks. */
   compatibility?: ModelRuntimeCompatibility;
+  /**
+   * The reviewed effort levels this model can actually run. Present only for a
+   * retained identity that has a generated profile, so the global effort policy
+   * stays inert for every ordinary provider.
+   */
+  effortProfile?: EffortProfile;
   /**
    * Bare upstream model id (e.g. 'grok-4.5'), distinct from the request's `model`
    * field which may be a gateway alias or catalog slug (e.g. 'xai-oauth__grok-4.5').

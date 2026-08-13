@@ -30,11 +30,16 @@ import { refreshAllProviderModels, refreshProviderModelsWithCredential } from '.
 import { authenticateProvider, providerAuthHelpText, validateOAuthAccountName, type ProviderAuthMethod } from './registry/provider-auth.js';
 import { supportsNativeOAuth } from './oauth/types.js';
 import { browseAllModels } from './prompts.js';
-import { cachedModelToLocal, projectSelectedOAuthAccount } from './registry/materialize.js';
+import {
+  cachedModelToLocal,
+  projectProviderCachedModels,
+  projectSelectedOAuthAccount,
+} from './registry/materialize.js';
 import { OAUTH_ACCOUNT_ENV } from './oauth-account-selection.js';
 import { loadPreferences } from './config.js';
 import type { LocalProvider } from './types.js';
 import { readLiveServerRuntimeStates } from './server-runtime.js';
+import { isProviderConfiguredForTemplate } from './registry/resolve-template.js';
 import {
   fmtEnabledStar,
   fmtProvider,
@@ -155,7 +160,7 @@ export function parseProvidersArgs(args: string[]): {
 }
 
 export function providersHelpText(): string {
-  return `${pc.bold('clodex providers')} — manage your OpenAI providers
+  return `${pc.bold('clodex providers')} — manage model providers
 
 ${pc.bold('Usage:')}
   clodex providers
@@ -167,7 +172,7 @@ ${pc.bold('Usage:')}
 
 ${pc.bold('Subcommands:')}
   (none)      Provider hub wizard
-  add         Add OpenAI with an API key
+  add         Add a built-in provider or sign in with ChatGPT
   auth        Sign in with ChatGPT/Codex-plan OAuth (device code)
   list        Show configured providers
   remove      Remove a provider by id
@@ -548,15 +553,23 @@ export async function runProvidersList(): Promise<number> {
   return 0;
 }
 
-/** Add the OpenAI API-key provider (the only addable template in clodex). */
-async function runTemplateAddFlow(cleanupState?: ProviderCommandCleanupState): Promise<number> {
+function listRegistryAddableTemplates(providers: RegistryProvider[]) {
+  return listAddableTemplates().filter(template =>
+    !providers.some(provider => isProviderConfiguredForTemplate(provider, template.id)));
+}
+
+/** Add one API-key provider from a built-in template. */
+async function runTemplateAddFlow(
+  templateId: string,
+  cleanupState?: ProviderCommandCleanupState,
+): Promise<number> {
   const registry = loadRegistry();
-  const configuredIds = registry.providers.map(p => p.id);
-  const template = listAddableTemplates(configuredIds).find(t => t.id === 'openai')
-    ?? getTemplateById('openai');
-  if (!template || configuredIds.includes('openai')) {
-    p.log.info('OpenAI is already configured. Use clodex providers auth openai for ChatGPT OAuth.');
-    return 0;
+  const template = listRegistryAddableTemplates(registry.providers)
+    .find(candidate => candidate.id === templateId);
+  if (!template) {
+    const known = getTemplateById(templateId);
+    p.log.info(known ? `${known.name} is already configured.` : `Unknown provider template: ${templateId}`);
+    return known ? 0 : 1;
   }
 
   if (template.signupUrl) {
@@ -599,20 +612,35 @@ async function runTemplateAddFlow(cleanupState?: ProviderCommandCleanupState): P
 async function runProvidersAddWithCleanupState(
   cleanupState?: ProviderCommandCleanupState,
 ): Promise<number> {
+  const providers = loadRegistry().providers;
+  const configuredIds = providers.map(provider => provider.id);
+  const options: Array<{ value: string; label: string; hint: string }> = [];
+
+  if (!configuredIds.includes('openai-oauth')) {
+    options.push({
+      value: 'oauth',
+      label: 'Sign in with ChatGPT (Plus/Pro plan)',
+      hint: 'OAuth device code — no API key needed',
+    });
+  }
+  for (const template of listRegistryAddableTemplates(providers)) {
+    options.push({
+      value: `api:${template.id}`,
+      label: `${template.name} API key`,
+      hint: template.id === 'openai'
+        ? 'platform.openai.com key (usage-billed)'
+        : 'provider API key (usage-billed)',
+    });
+  }
+
+  if (options.length === 0) {
+    p.log.info('All built-in providers are already configured.');
+    return 0;
+  }
+
   const choice = await p.select({
     message: 'Add a provider',
-    options: [
-      {
-        value: 'oauth',
-        label: 'Sign in with ChatGPT (Plus/Pro plan)',
-        hint: 'OAuth device code — no API key needed',
-      },
-      {
-        value: 'apikey',
-        label: 'OpenAI API key',
-        hint: 'platform.openai.com key (usage-billed)',
-      },
-    ],
+    options,
   });
   if (p.isCancel(choice)) {
     p.cancel('Cancelled.');
@@ -622,7 +650,9 @@ async function runProvidersAddWithCleanupState(
   if (choice === 'oauth') {
     return runProvidersAuthWithCleanupState('openai', undefined, cleanupState);
   }
-  if (choice === 'apikey') return runTemplateAddFlow(cleanupState);
+  if (typeof choice === 'string' && choice.startsWith('api:')) {
+    return runTemplateAddFlow(choice.slice('api:'.length), cleanupState);
+  }
   return 0;
 }
 
@@ -705,7 +735,7 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
     delete modelProvider.modelsCache;
     delete modelProvider.refreshedAt;
   }
-  const modelCount = modelProvider.modelsCache?.models.length ?? 0;
+  const modelCount = projectProviderCachedModels(modelProvider).length;
   const authLabel = (await resolveProvidersForDisplay()).find(entry => entry.id === id)?.authLabel
     ?? formatRegistryAuthLabel(provider);
   printProviderDetailPanel(provider.name, modelCount, authLabel);
@@ -767,7 +797,7 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
   if (p.isCancel(action) || action === 'back') return 'back';
 
   if (action === 'browse') {
-    const cachedModels = modelProvider.modelsCache?.models ?? [];
+    const cachedModels = projectProviderCachedModels(modelProvider);
     const localModels = cachedModels
       .map(m => cachedModelToLocal(m, modelProvider))
       .filter((m): m is NonNullable<typeof m> => m !== null);
@@ -857,7 +887,7 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
         result.account,
         resolveActiveAccount(currentProvider),
       );
-      const selectedCatalogReady = Boolean(currentProvider.modelsCache?.models.length);
+      const selectedCatalogReady = projectProviderCachedModels(currentProvider).length > 0;
       if (
         outcome.ok
         && currentProvider.enabled
@@ -932,7 +962,7 @@ export async function runProvidersHub(): Promise<number> {
     options.push({ value: 'done', label: 'Done', hint: '' });
 
     const choice = await p.select({
-      message: entries.length > 0 ? 'Your OpenAI providers' : 'Get started',
+      message: entries.length > 0 ? 'Your providers' : 'Get started',
       options,
     });
     if (p.isCancel(choice) || choice === 'done') {
@@ -1018,6 +1048,6 @@ export async function runProvidersCommand(args: string[]): Promise<number> {
       runProvidersAuthWithCleanupState(parsed.removeId!, parsed.authMethod, state, parsed.authAccount));
   }
 
-  relayIntro('Your OpenAI providers');
+  relayIntro('Your providers');
   return runProvidersHub();
 }

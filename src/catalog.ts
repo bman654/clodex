@@ -5,11 +5,12 @@ import {
   normalizeRouteLookupId,
 } from './context-model-id.js';
 import { resolveProviderCredential } from './env.js';
+import { projectFavoriteExposure } from './favorites.js';
 import {
   canonicalModelAliasName,
-  describeModelAliasRejection,
   modelAliasTarget,
   normalizeModelAliases,
+  type ModelAliasRejectionReason,
 } from './model-aliases.js';
 import { isSdkMigratedNpm } from './provider-factory.js';
 import { aliasModelId } from './proxy.js';
@@ -55,6 +56,7 @@ export function localModelToRoute(lp: LocalProvider, model: LocalProviderModel):
     useResponsesLite: model.useResponsesLite,
     preferWebSockets: model.preferWebSockets,
     compatibility: model.compatibility,
+    effortProfile: model.effortProfile,
   };
 }
 
@@ -71,18 +73,44 @@ export function makeRouteResolver(
 export function resolveCatalogModelAliases(
   modelAliases: unknown,
   resolveRoute: (providerId: string, modelId: string) => ProxyRoute | undefined,
-  catalogRoutes: readonly Pick<ProxyRoute, 'aliasId'>[] = [],
+  catalogRoutes?: readonly Pick<ProxyRoute, 'aliasId'>[],
+  availability?: {
+    favorites: readonly FavoriteModel[];
+    capacitySkippedFavorites: readonly FavoriteModel[];
+  },
 ): ProxyModelAlias[] {
   const normalized = normalizeModelAliases(modelAliases);
-  const catalogRouteIds = new Set(
-    catalogRoutes.map(route => normalizeRouteLookupId(route.aliasId)),
-  );
+  const catalogRouteIds = catalogRoutes === undefined
+    ? undefined
+    : new Set(catalogRoutes.map(route => normalizeRouteLookupId(route.aliasId)));
+  const favoriteTargets = availability === undefined
+    ? undefined
+    : new Set(availability.favorites.map(favorite => (
+        `${favorite.providerId}:${favorite.modelId}`
+      )));
+  const capacitySkippedTargets = availability === undefined
+    ? undefined
+    : new Set(availability.capacitySkippedFavorites.map(favorite => (
+        `${favorite.providerId}:${favorite.modelId}`
+      )));
   return [
     ...normalized.accepted.map(({ alias, source, sources }) => {
       const route = resolveRoute(alias.providerId, alias.modelId);
-      const collidesWithCatalog = catalogRouteIds.has(
+      const target = `${alias.providerId}:${alias.modelId}`;
+      const collidesWithCatalog = catalogRouteIds?.has(
         normalizeRouteLookupId(alias.name),
+      ) ?? false;
+      const targetIsExposed = route !== undefined && (
+        catalogRouteIds === undefined
+        || catalogRouteIds.has(normalizeRouteLookupId(route.aliasId))
       );
+      let rejectionReason: ModelAliasRejectionReason | undefined;
+      if (collidesWithCatalog) rejectionReason = 'catalog-id-collision';
+      else if (targetIsExposed) rejectionReason = undefined;
+      else if (capacitySkippedTargets?.has(target)) rejectionReason = 'target-not-exposed';
+      else if (favoriteTargets !== undefined && !favoriteTargets.has(target)) {
+        rejectionReason = 'target-not-favorite';
+      } else if (availability !== undefined) rejectionReason = 'target-unavailable';
       const sourceNames = [...new Set(sources.map(entry => entry.name))];
       return {
         name: alias.name,
@@ -93,13 +121,7 @@ export function resolveCatalogModelAliases(
             : { sourceNames }
         ),
         routeId: route?.aliasId ?? modelAliasTarget(alias),
-        ...(
-          collidesWithCatalog
-            ? { unavailableReason: 'conflicts with a catalog model id' }
-            : route
-              ? {}
-              : { unavailableReason: 'target unavailable' }
-        ),
+        ...(rejectionReason === undefined ? {} : { rejectionReason }),
       };
     }),
     ...normalized.rejections.map(rejection => ({
@@ -107,29 +129,38 @@ export function resolveCatalogModelAliases(
       ...(rejection.alias.name === canonicalModelAliasName(rejection.alias.name)
         ? {}
         : { savedName: rejection.alias.name }),
-      unavailableReason: describeModelAliasRejection(rejection.reason),
+      rejectionReason: rejection.reason,
     })),
   ];
 }
 
 /**
  * Claude-specific catalog builder. Takes a `resolveRoute` function (not a
- * ResolveContext) and returns built ProxyRoute[] — does NOT delegate to
- * `buildFavoritesList` in `./favorites-resolver.ts` because the input/output
- * shapes are different (closure-based lookup vs. ResolveContext, ProxyRoute
- * vs. ResolvedFavorite). The dedup+cap pattern is duplicated here on purpose;
- * cross-surface shared resolution lives in `favorites-resolver.ts` and is
- * intended to be consumed by other call sites (Codex, Server) that need a
- * route-shape-agnostic intermediate result.
+ * ResolveContext) and returns built ProxyRoute[]. Persisted-order capacity
+ * selection is shared through `projectFavoriteExposure` and happens BEFORE
+ * route resolution: one slot is reserved for the starting model
+ * (`startingFavorite`), and a favorite that fails resolution still consumes
+ * its selected window slot — the window is never backfilled with later
+ * favorites. Only route resolution remains surface-specific.
  */
 export function buildCatalogRoutes(
   startingRoute: ProxyRoute,
   favorites: FavoriteModel[],
   resolveRoute: (providerId: string, modelId: string) => ProxyRoute | undefined,
   max = MAX_MODEL_CATALOG,
-): { routes: ProxyRoute[]; droppedFavorites: FavoriteModel[] } {
+  startingFavorite?: FavoriteModel,
+): {
+  routes: ProxyRoute[];
+  droppedFavorites: FavoriteModel[];
+  capacitySkippedFavorites: FavoriteModel[];
+} {
+  const projection = projectFavoriteExposure(favorites, {
+    max,
+    reservedFavorite: startingFavorite,
+    reservedSlots: 1,
+  });
   const droppedFavorites: FavoriteModel[] = [];
-  const tail = favorites
+  const tail = projection.exposedFavorites
     .map(fav => {
       const route = resolveRoute(fav.providerId, fav.modelId);
       if (!route) droppedFavorites.push(fav);
@@ -139,6 +170,10 @@ export function buildCatalogRoutes(
   const routes = [
     startingRoute,
     ...tail.filter(route => route.aliasId !== startingRoute.aliasId),
-  ].slice(0, max);
-  return { routes, droppedFavorites };
+  ].slice(0, Math.max(0, max));
+  return {
+    routes,
+    droppedFavorites,
+    capacitySkippedFavorites: projection.capacitySkippedFavorites,
+  };
 }

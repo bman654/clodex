@@ -95,16 +95,23 @@ describe('HTTP proxy startup model list', () => {
       aliases: [],
       unavailable: [],
       unsupported: [],
-      unavailableAliases: [
+      capacitySkippedFavorites: [],
+      unavailableAliasRejections: [
         {
-          name: ' Orbit ',
-          providerId: 'openai',
-          modelId: 'model-a',
+          alias: {
+            name: ' Orbit ',
+            providerId: 'openai',
+            modelId: 'model-a',
+          },
+          reason: 'conflicting-targets',
         },
         {
-          name: 'ORBIT',
-          providerId: 'other',
-          modelId: 'model-b',
+          alias: {
+            name: 'ORBIT',
+            providerId: 'other',
+            modelId: 'model-b',
+          },
+          reason: 'conflicting-targets',
         },
       ],
       favoriteCount: 0,
@@ -124,10 +131,25 @@ describe('HTTP proxy startup model list', () => {
       modelAliases: [],
       inferenceLogPath: '/tmp/inference.jsonl',
     });
-    expect(options.reservedModelIds).toHaveLength(4);
-    expect(new Set(options.reservedModelIds)).toEqual(
-      new Set([' Orbit ', 'orbit', 'Orbit', 'ORBIT']),
-    );
+    expect(options.modelAliasRejections).toEqual([
+      {
+        alias: {
+          name: ' Orbit ',
+          providerId: 'openai',
+          modelId: 'model-a',
+        },
+        reason: 'conflicting-targets',
+      },
+      {
+        alias: {
+          name: 'ORBIT',
+          providerId: 'other',
+          modelId: 'model-b',
+        },
+        reason: 'conflicting-targets',
+      },
+    ]);
+    expect(options.reservedModelIds).toBeUndefined();
   });
 
   it('reserves every exact source spelling for an active canonical alias', () => {
@@ -141,7 +163,8 @@ describe('HTTP proxy startup model list', () => {
       }],
       unavailable: [],
       unsupported: [],
-      unavailableAliases: [],
+      capacitySkippedFavorites: [],
+      unavailableAliasRejections: [],
       favoriteCount: 1,
     };
 
@@ -152,9 +175,8 @@ describe('HTTP proxy startup model list', () => {
       '/tmp/inference.jsonl',
     );
 
-    expect(new Set(options.reservedModelIds)).toEqual(
-      new Set(['luna', 'LuNa', 'LUNA']),
-    );
+    expect(options.modelAliases?.[0]?.sourceNames).toEqual(['LuNa', 'LUNA']);
+    expect(options.reservedModelIds).toBeUndefined();
   });
 
   it('preserves every exact source spelling when no favorites remain', async () => {
@@ -171,9 +193,15 @@ describe('HTTP proxy startup model list', () => {
 
     try {
       const loaded = await loadHttpProxyRoutes();
-      expect(loaded.unavailableAliases).toEqual([
-        { name: 'LuNa', providerId: 'one', modelId: 'model-a' },
-        { name: 'LUNA', providerId: 'one', modelId: 'model-a' },
+      expect(loaded.unavailableAliasRejections).toEqual([
+        {
+          alias: { name: 'LuNa', providerId: 'one', modelId: 'model-a' },
+          reason: 'target-not-favorite',
+        },
+        {
+          alias: { name: 'LUNA', providerId: 'one', modelId: 'model-a' },
+          reason: 'target-not-favorite',
+        },
       ]);
 
       const options = buildConfiguredHttpProxyOptions(
@@ -182,9 +210,8 @@ describe('HTTP proxy startup model list', () => {
         false,
         '/tmp/inference.jsonl',
       );
-      expect(new Set(options.reservedModelIds)).toEqual(
-        new Set(['luna', 'LuNa', 'LUNA']),
-      );
+      expect(options.modelAliasRejections).toEqual(loaded.unavailableAliasRejections);
+      expect(options.reservedModelIds).toBeUndefined();
     } finally {
       if (previousHome === undefined) delete process.env['CLODEX_HOME'];
       else process.env['CLODEX_HOME'] = previousHome;
@@ -249,12 +276,28 @@ describe('HTTP proxy startup model list', () => {
       aliases: [],
       unavailable: [],
       unsupported: [],
-      unavailableAliases: [
-        { name: 'default', providerId: 'openai', modelId: 'model-a' },
-        { name: 'Orbit', providerId: 'openai', modelId: 'model-a' },
-        { name: 'ORBIT', providerId: 'other', modelId: 'model-b' },
-        { name: 'bad:name', providerId: 'openai', modelId: 'model-a' },
-        { name: 'missing', providerId: 'openai', modelId: 'missing-model' },
+      capacitySkippedFavorites: [],
+      unavailableAliasRejections: [
+        {
+          alias: { name: 'default', providerId: 'openai', modelId: 'model-a' },
+          reason: 'reserved-name',
+        },
+        {
+          alias: { name: 'Orbit', providerId: 'openai', modelId: 'model-a' },
+          reason: 'conflicting-targets',
+        },
+        {
+          alias: { name: 'ORBIT', providerId: 'other', modelId: 'model-b' },
+          reason: 'conflicting-targets',
+        },
+        {
+          alias: { name: 'bad:name', providerId: 'openai', modelId: 'model-a' },
+          reason: 'invalid-name',
+        },
+        {
+          alias: { name: 'missing', providerId: 'openai', modelId: 'missing-model' },
+          reason: 'target-unavailable',
+        },
       ],
       favoriteCount: 1,
     };
@@ -267,7 +310,37 @@ describe('HTTP proxy startup model list', () => {
         + '  "Orbit" — conflicting targets\n'
         + '  "ORBIT" — conflicting targets\n'
         + '  "bad:name" — invalid name\n'
-        + '  "missing" — target unavailable',
+        + '  "missing" — target is unavailable or unsupported',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('reports every favorite omitted by the Claude-facing capacity limit', () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const loaded: LoadedHttpProxyRoutes = {
+      routes: [],
+      aliases: [],
+      unavailable: [],
+      unsupported: [],
+      capacitySkippedFavorites: [
+        { providerId: 'one', modelId: 'model-20' },
+        { providerId: 'two', modelId: 'model-21' },
+      ],
+      unavailableAliasRejections: [],
+      favoriteCount: 22,
+    };
+
+    try {
+      reportSkippedHttpProxyFavorites(loaded);
+      expect(warn).toHaveBeenCalledWith(
+        '2 saved favorites not exposed because clodex limits this Claude-facing catalog to 20 models. '
+        + 'Capacity is selected from saved order before availability and support checks; unavailable '
+        + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+        + 'entries reclaims positions. Skipped entries were preserved:\n'
+        + '  clodex:one:model-20\n'
+        + '  clodex:two:model-21',
       );
     } finally {
       warn.mockRestore();
