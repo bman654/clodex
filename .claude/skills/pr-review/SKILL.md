@@ -19,10 +19,18 @@ review that got something wrong.
   release, `git diff old..new` is pure noise. Use
   `git diff $(git merge-base main X)..X` for each head and then `diff -u` the two patches. This is
   how you find out a "small update" was actually a full rebuild.
-- **Read the PR body before adjudicating between an agent and the author.** A reviewer once called a
-  contributor's number an unsupported inference when the PR's own validation section stated the
-  source in as many words — the same failure shape we warn contributors about, committed by the
-  reviewer.
+- **Before alleging the author skipped work or misstated a result, read the PR body *and* the
+  comments, and tie every claim to the head it describes.** A reviewer once called a contributor's
+  number an unsupported inference when the PR's own validation section stated the source in as many
+  words — the same failure shape we warn contributors about, committed by the reviewer. Later, a
+  panel drafted a note telling an author to re-run a gate his own transplant comment had already
+  reported, with the exact numbers we had measured ourselves. After a rebase or transplant the
+  current gate result often lands in a comment while the body still describes the dead head — but a
+  comment ages the same way, so neither surface is authoritative until you match it to the head.
+  Note what did *not* save us there: four lenses, a refuter pass, and a cross-family cross-check all
+  missed it, and the cross-check actually endorsed the note and extended it. Only an explicit
+  body-versus-comment check before drafting caught it. That is why this is a named step and not a
+  thing you can expect the panel to notice.
 
 ## Build the panel
 
@@ -190,10 +198,33 @@ pushing). Keep them while the PR is open; clean up when it closes. One worktree 
 dedicated refuter worktree per lens gives every agent full mutation rights with zero contention at
 2N worktrees instead of one per agent. Create the worktrees **before** launching a workflow.
 
-**Salvage before you prune.** Verify clean → salvage any untracked harnesses → then remove. Never
+**Salvage every delta from the reviewed head before pruning, and never let a clean `git status`
+alone be the guard.** **Committed probes do not appear in `git status`** — one worktree held three
+probe commits, including the only artifact pinning an interactive warning seam, while its status
+showed nothing but the `node_modules` symlink, so an untracked-only sweep found nothing to salvage
+and said so confidently.
+
+Record the reviewed head externally *before* agents start. Never re-derive it from the worktree you
+are inspecting, which makes drift undetectable by construction, and never from the worktrees' parent
+directory — that is not a repository, so the SHA comes back empty and `git log "$X"..HEAD` silently
+degrades to a no-op that reports nothing. Then, passing `git -C "$wt"` on every command:
+
+- classify the head. Equal is clean; ahead means salvage first. Anything else — `git merge-base
+  --is-ancestor "$head" HEAD` returns non-zero — means **stop and read the reflog**, because a
+  worktree already reset or force-moved has dropped its probes from the range, from status, and from
+  the filesystem alike, and resetting again buries them further.
+- enumerate committed files with `git log --name-status "$head"..HEAD`. Plain `git log` lists
+  commits, not paths, so it cannot drive a salvage.
+- enumerate the rest with `git status --porcelain -uall`, then sweep for `zz-*` harnesses. That
+  sweep is a naming-convention backstop, not an inventory: it misses differently-named scratch,
+  anything written outside the worktree, and files a reset already removed.
+
+Confirm every copy with `diff -q`, requiring exit 0 — exit 1 means the destination differs and 2
+that it is missing, and either one blocks the prune. Only then reset a worktree you are keeping back
+to the reviewed head, or later differentials run against polluted material. Never
 delete-then-discover; a cleanup script once refused to delete precisely because four worktrees still
-held unsalvaged harnesses. And never trust a stated branch state before destructive cleanup —
-verify with a content diff, not ancestry, because a squash merge defeats ancestry checks.
+held unsalvaged harnesses. And never trust a stated branch state before destructive cleanup — verify
+with a content diff, not ancestry, because a squash merge defeats ancestry checks.
 
 ## Verdict, posting, merging
 
