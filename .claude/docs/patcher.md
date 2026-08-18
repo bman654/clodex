@@ -13,7 +13,7 @@ network.** Flow: `tryDetectInstallation({ path })` → `readContent` → `applyC
 config)` (in-process pure function applying built-in PATCH 1–10 sites) → optional
 `applyLocalPatches` transaction with built-in postcondition verification → `writeContent` (repacks
 the native binary). Both layers return per-site OK/SKIP/FAIL results shown by `--trace`. Since
-2.1.231, the reads and the repack are each wrapped in the entry-module shim below, without which
+2.1.229, the reads and the repack are each wrapped in the entry-module shim below, without which
 tweakcc cannot find the bundle at all.
 
 tweakcc ships no `.d.ts` despite its `types` field — `src/tweakcc.d.ts` declares the verified API
@@ -67,7 +67,7 @@ tweakcc's own repack reads back as an ordinary module name.
   immediately before it is published as a backup, so drifted bytes fail loudly instead.
 - **Only rename when tweakcc would otherwise find nothing.** If any module name already matches, the
   shim is a no-op — a second match could hand tweakcc a different module than it picks today, and
-  every release before 2.1.231 must keep behaving exactly as it did. This is also what makes the
+  every release before 2.1.229 must keep behaving exactly as it did. This is also what makes the
   two selectors agree: tweakcc *reads* the first name-matching module but *rewrites every* one,
   while the shim renames the entry module specifically. Refusing to fire when a match already
   exists guarantees exactly one match, so all three always mean the same module.
@@ -88,9 +88,13 @@ tweakcc's own repack reads back as an ordinary module name.
 - **Restoration is swept, not assumed.** Locating the blob is a search, so "I wrote the name where I
   found the marker" is weaker than it sounds — it is also true of a write into a stale copy while the
   live blob stays shimmed. So after the parse-directed write the whole file is scanned and the real
-  name goes back over **every** remaining copy, then a second scan proves none is left. That is what
-  holds the never-publish-the-stand-in rule up, and it does not depend on the parse having picked the
-  live blob: the stale-copy case gets the real name too.
+  name goes back over **every remaining copy that is a module name**, then a second scan proves none
+  is left. That is what holds the never-publish-the-stand-in rule up, and it does not depend on the
+  parse having picked the live blob: the stale-copy case gets the real name too.
+  Read that rule precisely: it is *never publish a binary that resolves its entry module to the
+  stand-in*, not *never let those sixteen bytes appear anywhere*. Inert copies may legitimately
+  remain — a local patch is allowed to contain the literal — and they are harmless because Bun's
+  parser only accepts a NUL-terminated name.
   Refusing to publish on any surviving copy — the earlier behaviour — could not distinguish that
   case from a benign one, and **every ELF build produces the benign one on every patch**. tweakcc
   branches on container format, and only the ELF-with-a-`.bun`-section path *relocates* the section
@@ -105,15 +109,22 @@ tweakcc's own repack reads back as an ordinary module name.
   That predates the shim — 2.1.228, which needs no shim at all, balloons identically — and it does
   not compound, because the candidate is reseeded from pristine bytes on every run. Do not add a
   size sanity bound: at 2.37x today, any plausible cap would recreate the refusal this replaced.
-  Rewriting is sound only while every copy is one the shim wrote, so `shimEntryModuleName` declines a
-  binary that already carries the marker. That guard cannot see a copy that arrives *after* it runs:
-  a local patch emitting the stand-in literal lands in the file at `writeContent` and is then
-  rewritten with the real name, silently. Reachable only by deliberately emitting clodex's own
-  sentinel from an opt-in local patch, but it is a fail-closed behaviour this trades away — narrow
-  both the sweep and the guard to occurrences followed by a NUL (Bun terminates every blob string;
-  a JS literal is followed by a quote).
-- `scripts/extract-cc-bundles.mjs` needs the same shim to read a 2.1.229-or-later bundle. It shims a **scratch
-  copy**; the `.orig` backups are the only pristine bytes on the machine and nothing may write to
+  Rewriting is sound only while every rewritten copy is one the shim wrote, so `isModuleNameAt`
+  requires a trailing NUL and `shimEntryModuleName` declines a binary whose blob already carries a
+  marker *as a module name*. Without that test the sweep reached content the guard could never have
+  seen, because a local patch's output only lands in the file at `writeContent`, long after the
+  guard ran — a patch emitting the stand-in literal had it rewritten to the real name in the
+  published binary while `clodex patch` reported success. Both halves need the same predicate:
+  narrowing only the sweep would leave the literal in place and then trip the guard on the next run,
+  making the binary unreadable.
+  **The NUL test narrows this case; it does not eliminate it.** Bun NUL-terminates every string
+  field in the blob, not only module names, so a local patch that emits the stand-in immediately
+  before a NUL is still rewritten — reproduced against a real repack. Proving an occurrence is a
+  module name means parsing the stale table it belongs to, which is not worth adding to a module
+  that disappears entirely once tweakcc recognizes `/cli` and the rename goes away. Deleting the
+  shim closes this by construction; until then it is a known, opt-in-only limitation.
+- `scripts/extract-cc-bundles.mjs` needs the same shim to read a 2.1.229-or-later bundle. It shims a
+  **scratch copy**; the `.orig` backups are the only pristine bytes on the machine and nothing may write to
   them.
 
 ## Patcher invariants

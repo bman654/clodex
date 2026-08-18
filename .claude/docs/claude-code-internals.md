@@ -34,7 +34,7 @@ Then **enumerate every branch of the function yourself.** Shipped bugs have come
 gates that happened to be visible, and from grepping one syntactic form of a comparison — grep the
 *value*, then trace every hit.
 
-## The entry module's name is not stable (renamed in 2.1.231)
+## The entry module's name is not stable (renamed in 2.1.229)
 
 The bundle lives in a Bun data blob as one module among ~15, and tweakcc finds it **by name**:
 `/claude`, `claude`, `/claude.exe`, `claude.exe`, `/src/entrypoints/cli.js`, `src/entrypoints/cli.js`.
@@ -42,14 +42,17 @@ The bundle lives in a Bun data blob as one module among ~15, and tweakcc finds i
 | Version | Entry module |
 | --- | --- |
 | 2.1.224, 2.1.226, 2.1.228 | `/$bunfs/root/src/entrypoints/cli.js` |
-| 2.1.231 | `/$bunfs/root/cli` |
+| 2.1.229, 2.1.231–2.1.234 | `/$bunfs/root/cli` |
 
-(Those are the versions actually inspected; 2.1.229 and 2.1.230 were never available here.)
+(2.1.228 is the last release clodex's pinned tweakcc 4.3.0 — and clodex's own mirrored copy of its
+name list — can discover, and 2.1.230 was never published for any platform package, so 2.1.229 is
+where the rename actually landed. Confirmed on linux-x64 and darwin-arm64.)
 
-2.1.231 matches none of them, so `readContent` threw and every patch failed with
+2.1.229 and later match none of them, so `readContent` threw and every patch failed with
 "Failed to extract JavaScript from native installation" — which reads like the `node-gyp-build`
-packaging fault described in `patcher.md` and is not it. tweakcc 4.3.2, the latest release, still
-carries the old list. `src/bun-entry-module.ts` works around it; see `patcher.md`.
+packaging fault described in `patcher.md` and is not it. tweakcc carried the old list through
+4.3.2; **4.3.3** added `/cli`, but clodex mirrors the list itself and is still pinned to 4.3.0, so
+`src/bun-entry-module.ts` works around it; see `patcher.md`.
 
 Two things that are easy to assume wrongly about the blob:
 

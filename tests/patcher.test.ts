@@ -1076,7 +1076,7 @@ describe('applyPatch', () => {
   });
 
   /**
-   * Claude Code 2.1.231 renamed the module tweakcc identifies the bundle by, so extraction and
+   * Claude Code 2.1.229 renamed the module tweakcc identifies the bundle by, so extraction and
    * repacking both stopped finding it. The stand-in below reproduces that: it resolves the module
    * BY NAME, exactly as tweakcc does, and — also exactly as tweakcc does — repacks the original
    * contents rather than erroring when no name matches.

@@ -96,7 +96,7 @@ for (const f of files) {
     }
     console.log(`re-extracting ${f}: cached file is only ${size} bytes`);
   }
-  // Claude Code 2.1.231 renamed the module tweakcc looks for. The rename that makes it
+  // Claude Code 2.1.229 renamed the module tweakcc looks for. The rename that makes it
   // readable again is a write, so it happens on a scratch copy — these backups are the only
   // pristine bytes on the machine and nothing here may touch them.
   let readFrom = path.join(srcDir, f);

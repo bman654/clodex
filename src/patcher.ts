@@ -640,7 +640,7 @@ export async function applyPatch(
     const candidatePath = join(candidateDir, basename(binaryPath));
     const seedCandidate = async (from: string): Promise<{ installation: Installation; source: string }> => {
       copyFileSync(from, candidatePath);
-      // Claude Code 2.1.231 renamed the module tweakcc looks for; the shim is a
+      // Claude Code 2.1.229 renamed the module tweakcc looks for; the shim is a
       // same-length rename that only has to be in place while tweakcc reads. It
       // is undone immediately so the seeded candidate stays byte-identical to
       // `from` — the snapshot path publishes these exact bytes as the pristine
