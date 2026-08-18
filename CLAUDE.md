@@ -190,6 +190,13 @@ poisoned/corrupt-backup refusals, `--restore`, and the manifest without touching
 
 Interactive launch flow and real-provider behavior are verified manually.
 
+**Nothing automated touches a real Claude Code binary, so nothing automated can see a break that is
+specific to one executable format.** That is not hypothetical: `clodex patch` was broken on every
+ELF build of Claude Code across two releases while macOS stayed green. Before changing
+`src/bun-entry-module.ts` or anything else in the read/repack/restore path, run
+`scripts/probe-patch-mechanism.mjs` against a build for each format — Mach-O, ELF and PE. It needs
+no Linux or Windows host, because it never executes the binary. See `.claude/docs/patcher.md`.
+
 **`claude -p` end-to-end tests are manual only — NEVER add them to the automated suite.**
 
 ## Key constraints

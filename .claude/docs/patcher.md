@@ -127,6 +127,24 @@ tweakcc's own repack reads back as an ordinary module name.
 - `scripts/extract-cc-bundles.mjs` needs the same shim to read a 2.1.229-or-later bundle. It shims a
   **scratch copy**; the `.orig` backups are the only pristine bytes on the machine and nothing may write to
   them.
+- **`scripts/probe-patch-mechanism.mjs` is how you check this on a platform you are not running.**
+  The refusal above shipped because every check we had ran on Mach-O, where the ELF behaviour it
+  turned on cannot occur. The probe drives the same shim → `readContent` → repack → restore cycle
+  `applyPatches` runs, against a Claude Code build for any platform, **without executing it** — so
+  a linux-arm64 or win32-x64 binary can be checked from macOS, and it calls the exported functions
+  rather than a copy so it cannot drift.
+
+  ```bash
+  node scripts/probe-patch-mechanism.mjs <claude-binary> --label linux-x64 --expect-version 2.1.233
+  ```
+
+  It checks that the binary parses, that the seeded candidate is byte-identical to the release
+  (what the content-addressed pristine backup depends on), that the restore leaves no stand-in
+  behind, that a repacked Mach-O still verifies under `codesign`, and that the published bytes read
+  back carrying what was written. It does **not** exercise the patch sites, and it cannot tell you
+  the patched binary runs — only a host or containerised `clodex patch` does that. `clodex patch`
+  resolves the version by executing the binary (`getClaudeVersionForBinary`), which is exactly why
+  a foreign binary can go through the probe and not through the real command.
 
 ## Patcher invariants
 

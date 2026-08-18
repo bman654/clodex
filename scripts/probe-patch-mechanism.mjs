@@ -39,6 +39,7 @@ import {
   statSync,
 } from 'node:fs';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -276,6 +277,23 @@ try {
       info.standInSurvivors === 0
         ? `no ${writeShim.marker} left in the published bytes`
         : `${info.standInSurvivors} copy/copies of ${writeShim.marker} survived — Claude Code would fail to resolve its sibling native modules`,
+    );
+  }
+
+  // The probe never runs the binary, so a Mach-O whose signature the repack invalidated would
+  // otherwise sail through here and only be caught on the one platform that executes it. codesign
+  // reads any Mach-O, so this covers darwin-x64 from an arm64 host too.
+  if (info.format === 'macho' && process.platform === 'darwin') {
+    let signatureError = null;
+    try {
+      execFileSync('codesign', ['--verify', '--strict', scratch], { stdio: 'pipe' });
+    } catch (err) {
+      signatureError = (err.stderr?.toString() || err.message || String(err)).trim().split('\n')[0];
+    }
+    record(
+      'signature-valid',
+      signatureError === null,
+      signatureError ?? 'the repacked Mach-O still carries a valid signature, so it can be executed',
     );
   }
 
