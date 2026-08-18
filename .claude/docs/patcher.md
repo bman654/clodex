@@ -122,7 +122,8 @@ tweakcc's own repack reads back as an ordinary module name.
   before a NUL is still rewritten — reproduced against a real repack. Proving an occurrence is a
   module name means parsing the stale table it belongs to, which is not worth adding to a module
   that disappears entirely once tweakcc recognizes `/cli` and the rename goes away. Deleting the
-  shim closes this by construction; until then it is a known, opt-in-only limitation.
+  shim closes this by construction; until then it is a known, opt-in-only limitation — tracked in
+  issue #129, which also records the one behaviour the deletion must not silently drop.
 - `scripts/extract-cc-bundles.mjs` needs the same shim to read a 2.1.229-or-later bundle. It shims a
   **scratch copy**; the `.orig` backups are the only pristine bytes on the machine and nothing may write to
   them.
