@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.6.1](https://github.com/bman654/clodex/compare/v2.6.0...v2.6.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* **patch:** keep your own local patch text intact when clodex patches Claude Code ([#128](https://github.com/bman654/clodex/issues/128)) ([af53204](https://github.com/bman654/clodex/commit/af532042ef106d2384bfe40c269349d92680bf00))
+* **patch:** make clodex patch work again on Linux so model aliases and effort settings apply ([#126](https://github.com/bman654/clodex/issues/126)) ([24c86d3](https://github.com/bman654/clodex/commit/24c86d3a9a749d595d434c72362815e7a6425c55))
+
 ## [2.6.0](https://github.com/bman654/clodex/compare/v2.5.2...v2.6.0) (2026-08-13)
 
 
