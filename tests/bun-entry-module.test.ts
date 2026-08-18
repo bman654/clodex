@@ -43,7 +43,7 @@ const CURRENT_NAMES = [
   '/$bunfs/root/image-processor.js',
   '/$bunfs/root/mermaid.min.js',
 ];
-const PRE_231_NAMES = [
+const PRE_RENAME_NAMES = [
   '/$bunfs/root/src/entrypoints/cli.js',
   '/$bunfs/root/image-processor.js',
   '/$bunfs/root/mermaid.min.js',
@@ -65,14 +65,14 @@ describe('bun entry module shim', () => {
   };
 
   it('leaves a binary tweakcc can already read untouched', () => {
-    const before = write(buildBinary(PRE_231_NAMES));
+    const before = write(buildBinary(PRE_RENAME_NAMES));
 
     expect(inspectEntryModule(binary)).toBe('discoverable');
     expect(shimEntryModuleName(binary)).toBeNull();
     expect(readFileSync(binary).equals(before)).toBe(true);
   });
 
-  it('makes the renamed 2.1.231 entry module discoverable', () => {
+  it('makes the renamed 2.1.229-and-later entry module discoverable', () => {
     write(buildBinary(CURRENT_NAMES));
     expect(inspectEntryModule(binary)).toBe('needs-shim');
 
@@ -280,13 +280,13 @@ describe('bun entry module shim', () => {
     write(Buffer.concat([blob, Buffer.alloc(32, 0x47)]));
     const shim = shimEntryModuleName(binary)!;
     const shimmed = readFileSync(binary);
-    writeFileSync(binary, Buffer.concat([shimmed, Buffer.from(shim.marker)]));
+    writeFileSync(binary, Buffer.concat([shimmed, Buffer.from(shim.marker), Buffer.alloc(1)]));
 
     restoreEntryModuleName(binary, shim, { resign: false });
 
     const restored = readFileSync(binary);
     expect(restored.includes(shim.marker)).toBe(false);
-    expect(restored.subarray(restored.length - shim.original.length).toString())
+    expect(restored.subarray(restored.length - 1 - shim.original.length, restored.length - 1).toString())
       .toBe(shim.original);
     expect(shimEntryModuleName(binary)?.original).toBe('/$bunfs/root/cli');
   });
@@ -324,8 +324,8 @@ describe('bun entry module shim', () => {
     const beyondTail = 1024 * 1024;
     // Spans the boundary between the first and second read, where the carry arithmetic applies.
     const acrossBoundary = chunkBytes - 8;
-    repacked.write(shim.marker, beyondTail, 'latin1');
-    repacked.write(shim.marker, acrossBoundary, 'latin1');
+    repacked.write(`${shim.marker}\0`, beyondTail, 'latin1');
+    repacked.write(`${shim.marker}\0`, acrossBoundary, 'latin1');
     writeFileSync(binary, repacked);
 
     restoreEntryModuleName(binary, shim, { resign: false });
@@ -337,12 +337,55 @@ describe('bun entry module shim', () => {
     }
   });
 
+  it('leaves a stand-in that is not a module name alone', () => {
+    // The sweep rewrites by byte match, so without a type check it would also rewrite an ordinary
+    // string in the patched bundle. A local patch emitting the stand-in literal is the reachable
+    // shape: it arrives at writeContent, AFTER the shim guard has already run, and silently
+    // becoming `/$bunfs/root/cli` would change the published JavaScript.
+    const blob = buildBunBlob(CURRENT_NAMES.map(name => ({ name })));
+    write(Buffer.concat([blob, Buffer.alloc(32, 0x47)]));
+    const shim = shimEntryModuleName(binary)!;
+    const shimmed = readFileSync(binary);
+    // Quote-delimited, exactly as a JS string literal lands — no NUL terminator. The orphan beside
+    // it is the competitor: the sweep must rewrite that one in the same pass it leaves this one
+    // alone, so neither a no-op sweep nor an indiscriminate one can pass.
+    const literal = Buffer.from(`x="${shim.marker}";`);
+    const orphan = Buffer.from(`${shim.marker}\0`);
+    writeFileSync(binary, Buffer.concat([shimmed, literal, orphan]));
+
+    restoreEntryModuleName(binary, shim, { resign: false });
+
+    const restored = readFileSync(binary);
+    const orphanAt = shimmed.length + literal.length;
+    expect(restored.subarray(orphanAt, orphanAt + orphan.length).toString())
+      .toBe(`${shim.original}\0`);
+    expect(restored.subarray(shimmed.length, shimmed.length + literal.length).toString())
+      .toBe(`x="${shim.marker}";`);
+  });
+
+  it('still shims a binary whose bundle merely mentions the stand-in', () => {
+    // The mirror of the guard: a non-module-name occurrence must not make the binary unpatchable.
+    // Narrowing only the sweep and not the guard would strand exactly this binary.
+    const marker = entryModuleShimName('/$bunfs/root/cli'.length)!;
+    const blob = buildBunBlob(CURRENT_NAMES.map(name => ({ name })));
+    write(Buffer.concat([blob, Buffer.from(`x="${marker}";`)]));
+
+    expect(shimEntryModuleName(binary)?.original).toBe('/$bunfs/root/cli');
+  });
+
   it('declines to shim a binary that already carries the stand-in bytes', () => {
     // Restoration rewrites every copy of the marker, which is only sound while every copy is one
     // the shim wrote. Anything else is left to tweakcc's own extraction failure.
     const marker = entryModuleShimName('/$bunfs/root/cli'.length)!;
     const blob = buildBunBlob(CURRENT_NAMES.map(name => ({ name })));
-    write(Buffer.concat([blob, Buffer.from(marker)]));
+    // The bundle literal comes FIRST, so a guard that only inspects the earliest occurrence would
+    // see a non-module-name and wrongly agree to shim.
+    write(Buffer.concat([
+      blob,
+      Buffer.from(`x="${marker}";`),
+      Buffer.from(marker),
+      Buffer.alloc(1),
+    ]));
 
     expect(shimEntryModuleName(binary)).toBeNull();
     expect(readFileSync(binary).includes(marker)).toBe(true);
