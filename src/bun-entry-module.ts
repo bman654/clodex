@@ -287,6 +287,26 @@ export function inspectEntryModule(path: string): EntryModuleState {
 }
 
 /**
+ * Every module name in the blob, in blob order, or null when the blob cannot be
+ * read. Opens read-only, so it is safe on a pristine backup.
+ *
+ * Nothing in the patch path uses this: it exists so a caller can compare the
+ * module inventory before and after a repack. `inspectEntryModule` collapses the
+ * whole table to three states, which cannot see a repack that rebuilds a valid
+ * table while dropping or reordering a NON-entry sibling — the entry module still
+ * reads, the signature still verifies, and the native feature that needed the lost
+ * module fails later, in front of a user. See scripts/probe-patch-mechanism.mjs.
+ */
+export function listBunModuleNames(path: string): string[] | null {
+  const fd = openSync(path, 'r');
+  try {
+    return readBunModuleNames(fd, statSync(path).size)?.names ?? null;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
  * Give an unpatchable Claude Code binary a module name tweakcc recognizes, so it
  * can read and repack it. Returns null — no write — when the binary already has a
  * recognizable module (every release before 2.1.229, so nothing drifts for

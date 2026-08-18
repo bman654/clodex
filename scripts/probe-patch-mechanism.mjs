@@ -44,6 +44,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   inspectEntryModule,
+  listBunModuleNames,
   restoreEntryModuleName,
   shimEntryModuleName,
 } from '../src/bun-entry-module.ts';
@@ -66,13 +67,24 @@ if (args.length === 0 || args.includes('-h') || args.includes('--help')) {
 
 const opts = { json: false, keep: false, label: '', scratch: '', expectVersion: '' };
 const positionals = [];
+// A missing value must be an error, not a silent one. `--label --json` used to name the binary
+// "--json" AND turn JSON output off, and a trailing `--expect-version` left the version
+// unvalidated — so a mistyped command reported PASS for a release it never checked.
+const value = (flag, i) => {
+  const next = args[i];
+  if (next === undefined || next.startsWith('-') || next === '') {
+    console.error(`${flag} needs a value. Try --help.`);
+    process.exit(1);
+  }
+  return next;
+};
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
   if (arg === '--json') opts.json = true;
   else if (arg === '--keep') opts.keep = true;
-  else if (arg === '--label') opts.label = args[++i] ?? '';
-  else if (arg === '--expect-version') opts.expectVersion = args[++i] ?? '';
-  else if (arg === '--scratch') opts.scratch = args[++i] ?? '';
+  else if (arg === '--label') opts.label = value(arg, ++i);
+  else if (arg === '--expect-version') opts.expectVersion = value(arg, ++i);
+  else if (arg === '--scratch') opts.scratch = value(arg, ++i);
   else if (arg.startsWith('-')) {
     console.error(`Unrecognized option: ${arg}. Try --help.`);
     process.exit(1);
@@ -93,9 +105,13 @@ const label = opts.label || path.basename(path.dirname(binary));
 // tweakcc keeps its own backups and config beside whatever this points at. The probe must never
 // write into a real ~/.tweakcc, so it is redirected into the scratch dir unless the caller has
 // already chosen somewhere — and before tweakcc is imported, in case it reads the variable then.
-let scratchDir = opts.scratch ? path.resolve(opts.scratch) : '';
-if (scratchDir) mkdirSync(scratchDir, { recursive: true });
-else scratchDir = mkdtempSync(path.join(tmpdir(), 'clodex-probe-'));
+// Always a private subdirectory, even under a caller-supplied --scratch. Writing `claude` and
+// `tweakcc/` straight into the given directory clobbered anything already named that, deleted it
+// on the way out, made two concurrent probes fight over the same files, and — when the binary
+// under test lived in the directory handed to --scratch — deleted the input itself.
+const scratchRoot = opts.scratch ? path.resolve(opts.scratch) : tmpdir();
+mkdirSync(scratchRoot, { recursive: true });
+const scratchDir = mkdtempSync(path.join(scratchRoot, 'clodex-probe-'));
 if (!process.env['TWEAKCC_CONFIG_DIR']) {
   const dir = path.join(scratchDir, 'tweakcc');
   mkdirSync(dir, { recursive: true });
@@ -114,6 +130,15 @@ const PROBE_MARKER = '/*clodex-probe-patch-mechanism*/';
 // binary whose segment actually moved — untested, while every real patch takes it. The patch sites
 // add kilobytes; so does this.
 const PROBE_PADDING = `\n/*${'clodex-probe-padding'.repeat(4096)}*/\n`;
+
+// Default signal handling does not unwind through the `finally` that cleans up, so an interrupted
+// run would strand a scratch tree of up to ~770 MB.
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => {
+    if (!opts.keep) rmSync(scratchDir, { recursive: true, force: true });
+    process.exit(130);
+  });
+}
 
 const checks = [];
 const info = { label, binary, checks: [] };
@@ -198,14 +223,23 @@ let exitCode = 1;
 try {
   info.format = containerFormat(binary);
   info.pristineSize = statSync(binary).size;
+  info.pristineMode = statSync(binary).mode & 0o777;
   note(`${label}: ${info.format}, ${info.pristineSize} bytes`);
 
   // --label is otherwise pure decoration, so probing one binary eight times under eight platform
   // names would report eight greens and look like full coverage. The magic is the file's own
   // testimony; where the label claims a platform, the two must agree. (Arch cannot be checked this
   // way — nothing here reads e_machine/cputype — so linux-x64 vs linux-arm64 stays unverified.)
-  const EXPECTED_FORMAT = { darwin: 'macho', linux: 'elf', win32: 'pe' };
-  const claimed = EXPECTED_FORMAT[label.split('-')[0]];
+  // Keyed on the whole published platform name, not its first component: --label is documented as
+  // free text, and treating any "linux-…" as a platform claim would fail a PE artifact somebody
+  // labelled "linux-reference".
+  const EXPECTED_FORMAT = {
+    'darwin-arm64': 'macho', 'darwin-x64': 'macho',
+    'linux-arm64': 'elf', 'linux-x64': 'elf',
+    'linux-arm64-musl': 'elf', 'linux-x64-musl': 'elf',
+    'win32-arm64': 'pe', 'win32-x64': 'pe',
+  };
+  const claimed = EXPECTED_FORMAT[label];
   if (claimed) {
     record(
       'label-matches-format',
@@ -230,6 +264,7 @@ try {
   // The shim is undone immediately so the seeded copy is byte-identical to the source: clodex
   // publishes these bytes as the pristine backup under a content address, so a shim left in place
   // (or a stray re-sign) would poison a backup that is supposed to be Claude Code's own bytes.
+  const pristineModules = listBunModuleNames(scratch) ?? [];
   const readShim = shimEntryModuleName(scratch);
   info.shimUsed = readShim !== null;
   info.entryModuleName = readShim?.original ?? null;
@@ -270,8 +305,9 @@ try {
 
   // ---- 3. repack, then put the real entry-module name back ----------------------------------
   const repackStarted = Date.now();
+  const written = `${source}\n${PROBE_MARKER}${PROBE_PADDING}`;
   const writeShim = shimEntryModuleName(scratch);
-  await writeContent(installation, `${source}\n${PROBE_MARKER}${PROBE_PADDING}`);
+  await writeContent(installation, written);
   let restoreError = null;
   if (writeShim) {
     try {
@@ -296,7 +332,10 @@ try {
   record(
     'restore-entry-name',
     restoreError === null,
-    restoreError ?? 'the real entry-module name went back on after the repack',
+    restoreError
+      ?? (writeShim
+        ? 'the real entry-module name went back on after the repack'
+        : 'no shim was needed, so there was no entry-module name to put back'),
   );
 
   // ---- 4. is the binary that WOULD be published actually sound? -----------------------------
@@ -309,7 +348,7 @@ try {
       info.standInSurvivors === 0,
       info.standInSurvivors === 0
         ? `no ${writeShim.marker} left in the published bytes`
-        : `${info.standInSurvivors} copy/copies of ${writeShim.marker} survived — Claude Code would fail to resolve its sibling native modules`,
+        : `${info.standInSurvivors} copy/copies of ${writeShim.marker} survived; if any of them is a module name, Claude Code fails to resolve its sibling native modules`,
     );
   }
 
@@ -332,7 +371,28 @@ try {
     record(
       'signature-valid',
       signatureError === null,
-      signatureError ?? 'the repacked Mach-O still carries a valid signature, so it can be executed',
+      // Not "so it can be executed": a signed Mach-O with mode 0644 verifies and still will not
+      // run. The executable bit is checked separately, below.
+      signatureError ?? 'the Mach-O signature verifies after the repack and the name restore',
+    );
+  }
+
+  // Every check around this one can be green on a file that will not start: the patcher renames
+  // the candidate over the live install, and a repack that stopped preserving the mode would ship
+  // an unrunnable Claude Code with a perfectly valid signature. The question is whether the repack
+  // CHANGED the mode, not whether the file is executable — a Windows build unpacked from its npm
+  // tarball is 0644 and correctly so.
+  // ELF and Mach-O only: the execute bit is what the kernel consults for those, whereas a PE is
+  // launched by Windows on its extension and tweakcc's PE path legitimately writes 0644 — asserting
+  // it there would fail every Windows build for a property nothing depends on.
+  if (info.format === 'elf' || info.format === 'macho') {
+    const publishedMode = statSync(scratch).mode & 0o777;
+    record(
+      'mode-preserved',
+      publishedMode === info.pristineMode,
+      publishedMode === info.pristineMode
+        ? `mode ${publishedMode.toString(8)}, unchanged by the repack`
+        : `mode went from ${info.pristineMode.toString(8)} to ${publishedMode.toString(8)} — the published binary would not start`,
     );
   }
 
@@ -359,13 +419,25 @@ try {
   try {
     const verifyInstallation = await tryDetectInstallation({ path: scratch });
     const republished = verifyInstallation ? await readContent(verifyInstallation) : '';
+    // Exact equality, not "the marker is in there". Checking only for the marker passed a mutation
+    // that dropped the first byte of Claude Code's entry JavaScript: a repack that flips, drops,
+    // duplicates or re-encodes source bytes while carrying the marker through is precisely the
+    // silent corruption this is here to catch, and it would ship a broken install reporting OK.
+    let mismatch = '';
+    if (!republished) mismatch = 'the published binary yields no JavaScript at all';
+    else if (republished.length !== written.length) {
+      mismatch = `read back ${republished.length} bytes, wrote ${written.length}`;
+    } else if (republished !== written) {
+      let at = 0;
+      while (at < written.length && written[at] === republished[at]) at++;
+      mismatch = `the bytes differ from what was written, first at offset ${at}`;
+    }
     record(
       'published-content',
-      republished.includes(PROBE_MARKER),
-      republished
-        ? `${republished.length} bytes read back${republished.includes(PROBE_MARKER) ? ', carrying the probe marker' : ' but WITHOUT the probe marker — the repack did not land'}`
-        : 'the published binary yields no JavaScript — a patched install would be unreadable and unpatchable',
+      mismatch === '',
+      mismatch || `${republished.length} bytes read back, byte-for-byte what was written`,
     );
+
   } finally {
     // Undoing the verification shim is housekeeping, not a check: leaving it on would hand an
     // investigator a binary that cannot run and a symptom the probe invented. When it fails for
@@ -382,6 +454,25 @@ try {
     }
   }
 
+  // Taken here, on the bytes that would actually be published — after the verification shim is
+  // undone. Read while that shim is on, the entry module still carries the stand-in name and this
+  // reports a change that is the probe's own doing.
+  //
+  // A repack can rebuild a perfectly valid module table and still lose or reorder a sibling — an
+  // image or audio helper, say. The entry module reads, the signature verifies, every check above
+  // is green, and the feature that needed the missing module fails in front of a user.
+  const publishedModules = listBunModuleNames(scratch) ?? [];
+  const lost = pristineModules.filter((n) => !publishedModules.includes(n));
+  const gained = publishedModules.filter((n) => !pristineModules.includes(n));
+  info.moduleCount = { pristine: pristineModules.length, published: publishedModules.length };
+  record(
+    'modules-intact',
+    lost.length === 0 && gained.length === 0 && pristineModules.length === publishedModules.length,
+    lost.length === 0 && gained.length === 0
+      ? `all ${publishedModules.length} modules survived the repack`
+      : `the repack changed the module list — lost [${lost.slice(0, 5).join(', ')}], gained [${gained.slice(0, 5).join(', ')}]`,
+  );
+
   exitCode = failed === 0 ? 0 : 1;
 } catch (err) {
   const detail = err instanceof Error ? err.message : String(err);
@@ -394,16 +485,10 @@ try {
   info.failed = failed;
   info.verdict = failed === 0 ? 'pass' : 'fail';
   info.reasons = info.checks.filter((c) => !c.ok).map((c) => `${c.name}: ${c.detail}`);
-  if (opts.keep) {
-    info.scratch = scratch;
-  } else if (opts.scratch) {
-    // A caller-supplied --scratch may be a directory with other things in it, so only what this
-    // run created comes out. A blanket rmSync here would delete the caller's contents too.
-    rmSync(scratch, { force: true });
-    rmSync(path.join(scratchDir, 'tweakcc'), { recursive: true, force: true });
-  } else {
-    rmSync(scratchDir, { recursive: true, force: true });
-  }
+  // scratchDir is always one this run made, so removing it wholesale takes nothing that was not
+  // put there by this run.
+  if (opts.keep) info.scratch = scratch;
+  else rmSync(scratchDir, { recursive: true, force: true });
   if (opts.json) process.stdout.write(`${JSON.stringify(info)}\n`);
   else console.log(`${info.verdict.toUpperCase()} ${label} — ${checks.length} checks in ${Math.round(info.durationMs / 1000)}s`);
 }
