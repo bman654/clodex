@@ -108,6 +108,13 @@ const { tryDetectInstallation, readContent, writeContent } = await import('tweak
 // binary that somehow escapes cleanup.
 const PROBE_MARKER = '/*clodex-probe-patch-mechanism*/';
 
+// ...and enough of it to make the bundle bigger. tweakcc only extends the Mach-O segment when the
+// repacked bundle exceeds the section it came from, and an identity repack SHRINKS it by ~61 bytes,
+// so a token-sized marker leaves that branch — page rounding, segment extension, re-signing a
+// binary whose segment actually moved — untested, while every real patch takes it. The patch sites
+// add kilobytes; so does this.
+const PROBE_PADDING = `\n/*${'clodex-probe-padding'.repeat(4096)}*/\n`;
+
 const checks = [];
 const info = { label, binary, checks: [] };
 let failed = 0;
@@ -146,10 +153,13 @@ function containerFormat(file) {
     if (head.toString('latin1') === '\x7fELF') return 'elf';
     if (head.toString('latin1', 0, 2) === 'MZ') return 'pe';
     const magic = head.readUInt32BE(0);
-    // 32/64-bit Mach-O in either endianness, plus the fat wrapper.
-    if ([0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe, 0xbebafeca].includes(magic)) {
-      return 'macho';
-    }
+    // Kept in step with isMachO in src/bun-entry-module.ts: thin 32/64 in both byte orders, plus
+    // both fat wrappers. A magic this list misses is reported as unknown, which silently skips the
+    // signature check on a binary the patcher does re-sign.
+    const MACH_O_MAGIC = [
+      0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe, 0xcafebabf, 0xbebafeca,
+    ];
+    if (MACH_O_MAGIC.includes(magic)) return 'macho';
     return `unknown(0x${magic.toString(16)})`;
   } finally {
     closeSync(fd);
@@ -189,6 +199,20 @@ try {
   info.format = containerFormat(binary);
   info.pristineSize = statSync(binary).size;
   note(`${label}: ${info.format}, ${info.pristineSize} bytes`);
+
+  // --label is otherwise pure decoration, so probing one binary eight times under eight platform
+  // names would report eight greens and look like full coverage. The magic is the file's own
+  // testimony; where the label claims a platform, the two must agree. (Arch cannot be checked this
+  // way — nothing here reads e_machine/cputype — so linux-x64 vs linux-arm64 stays unverified.)
+  const EXPECTED_FORMAT = { darwin: 'macho', linux: 'elf', win32: 'pe' };
+  const claimed = EXPECTED_FORMAT[label.split('-')[0]];
+  if (claimed) {
+    record(
+      'label-matches-format',
+      claimed === info.format,
+      `${label} should be ${claimed}, the bytes say ${info.format}`,
+    );
+  }
 
   copyFileSync(binary, scratch);
   const pristineSha = await sha256(scratch);
@@ -247,7 +271,7 @@ try {
   // ---- 3. repack, then put the real entry-module name back ----------------------------------
   const repackStarted = Date.now();
   const writeShim = shimEntryModuleName(scratch);
-  await writeContent(installation, `${source}\n${PROBE_MARKER}\n`);
+  await writeContent(installation, `${source}\n${PROBE_MARKER}${PROBE_PADDING}`);
   let restoreError = null;
   if (writeShim) {
     try {
@@ -259,7 +283,16 @@ try {
   info.repackMs = Date.now() - repackStarted;
   info.publishedSize = statSync(scratch).size;
   info.growth = Number((info.publishedSize / info.pristineSize).toFixed(3));
-  note(`repacked to ${info.publishedSize} bytes (${info.growth}x)`);
+  // The ratio rounds to 1.000 on Mach-O and PE, where the repack assigns in place, so the signed
+  // delta is what shows whether the bundle actually grew — and growing is the point of the padding
+  // above, since that is what makes tweakcc extend the segment.
+  info.sizeDelta = info.publishedSize - info.pristineSize;
+  note(`repacked to ${info.publishedSize} bytes (${info.growth}x, ${info.sizeDelta >= 0 ? '+' : ''}${info.sizeDelta})`);
+  record(
+    'repack-grew',
+    info.sizeDelta > 0,
+    `${info.sizeDelta >= 0 ? '+' : ''}${info.sizeDelta} bytes — a repack that did not grow leaves the segment-extension path untested`,
+  );
   record(
     'restore-entry-name',
     restoreError === null,
@@ -283,6 +316,12 @@ try {
   // The probe never runs the binary, so a Mach-O whose signature the repack invalidated would
   // otherwise sail through here and only be caught on the one platform that executes it. codesign
   // reads any Mach-O, so this covers darwin-x64 from an arm64 host too.
+  if (info.format === 'macho' && process.platform !== 'darwin') {
+    // Saying nothing here would make a Linux run of this probe indistinguishable from a macOS one
+    // that verified the signature.
+    info.notChecked = [...(info.notChecked ?? []), 'signature-valid'];
+    note('signature-valid was NOT checked: codesign needs a macOS host');
+  }
   if (info.format === 'macho' && process.platform === 'darwin') {
     let signatureError = null;
     try {
@@ -357,6 +396,11 @@ try {
   info.reasons = info.checks.filter((c) => !c.ok).map((c) => `${c.name}: ${c.detail}`);
   if (opts.keep) {
     info.scratch = scratch;
+  } else if (opts.scratch) {
+    // A caller-supplied --scratch may be a directory with other things in it, so only what this
+    // run created comes out. A blanket rmSync here would delete the caller's contents too.
+    rmSync(scratch, { force: true });
+    rmSync(path.join(scratchDir, 'tweakcc'), { recursive: true, force: true });
   } else {
     rmSync(scratchDir, { recursive: true, force: true });
   }
