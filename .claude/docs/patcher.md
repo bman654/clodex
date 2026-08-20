@@ -164,6 +164,48 @@ tweakcc's own repack reads back as an ordinary module name.
 
 ## Patcher invariants
 
+- **The eight published builds of one Claude Code version are eight different bundles, and a
+  minified identifier is not stable across them.** 2.1.238 named the `/model` picker's builder
+  `(e,t,r){let n=…}` on five of the eight published builds but `(e,t,n){let r=…}` on linux-arm64,
+  linux-arm64-musl and win32-arm64, so PATCH 5's anchor — which spelled `r` out — matched five
+  builds and silently dropped every picker entry on the other three. Tie repeated names together
+  with back-references instead of spelling them out, and when the replacement has to name a
+  variable, capture it from the match rather than assuming the name. **Wildcarding alone is not
+  enough**: an anchor made of pure structure (ternary → loop → call) identifies nothing, and a
+  review demonstrated a same-shaped neighbour being patched, with status `OK`, once the real site
+  drifted out of the match. Keep a semantic discriminator that only the intended site can satisfy —
+  for PATCH 5 that is the builder's own `"opus"`/`"sonnet"` comparison — and **count the
+  discriminator across the whole bundle, not just the anchor**. "Matched once" means one candidate
+  survived, not that it was the right one: a second review built a twin carrying its own
+  opus/sonnet selection, moved the real picker out of the match by turning `for(` into `for (`, and
+  PATCH 5 injected into the twin and reported success. Because the anchor begins with the counted
+  expression, at most one site in the bundle can match it. Read that guarantee precisely — it
+  holds **only while the real site keeps spelling the discriminator the way the count spells it**.
+  Were
+  the picker respelt upstream to the equivalent `(x==="sonnet"||x==="opus")` while something else
+  adopted the counted spelling, the survivor would be the wrong function again; if only the
+  spelling drifts, the count goes to zero and PATCH 5 fails loud, which is the safe direction.
+  Note also that both regexes are **lexical, not syntax-aware**: they match inside block comments
+  and template literals (executed — one match each), so "occurs once" is a claim about bytes, not
+  about executable code. **An identity oracle must be derived from content, never position** — an
+  oracle that took "the function following the built-in option factory" blessed that same twin,
+  because the twin was inserted into exactly that gap. Note what the replacement does and does not
+  prove: it validates the appender the builder loops through, so a different caller of the genuine
+  appender would inherit that evidence; it rejects the realistic impostor, which brings its own.
+  Verify with the real-bundle
+  harness over **every platform's** bundle (`scripts/extract-cc-bundles.mjs` reads a foreign binary
+  fine), not just this Mac's: the canary's probe legs exercise zero patch sites, so win32-arm64
+  recorded a `pass` for the release this broke.
+- **Calibrate a patch-anchor weakness by corpus reachability and by which direction it fails, not
+  by whether an attack can be constructed** — one always can, against every site we ship.
+  PATCH 5's surviving hole needs upstream to make two coordinated changes at once (respell its own
+  discriminator *and* introduce the counted spelling elsewhere, in a function that also matches the
+  full anchor shape); it has zero instances across every bundle we hold, and it was accepted rather
+  than defended. The reason is the incident itself: **this outage was caused by an over-specific
+  anchor**, and every discriminator added is one more thing a benign upstream rename can break for
+  real users. Weigh added specificity against that, prefer anchors that fail loud over anchors that
+  fail silent, and let the canary — which now runs the real patch sites on Linux and the host —
+  catch the loud ones.
 - **The alias IS the model identity in the binary.** For any favorite with an alias, the short name
   (`sol`) — never the canonical `clodex:<provider>:<model>` id — is what lands in the Agent-tool zod
   enum (PATCH 1), the known-alias validator list (PATCH 3), the `/model` picker value (PATCH 5), and

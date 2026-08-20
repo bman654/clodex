@@ -91,7 +91,7 @@ describe('isPatchedClaudeSource', () => {
     '.enum(["sonnet","opus","haiku","fable"]).optional().describe(`Optional model override for this agent. Defaults to inherit.`)',
     'var KNOWN=["sonnet","opus","haiku","fable","opusplan"];',
     'function rz(x){switch(x){case"best":{return "opus"}default:return null}}',
-    'function opts(e,t,r){let n=cur(),o=(n==="opus")?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}',
+    'function opts(e,t,r){let n=cur(),o=(n==="opus"||n==="sonnet")&&n!==r?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}',
     'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
     // The required effort sites (PATCH 8a/8b/8c/9). Every binary current clodex
     // publishes carries their `ccpatch` comments, which is why those alone are

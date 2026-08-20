@@ -19,10 +19,11 @@ one into `tests/` only after you have run it and confirmed it actually asserts s
 Several need real Claude Code bundles. Extract them once with
 `node scripts/extract-cc-bundles.mjs` and point `REVIEW_BUNDLE_DIR` at the output.
 
-## Patcher / PATCH 10
+## Patcher / PATCH 5 and PATCH 10
 
 | Harness | Claim it settles |
 | --- | --- |
+| `cc238-patch5-anchor-over-real-bundles` | PATCH 5's /model picker anchor binds one builder per bundle **at the sole model selection**, identified from the builder's own content rather than from what it sits next to, pushes into the array that builder returns, and the patched builder **executes** and yields the entries. Per bundle it also runs the strongest wrong-target attack — a twin carrying its own opus/sonnet selection while the real picker drifts by one space — and re-runs the pre-2.1.238 anchor to assert the exact set of builds it missed. Copy this one when a release moves the picker; the position-derived oracle it replaced blessed the twin. |
 | `pr78-patch10-anchor-over-real-bundles` | PATCH 10's anchor self-identifies the child-env builder across every real bundle — match count, bound function, matched span, and that no rewritten `process.env` reference escapes the declaring function. Extracts the regex from `patch-transforms.ts` so it cannot drift. The default first move on any anchor PR. |
 | `pr78-patch10-wrong-target-mutations` | The three wrong-target classes — preceding decoy, token-bearing neighbour, nested named function — plus a `vm.Script` parse of the patched output. |
 | `pr78-patch10-execute-real-builder` | Extracts the *patched* builder out of a real bundle and **executes** it with stubs. Reading a regex replacement is not evidence the code runs. |

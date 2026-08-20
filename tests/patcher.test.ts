@@ -580,8 +580,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 6,
-      digest: 'c2abf1d2b334562c3b3b3e2158d44c9986001c0401415912ef7dd450137eab3e',
+      version: 7,
+      digest: '64e9fc9836e8eda0a6dfa7ab6b77c45838f8df4d38593018f21ea2df122651e0',
     });
   });
 });
@@ -1260,6 +1260,36 @@ function executeDefaultEffort(
   return defaultEffort(modelId);
 }
 
+/**
+ * Run the patched /model picker builder and return the option values it yields.
+ * Reading the injected snippet is not evidence it runs: the snippet names the
+ * options array, and a build that calls that array something other than `e` is
+ * exactly where a hardcoded name becomes a ReferenceError inside the picker.
+ */
+function executePicker(source: string, functionName = 'opts'): string[] {
+  // Sliced by brace matching, not by line prefix: the decoy fixture puts a second
+  // function on the same line as the real one.
+  const start = source.indexOf(`function ${functionName}(`);
+  expect(start, `${functionName} present`).toBeGreaterThan(-1);
+  let depth = 0;
+  let end = -1;
+  for (let i = source.indexOf('{', start); i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}' && --depth === 0) { end = i + 1; break; }
+  }
+  expect(end, `${functionName} is balanced`).toBeGreaterThan(start);
+  const declaration = source.slice(start, end);
+  const build = Function(
+    'cur',
+    'Dlh',
+    `${declaration};return ${functionName};`,
+  )(
+    () => 'opus',
+    (options: { value: string }[], name: string) => options.push({ value: name }),
+  ) as (options: { value: string }[], ctx: unknown, current: unknown) => { value: string }[];
+  return build([], 'ctx', 'opus').map(option => option.value);
+}
+
 const CAPABILITY_GATES: Array<{
   name: string;
   functionName: CapabilityFunctionName;
@@ -1824,6 +1854,159 @@ describe('patch script identity naming', () => {
     const out = runPatchScript({ 'clodex:openai-oauth:gpt-5.6-sol': { alias: 'sol', context: 272_000 } });
     expect(out).toContain('{value:"sol",label:"Sol",description:"Custom model (clodex:openai-oauth:gpt-5.6-sol)"}');
     expect(out).toContain('Additional custom models: sol.');
+  });
+
+  const PICKER_STD =
+    'function opts(e,t,r){let n=cur(),o=(n==="opus"||n==="sonnet")&&n!==r?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}';
+  const pickerSite = (result: ReturnType<typeof applyClodexPatches>) =>
+    result.results.find(site => site.name.startsWith('PATCH 5'));
+
+  // Claude Code 2.1.238 shipped per-platform builds whose minifier named this
+  // same function differently: `(e,t,r){let n=...}` on five of the eight published
+  // builds, but `(e,t,n){let r=...}` on linux-arm64, linux-arm64-musl and
+  // win32-arm64. An anchor that spelled those identifiers out silently dropped the
+  // picker entries on the other three.
+  const CLAUDE_FIXTURE_238_ARM = CLAUDE_FIXTURE.replace(
+    PICKER_STD,
+    'function opts(e,t,n){let r=cur(),o=(r==="opus"||r==="sonnet")&&r!==n?[r,n]:[n];for(let i of o)Dlh(e,i,t);return e}',
+  );
+
+  // The same build shape, but with the OPTIONS ARRAY itself renamed. Nothing in
+  // the bundle guarantees it is called `e` — the injected snippet has to use the
+  // name this build gave it, or the picker throws a ReferenceError at runtime
+  // while `clodex patch` still reports OK.
+  const CLAUDE_FIXTURE_238_RENAMED_ARRAY = CLAUDE_FIXTURE.replace(
+    PICKER_STD,
+    'function opts(a,t,n){let r=cur(),o=(r==="opus"||r==="sonnet")&&r!==n?[r,n]:[n];for(let i of o)Dlh(a,i,t);return a}',
+  );
+
+  // The strongest competitor: the exact ternary → loop → three-argument-appender
+  // shape AND its own opus/sonnet selection, so nothing in the anchor itself can
+  // tell it from the picker. A review put one of these immediately before the real
+  // builder and moved the real builder out of the match with a single space
+  // (`for(` → `for (`); PATCH 5 reported OK and injected into the impostor. The
+  // whole-bundle selection count is what turns that into a refusal.
+  const DECOY_SELECTING =
+    'function zzTwin(a,b,c){let d=cur(),f=(d==="opus"||d==="sonnet")&&d!==c?[d,c]:[c];for(let g of f)Dlh(a,g,b);return a}';
+  const CLAUDE_FIXTURE_TWIN = CLAUDE_FIXTURE.replace(PICKER_STD, DECOY_SELECTING + PICKER_STD);
+  const CLAUDE_FIXTURE_TWIN_DRIFTED = CLAUDE_FIXTURE_TWIN.replace(
+    'for(let i of o)Dlh(e,i,t);return e}',
+    'for (let i of o)Dlh(e,i,t);return e}',
+  );
+
+  // A competitor with the same shape but selecting on something that is not a
+  // model family: rejected by the discriminator rather than by the count.
+  const DECOY_GENERIC =
+    'function zzGeneric(a,b,c){let d=cur(),f=(d==="fast")&&d!==c?[d,c]:[c];for(let g of f)Dlh(a,g,b);return a}';
+  const CLAUDE_FIXTURE_GENERIC_DECOY = CLAUDE_FIXTURE.replace(
+    PICKER_STD,
+    DECOY_GENERIC + PICKER_STD,
+  );
+  // The same competitor, with the real picker put cosmetically out of reach.
+  const CLAUDE_FIXTURE_DECOY_ONLY = CLAUDE_FIXTURE_GENERIC_DECOY.replace(
+    'for(let i of o)Dlh(e,i,t);return e}',
+    'for (let i of o)Dlh(e,i,t);return e}',
+  );
+
+  it('patches a build whose picker builder minified to different identifiers', () => {
+    expect(CLAUDE_FIXTURE_238_ARM, 'fixture drifted from the shape this test mutates')
+      .not.toBe(CLAUDE_FIXTURE);
+
+    const result = applyClodexPatches(CLAUDE_FIXTURE_238_ARM, config);
+
+    expect(pickerSite(result)).toEqual({ status: 'OK', name: 'PATCH 5: model picker options' });
+    expect(executePicker(result.content)).toContain('sol');
+  });
+
+  it('binds the injected entries to the options array this build actually named', () => {
+    expect(CLAUDE_FIXTURE_238_RENAMED_ARRAY, 'fixture drifted from the shape this test mutates')
+      .not.toBe(CLAUDE_FIXTURE);
+
+    const result = applyClodexPatches(CLAUDE_FIXTURE_238_RENAMED_ARRAY, config);
+
+    expect(pickerSite(result)?.status).toBe('OK');
+    expect(result.content).toContain('a.push(_o)');
+    expect(result.content).not.toContain('e.push(_o)');
+    // The proof that matters: the patched builder RUNS and yields the entries.
+    // `cur()` and the third argument both stub to "opus", so the builder appends
+    // that one built-in before our entries; the unaliased model gets no picker
+    // entry.
+    expect(executePicker(result.content)).toEqual(['opus', 'sol']);
+  });
+
+  it.each([
+    ['alongside the picker', () => CLAUDE_FIXTURE_TWIN],
+    ['while the picker itself drifts out of the match', () => CLAUDE_FIXTURE_TWIN_DRIFTED],
+  ])('refuses to patch anything when a second builder also selects a model, %s', (_case, fixture) => {
+    const source = fixture();
+    expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE);
+
+    const result = applyClodexPatches(source, config);
+
+    expect(pickerSite(result)).toEqual({
+      status: 'FAIL',
+      name: 'PATCH 5: model picker options',
+      extra: 'model selection appears 2 times (expected 1)',
+    });
+    expect(result.content, 'nothing was injected').not.toContain('{value:"sol",label:"Sol"');
+    expect(result.content, 'the competitor is left exactly as it was').toContain(DECOY_SELECTING);
+  });
+
+  it('ignores a same-shaped builder that does not select between opus and sonnet', () => {
+    expect(CLAUDE_FIXTURE_GENERIC_DECOY, 'fixture drifted from the shape this test mutates')
+      .not.toBe(CLAUDE_FIXTURE);
+
+    const result = applyClodexPatches(CLAUDE_FIXTURE_GENERIC_DECOY, config);
+
+    expect(pickerSite(result)?.status).toBe('OK');
+    expect(result.content.match(/\{value:"sol",label:"Sol"/g)).toHaveLength(1);
+    expect(result.content, 'the competitor is left exactly as it was').toContain(DECOY_GENERIC);
+    expect(executePicker(result.content)).toContain('sol');
+    expect(executePicker(result.content, 'zzGeneric'), 'the competitor gained no entries')
+      .not.toContain('sol');
+  });
+
+  it('reports a miss rather than patching a same-shaped builder when the picker drifts', () => {
+    expect(CLAUDE_FIXTURE_DECOY_ONLY, 'fixture drifted from the shape this test mutates')
+      .not.toBe(CLAUDE_FIXTURE_GENERIC_DECOY);
+
+    const result = applyClodexPatches(CLAUDE_FIXTURE_DECOY_ONLY, config);
+
+    // A structure-only anchor reports OK here, having patched zzGeneric.
+    expect(pickerSite(result)).toEqual({
+      status: 'FAIL',
+      name: 'PATCH 5: model picker options',
+      extra: 'anchor not found',
+    });
+    expect(result.content).not.toContain('{value:"sol",label:"Sol"');
+    expect(result.content, 'the competitor is left exactly as it was').toContain(DECOY_GENERIC);
+  });
+
+  // The back-references decide WHICH variable is captured as the options array.
+  // Loosen them and each of these builders matches, with the capture landing on a
+  // variable that is not the list — so the patch must refuse them. The selection
+  // count cannot catch these: each fixture still has exactly one selection.
+  it.each([
+    [
+      'the loop variable is not the appender\'s middle argument',
+      'function opts(e,t,r){let n=cur(),o=(n==="opus"||n==="sonnet")&&n!==r?[n,r]:[r];for(let i of o)Dlh(e,t,i);return e}',
+    ],
+    [
+      'the fallback array does not repeat the pair',
+      'function opts(e,t,r){let n=cur(),o=(n==="opus"||n==="sonnet")&&n!==r?[n,r]:[t];for(let i of o)Dlh(e,i,t);return e}',
+    ],
+  ])('refuses a builder whose shape does not line up: %s', (_case, builder) => {
+    const source = CLAUDE_FIXTURE.replace(PICKER_STD, builder);
+    expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE);
+
+    const result = applyClodexPatches(source, config);
+
+    expect(pickerSite(result)).toEqual({
+      status: 'FAIL',
+      name: 'PATCH 5: model picker options',
+      extra: 'anchor not found',
+    });
+    expect(result.content).not.toContain('{value:"sol",label:"Sol"');
   });
 
   it('supports aliases that match object prototype property names', () => {

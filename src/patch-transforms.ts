@@ -38,7 +38,7 @@ import {
  * hash of the transform inputs to force that decision to be made rather than
  * forgotten.
  */
-export const PATCH_TRANSFORMS_VERSION = 6;
+export const PATCH_TRANSFORMS_VERSION = 7;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -348,6 +348,52 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // {value,label,description} entries — with a runtime .some() dedupe guard so
   // it is safe even if the function runs over the same array twice. Only
   // aliases not already injected are added, so reruns top up cleanly.
+  //
+  // Anchor: the choke-point's own code — its `"opus"`/`"sonnet"` selection, which
+  // is what makes it the MODEL picker and not merely a loop that appends things,
+  // followed by the loop and the per-item appender. Every minified identifier is
+  // wildcarded and repeats are tied together with back-references rather than
+  // spelled out. Claude Code 2.1.238 shipped per-platform builds whose minifier
+  // handed this function different names — `(e,t,r){let n=...}` on five of the
+  // eight published builds, but `(e,t,n){let r=...}` on linux-arm64,
+  // linux-arm64-musl and win32-arm64 — so an anchor naming `r` literally stopped
+  // matching on the other three, and their users silently lost every custom
+  // picker entry.
+  // Keep BOTH halves. The back-references alone only make the identifiers
+  // internally consistent; they do not say the function is the picker, and a
+  // review demonstrated that a same-shaped neighbour could then be patched
+  // instead if the real site ever drifted out of the match. The model-name
+  // comparison is the discriminator; the wildcards are what survive a rename.
+  // The tolerated run between the comparison and the pair is bounded to
+  // `[^;{}]` so it cannot reach out of the statement it starts in.
+  // The appender's FIRST argument is captured and the append snippet is bound to
+  // that name, so we push into the very array the built-in options were just
+  // appended to, under whatever name this build gave it, instead of into a
+  // variable we assumed was called `e`.
+  // The anchor deliberately stops before the function's `return`: the snippet is
+  // spliced in between, so consuming the tail would make a re-run of the patch
+  // report a missing anchor instead of the SKIP that keeps re-patching clean.
+  //
+  // The selection is ALSO counted across the whole bundle, and that check is not
+  // redundant. "The anchor matched once" only means one candidate survived, not
+  // that it was the right one: a review built a second builder with its own
+  // opus/sonnet selection and moved the real picker out of the match by turning
+  // `for(` into `for (` — one space — and PATCH 5 reported OK while injecting
+  // into the impostor, where no user would ever see the entries. The anchor
+  // BEGINS with the selection, so at most one site in the bundle can match it,
+  // and that composition becomes a refusal.
+  // State the guarantee precisely, because it rests on an assumption nothing
+  // here tests: the counted site is the picker only while the picker keeps
+  // spelling its selection THIS way. Respelt upstream to the equivalent
+  // `(x==="sonnet"||x==="opus")` with something else adopting this spelling, the
+  // survivor would be the wrong function again. No published bundle contains a
+  // second selection in any spelling, and that needs two coordinated upstream
+  // changes rather than one, so it is calibrated as unreachable rather than
+  // defended against — adding more discriminators is what broke this patch on
+  // three platforms in the first place. If only the spelling drifts, the count
+  // goes to ZERO and PATCH 5 fails loudly (it is `required:false`, so the rest
+  // of the patch still applies) and the release canary reports it on all eight
+  // platforms. Failing loud is the direction to bias toward here.
   // ---------------------------------------------------------------------------
   {
     const missing = ALIASES.filter((a) => !new RegExp('value:' + reEsc(q(a))).test(js));
@@ -360,16 +406,25 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         (a) => '{value:' + q(a) + ',label:' + q(a.charAt(0).toUpperCase() + a.slice(1)) + ',description:' + q(displayFor(a, ALIAS_TO_ID[a]!)) + '}'
       )
       .join(',');
-    const inject = missing.length
-      ? '[' + entries + '].forEach(function(_o){if(!e.some(function(_i){return _i.value===_o.value}))e.push(_o)});'
-      : '';
+    /** The append snippet, bound to whatever this build named the options array. */
+    const injectInto = (options: string) =>
+      missing.length
+        ? '[' + entries + '].forEach(function(_o){if(!' + options + '.some(function(_i){return _i.value===_o.value}))' + options + '.push(_o)});'
+        : '';
+    const pickerSite = 'PATCH 5: model picker options';
+    // MUST stay a prefix of the anchor below — that is what makes the count mean
+    // "the anchor can only match the picker". A harness asserts the relationship
+    // and, on every real bundle, that the anchor binds at this very offset.
+    const modelSelections = [...js.matchAll(/\(([\w$]+)==="opus"\|\|\1==="sonnet"\)/g)];
     if (ALIASES.length === 0) {
-      log('SKIP', 'PATCH 5: model picker options', 'no aliases configured');
+      log('SKIP', pickerSite, 'no aliases configured');
+    } else if (modelSelections.length !== 1) {
+      log('FAIL', pickerSite, 'model selection appears ' + modelSelections.length + ' times (expected 1)');
     } else {
       applyOnce(
-        'PATCH 5: model picker options',
-        /(\?\[[\w$]+,r\]:\[r\];for\(let [\w$]+ of [\w$]+\)[\w$]+\(e,[\w$]+,t\);)/,
-        (m) => m + inject,
+        pickerSite,
+        /\(([\w$]+)==="opus"\|\|\1==="sonnet"\)[^;{}]*\?\[\1,([\w$]+)\]:\[\2\];for\(let ([\w$]+) of [\w$]+\)[\w$]+\(([\w$]+),\3,[\w$]+\);/,
+        (m, _selected, _requested, _item, options) => m + injectInto(options!),
         { required: false, noopIsSkip: true }
       );
     }

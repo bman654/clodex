@@ -62,14 +62,18 @@ describe('the canary probe against a healthy bundle', () => {
 });
 
 describe('the canary probe against a bundle whose anchors drifted', () => {
-  // The real Claude Code 2.1.238 regression, reproduced. Its linux-arm64, linux-arm64-musl and
-  // win32-arm64 builds minified the picker helper's second parameter from `r` to `n`, and the
-  // PATCH 5 anchor spells `r` literally — so the anchor matched on the other five builds and not
-  // on those three. Renaming the same identifier in the fixture reproduces exactly that shape.
-  const PICKER_ANCHOR = 'function opts(e,t,r){let n=cur(),o=(n==="opus")?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}';
-  const PICKER_DRIFTED = 'function opts(e,t,q){let n=cur(),o=(n==="opus")?[n,q]:[q];for(let i of o)Dlh(e,i,t);return e}';
+  // A drift the PATCH 5 anchor does NOT tolerate, which is what the probe has to catch.
+  //
+  // This deliberately does not reproduce the Claude Code 2.1.238 break any more. That break was an
+  // identifier rename (`r` to `n` in the picker helper) and the anchor now wildcards identifiers and
+  // ties repeats with back-references specifically so a rename cannot break it — reproducing it here
+  // would assert the opposite of the behaviour we ship. Braces around the loop body are used instead:
+  // a plausible minifier variation that the anchor genuinely misses, so PATCH 5 reports `anchor not
+  // found` while the whole-bundle model-selection count still resolves to exactly one.
+  const PICKER_ANCHOR = 'function opts(e,t,r){let n=cur(),o=(n==="opus"||n==="sonnet")&&n!==r?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}';
+  const PICKER_DRIFTED = 'function opts(e,t,r){let n=cur(),o=(n==="opus"||n==="sonnet")&&n!==r?[n,r]:[r];for(let i of o){Dlh(e,i,t);}return e}';
 
-  it('fails when the model-picker anchor no longer matches — the 2.1.238 win32-arm64 break', () => {
+  it('fails when the model-picker anchor no longer matches', () => {
     expect(CLAUDE_FIXTURE, 'fixture drifted from the shape this test mutates')
       .toContain(PICKER_ANCHOR);
     const drifted = CLAUDE_FIXTURE.replace(PICKER_ANCHOR, PICKER_DRIFTED);
