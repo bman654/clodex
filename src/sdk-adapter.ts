@@ -635,6 +635,17 @@ interface AnthropicUsage {
  * from input_tokens to avoid double-counting. GPT-5.6+ reports cache writes;
  * older models generally report reads only.
  */
+/** Hand the provider's own prompt total to the observer, when it reported one. */
+function reportPromptTokens(
+  observer: AnthropicStreamObserver | undefined,
+  usage: SdkUsage | undefined,
+): void {
+  const total = usage?.inputTokens;
+  if (observer?.onPromptTokens && typeof total === 'number' && Number.isFinite(total)) {
+    observer.onPromptTokens(total);
+  }
+}
+
 function toAnthropicUsage(u?: SdkUsage): AnthropicUsage {
   const total = u?.inputTokens ?? 0;
   const cacheRead = u?.inputTokenDetails?.cacheReadTokens ?? u?.cachedInputTokens ?? 0;
@@ -655,6 +666,12 @@ type LogFn = (msg: () => string) => void;
 export interface AnthropicStreamObserver {
   /** Called for every AI SDK fullStream part before Relay translates it. */
   onPart?: (partType: string) => void;
+  /**
+   * Total prompt tokens the provider counted, cached portion included. Reported
+   * before the Anthropic split, because provider pricing bands apply to the whole
+   * input rather than the uncached remainder.
+   */
+  onPromptTokens?: (total: number) => void;
   /** Local fallback used when the provider omits usage at stream completion. */
   initialInputTokens?: number;
   abortSignal?: AbortSignal;
@@ -862,6 +879,7 @@ export async function writeAnthropicStream(
 
       case 'finish':
         if (part.totalUsage) {
+          reportPromptTokens(observer, part.totalUsage);
           const finalUsage = toAnthropicUsage(part.totalUsage);
           const hasFinalInputUsage = finalUsage.input_tokens
             + finalUsage.cache_creation_input_tokens
@@ -969,6 +987,7 @@ export async function generateAnthropicResponse(
     forceStream?: boolean;
     abortSignal?: AbortSignal;
     onPart?: (partType: string) => void;
+    onPromptTokens?: (total: number) => void;
     idleTimeoutMs?: number;
   },
 ): Promise<Record<string, unknown>> {
@@ -1072,6 +1091,7 @@ export async function generateAnthropicResponse(
   }
 
   reportUnsupportedServiceTier(params, warnings);
+  reportPromptTokens({ onPromptTokens: options?.onPromptTokens }, usage);
   const requiredProps = toolRequiredProps(params.tools);
   return {
     id: 'msg_' + Date.now(), type: 'message', role: 'assistant', model: modelId,
@@ -1088,3 +1108,4 @@ export async function generateAnthropicResponse(
     usage: toAnthropicUsage(usage),
   };
 }
+

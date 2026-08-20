@@ -28,7 +28,18 @@ export interface LocalProviderModel {
   npm?: string;            // OpenCode api.npm package, e.g. @ai-sdk/xai (SDK routing)
   apiBaseUrl?: string;     // raw api.url, for openai-compatible/openrouter SDK base URL
   cost?: ModelCost;
+  /** Window to report to clients, after the selected context stop and its headroom. */
   contextWindow?: number;
+  /** Raw window behind `contextWindow`, set only when headroom made them differ. */
+  rawContextWindow?: number;
+  /** Per-model auto-compact target, set only when it is below `contextWindow`. */
+  autoCompactWindow?: number;
+  /** Selected stop, omitted while the model is on its standard window. */
+  contextStop?: 'standard' | 'max' | number;
+  /** Input size above which the provider bills the whole request at a higher rate. */
+  pricingBoundary?: number;
+  /** Largest output the model accepts, independent of the input window. */
+  maxOutputTokens?: number;
   /** Provider-reported request parameters, e.g. OpenRouter supported_parameters. */
   supportedParameters?: string[];
   /** Broad model metadata: model can produce reasoning/thinking output. */
@@ -78,6 +89,8 @@ export interface UserPreferences {
   recentModelsByProvider?: Record<string, string[]>;
   favoriteModels?: FavoriteModel[];
   modelAliases?: ModelAlias[];
+  /** Saved context stop per `<provider-id>:<model-id>`, set by `models --context`. */
+  modelContextModes?: Record<string, 'standard' | 'max' | number>;
   /** Remembered bridge mode for `clodex claude` (set by --endpoint / --proxy). */
   claudeBridgeMode?: BridgeMode;
   /** Remembered bridge mode for `clodex server` (set by --endpoint / --proxy). */
@@ -141,6 +154,12 @@ export interface ParsedArgs {
   favoritesAlias?: string;
   /** Remove a saved short proxy-mode model alias. */
   favoritesUnalias?: string;
+  /** Print resolved metadata for saved favorites as JSON. */
+  favoritesJson?: boolean;
+  /** Context stop assignments (`<model-ref>=standard|max|default|<tokens>`). */
+  contextStops?: string[];
+  /** With `models --context`: write the stop to preferences instead of this run only. */
+  contextSave?: boolean;
   /** clodex patch: restore the pristine Claude Code binary. */
   patchRestore?: boolean;
   /** clodex patch: persistently enable or disable local patch execution. */

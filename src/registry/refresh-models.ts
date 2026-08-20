@@ -35,7 +35,13 @@ import {
 } from './refresh-credentials.js';
 import { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js';
-import { buildOpenAiOAuthModels, CHATGPT_CODEX_UNSUPPORTED_MODELS } from '../data/openai-oauth-models.js';
+import {
+  buildOpenAiOAuthModels,
+  CHATGPT_CODEX_UNSUPPORTED_MODELS,
+  openAiPricingMetadata,
+} from '../data/openai-oauth-models.js';
+import { DEFAULT_EFFECTIVE_CONTEXT_PERCENT } from '../context-modes.js';
+import { isChatGptOAuthProvider } from './provider-kind.js';
 import { modelPrefersResponsesApi } from '../provider-factory.js';
 import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
@@ -84,9 +90,33 @@ interface OpenAiModelEntry {
   id: string;
   name: string;
   context_window?: number;
+  /** Ceiling the client may raise `context_window` to; account-dependent. */
+  max_context_window?: number;
+  /** Share of the raw window the client should fill. */
+  effective_context_window_percent?: number;
+  /** Provider-chosen compaction target. Frequently null, meaning the client picks. */
+  auto_compact_token_limit?: number;
+  max_output_tokens?: number;
   /** Backend flags: model needs the Responses-Lite shape / WebSocket transport. */
   useResponsesLite?: boolean;
   preferWebSockets?: boolean;
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+/** Read the context-budget fields the Codex catalog carries alongside the window. */
+function readContextFields(
+  m: Record<string, unknown>,
+): Pick<OpenAiModelEntry, 'context_window' | 'max_context_window' | 'effective_context_window_percent' | 'auto_compact_token_limit' | 'max_output_tokens'> {
+  return {
+    context_window: positiveInteger(m['context_window']),
+    max_context_window: positiveInteger(m['max_context_window']),
+    effective_context_window_percent: positiveInteger(m['effective_context_window_percent']),
+    auto_compact_token_limit: positiveInteger(m['auto_compact_token_limit']),
+    max_output_tokens: positiveInteger(m['max_output_tokens']),
+  };
 }
 
 /** Read the Responses-Lite / WebSocket capability flags off a raw model entry. */
@@ -109,7 +139,7 @@ function parseOpenAiModelEntries(body: unknown): OpenAiModelEntry[] {
       .map(m => ({
         id: (m.slug as string) ?? '',
         name: (m.title as string) ?? (m.name as string) ?? (m.slug as string) ?? '',
-        context_window: m.context_window as number | undefined,
+        ...readContextFields(m),
         ...readCapabilityFlags(m),
       }))
       .filter(m => m.id.length > 0);
@@ -120,7 +150,7 @@ function parseOpenAiModelEntries(body: unknown): OpenAiModelEntry[] {
       .map(m => ({
         id: (m.id as string) ?? '',
         name: (m.name as string) ?? (m.id as string) ?? '',
-        context_window: m.context_window as number | undefined,
+        ...readContextFields(m),
         ...readCapabilityFlags(m),
       }))
       .filter(m => m.id.length > 0);
@@ -139,6 +169,14 @@ function buildDynamicOAuthModel(entry: OpenAiModelEntry, seedById: Map<string, C
     return {
       ...seed,
       contextWindow: entry.context_window ?? seed.contextWindow,
+      // A catalog that omits the ceiling is not a catalog that reports there is
+      // none, so the seed's ceiling survives rather than collapsing the `max`
+      // stop down onto the standard one.
+      maxContextWindow: entry.max_context_window ?? seed.maxContextWindow,
+      effectiveContextPercent: entry.effective_context_window_percent
+        ?? seed.effectiveContextPercent,
+      autoCompactWindow: entry.auto_compact_token_limit ?? seed.autoCompactWindow,
+      maxOutputTokens: entry.max_output_tokens ?? seed.maxOutputTokens,
       useResponsesLite: entry.useResponsesLite ?? seed.useResponsesLite,
       preferWebSockets: entry.preferWebSockets ?? seed.preferWebSockets,
     };
@@ -152,6 +190,12 @@ function buildDynamicOAuthModel(entry: OpenAiModelEntry, seedById: Map<string, C
     family: prefix,
     brand: deriveBrand(prefix),
     contextWindow: entry.context_window ?? resolveContextWindow(id),
+    maxContextWindow: entry.max_context_window,
+    effectiveContextPercent: entry.effective_context_window_percent
+      ?? DEFAULT_EFFECTIVE_CONTEXT_PERCENT,
+    autoCompactWindow: entry.auto_compact_token_limit,
+    maxOutputTokens: entry.max_output_tokens,
+    ...openAiPricingMetadata(id),
     modelFormat: 'openai' as const,
     npm: '@ai-sdk/openai',
     reasoning: modelPrefersResponsesApi(id),
@@ -528,7 +572,7 @@ export async function refreshProviderModels(
     let baseUrl: string | undefined;
     let oauthFallbackReason: string | undefined;
 
-    if (provider.authType === 'oauth' && ((provider.templateId ?? provider.id) === 'openai' || provider.id === 'openai-oauth')) {
+    if (isChatGptOAuthProvider(provider)) {
       // OAuth tokens are not valid API keys for the developer endpoints.
       // OpenAI: ChatGPT JWT rejected by api.openai.com; no /v1/models on ChatGPT backend.
       if (!apiKey) {

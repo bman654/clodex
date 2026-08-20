@@ -11,6 +11,7 @@ import {
   normalizeRouteLookupId,
   stripOneMContextSuffix,
 } from './context-model-id.js';
+import { reportPricingBoundaryCrossing } from './pricing-boundary.js';
 import { routeUnavailableMessage } from './route-unavailable.js';
 import {
   getProxyDebugLogPath,
@@ -236,6 +237,12 @@ export interface ProxyRoute {
   apiKey: string;
   modelFormat: 'anthropic' | 'openai';
   contextWindow?: number;
+  /** Per-model auto-compact target, set only when it is below `contextWindow`. */
+  autoCompactWindow?: number;
+  /** Input size above which the provider bills the whole request at a higher rate. */
+  pricingBoundary?: number;
+  /** Largest output the model accepts, independent of the input window. */
+  maxOutputTokens?: number;
   npm?: string;      // OpenCode api.npm — when SDK-migrated, routes via the adapter
   baseURL?: string;  // base URL for openai-compatible / openrouter SDK providers
   providerId?: string;
@@ -699,6 +706,11 @@ export async function startProxyCatalog(
                       lastUpstreamPartAt = Date.now();
                       translationLifecycle?.onPart(partType);
                     },
+                    onPromptTokens: total => reportPricingBoundaryCrossing({
+                      modelLabel: route.displayName || route.aliasId,
+                      pricingBoundary: route.pricingBoundary,
+                      inputTokens: total,
+                    }),
                     initialInputTokens: estimateAnthropicInputTokens(anthropicBody),
                     abortSignal: clientAbort.signal,
                   },
@@ -724,6 +736,11 @@ export async function startProxyCatalog(
                   forceStream: openAiOAuth,
                   abortSignal: clientAbort.signal,
                   onPart: partType => translationLifecycle?.onPart(partType),
+                  onPromptTokens: total => reportPricingBoundaryCrossing({
+                    modelLabel: route.displayName || route.aliasId,
+                    pricingBoundary: route.pricingBoundary,
+                    inputTokens: total,
+                  }),
                 },
               ),
             );

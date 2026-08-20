@@ -7,6 +7,24 @@ import { fileURLToPath } from 'node:url';
 import { findClaudeBinary, launchClaude } from './launch.js';
 import { detectConflicts, buildChildEnv, buildHttpProxyChildEnv } from './env.js';
 import { claudeCodeClientModelId } from './context-model-id.js';
+import {
+  contextClampNotice,
+  contextLimitsFrom,
+  pricingBoundaryWarning,
+  primeSavedContextStops,
+  resolveContextStop,
+  setSessionContextStops,
+} from './context-modes.js';
+import { resolveContextWindow } from './context-window.js';
+import {
+  parseContextStopAssignments,
+  savedStopsAfter,
+  sessionStopsFrom,
+  type ContextStopAssignment,
+} from './context-stop-args.js';
+import { buildModelMetadata, formatModelMetadata } from './model-metadata.js';
+import { loadRegistry } from './registry/io.js';
+import { projectProviderCachedModels } from './registry/materialize.js';
 import { needsFirstRunSetup, runFirstRunWizard } from './first-run.js';
 import { MAX_MODEL_CATALOG } from './constants.js';
 import { startProxy, startProxyCatalog } from './proxy.js';
@@ -62,7 +80,13 @@ import {
 import { runPatchCommand, runLaunchPatchCheck } from './patcher.js';
 import { installOutboundProxyDispatcher } from './outbound-proxy.js';
 const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--trace', '--fast', '--endpoint', '--proxy', '--save-mode', '--help', '-h', '--version', '-v']);
-const CLODEX_LAUNCH_FLAGS = new Set(['--provider', '--model']);
+const CLODEX_LAUNCH_FLAGS = new Set(['--provider', '--model', '--context']);
+
+function addContextStop(parsed: ParsedArgs, value: string): void {
+  const stops = parsed.contextStops ?? [];
+  stops.push(value);
+  parsed.contextStops = stops;
+}
 
 function parseClodexLaunchFlag(
   arg: string,
@@ -70,13 +94,14 @@ function parseClodexLaunchFlag(
   index: number,
   parsed: ParsedArgs,
 ): number | 'error' {
-  if (arg === '--provider' || arg === '--model') {
+  if (arg === '--provider' || arg === '--model' || arg === '--context') {
     const value = rest[index + 1];
     if (!value || value.startsWith('-')) {
       parsed.error = `Missing value for ${arg}`;
       return 'error';
     }
     if (arg === '--provider') parsed.launchProvider = value;
+    else if (arg === '--context') addContextStop(parsed, value);
     else parsed.launchModel = value;
     return index + 1;
   }
@@ -88,6 +113,10 @@ function parseClodexLaunchFlag(
     parsed.launchModel = arg.slice('--model='.length);
     return index;
   }
+  if (arg.startsWith('--context=')) {
+    addContextStop(parsed, arg.slice('--context='.length));
+    return index;
+  }
   return index;
 }
 
@@ -97,7 +126,8 @@ function tryConsumeClodexLaunchFlag(
   index: number,
   parsed: ParsedArgs,
 ): { next: number } | { error: true } | null {
-  if (!CLODEX_LAUNCH_FLAGS.has(arg) && !arg.startsWith('--provider=') && !arg.startsWith('--model=')) {
+  const valueForms = ['--provider=', '--model=', '--context='];
+  if (!CLODEX_LAUNCH_FLAGS.has(arg) && !valueForms.some(prefix => arg.startsWith(prefix))) {
     return null;
   }
   const next = parseClodexLaunchFlag(arg, rest, index, parsed);
@@ -248,6 +278,14 @@ export function parseArgs(args: string[]): ParsedArgs {
       if (arg === '--help' || arg === '-h') parsed.showHelp = true;
       else if (arg === '--version' || arg === '-v') parsed.showVersion = true;
       else if (arg === '--list') parsed.favoritesList = true;
+      else if (arg === '--json') parsed.favoritesJson = true;
+      else if (arg === '--save') parsed.contextSave = true;
+      else if (arg === '--context' || arg.startsWith('--context=')) {
+        const consumed = consumeServerOptionValue(arg, rest, i, '--context', parsed);
+        if (!consumed) return parsed;
+        addContextStop(parsed, consumed.value);
+        i = consumed.next;
+      }
       else if (arg === '--alias' || arg.startsWith('--alias=')) {
         const consumed = consumeServerOptionValue(arg, rest, i, '--alias', parsed);
         if (!consumed) return parsed;
@@ -408,6 +446,9 @@ ${pc.bold('Options:')}
                (equivalent to CLODEX_SERVICE_TIER=fast; warns if the SDK omits it)
   --provider   Boot provider id (skip wizard when paired with --model or in print mode)
   --model      Boot model id (skip wizard when paired with --provider or in print mode)
+  --context    <model=stop> use a different share of a model's window for this
+               launch only (standard, max, default, or a token count). Nothing is
+               saved; set a default with clodex models --context <model=stop> --save
   --help       Show this command help
   --version    Show version
 
@@ -532,6 +573,8 @@ ${pc.bold('Usage:')}
   clodex models --list
   clodex models --alias sol=clodex:openai-oauth:gpt-5.6-sol
   clodex models --unalias sol
+  clodex models --context sol=max --save
+  clodex models --json
   clodex models
   clodex favorites --help
   clodex favorites --version
@@ -546,6 +589,13 @@ ${pc.bold('Behavior:')}
   target is clodex:<provider-id>:<model-id> (the clodex: prefix is optional).
   Alias names are stored lowercase and cannot use client-reserved model names.
   --unalias <name> removes a saved short name.
+  --context <model=stop> chooses how much of a model's window to use. Stops are
+  standard (the provider's tuned default), max (its ceiling), default (clear a
+  saved choice), or a token count such as 500k. Applies to this run only unless
+  --save is given. The model is a saved alias or clodex:<provider-id>:<model-id>.
+  --json prints the resolved metadata for saved favorites as JSON: ids,
+  aliases, context stop and windows, compaction target, output limit, pricing
+  boundary, and effort levels. Diagnostics go to stderr so stdout stays parseable.
 
 ${pc.bold('How it works:')}
   claude and server use the global favorites list.
@@ -553,9 +603,15 @@ ${pc.bold('How it works:')}
   by name in proxy mode. clodex patch bakes favorites + aliases into the
   Claude Code binary so they pass model validation and report real context.
 
+${pc.bold('Context stops and cost:')}
+  Some providers price large prompts in bands: GPT-5.6 bills the full request at
+  a higher rate above 272,000 input tokens. The standard stop stays under that
+  line, so max is opt-in and reports the boundary when you select it.
+
 ${pc.bold('Examples:')}
   clodex favorites
   clodex models --alias sol=clodex:openai-oauth:gpt-5.6-sol
+  clodex models --context sol=max --save
   clodex claude    # switch menu active when favorites are set`;
 }
 
@@ -667,10 +723,101 @@ async function launchClaudeViaCatalog(
   return exitCode;
 }
 
+/**
+ * Report each `--context` assignment against the model's real limits, then persist
+ * when asked. Reporting is the point: the larger stops cross a provider pricing
+ * boundary, so the numbers and the warning belong at selection time.
+ */
+interface ContextStopReporter {
+  info: (message: string) => void;
+  warn: (message: string) => void;
+  success: (message: string) => void;
+}
+
+const CLACK_CONTEXT_REPORTER: ContextStopReporter = {
+  info: message => p.log.info(message),
+  warn: message => p.log.warn(message),
+  success: message => p.log.success(message),
+};
+
+/**
+ * Diagnostics go to stderr so `--json` keeps stdout to the JSON a
+ * launcher captures. The messages still appear; they just stop being data.
+ */
+const STDERR_CONTEXT_REPORTER: ContextStopReporter = {
+  info: message => console.error(message),
+  warn: message => console.error(message),
+  success: message => console.error(message),
+};
+
+function applyContextStopAssignments(
+  assignments: readonly ContextStopAssignment[],
+  save: boolean,
+  report: ContextStopReporter,
+): number {
+  const registry = loadRegistry();
+  const modelsByProvider = new Map(
+    registry.providers.map(provider => [provider.id, projectProviderCachedModels(provider)]),
+  );
+
+  for (const assignment of assignments) {
+    const cached = modelsByProvider
+      .get(assignment.providerId)
+      ?.find(model => model.id === assignment.modelId);
+    if (!cached) {
+      p.log.error(
+        `${modelAliasTarget(assignment)} is not in the saved provider catalog. `
+        + 'Add the provider and refresh its models first.',
+      );
+      return 1;
+    }
+
+    const limits = contextLimitsFrom(cached, resolveContextWindow(assignment.modelId));
+    const resolved = resolveContextStop(limits, assignment.stop ?? 'standard');
+    const target = modelAliasTarget(assignment);
+    // An alias earns the parenthesised target; spelling the full id already showed it.
+    const label = assignment.label === target ? target : `${assignment.label} (${target})`;
+
+    const clamp = contextClampNotice(assignment.label, resolved);
+    if (clamp) report.warn(clamp);
+
+    const window = `${resolved.effective.toLocaleString('en-US')} tokens`;
+    const compaction = resolved.autoCompactWindow === undefined
+      ? ''
+      : `, auto-compact at ${resolved.autoCompactWindow.toLocaleString('en-US')}`;
+    report.info(
+      assignment.stop === null
+        ? `${label}: cleared, back to standard — ${window}${compaction}.`
+        : `${label}: ${assignment.stop} — ${window}${compaction}.`,
+    );
+
+    const warning = pricingBoundaryWarning(assignment.label, limits, resolved);
+    if (warning) report.warn(warning);
+  }
+
+  if (save) {
+    const prefs = loadPreferences();
+    savePreferences({
+      modelContextModes: savedStopsAfter(prefs.modelContextModes, assignments),
+    });
+    report.success(
+      assignments.length === 1
+        ? 'Saved the context stop.'
+        : `Saved ${assignments.length} context stops.`,
+    );
+  } else {
+    report.info('Applies to this run only. Add --save to make it the default.');
+  }
+  return 0;
+}
+
 interface FavoritesCommandOptions {
   list?: boolean;
   alias?: string;
   unalias?: string;
+  json?: boolean;
+  contextAssignments?: ContextStopAssignment[];
+  saveContext?: boolean;
 }
 
 export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Promise<number> {
@@ -678,6 +825,24 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
   if (changesAlias && (opts.list || (opts.alias !== undefined && opts.unalias !== undefined))) {
     p.log.error('--alias/--unalias apply one at a time to proxy-mode favorites.');
     return 1;
+  }
+  const assignments = opts.contextAssignments ?? [];
+  if (opts.saveContext && assignments.length === 0) {
+    p.log.error('--save applies to --context assignments; none were given.');
+    return 1;
+  }
+  if (assignments.length > 0) {
+    const applied = applyContextStopAssignments(
+      assignments,
+      Boolean(opts.saveContext),
+      opts.json ? STDERR_CONTEXT_REPORTER : CLACK_CONTEXT_REPORTER,
+    );
+    if (applied !== 0) return applied;
+    if (opts.saveContext && !opts.list && !opts.json) return 0;
+  }
+  if (opts.json) {
+    console.log(formatModelMetadata(buildModelMetadata()));
+    return 0;
   }
   if (opts.alias !== undefined) {
     const parsed = parseModelAliasAssignment(opts.alias);
@@ -1478,6 +1643,21 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
     return 1;
   }
 
+  // The registry layer does not read configuration, so saved stops are handed to it
+  // once here. Session overrides from --context are applied on top and never saved.
+  const preferences = loadPreferences();
+  primeSavedContextStops(preferences.modelContextModes);
+  let contextAssignments: ContextStopAssignment[] = [];
+  if (parsed.contextStops?.length) {
+    const resolved = parseContextStopAssignments(parsed.contextStops, preferences.modelAliases);
+    if ('error' in resolved) {
+      console.error(pc.red(`\nError: ${resolved.error}\n`));
+      return 1;
+    }
+    contextAssignments = resolved.assignments;
+    if (!parsed.contextSave) setSessionContextStops(sessionStopsFrom(contextAssignments));
+  }
+
   if (!parsed.showVersion) {
     refreshModelsDevCacheAsync();
   }
@@ -1530,6 +1710,9 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
       list: parsed.favoritesList,
       alias: parsed.favoritesAlias,
       unalias: parsed.favoritesUnalias,
+      json: parsed.favoritesJson,
+      contextAssignments,
+      saveContext: parsed.contextSave,
     });
   }
 

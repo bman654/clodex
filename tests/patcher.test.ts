@@ -575,8 +575,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 6,
-      digest: 'c2abf1d2b334562c3b3b3e2158d44c9986001c0401415912ef7dd450137eab3e',
+      version: 7,
+      digest: '3d2b4ed669d9c5de1c46f4e9ec72746baf8c39e5bf7681ec5c07dccfcda178c1',
     });
   });
 });
@@ -770,6 +770,7 @@ const CLAUDE_CORE_FIXTURE = [
   'function rz(x){switch(x){case"best":{return "opus"}default:return null}}',
   'function opts(e,t,r){let n=cur(),o=(n==="opus")?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}',
   'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
+  'function ACW(e,t,r=_C()){let n=jo(e),o=RS(e,r);if(process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW){let l=pv("CLAUDE_CODE_AUTO_COMPACT_WINDOW",process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW,N7,Oc);if(l.status!=="invalid"){let c=Math.max(N7,l.effective);return{window:Math.min(o,c),configured:c,source:"env"}}}if(t!==void 0)return{window:Math.min(o,t),configured:t,source:"settings"};return{window:o,configured:o,source:"auto"}}',
   'function cwdOf(){let p=process.env.PWD;return p}',
   'function childEnv(){let e=extra(),t=Object.keys(e).length>0,n=Object.keys(e).length>0,s=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};let o=[process.env.CLAUDE_CODE_OAUTH_TOKEN,process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE,process.env.CLAUDE_BG_PTY_AUTH,"OTEL_",process.env.CLAUDE_CODE_OTEL_DIAG_STDERR],u=["CLAUDE_CODE_OAUTH_TOKEN"];if(!t&&!n&&!o[0])return process.env;let v={...process.env,...e,...s};for(let k of u)delete v[k],delete v[`INPUT_${k}`];return v}function mcpAllow(){let e=process.env.CLAUDE_CODE_MCP_ALLOWLIST_ENV;return e}',
 ].join('\n');
@@ -1358,6 +1359,77 @@ describe('patch script identity naming', () => {
     expect(parsed['sol']).toBe(272_000);
     expect(parsed['clodex:openai-oauth:gpt-5.6-sol']).toBe(272_000);
     expect(parsed['clodex:openai:mystery']).toBe(128_000);
+  });
+
+  it('leaves the auto-compact resolver alone when no model sets one', () => {
+    expect(runPatchScript(config)).not.toContain('/*ccpatch:autocompact*/');
+  });
+
+  it('keys the auto-compact table by the alias and the canonical id', () => {
+    const out = runPatchScript({
+      ...config,
+      'clodex:openai-oauth:gpt-5.6-sol': {
+        ...config['clodex:openai-oauth:gpt-5.6-sol'],
+        context: 997_500,
+        autoCompact: 900_000,
+      },
+    });
+    const table = out.match(/\/\*ccpatch:autocompact\*\/var _cca=Object\.assign\(Object\.create\(null\),(\{[^}]*\})\)/)?.[1];
+    expect(table).toBeTruthy();
+    const parsed = JSON.parse(table!) as Record<string, number>;
+    expect(parsed['sol']).toBe(900_000);
+    expect(parsed['clodex:openai-oauth:gpt-5.6-sol']).toBe(900_000);
+    expect(parsed['clodex:openai:mystery']).toBeUndefined();
+  });
+
+  // The point of a per-model window is that it does not seize the control: an
+  // explicit /auto-compact and the process-wide variable both still win.
+  it('yields to an explicit setting and to the environment override', () => {
+    const out = runPatchScript({
+      ...config,
+      'clodex:openai-oauth:gpt-5.6-sol': {
+        ...config['clodex:openai-oauth:gpt-5.6-sol'],
+        context: 997_500,
+        autoCompact: 900_000,
+      },
+    });
+    const declaration = out.split('\n').find(line => line.startsWith('function ACW('));
+    expect(declaration).toBeDefined();
+    const stubs = 'const _C=()=>undefined,jo=x=>x,RS=()=>997500,'
+      + 'pv=()=>({status:"valid",effective:150000}),N7=100000,Oc=1000000;';
+    const resolve = new Function(`${stubs}${declaration}; return ACW;`)() as (
+      model: string,
+      configured?: number,
+    ) => { window: number; configured: number; source: string };
+
+    expect(resolve('sol')).toEqual({ window: 900_000, configured: 900_000, source: 'model-default' });
+    expect(resolve('sol', 400_000)).toEqual({ window: 400_000, configured: 400_000, source: 'settings' });
+    expect(resolve('claude-opus-5')).toEqual({ window: 997_500, configured: 997_500, source: 'auto' });
+
+    const previous = process.env['CLAUDE_CODE_AUTO_COMPACT_WINDOW'];
+    process.env['CLAUDE_CODE_AUTO_COMPACT_WINDOW'] = '150000';
+    try {
+      expect(resolve('sol').source).toBe('env');
+    } finally {
+      if (previous === undefined) delete process.env['CLAUDE_CODE_AUTO_COMPACT_WINDOW'];
+      else process.env['CLAUDE_CODE_AUTO_COMPACT_WINDOW'] = previous;
+    }
+  });
+
+  it.each([
+    ['not an integer', 900_000.5],
+    ['below the client minimum', 90_000],
+    ['above the client maximum', 1_100_000],
+    ['at or above its own context window', 997_500],
+  ])('refuses an auto-compact window that is %s', (_name, autoCompact) => {
+    expect(() => runPatchScript({
+      ...config,
+      'clodex:openai-oauth:gpt-5.6-sol': {
+        ...config['clodex:openai-oauth:gpt-5.6-sol'],
+        context: 997_500,
+        autoCompact,
+      },
+    })).toThrow(/autoCompact/);
   });
 
   it('enables GPT-5.6 effort, xhigh, max, and the native high default for its alias', () => {

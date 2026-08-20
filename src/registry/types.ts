@@ -68,6 +68,18 @@ export interface CachedModel {
   family?: string;
   brand?: string;
   contextWindow?: number;
+  /** Highest input window the model accepts, reachable via the `max` context stop. */
+  maxContextWindow?: number;
+  /** Share of the raw window a client fills; mirrors the Codex catalog field. */
+  effectiveContextPercent?: number;
+  /** Provider-chosen compaction target, when the catalog supplies one. */
+  autoCompactWindow?: number;
+  /** Input size above which the provider bills the whole request at a higher rate. */
+  pricingBoundary?: number;
+  /** How the provider prices above the boundary, for the user-facing warning. */
+  pricingBoundaryNote?: string;
+  /** Largest output the model accepts, independent of the input window. */
+  maxOutputTokens?: number;
   cost?: { input: number; output: number; cache_read?: number; cache_write?: number };
   isFree?: boolean;
   freeStatus?: FreeStatus;

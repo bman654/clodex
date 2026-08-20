@@ -41,6 +41,13 @@ import * as p from '@clack/prompts';
 import { getAppHome } from './paths.js';
 import { loadPreferences, savePreferences } from './config.js';
 import {
+  contextLimitsFrom,
+  resolveContextStop,
+  selectContextStop,
+  type ContextStop,
+} from './context-modes.js';
+import { resolveContextWindow } from './context-window.js';
+import {
   applyLocalPatches,
   inspectLocalPatchSource,
   type LocalPatchSource,
@@ -144,6 +151,8 @@ function writePatchManifest(manifest: PatchManifest, path = getPatchManifestPath
 
 export interface DesiredPatchConfig {
   config: PatchScriptModelConfig;
+  /** Full metadata per patched id, for surfaces that need more than the patch bakes in. */
+  metaById: Record<string, PatchModelMeta>;
   /** Model ids whose context window is unknown (defaulting to Claude Code's 200k). */
   unknownWindows: string[];
   /** Saved aliases excluded from the patch while remaining in configuration. */
@@ -151,9 +160,28 @@ export interface DesiredPatchConfig {
   rejectedAliasRejections: ModelAliasRejection[];
 }
 
-/** Model metadata the patch bakes in, resolved from the registry models cache. */
+/**
+ * Resolved per-model metadata. The patch bakes in a subset; the rest describes how
+ * the window was arrived at, which `models --json` reports and diagnostics rely on.
+ */
 export interface PatchModelMeta {
+  providerId?: string;
+  modelId?: string;
+  /** Effective window, after the model's headroom percentage. */
   contextWindow?: number;
+  /** Window before headroom was applied. */
+  rawContextWindow?: number;
+  /** Highest raw window the model accepts. */
+  maxContextWindow?: number;
+  effectiveContextPercent?: number;
+  /** Which stop produced these numbers. */
+  contextStop?: ContextStop;
+  /** Auto-compact target, set only when it is below `contextWindow`. */
+  autoCompactWindow?: number;
+  /** Largest output the model accepts, independent of the input window. */
+  maxOutputTokens?: number;
+  /** Input size above which the provider bills the whole request at a higher rate. */
+  pricingBoundary?: number;
   /** Canonical label, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. */
   displayName?: string;
   effort?: {
@@ -174,6 +202,7 @@ export function buildPatchModelConfig(
   modelMetaFor: (providerId: string, modelId: string) => PatchModelMeta | undefined,
 ): DesiredPatchConfig {
   const config: PatchScriptModelConfig = {};
+  const metaById: Record<string, PatchModelMeta> = {};
   const unknownWindows: string[] = [];
   const normalizedAliases = normalizeModelAliases(aliases);
   const favoriteTargets = new Set(
@@ -206,14 +235,20 @@ export function buildPatchModelConfig(
     if (alias) entry.alias = alias;
     if (context === undefined || context <= 0) unknownWindows.push(id);
     else if (context !== 200_000) entry.context = context;
+    const autoCompact = meta?.autoCompactWindow;
+    if (autoCompact !== undefined && autoCompact > 0 && context !== undefined && autoCompact < context) {
+      entry.autoCompact = autoCompact;
+    }
     const display = meta?.displayName?.trim();
     if (display) entry.display = display;
     const effort = projectNativeEffort(meta?.effort);
     if (effort) entry.effort = effort;
     config[id] = entry;
+    if (meta) metaById[id] = meta;
   }
   return {
     config,
+    metaById,
     unknownWindows,
     rejectedAliases: [
       ...normalizedAliases.rejected,
@@ -249,6 +284,7 @@ export function computePatchConfigHash(
       key,
       entry.alias ?? null,
       entry.context ?? null,
+      entry.autoCompact ?? null,
       entry.display ?? null,
       entry.effort?.levels ?? null,
       entry.effort?.defaultLevel ?? null,
@@ -288,8 +324,24 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
         compatibility: model.compatibility,
         upstreamModelId,
       });
+      // Same context stop the runtime catalog applies, resolved here too because
+      // the patch config is built straight from the registry cache.
+      const limits = contextLimitsFrom(model, resolveContextWindow(model.id));
+      const stop = resolveContextStop(
+        limits,
+        selectContextStop(provider.id, model.id, prefs.modelContextModes),
+      );
       meta.set(`${provider.id}:${model.id}`, {
-        contextWindow: model.contextWindow && model.contextWindow > 0 ? model.contextWindow : undefined,
+        providerId: provider.id,
+        modelId: model.id,
+        contextWindow: stop.effective > 0 ? stop.effective : undefined,
+        rawContextWindow: stop.raw > 0 ? stop.raw : undefined,
+        maxContextWindow: limits.maxContextWindow,
+        effectiveContextPercent: limits.effectiveContextPercent,
+        contextStop: stop.stop,
+        autoCompactWindow: stop.autoCompactWindow,
+        maxOutputTokens: model.maxOutputTokens,
+        pricingBoundary: limits.pricingBoundary,
         // Same label `clodex server` prints at startup and `models --list` shows.
         displayName: httpProxyDisplayName(model, provider.name),
         effort: effort.mode === 'controllable'

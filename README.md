@@ -122,6 +122,7 @@ Launch Claude Code bridged to configured model providers. Unrecognized flags (an
 | `--fast` | Request Codex fast mode (`service_tier=priority`) for ChatGPT/Codex OAuth routes; equivalent to `CLODEX_SERVICE_TIER=fast` |
 | `--provider <id>` | Boot provider id (`openai`, `openai-oauth`, or `opencode-go`); with `--model`, skips the wizard |
 | `--model <id>` | Boot model id; with `--provider`, skips the wizard |
+| `--context <model=stop>` | Use a different share of a model's context window for this launch only; never saved |
 | `--help`, `--version` | Help / version |
 
 Notes:
@@ -229,7 +230,31 @@ Manage favorite models (max 20) and short aliases. Favorites feed the endpoint-m
 | `--list` | Print the exact `clodex:<provider-id>:<model-id>` names (and aliases) without opening the manager |
 | `--alias <name=target>` | Save a short name for a favorite, e.g. `--alias sol=clodex:openai-oauth:gpt-5.6-sol` (the `clodex:` prefix is optional in the target) |
 | `--unalias <name>` | Remove a saved short name |
+| `--context <model=stop>` | Choose how much of a model's context window to use: `standard`, `max`, `default` to clear, or a token count such as `500k`. Applies to this run unless `--save` is given |
+| `--save` | With `--context`: store the stop as that model's default |
+| `--json` | Print resolved metadata for saved favorites as JSON (ids, aliases, context stop and windows, compaction target, output limit, pricing boundary, effort levels). Diagnostics go to stderr so stdout stays parseable |
 | `--help`, `--version` | Help / version |
+
+#### Context stops and the pricing boundary
+
+A context window is a cost dial as much as a capacity number. OpenAI prices GPT-5.6
+prompts above **272,000 input tokens at 2x input and 1.5x output for the full
+request**, which is why the Codex catalog reports a 272,000 window rather than the
+model's ceiling. Clodex follows that: the default `standard` stop stays under the
+line, and a larger window is something you ask for.
+
+```sh
+clodex models --context sol=max --save     # this model's default, with a cost warning
+clodex claude --context sol=max            # this launch only, nothing saved
+clodex models --context sol=default --save # back to the provider's tuned window
+```
+
+Each stop is reported with the numbers behind it: the raw window, the headroom
+percentage the Codex catalog uses, the effective window a client should fill, and the
+account ceiling a larger stop can reach. A stop above the ceiling is clamped and says
+so. When a request's own reported token count crosses the boundary, clodex warns once
+per model per session, because the client's token count and the provider's differ
+after translation and only the provider's settles it.
 
 ### `clodex providers [subcommand]`
 

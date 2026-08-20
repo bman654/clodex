@@ -2,6 +2,13 @@
 
 import { shouldHideModel, type CompatibilityAgent } from '../model-compatibility.js';
 import { deriveBrand } from '../models.js';
+import {
+  contextLimitsFrom,
+  resolveContextStop,
+  selectContextStop,
+} from '../context-modes.js';
+import { applyOAuthSeedContextMetadata } from '../data/openai-oauth-models.js';
+import { isChatGptOAuthProvider } from './provider-kind.js';
 import { resolveContextWindow } from '../context-window.js';
 import type { LocalProvider, LocalProviderModel } from '../types.js';
 import { normalizeGoogleDisplayName, normalizeGoogleModelId } from './google-model-id.js';
@@ -57,6 +64,7 @@ export { openCodeGoPinnedApiUrl } from './resolve-template.js';
  */
 export function projectProviderCachedModels(provider: RegistryProvider): CachedModel[] {
   const cached = provider.modelsCache?.models ?? [];
+  if (isChatGptOAuthProvider(provider)) return applyOAuthSeedContextMetadata(cached);
   if (!isRetainedOpenCodeGoProvider(provider)) return cached;
   const template = retainedOpenCodeGoTemplate();
   return template ? applyTemplateModelMetadata(template, cached) : [];
@@ -71,6 +79,33 @@ function resolveMaterializedApiUrl(
     return cached.apiUrl ?? provider.api.url ?? '';
   }
   return openCodeGoPinnedApiUrl(npm);
+}
+
+/**
+ * Apply the selected context stop. `contextWindow` stays the number every consumer
+ * already reads, so it carries the effective window rather than the raw one; the raw
+ * value is kept alongside for surfaces that explain the choice.
+ */
+function projectContextStop(
+  cached: CachedModel,
+  providerId: string,
+  modelId: string,
+): Pick<
+  LocalProviderModel,
+  'contextWindow' | 'rawContextWindow' | 'autoCompactWindow' | 'contextStop' | 'pricingBoundary'
+> {
+  const limits = contextLimitsFrom(cached, resolveContextWindow(modelId));
+  const stop = selectContextStop(providerId, modelId);
+  const resolved = resolveContextStop(limits, stop);
+  return {
+    contextWindow: resolved.effective,
+    ...(resolved.raw === resolved.effective ? {} : { rawContextWindow: resolved.raw }),
+    ...(resolved.autoCompactWindow === undefined
+      ? {}
+      : { autoCompactWindow: resolved.autoCompactWindow }),
+    ...(stop === 'standard' ? {} : { contextStop: stop }),
+    ...(limits.pricingBoundary === undefined ? {} : { pricingBoundary: limits.pricingBoundary }),
+  };
 }
 
 export function cachedModelToLocal(
@@ -108,7 +143,8 @@ export function cachedModelToLocal(
     cost: cached.cost,
     isFree: isFreeStatus(freeStatus),
     freeStatus,
-    contextWindow: cached.contextWindow ?? resolveContextWindow(id),
+    ...projectContextStop(cached, provider.id, id),
+    maxOutputTokens: cached.maxOutputTokens,
     supportedParameters: cached.supportedParameters,
     reasoning: cached.reasoning ?? modelsDev?.reasoning,
     interleavedReasoningField: cached.interleavedReasoningField ?? modelsDev?.interleaved?.field,

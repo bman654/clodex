@@ -688,6 +688,107 @@ describe('generateAnthropicResponse', () => {
     }
   });
 
+  // The pricing-boundary guard compares against the provider's own prompt total,
+  // before the Anthropic split, because the band applies to the whole input rather
+  // than the uncached remainder.
+  it('reports the provider prompt total, not the uncached remainder', async () => {
+    vi.resetModules();
+    const generateText = vi.fn(async () => ({
+      text: 'done',
+      toolCalls: [],
+      finishReason: 'stop',
+      usage: {
+        inputTokens: 284_102,
+        outputTokens: 12,
+        inputTokenDetails: { cacheReadTokens: 280_000, cacheWriteTokens: 1_000 },
+      },
+    }));
+    vi.doMock('ai', () => ({
+      generateText,
+      streamText: vi.fn(),
+      tool: vi.fn((spec: unknown) => spec),
+      jsonSchema: vi.fn((schema: unknown) => schema),
+    }));
+
+    try {
+      const { generateAnthropicResponse } = await import('../src/sdk-adapter.js');
+      const seen: number[] = [];
+      const response = await generateAnthropicResponse(
+        {} as never,
+        { messages: [] },
+        'test-model',
+        { onPromptTokens: total => seen.push(total) },
+      );
+
+      expect(seen).toEqual([284_102]);
+      // The Anthropic-shaped usage still splits the cached portion out, so reading
+      // input_tokens instead would have under-reported by the cache hit.
+      expect(response['usage']).toMatchObject({ input_tokens: 3_102 });
+    } finally {
+      vi.doUnmock('ai');
+      vi.resetModules();
+    }
+  });
+
+  it('reports nothing when the provider omits usage', async () => {
+    vi.resetModules();
+    const generateText = vi.fn(async () => ({
+      text: 'done',
+      toolCalls: [],
+      finishReason: 'stop',
+      usage: undefined,
+    }));
+    vi.doMock('ai', () => ({
+      generateText,
+      streamText: vi.fn(),
+      tool: vi.fn((spec: unknown) => spec),
+      jsonSchema: vi.fn((schema: unknown) => schema),
+    }));
+
+    try {
+      const { generateAnthropicResponse } = await import('../src/sdk-adapter.js');
+      const seen: number[] = [];
+      await generateAnthropicResponse({} as never, { messages: [] }, 'test-model', {
+        onPromptTokens: total => seen.push(total),
+      });
+      expect(seen).toEqual([]);
+    } finally {
+      vi.doUnmock('ai');
+      vi.resetModules();
+    }
+  });
+
+  it('reports the prompt total from a collected stream too', async () => {
+    vi.resetModules();
+    async function* stream() {
+      yield { type: 'start' };
+      yield {
+        type: 'finish',
+        finishReason: 'stop',
+        totalUsage: { inputTokens: 300_000, outputTokens: 5 },
+      };
+    }
+    vi.doMock('ai', () => ({
+      generateText: vi.fn(),
+      streamText: vi.fn(() => ({ stream: stream() })),
+      tool: vi.fn((spec: unknown) => spec),
+      jsonSchema: vi.fn((schema: unknown) => schema),
+    }));
+
+    try {
+      const { generateAnthropicResponse } = await import('../src/sdk-adapter.js');
+      const seen: number[] = [];
+      await generateAnthropicResponse({} as never, { messages: [] }, 'test-model', {
+        forceStream: true,
+        onPromptTokens: total => seen.push(total),
+      });
+      expect(seen).toEqual([300_000]);
+    } finally {
+      vi.doUnmock('ai');
+      vi.resetModules();
+    }
+  });
+
   it('encodes non-streaming tool-call provider signatures for Gemini round-trip', async () => {
     vi.resetModules();
     const generateText = vi.fn(async () => ({

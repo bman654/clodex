@@ -277,6 +277,89 @@ describe('registry/refresh-models', () => {
       expect(sol?.preferWebSockets).toBeUndefined();
     });
 
+    // A catalog that omits the ceiling is not one reporting there is none. Treating
+    // the two the same is what collapses the `max` stop back onto the standard one,
+    // silently, on exactly the accounts where discovery is thinnest.
+    it('keeps the seed ceiling when the live catalog reports a window but no ceiling', async () => {
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI (ChatGPT)',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          models: [
+            { slug: 'gpt-5.6-sol', title: 'GPT-5.6 Sol', context_window: 272_000 },
+            { slug: 'codex-auto-review', title: 'Auto Review', context_window: 272_000 },
+          ],
+        }),
+      } as Response);
+
+      await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
+
+      const saved = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+      const models = saved.providers[0]?.modelsCache?.models ?? [];
+      const sol = models.find(m => m.id === 'gpt-5.6-sol');
+      expect(sol?.contextWindow).toBe(272_000);
+      expect(sol?.maxContextWindow).toBe(872_000);
+      expect(sol?.effectiveContextPercent).toBe(95);
+      expect(sol?.pricingBoundary).toBe(272_000);
+
+      // A discovered model outside the seed still gets no invented ceiling.
+      const review = models.find(m => m.id === 'codex-auto-review');
+      expect(review?.contextWindow).toBe(272_000);
+      expect(review?.maxContextWindow).toBeUndefined();
+    });
+
+    it('takes the live ceiling and headroom over the seed when the catalog reports them', async () => {
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI (ChatGPT)',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          models: [{
+            slug: 'gpt-5.6-sol',
+            title: 'GPT-5.6 Sol',
+            context_window: 372_000,
+            max_context_window: 2_000_000,
+            effective_context_window_percent: 90,
+            max_output_tokens: 64_000,
+          }],
+        }),
+      } as Response);
+
+      await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
+
+      const saved = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+      const sol = (saved.providers[0]?.modelsCache?.models ?? []).find(m => m.id === 'gpt-5.6-sol');
+      expect(sol?.contextWindow).toBe(372_000);
+      expect(sol?.maxContextWindow).toBe(2_000_000);
+      expect(sol?.effectiveContextPercent).toBe(90);
+      expect(sol?.maxOutputTokens).toBe(64_000);
+    });
+
     it('Tier 3: static seed carries Luna capability flags so a discovery outage does not regress it', async () => {
       const mockRegistry: ProviderRegistry = {
         version: 1,
