@@ -296,6 +296,10 @@ describe('help text', () => {
     expect(claudeHelpText()).toContain('warns if the SDK omits it');
     expect(serverHelpText()).toContain('--save-mode');
     expect(claudeHelpText()).toContain('clodex:<provider-id>:<model-id>');
+    expect(claudeHelpText()).toContain('--context');
+    expect(modelsHelpText()).toContain('--context');
+    expect(modelsHelpText()).toContain('--save');
+    expect(modelsHelpText()).toContain('--json');
     expect(serverHelpText()).toContain('--no-discovery');
     expect(patchHelpText()).toContain('--restore');
     expect(patchHelpText()).toContain('--enable-local-patches');

@@ -52,6 +52,8 @@ export interface ServerModelInfo {
   /** Fallback reasoning effort when the client omits output_config.effort. */
   defaultEffort?: string;
   contextWindow?: number;
+  /** Input size above which the provider bills the whole request at a higher rate. */
+  pricingBoundary?: number;
   /** Picker label for gateway aliases, e.g. "OpenCode Go" or local provider name. */
   providerLabel?: string;
   /** Provider id for filtering. */

@@ -35,8 +35,6 @@ export interface ModelMetadata {
   alias?: string;
   displayName?: string;
   context: ModelContextMetadata;
-  /** Compaction target, present only when it is below the effective window. */
-  autoCompactWindow?: number;
   maxOutputTokens?: number;
   /** Input size above which the provider bills the whole request at a higher rate. */
   pricingBoundary?: number;
@@ -62,7 +60,6 @@ function effortFor(meta: PatchModelMeta): ModelEffortMetadata | undefined {
 
 function metadataFor(id: string, meta: PatchModelMeta, alias?: string): ModelMetadata {
   const effective = positive(meta.contextWindow);
-  const autoCompactWindow = positive(meta.autoCompactWindow);
   const effort = effortFor(meta);
   return {
     id,
@@ -81,11 +78,6 @@ function metadataFor(id: string, meta: PatchModelMeta, alias?: string): ModelMet
         : { effectivePercent: meta.effectiveContextPercent }),
       ...(positive(meta.maxContextWindow) === undefined ? {} : { max: meta.maxContextWindow }),
     },
-    // Only when it genuinely bites: equal to or above the window, it never fires.
-    ...(autoCompactWindow !== undefined
-      && (effective === undefined || autoCompactWindow < effective)
-      ? { autoCompactWindow }
-      : {}),
     ...(positive(meta.maxOutputTokens) === undefined
       ? {}
       : { maxOutputTokens: meta.maxOutputTokens }),

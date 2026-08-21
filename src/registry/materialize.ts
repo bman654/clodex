@@ -92,7 +92,7 @@ function projectContextStop(
   modelId: string,
 ): Pick<
   LocalProviderModel,
-  'contextWindow' | 'rawContextWindow' | 'autoCompactWindow' | 'contextStop' | 'pricingBoundary'
+  'contextWindow' | 'rawContextWindow' | 'contextStop' | 'pricingBoundary'
 > {
   const limits = contextLimitsFrom(cached, resolveContextWindow(modelId));
   const stop = selectContextStop(providerId, modelId);
@@ -100,9 +100,6 @@ function projectContextStop(
   return {
     contextWindow: resolved.effective,
     ...(resolved.raw === resolved.effective ? {} : { rawContextWindow: resolved.raw }),
-    ...(resolved.autoCompactWindow === undefined
-      ? {}
-      : { autoCompactWindow: resolved.autoCompactWindow }),
     ...(stop === 'standard' ? {} : { contextStop: stop }),
     ...(limits.pricingBoundary === undefined ? {} : { pricingBoundary: limits.pricingBoundary }),
   };

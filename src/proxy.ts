@@ -237,8 +237,6 @@ export interface ProxyRoute {
   apiKey: string;
   modelFormat: 'anthropic' | 'openai';
   contextWindow?: number;
-  /** Per-model auto-compact target, set only when it is below `contextWindow`. */
-  autoCompactWindow?: number;
   /** Input size above which the provider bills the whole request at a higher rate. */
   pricingBoundary?: number;
   /** Largest output the model accepts, independent of the input window. */
@@ -707,6 +705,7 @@ export async function startProxyCatalog(
                       translationLifecycle?.onPart(partType);
                     },
                     onPromptTokens: total => reportPricingBoundaryCrossing({
+                      modelKey: route.aliasId,
                       modelLabel: route.displayName || route.aliasId,
                       pricingBoundary: route.pricingBoundary,
                       inputTokens: total,
@@ -737,6 +736,7 @@ export async function startProxyCatalog(
                   abortSignal: clientAbort.signal,
                   onPart: partType => translationLifecycle?.onPart(partType),
                   onPromptTokens: total => reportPricingBoundaryCrossing({
+                    modelKey: route.aliasId,
                     modelLabel: route.displayName || route.aliasId,
                     pricingBoundary: route.pricingBoundary,
                     inputTokens: total,

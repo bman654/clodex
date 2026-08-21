@@ -32,7 +32,6 @@ export function localModelToRoute(lp: LocalProvider, model: LocalProviderModel):
     apiKey: lp.apiKey,
     modelFormat: model.modelFormat,
     contextWindow: model.contextWindow,
-    autoCompactWindow: model.autoCompactWindow,
     pricingBoundary: model.pricingBoundary,
     maxOutputTokens: model.maxOutputTokens,
     npm: model.npm,

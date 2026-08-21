@@ -24,6 +24,7 @@ import {
   estimateAnthropicInputTokens,
 } from '../anthropic-endpoints.js';
 import { resolveProviderCredential } from '../env.js';
+import { reportPricingBoundaryCrossing } from '../pricing-boundary.js';
 import {
   injectClaudeCodeBillingSystemLine,
   injectClaudeIdentity,
@@ -461,6 +462,12 @@ async function handleAnthropicMessages(
             { requestId, claudeSessionId },
             () => streamAnthropicResponse(languageModel, params, responseModelId, writeStreamChunk, undefined, {
               initialInputTokens: estimateAnthropicInputTokens(body),
+              onPromptTokens: total => reportPricingBoundaryCrossing({
+                modelKey: model.id,
+                modelLabel: model.name || model.id,
+                pricingBoundary: model.pricingBoundary,
+                inputTokens: total,
+              }),
             }),
           );
           if (!res.headersSent) writeStreamChunk('');
@@ -471,7 +478,15 @@ async function handleAnthropicMessages(
           // collect the result instead of issuing a non-streaming SDK request.
           const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
             { requestId, claudeSessionId },
-            () => generateAnthropicResponse(languageModel, params, responseModelId, { forceStream: openAiOAuth }),
+            () => generateAnthropicResponse(languageModel, params, responseModelId, {
+              forceStream: openAiOAuth,
+              onPromptTokens: total => reportPricingBoundaryCrossing({
+                modelKey: model.id,
+                modelLabel: model.name || model.id,
+                pricingBoundary: model.pricingBoundary,
+                inputTokens: total,
+              }),
+            }),
           );
           sendJson(res, 200, anthropicResponse);
         }

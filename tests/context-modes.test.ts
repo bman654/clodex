@@ -49,14 +49,12 @@ describe('resolveContextStop', () => {
     const resolved = resolveContextStop(SOL, 'standard');
     expect(resolved.effective).toBe(258_400);
     expect(resolved.crossesPricingBoundary).toBe(false);
-    expect(resolved.autoCompactWindow).toBeUndefined();
   });
 
-  it('uses the full ceiling for the max stop and compacts below it', () => {
+  it('uses the full ceiling for the max stop', () => {
     const resolved = resolveContextStop(SOL, 'max');
     expect(resolved.raw).toBe(872_000);
     expect(resolved.effective).toBe(828_400);
-    expect(resolved.autoCompactWindow).toBe(745_560);
     expect(resolved.crossesPricingBoundary).toBe(true);
   });
 
@@ -64,15 +62,6 @@ describe('resolveContextStop', () => {
   // hard-codes a different window upstream at exactly that number.
   it('keeps the max stop under one million', () => {
     expect(resolveContextStop(SOL, 'max').effective).toBeLessThan(1_000_000);
-    const generous = { ...SOL, maxContextWindow: 4_000_000 };
-    expect(resolveContextStop(generous, 'max').autoCompactWindow)
-      .toBeLessThanOrEqual(1_000_000);
-  });
-
-  it('honours a provider-supplied compaction target at any stop', () => {
-    const withLimit = { ...SOL, autoCompactWindow: 200_000 };
-    expect(resolveContextStop(withLimit, 'standard').autoCompactWindow).toBe(200_000);
-    expect(resolveContextStop(withLimit, 'max').autoCompactWindow).toBe(200_000);
   });
 
   it('clamps a custom stop to the ceiling and reports it', () => {
@@ -82,27 +71,14 @@ describe('resolveContextStop', () => {
     expect(contextClampNotice('sol', resolved)).toContain('above the model ceiling');
   });
 
-  // A max stop that cannot raise the window has changed nothing, so it must not
-  // start compacting earlier than the standard stop would have.
+  // A max stop that cannot raise the window has changed nothing.
   it('does not invent a larger window when no ceiling is known', () => {
     const terra = { ...SOL, maxContextWindow: undefined };
     expect(resolveContextStop(terra, 'max').effective).toBe(258_400);
-    expect(resolveContextStop(terra, 'max').autoCompactWindow).toBeUndefined();
   });
 
-  it('leaves the auto-compact window unset when the ceiling equals the default', () => {
-    const small = { contextWindow: 400_000, maxContextWindow: 400_000 };
-    expect(resolveContextStop(small, 'max').autoCompactWindow).toBeUndefined();
-  });
-
-  it('derives a compaction target for a custom stop that raises the window', () => {
-    const resolved = resolveContextStop(SOL, 600_000);
-    expect(resolved.effective).toBe(570_000);
-    expect(resolved.autoCompactWindow).toBe(513_000);
-  });
-
-  it('leaves a custom stop below the default without one', () => {
-    expect(resolveContextStop(SOL, 200_000).autoCompactWindow).toBeUndefined();
+  it('applies the declared headroom to a custom stop', () => {
+    expect(resolveContextStop(SOL, 600_000).effective).toBe(570_000);
   });
 });
 

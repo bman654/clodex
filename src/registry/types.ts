@@ -72,8 +72,6 @@ export interface CachedModel {
   maxContextWindow?: number;
   /** Share of the raw window a client fills; mirrors the Codex catalog field. */
   effectiveContextPercent?: number;
-  /** Provider-chosen compaction target, when the catalog supplies one. */
-  autoCompactWindow?: number;
   /** Input size above which the provider bills the whole request at a higher rate. */
   pricingBoundary?: number;
   /** How the provider prices above the boundary, for the user-facing warning. */

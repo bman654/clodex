@@ -448,7 +448,10 @@ ${pc.bold('Options:')}
   --model      Boot model id (skip wizard when paired with --provider or in print mode)
   --context    <model=stop> use a different share of a model's window for this
                launch only (standard, max, default, or a token count). Nothing is
-               saved; set a default with clodex models --context <model=stop> --save
+               saved. It reaches Claude Code through the exported catalog, so a
+               binary patched by clodex patch keeps its baked window until you
+               save the stop with clodex models --context <model=stop> --save
+               and re-run clodex patch
   --help       Show this command help
   --version    Show version
 
@@ -594,8 +597,8 @@ ${pc.bold('Behavior:')}
   saved choice), or a token count such as 500k. Applies to this run only unless
   --save is given. The model is a saved alias or clodex:<provider-id>:<model-id>.
   --json prints the resolved metadata for saved favorites as JSON: ids,
-  aliases, context stop and windows, compaction target, output limit, pricing
-  boundary, and effort levels. Diagnostics go to stderr so stdout stays parseable.
+  aliases, context stop and windows, output limit, pricing boundary, and effort
+  levels. Diagnostics go to stderr so stdout stays parseable.
 
 ${pc.bold('How it works:')}
   claude and server use the global favorites list.
@@ -782,13 +785,10 @@ function applyContextStopAssignments(
     if (clamp) report.warn(clamp);
 
     const window = `${resolved.effective.toLocaleString('en-US')} tokens`;
-    const compaction = resolved.autoCompactWindow === undefined
-      ? ''
-      : `, auto-compact at ${resolved.autoCompactWindow.toLocaleString('en-US')}`;
     report.info(
       assignment.stop === null
-        ? `${label}: cleared, back to standard — ${window}${compaction}.`
-        : `${label}: ${assignment.stop} — ${window}${compaction}.`,
+        ? `${label}: cleared, back to standard: ${window}.`
+        : `${label}: ${assignment.stop}: ${window}.`,
     );
 
     const warning = pricingBoundaryWarning(assignment.label, limits, resolved);
@@ -1656,6 +1656,12 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
     }
     contextAssignments = resolved.assignments;
     if (!parsed.contextSave) setSessionContextStops(sessionStopsFrom(contextAssignments));
+    // A launch-scoped stop gets the same cost accounting the `models` form gives,
+    // so opting into a larger window never happens without the warning attached.
+    if (parsed.command === 'claude') {
+      const code = applyContextStopAssignments(contextAssignments, false, STDERR_CONTEXT_REPORTER);
+      if (code !== 0) return code;
+    }
   }
 
   if (!parsed.showVersion) {

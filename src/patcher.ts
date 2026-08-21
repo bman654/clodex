@@ -42,8 +42,8 @@ import { getAppHome } from './paths.js';
 import { loadPreferences, savePreferences } from './config.js';
 import {
   contextLimitsFrom,
+  readContextStop,
   resolveContextStop,
-  selectContextStop,
   type ContextStop,
 } from './context-modes.js';
 import { resolveContextWindow } from './context-window.js';
@@ -176,8 +176,6 @@ export interface PatchModelMeta {
   effectiveContextPercent?: number;
   /** Which stop produced these numbers. */
   contextStop?: ContextStop;
-  /** Auto-compact target, set only when it is below `contextWindow`. */
-  autoCompactWindow?: number;
   /** Largest output the model accepts, independent of the input window. */
   maxOutputTokens?: number;
   /** Input size above which the provider bills the whole request at a higher rate. */
@@ -235,10 +233,6 @@ export function buildPatchModelConfig(
     if (alias) entry.alias = alias;
     if (context === undefined || context <= 0) unknownWindows.push(id);
     else if (context !== 200_000) entry.context = context;
-    const autoCompact = meta?.autoCompactWindow;
-    if (autoCompact !== undefined && autoCompact > 0 && context !== undefined && autoCompact < context) {
-      entry.autoCompact = autoCompact;
-    }
     const display = meta?.displayName?.trim();
     if (display) entry.display = display;
     const effort = projectNativeEffort(meta?.effort);
@@ -284,7 +278,6 @@ export function computePatchConfigHash(
       key,
       entry.alias ?? null,
       entry.context ?? null,
-      entry.autoCompact ?? null,
       entry.display ?? null,
       entry.effort?.levels ?? null,
       entry.effort?.defaultLevel ?? null,
@@ -324,12 +317,13 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
         compatibility: model.compatibility,
         upstreamModelId,
       });
-      // Same context stop the runtime catalog applies, resolved here too because
-      // the patch config is built straight from the registry cache.
+      // Saved stops only. A patched binary outlives the process that wrote it, so
+      // folding a launch-scoped `--context` in here would bake a one-off choice and
+      // report every unpatched-config launch as stale.
       const limits = contextLimitsFrom(model, resolveContextWindow(model.id));
       const stop = resolveContextStop(
         limits,
-        selectContextStop(provider.id, model.id, prefs.modelContextModes),
+        readContextStop(prefs.modelContextModes, provider.id, model.id) ?? 'standard',
       );
       meta.set(`${provider.id}:${model.id}`, {
         providerId: provider.id,
@@ -339,7 +333,6 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
         maxContextWindow: limits.maxContextWindow,
         effectiveContextPercent: limits.effectiveContextPercent,
         contextStop: stop.stop,
-        autoCompactWindow: stop.autoCompactWindow,
         maxOutputTokens: model.maxOutputTokens,
         pricingBoundary: limits.pricingBoundary,
         // Same label `clodex server` prints at startup and `models --list` shows.

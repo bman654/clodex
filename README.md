@@ -122,7 +122,7 @@ Launch Claude Code bridged to configured model providers. Unrecognized flags (an
 | `--fast` | Request Codex fast mode (`service_tier=priority`) for ChatGPT/Codex OAuth routes; equivalent to `CLODEX_SERVICE_TIER=fast` |
 | `--provider <id>` | Boot provider id (`openai`, `openai-oauth`, or `opencode-go`); with `--model`, skips the wizard |
 | `--model <id>` | Boot model id; with `--provider`, skips the wizard |
-| `--context <model=stop>` | Use a different share of a model's context window for this launch only; never saved |
+| `--context <model=stop>` | Use a different share of a model's context window for this launch only; never saved. Reaches Claude Code through the exported catalog, so a binary patched by `clodex patch` keeps its baked window until the stop is saved and the patch re-run |
 | `--help`, `--version` | Help / version |
 
 Notes:
@@ -232,7 +232,7 @@ Manage favorite models (max 20) and short aliases. Favorites feed the endpoint-m
 | `--unalias <name>` | Remove a saved short name |
 | `--context <model=stop>` | Choose how much of a model's context window to use: `standard`, `max`, `default` to clear, or a token count such as `500k`. Applies to this run unless `--save` is given |
 | `--save` | With `--context`: store the stop as that model's default |
-| `--json` | Print resolved metadata for saved favorites as JSON (ids, aliases, context stop and windows, compaction target, output limit, pricing boundary, effort levels). Diagnostics go to stderr so stdout stays parseable |
+| `--json` | Print resolved metadata for saved favorites as JSON (ids, aliases, context stop and windows, output limit, pricing boundary, effort levels). Diagnostics go to stderr so stdout stays parseable |
 | `--help`, `--version` | Help / version |
 
 #### Context stops and the pricing boundary
@@ -253,8 +253,19 @@ Each stop is reported with the numbers behind it: the raw window, the headroom
 percentage the Codex catalog uses, the effective window a client should fill, and the
 account ceiling a larger stop can reach. A stop above the ceiling is clamped and says
 so. When a request's own reported token count crosses the boundary, clodex warns once
-per model per session, because the client's token count and the provider's differ
-after translation and only the provider's settles it.
+per model for the life of the process, because the client's token count and the
+provider's differ after translation and only the provider's settles it.
+
+Two things worth knowing about the numbers:
+
+- **ChatGPT/Codex OAuth models carry a 95% headroom convention**, matching the Codex
+  client. Their reported window is 5% below the raw catalog value: `gpt-5.6-sol`
+  reports 258,400 rather than 272,000. This applies to that provider only; API-key
+  and OpenCode Go models keep their full window.
+- **The account ceiling moves.** It is server-side and per-account, and it has
+  changed by more than 2x within a single day in the past. `max` reads whatever the
+  catalog reports now and clamps to it, so a stale ceiling shrinks the stop rather
+  than overshooting it.
 
 ### `clodex providers [subcommand]`
 

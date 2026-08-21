@@ -628,13 +628,6 @@ interface AnthropicUsage {
   cache_read_input_tokens: number;
 }
 
-/**
- * Map SDK usage → Anthropic usage. SDK providers report the cache-hit subset in
- * `inputTokenDetails`, counted WITHIN the prompt total. The Anthropic schema
- * expects cache reads and writes in separate fields, so subtract both subsets
- * from input_tokens to avoid double-counting. GPT-5.6+ reports cache writes;
- * older models generally report reads only.
- */
 /** Hand the provider's own prompt total to the observer, when it reported one. */
 function reportPromptTokens(
   observer: AnthropicStreamObserver | undefined,
@@ -646,6 +639,13 @@ function reportPromptTokens(
   }
 }
 
+/**
+ * Map SDK usage → Anthropic usage. SDK providers report the cache-hit subset in
+ * `inputTokenDetails`, counted WITHIN the prompt total. The Anthropic schema
+ * expects cache reads and writes in separate fields, so subtract both subsets
+ * from input_tokens to avoid double-counting. GPT-5.6+ reports cache writes;
+ * older models generally report reads only.
+ */
 function toAnthropicUsage(u?: SdkUsage): AnthropicUsage {
   const total = u?.inputTokens ?? 0;
   const cacheRead = u?.inputTokenDetails?.cacheReadTokens ?? u?.cachedInputTokens ?? 0;

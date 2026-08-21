@@ -38,13 +38,11 @@ import {
  * hash of the transform inputs to force that decision to be made rather than
  * forgotten.
  */
-export const PATCH_TRANSFORMS_VERSION = 7;
+export const PATCH_TRANSFORMS_VERSION = 6;
 
 export interface PatchScriptModelEntry {
   alias?: string;
   context?: number;
-  /** Auto-compact target, set only when it is below the model's context window. */
-  autoCompact?: number;
   /** Human label for the /model picker, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. */
   display?: string;
   /** Provider reasoning levels projected onto Claude Code's native effort ladder. */
@@ -131,8 +129,6 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   const DISPLAY_BY_IDENTITY: Record<string, string> = Object.create(null);
   // lowercased alias AND id -> context-window tokens (only for models that set it)
   const CONTEXT_BY_KEY: Record<string, number> = Object.create(null);
-  // lowercased alias AND id -> auto-compact tokens (only for models that set it)
-  const AUTOCOMPACT_BY_KEY: Record<string, number> = Object.create(null);
   // lowercased alias AND id for every configured model. Capability verdicts
   // must distinguish configured-false from an unknown identity that may use
   // the native fallback.
@@ -196,25 +192,6 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       }
       if (spec.alias !== undefined) CONTEXT_BY_KEY[String(spec.alias).trim().toLowerCase()] = n;
       CONTEXT_BY_KEY[String(id).trim().toLowerCase()] = n;
-    }
-
-    if (spec.autoCompact !== undefined) {
-      const n = Number(spec.autoCompact);
-      if (!Number.isInteger(n) || n <= 0) {
-        fail('clodex patch: autoCompact for "' + id + '" must be a positive integer, got ' + spec.autoCompact);
-      }
-      // Claude Code clamps its own auto-compact setting to this range, so a value
-      // outside it would be silently reinterpreted rather than honoured.
-      if (n < 100_000 || n > 1_000_000) {
-        fail('clodex patch: autoCompact for "' + id + '" must be between 100000 and 1000000, got ' + n);
-      }
-      if (spec.context !== undefined && n >= Number(spec.context)) {
-        fail(
-          'clodex patch: autoCompact for "' + id + '" must be below its context window (' + spec.context + ')'
-        );
-      }
-      if (spec.alias !== undefined) AUTOCOMPACT_BY_KEY[String(spec.alias).trim().toLowerCase()] = n;
-      AUTOCOMPACT_BY_KEY[String(id).trim().toLowerCase()] = n;
     }
 
     if (spec.effort) {
@@ -564,47 +541,6 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         'PATCH 9: default effort',
         /(function [\w$]+\(([\w$]+)\)\{)(return [\w$]+\([\w$]+\(\2\)\)\?\.default_effort\?\?"high"\})/,
         (_m, head, arg, body) => head! + snippet(arg!) + body!,
-        { required: false },
-      );
-    }
-  }
-
-  // ---------------------------------------------------------------------------
-  // PATCH 11 — per-model auto-compact window.
-  //
-  // Claude Code resolves one auto-compact window per process, so a global override
-  // drags every model off its own tuned default. Bake a per-model table into that
-  // resolver, right after it computes the model's maximum window.
-  //
-  // Precedence comes from the guard, not the placement: the environment override
-  // and an explicit user setting are both checked first, so `/auto-compact` still
-  // wins over the baked value.
-  //
-  // Anchor: the resolver's own environment-variable read. Stable across builds,
-  // and inside a function body it appears only here.
-  // ---------------------------------------------------------------------------
-  const AUTOCOMPACT_MARKER = '/*ccpatch:autocompact*/';
-  if (Object.keys(AUTOCOMPACT_BY_KEY).length || js.includes(AUTOCOMPACT_MARKER)) {
-    const snippet = (model: string, configured: string, ceiling: string) =>
-      AUTOCOMPACT_MARKER
-      + 'var _cca=Object.assign(Object.create(null),' + JSON.stringify(AUTOCOMPACT_BY_KEY)
-      + ')[String(' + model + '||"").trim().toLowerCase()];'
-      + 'if(_cca!==void 0&&' + configured + '===void 0&&!process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW)'
-      + 'return{window:Math.min(' + ceiling + ',_cca),configured:_cca,source:"model-default"};';
-
-    if (js.includes(AUTOCOMPACT_MARKER)) {
-      applyOnce(
-        'PATCH 11: per-model auto-compact window (refresh)',
-        /\/\*ccpatch:autocompact\*\/var _cca=Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\(([\w$]+)\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_cca!==void 0&&([\w$]+)===void 0&&!process\.env\.CLAUDE_CODE_AUTO_COMPACT_WINDOW\)return\{window:Math\.min\(([\w$]+),_cca\),configured:_cca,source:"model-default"\};/,
-        (_m, model, configured, ceiling) => snippet(model!, configured!, ceiling!),
-        { required: false, noopIsSkip: true },
-      );
-    } else {
-      applyOnce(
-        'PATCH 11: per-model auto-compact window',
-        /(function [\w$]+\(([\w$]+),([\w$]+),[\w$]+=[\w$]+\(\)\)\{let [\w$]+=[\w$]+\(\2\),([\w$]+)=[\w$]+\(\2,[\w$]+\);)(if\(process\.env\.CLAUDE_CODE_AUTO_COMPACT_WINDOW\))/,
-        (_m, head, model, configured, ceiling, envCheck) =>
-          head! + snippet(model!, configured!, ceiling!) + envCheck!,
         { required: false },
       );
     }

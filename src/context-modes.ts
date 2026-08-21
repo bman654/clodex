@@ -4,22 +4,11 @@
 // The field shape mirrors the Codex model catalog.
 
 /**
- * Share of a raw window a client fills, matching the Codex catalog default. Applied
- * only to models that declare it, so providers without the convention keep reporting
- * their full window.
+ * Share of a raw window a client fills, matching the Codex catalog default. Carried
+ * only by the ChatGPT OAuth provider, whose models follow that convention; applying
+ * it to an API-key provider would shrink every other model by 5%.
  */
 export const DEFAULT_EFFECTIVE_CONTEXT_PERCENT = 95;
-
-/**
- * Share of the window the `max` stop compacts at, matching OpenAI's guidance of
- * 900,000 against a 1,000,000 window. Expressed as a ratio because the real ceiling
- * is account-scoped, so a fixed token count lands above some accounts' windows.
- */
-export const MAX_STOP_AUTO_COMPACT_PERCENT = 90;
-
-/** Range Claude Code accepts for an auto-compact window; values outside are clamped. */
-export const MIN_AUTO_COMPACT_WINDOW = 100_000;
-export const MAX_AUTO_COMPACT_WINDOW = 1_000_000;
 
 export type ContextStopName = 'standard' | 'max';
 export type ContextStop = ContextStopName | number;
@@ -35,8 +24,6 @@ export interface ContextLimits {
   pricingBoundary?: number;
   /** How the provider prices above the boundary, for the user-facing warning. */
   pricingBoundaryNote?: string;
-  /** Provider-supplied compaction target, honoured at any stop when present. */
-  autoCompactWindow?: number;
 }
 
 export interface ResolvedContextStop {
@@ -45,12 +32,6 @@ export interface ResolvedContextStop {
   raw: number;
   /** Window reported to clients: floor(raw * percent / 100). */
   effective: number;
-  /**
-   * Auto-compact target, set only when it is meaningfully below `effective`. Left
-   * undefined when compacting at the window itself is already the right behavior,
-   * so the default stop stays byte-identical to unconfigured Claude Code.
-   */
-  autoCompactWindow?: number;
   /** Set when the requested raw window was above the ceiling. */
   clampedFrom?: number;
   /** True when this window lets a session reach the provider's higher-rate band. */
@@ -114,25 +95,10 @@ export function resolveContextStop(
   const effective = effectiveContextWindow(raw, limits.effectiveContextPercent);
   const boundary = positiveInteger(limits.pricingBoundary);
 
-  // A provider-supplied limit wins at any stop. Otherwise a compaction target is
-  // only derived when the stop actually raised the window: a `max` that resolves to
-  // the standard window has changed nothing and must not start compacting earlier.
-  const target = positiveInteger(limits.autoCompactWindow)
-    ?? (raw > standardRaw
-      ? Math.floor((effective * MAX_STOP_AUTO_COMPACT_PERCENT) / 100)
-      : undefined);
-  const bounded = target === undefined ? undefined : Math.min(target, MAX_AUTO_COMPACT_WINDOW);
-  const autoCompactWindow = bounded !== undefined
-    && bounded < effective
-    && bounded >= MIN_AUTO_COMPACT_WINDOW
-    ? bounded
-    : undefined;
-
   return {
     stop,
     raw,
     effective,
-    ...(autoCompactWindow === undefined ? {} : { autoCompactWindow }),
     ...(requested > ceiling ? { clampedFrom: requested } : {}),
     crossesPricingBoundary: boundary !== undefined && effective > boundary,
   };
@@ -237,6 +203,5 @@ export function contextLimitsFrom(
     effectiveContextPercent: model.effectiveContextPercent,
     pricingBoundary: model.pricingBoundary,
     pricingBoundaryNote: model.pricingBoundaryNote,
-    autoCompactWindow: model.autoCompactWindow,
   };
 }

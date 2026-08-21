@@ -32,8 +32,6 @@ export interface LocalProviderModel {
   contextWindow?: number;
   /** Raw window behind `contextWindow`, set only when headroom made them differ. */
   rawContextWindow?: number;
-  /** Per-model auto-compact target, set only when it is below `contextWindow`. */
-  autoCompactWindow?: number;
   /** Selected stop, omitted while the model is on its standard window. */
   contextStop?: 'standard' | 'max' | number;
   /** Input size above which the provider bills the whole request at a higher rate. */

@@ -94,8 +94,6 @@ interface OpenAiModelEntry {
   max_context_window?: number;
   /** Share of the raw window the client should fill. */
   effective_context_window_percent?: number;
-  /** Provider-chosen compaction target. Frequently null, meaning the client picks. */
-  auto_compact_token_limit?: number;
   max_output_tokens?: number;
   /** Backend flags: model needs the Responses-Lite shape / WebSocket transport. */
   useResponsesLite?: boolean;
@@ -109,12 +107,11 @@ function positiveInteger(value: unknown): number | undefined {
 /** Read the context-budget fields the Codex catalog carries alongside the window. */
 function readContextFields(
   m: Record<string, unknown>,
-): Pick<OpenAiModelEntry, 'context_window' | 'max_context_window' | 'effective_context_window_percent' | 'auto_compact_token_limit' | 'max_output_tokens'> {
+): Pick<OpenAiModelEntry, 'context_window' | 'max_context_window' | 'effective_context_window_percent' | 'max_output_tokens'> {
   return {
     context_window: positiveInteger(m['context_window']),
     max_context_window: positiveInteger(m['max_context_window']),
     effective_context_window_percent: positiveInteger(m['effective_context_window_percent']),
-    auto_compact_token_limit: positiveInteger(m['auto_compact_token_limit']),
     max_output_tokens: positiveInteger(m['max_output_tokens']),
   };
 }
@@ -175,7 +172,6 @@ function buildDynamicOAuthModel(entry: OpenAiModelEntry, seedById: Map<string, C
       maxContextWindow: entry.max_context_window ?? seed.maxContextWindow,
       effectiveContextPercent: entry.effective_context_window_percent
         ?? seed.effectiveContextPercent,
-      autoCompactWindow: entry.auto_compact_token_limit ?? seed.autoCompactWindow,
       maxOutputTokens: entry.max_output_tokens ?? seed.maxOutputTokens,
       useResponsesLite: entry.useResponsesLite ?? seed.useResponsesLite,
       preferWebSockets: entry.preferWebSockets ?? seed.preferWebSockets,
@@ -193,7 +189,6 @@ function buildDynamicOAuthModel(entry: OpenAiModelEntry, seedById: Map<string, C
     maxContextWindow: entry.max_context_window,
     effectiveContextPercent: entry.effective_context_window_percent
       ?? DEFAULT_EFFECTIVE_CONTEXT_PERCENT,
-    autoCompactWindow: entry.auto_compact_token_limit,
     maxOutputTokens: entry.max_output_tokens,
     ...openAiPricingMetadata(id),
     modelFormat: 'openai' as const,
