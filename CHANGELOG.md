@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.0](https://github.com/bman654/clodex/compare/v2.6.3...v2.7.0) (2026-08-21)
+
+
+### Features
+
+* **models:** choose a context stop against a provider pricing boundary ([#131](https://github.com/bman654/clodex/issues/131)) ([6e14ba9](https://github.com/bman654/clodex/commit/6e14ba9f8d851ce81c35c06c39fd569bd0c0273c))
+
 ## [2.6.3](https://github.com/bman654/clodex/compare/v2.6.2...v2.6.3) (2026-08-21)
 
 
