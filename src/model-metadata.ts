@@ -88,9 +88,14 @@ function metadataFor(id: string, meta: PatchModelMeta, alias?: string): ModelMet
   };
 }
 
-/** Resolved metadata for every saved favourite, in the same order `--list` prints. */
+/**
+ * Resolved metadata for every saved favourite, in the same order `--list` prints.
+ *
+ * Session-aware: a launch-scoped `--context` is reported here, because this surface
+ * describes what the current run resolves to rather than what is baked into a binary.
+ */
 export function buildModelMetadata(): ModelMetadata[] {
-  const desired = buildDesiredPatchConfig();
+  const desired = buildDesiredPatchConfig({ sessionStops: true });
   return Object.entries(desired.config).map(([id, entry]) =>
     metadataFor(id, desired.metaById[id] ?? {}, entry.alias),
   );

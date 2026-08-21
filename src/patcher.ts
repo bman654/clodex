@@ -44,6 +44,7 @@ import {
   contextLimitsFrom,
   readContextStop,
   resolveContextStop,
+  selectContextStop,
   type ContextStop,
 } from './context-modes.js';
 import { resolveContextWindow } from './context-window.js';
@@ -291,7 +292,18 @@ export function computePatchConfigHash(
 }
 
 /** Read favorites + aliases + registry model metadata from disk (no network, no credentials). */
-export function buildDesiredPatchConfig(): DesiredPatchConfig {
+export interface DesiredPatchConfigOptions {
+  /**
+   * Honour a launch-scoped `--context` as well as the saved stop. Off for the patch
+   * config, which describes a binary that outlives the process; on for read-only
+   * surfaces that report what this run is actually using.
+   */
+  sessionStops?: boolean;
+}
+
+export function buildDesiredPatchConfig(
+  options: DesiredPatchConfigOptions = {},
+): DesiredPatchConfig {
   const prefs = loadPreferences();
   const favorites = prefs.favoriteModels ?? [];
   const aliases = prefs.modelAliases;
@@ -317,13 +329,15 @@ export function buildDesiredPatchConfig(): DesiredPatchConfig {
         compatibility: model.compatibility,
         upstreamModelId,
       });
-      // Saved stops only. A patched binary outlives the process that wrote it, so
-      // folding a launch-scoped `--context` in here would bake a one-off choice and
-      // report every unpatched-config launch as stale.
+      // A patched binary outlives the process that wrote it, so the patch config
+      // reads saved stops only: folding a launch-scoped `--context` in would bake a
+      // one-off choice and report every later launch as stale.
       const limits = contextLimitsFrom(model, resolveContextWindow(model.id));
       const stop = resolveContextStop(
         limits,
-        readContextStop(prefs.modelContextModes, provider.id, model.id) ?? 'standard',
+        options.sessionStops
+          ? selectContextStop(provider.id, model.id, prefs.modelContextModes)
+          : readContextStop(prefs.modelContextModes, provider.id, model.id) ?? 'standard',
       );
       meta.set(`${provider.id}:${model.id}`, {
         providerId: provider.id,

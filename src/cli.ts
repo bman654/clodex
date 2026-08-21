@@ -757,6 +757,9 @@ function applyContextStopAssignments(
   assignments: readonly ContextStopAssignment[],
   save: boolean,
   report: ContextStopReporter,
+  // `--save` is only consumed by the `models` branch; on the launch path it would
+  // fall through to the child, which ignores it silently.
+  saveHint = 'Add --save to make it the default.',
 ): number {
   const registry = loadRegistry();
   const modelsByProvider = new Map(
@@ -806,7 +809,7 @@ function applyContextStopAssignments(
         : `Saved ${assignments.length} context stops.`,
     );
   } else {
-    report.info('Applies to this run only. Add --save to make it the default.');
+    report.info(`Applies to this run only. ${saveHint}`);
   }
   return 0;
 }
@@ -1546,6 +1549,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
           modelFormat: 'anthropic',
           compatibility: selectedModel.compatibility,
           headers: activeProvider.headers,
+          pricingBoundary: selectedModel.pricingBoundary,
         },
         launchApiKey ?? '',
       );
@@ -1590,6 +1594,7 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
           preferWebSockets: selectedModel.preferWebSockets,
           compatibility: selectedModel.compatibility,
           headers: activeProvider.headers,
+          pricingBoundary: selectedModel.pricingBoundary,
         },
         launchApiKey ?? '',
       );
@@ -1648,7 +1653,9 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
   const preferences = loadPreferences();
   primeSavedContextStops(preferences.modelContextModes);
   let contextAssignments: ContextStopAssignment[] = [];
-  if (parsed.contextStops?.length) {
+  // Asking for help or version does no work: a malformed `--context` must not
+  // suppress the very text that explains how to spell it.
+  if (parsed.contextStops?.length && !parsed.showHelp && !parsed.showVersion) {
     const resolved = parseContextStopAssignments(parsed.contextStops, preferences.modelAliases);
     if ('error' in resolved) {
       console.error(pc.red(`\nError: ${resolved.error}\n`));
@@ -1656,12 +1663,6 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
     }
     contextAssignments = resolved.assignments;
     if (!parsed.contextSave) setSessionContextStops(sessionStopsFrom(contextAssignments));
-    // A launch-scoped stop gets the same cost accounting the `models` form gives,
-    // so opting into a larger window never happens without the warning attached.
-    if (parsed.command === 'claude') {
-      const code = applyContextStopAssignments(contextAssignments, false, STDERR_CONTEXT_REPORTER);
-      if (code !== 0) return code;
-    }
   }
 
   if (!parsed.showVersion) {
@@ -1760,6 +1761,20 @@ export async function main(args: string[] = process.argv.slice(2)): Promise<numb
   if (parsed.showHelp) {
     printHelp(claudeHelpText());
     return 0;
+  }
+
+  // After the short-circuits, so `--help` is not preceded by a stop report, and a
+  // bad target cannot suppress help. A launch-scoped stop still gets the same cost
+  // accounting the `models` form gives, so reaching the higher-rate band is never
+  // silent.
+  if (contextAssignments.length > 0) {
+    const code = applyContextStopAssignments(
+      contextAssignments,
+      false,
+      STDERR_CONTEXT_REPORTER,
+      'Save it with clodex models --context <model=stop> --save.',
+    );
+    if (code !== 0) return code;
   }
 
   return runClaudeCommand(parsed);

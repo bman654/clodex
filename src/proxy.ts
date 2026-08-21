@@ -239,8 +239,6 @@ export interface ProxyRoute {
   contextWindow?: number;
   /** Input size above which the provider bills the whole request at a higher rate. */
   pricingBoundary?: number;
-  /** Largest output the model accepts, independent of the input window. */
-  maxOutputTokens?: number;
   npm?: string;      // OpenCode api.npm — when SDK-migrated, routes via the adapter
   baseURL?: string;  // base URL for openai-compatible / openrouter SDK providers
   providerId?: string;
@@ -870,41 +868,49 @@ export async function startProxyCatalog(
   };
 }
 
-/** Single-model proxy — backward-compatible wrapper around startProxyCatalog. */
-export function startProxy(
+/** Per-model metadata the single-model wrapper carries onto its route. */
+export interface SingleModelProxyOptions {
+  npm?: string;
+  baseURL?: string;
+  upstreamModelId?: string;
+  providerId?: string;
+  authType?: 'api' | 'oauth' | 'none';
+  oauthAccountId?: string;
+  providerData?: Record<string, unknown>;
+  modelFormat?: 'anthropic' | 'openai';
+  supportedParameters?: string[];
+  reasoning?: boolean;
+  interleavedReasoningField?: string;
+  useResponsesLite?: boolean;
+  preferWebSockets?: boolean;
+  compatibility?: ModelRuntimeCompatibility;
+  headers?: Record<string, string>;
+  /** Input size above which the provider bills the whole request at a higher rate. */
+  pricingBoundary?: number;
+}
+
+/**
+ * The route the single-model wrapper hands to the catalog. Exported because this
+ * literal is where a field silently stops being carried: it has no spread, so a
+ * property omitted here reaches the runtime as `undefined` with nothing failing.
+ */
+export function singleModelProxyRoute(
   completionsUrl: string,
   modelId: string,
-  debug = false,
   contextWindow?: number,
-  sdk?: {
-    npm?: string;
-    baseURL?: string;
-    upstreamModelId?: string;
-    providerId?: string;
-    authType?: 'api' | 'oauth' | 'none';
-    oauthAccountId?: string;
-    providerData?: Record<string, unknown>;
-    modelFormat?: 'anthropic' | 'openai';
-    supportedParameters?: string[];
-    reasoning?: boolean;
-    interleavedReasoningField?: string;
-    useResponsesLite?: boolean;
-    preferWebSockets?: boolean;
-    compatibility?: ModelRuntimeCompatibility;
-    headers?: Record<string, string>;
-  },
+  sdk?: SingleModelProxyOptions,
   apiKey?: string,
-): Promise<ProxyHandle> {
+): ProxyRoute {
   const bareModelId = stripOneMContextSuffix(modelId);
-  const clientModelId = claudeCodeClientModelId(modelId, contextWindow);
-  return startProxyCatalog([{
-    aliasId: clientModelId,
+  return {
+    aliasId: claudeCodeClientModelId(modelId, contextWindow),
     realModelId: sdk?.upstreamModelId ?? bareModelId,
     displayName: bareModelId,
     upstreamUrl: completionsUrl,
     apiKey: apiKey ?? '',
     modelFormat: sdk?.modelFormat ?? 'openai',
     contextWindow,
+    pricingBoundary: sdk?.pricingBoundary,
     npm: sdk?.npm,
     baseURL: sdk?.baseURL,
     providerId: sdk?.providerId,
@@ -918,5 +924,17 @@ export function startProxy(
     preferWebSockets: sdk?.preferWebSockets,
     compatibility: sdk?.compatibility,
     headers: sdk?.headers,
-  }], clientModelId, debug);
+  };
+}
+
+export function startProxy(
+  completionsUrl: string,
+  modelId: string,
+  debug = false,
+  contextWindow?: number,
+  sdk?: SingleModelProxyOptions,
+  apiKey?: string,
+): Promise<ProxyHandle> {
+  const route = singleModelProxyRoute(completionsUrl, modelId, contextWindow, sdk, apiKey);
+  return startProxyCatalog([route], route.aliasId, debug);
 }
