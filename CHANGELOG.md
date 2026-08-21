@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.2](https://github.com/bman654/clodex/compare/v2.6.1...v2.6.2) (2026-08-21)
+
+
+### Bug Fixes
+
+* **patch:** restore your models in Claude Code 2.1.238's picker on ARM64 Linux and Windows ([#133](https://github.com/bman654/clodex/issues/133)) ([131907a](https://github.com/bman654/clodex/commit/131907a31440c1f80cadce4fa0db6bb9407e3fd4))
+
 ## [2.6.1](https://github.com/bman654/clodex/compare/v2.6.0...v2.6.1) (2026-08-18)
 
 
