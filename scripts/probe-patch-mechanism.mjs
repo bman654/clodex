@@ -1,18 +1,26 @@
 #!/usr/bin/env node
-// Does `clodex patch`'s binary handling survive a round trip on a Claude Code build for ANOTHER
-// platform?
+// Would `clodex patch` work on a Claude Code build for ANOTHER platform?
 //
-// The patch sites themselves match against extracted JavaScript, which is near-identical on every
-// platform — one platform covers them. Everything around the JavaScript is not: the entry-module
-// shim, tweakcc's read, the repack, the restore and the Mach-O re-sign all depend on the container
-// format, and that is the half that has broken. Every ELF build of Claude Code from 2.1.229 onward
-// was unpatchable across two clodex releases while macOS stayed green, because nothing tested an
-// ELF binary.
+// Two separable halves, and this answers both without ever EXECUTING the binary — which is what
+// lets a linux-arm64 or win32-x64 build be checked from macOS. (Running it is what `clodex patch`
+// itself needs, since it resolves the version by executing the binary; that is why full-patch
+// coverage for Linux needs a container and this does not.)
 //
-// This probe closes that gap without a Linux host: it never EXECUTES the binary, it only
-// manipulates its bytes, so a linux-arm64 or win32-x64 binary can be probed from macOS. (Running it
-// is what `clodex patch` itself needs — it resolves the version by executing the binary — which is
-// why full-patch coverage for Linux needs a container and this does not.)
+//   the container   the entry-module shim, tweakcc's read, the repack, the restore and the Mach-O
+//                   re-sign all depend on the executable format. Every ELF build of Claude Code
+//                   from 2.1.229 onward was unpatchable across two clodex releases while macOS
+//                   stayed green, because nothing tested an ELF binary.
+//   the patch sites the anchors clodex matches in the extracted JavaScript. These were long
+//                   assumed to be platform-independent — "one platform covers them all". 2.1.238
+//                   proved otherwise: `PATCH 5: model picker options` matched on five builds and
+//                   not on linux-arm64, linux-arm64-musl or win32-arm64. So this probe now applies
+//                   the real transforms to the real bundle it extracted from THIS build, and
+//                   repacks what they produced rather than the pristine bytes.
+//
+// What it still does NOT establish, and must never be reported as if it did: the patched binary is
+// never started, so nothing here says a PE runs on Windows or an ELF runs on Linux. And an anchor
+// that binds to the WRONG function while still emitting valid JavaScript passes every check below.
+// Only the host and container legs of the canary run the patched binary.
 //
 //   node scripts/probe-patch-mechanism.mjs <claude-binary> [options]
 //
@@ -31,6 +39,7 @@ import {
   closeSync,
   copyFileSync,
   createReadStream,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -40,6 +49,7 @@ import {
 } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
+import { registerHooks } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -48,6 +58,25 @@ import {
   restoreEntryModuleName,
   shimEntryModuleName,
 } from '../src/bun-entry-module.ts';
+
+// `src/` spells its own imports the TypeScript way — `./model-aliases.js` for a file that is
+// really `./model-aliases.ts`. tsup and vitest both understand that; bare `node` does not, and
+// resolves it to a file that does not exist. bun-entry-module.ts happens to import nothing
+// relative, which is why the static import above works; patch-transforms.ts does, so it is loaded
+// dynamically BELOW this hook — a static import would be resolved before this line ever runs.
+// Guarded on the sibling .ts actually existing, so a real .js file is never redirected.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier.startsWith('.') && specifier.endsWith('.js') && context.parentURL) {
+      const candidate = new URL(`${specifier.slice(0, -3)}.ts`, context.parentURL);
+      if (candidate.protocol === 'file:' && existsSync(candidate)) {
+        return nextResolve(candidate.href, context);
+      }
+    }
+    return nextResolve(specifier, context);
+  },
+});
+const { checkPatchSites } = await import('./probe-patch-sites.mjs');
 
 const args = process.argv.slice(2);
 if (args.length === 0 || args.includes('-h') || args.includes('--help')) {
@@ -58,9 +87,10 @@ if (args.length === 0 || args.includes('-h') || args.includes('--help')) {
       '  --expect-version V  fail unless the binary is that Claude Code release\n' +
       '  --scratch DIR       where the ~300 MB working copy goes\n' +
       '  --keep              leave the scratch copy behind\n\n' +
-      'Exercises the shim/read/repack/restore cycle `clodex patch` runs, without executing the\n' +
-      'binary — so a build for any platform can be probed from any host. Exits 0 only if every\n' +
-      'check passed.',
+      'Applies every clodex patch site to this build\'s own bundle and runs the shim/read/repack/\n' +
+      'restore cycle `clodex patch` runs — without executing the binary, so a build for any\n' +
+      'platform can be probed from any host. It does NOT start the patched binary. Exits 0 only\n' +
+      'if every check passed.',
   );
   process.exit(0);
 }
@@ -144,12 +174,16 @@ const checks = [];
 const info = { label, binary, checks: [] };
 let failed = 0;
 
-// name    stable identifier a caller can branch on
-// ok      did it hold
-// detail  what was actually observed — the thing worth reading in a Slack alert
-function record(name, ok, detail) {
+// name     stable identifier a caller can branch on
+// ok       did it hold
+// detail   what was actually observed — the thing worth reading in a Slack alert
+// reasons  how a failure should be phrased in the canary's alert, when `name: detail` is the
+//          wrong shape. The patch-site check needs this: it can hold several distinct findings,
+//          and its main one has to read exactly as the host and container legs word it so that
+//          one anchor broken on four builds collapses to a single line instead of four.
+function record(name, ok, detail, reasons) {
   checks.push(name);
-  info.checks.push({ name, ok, detail });
+  info.checks.push({ name, ok, detail, ...(reasons ? { reasons } : {}) });
   if (!ok) failed++;
   if (!opts.json) console.log(`${ok ? 'OK  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
 }
@@ -303,9 +337,33 @@ try {
     'the copy the pristine backup is taken from is byte-identical to the release',
   );
 
-  // ---- 3. repack, then put the real entry-module name back ----------------------------------
+  // ---- 3. do clodex's patch sites still land in THIS build's bundle? ------------------------
+  // The half that used to be taken on faith. Every anchor is matched against the JavaScript that
+  // came out of this specific binary, with a synthetic config that turns on every site — so a
+  // build whose picker, resolver or context anchor drifted is caught here even when no host of
+  // that platform exists to run the real command.
+  const patchStarted = Date.now();
+  const patch = checkPatchSites(source);
+  info.patchSites = patch.sites;
+  info.patchSiteSummary = patch.summary;
+  info.patchMs = Date.now() - patchStarted;
+  record(
+    'patch-sites-apply',
+    patch.failures.length === 0,
+    patch.failures.length === 0
+      ? `all ${patch.summary.total} patch sites applied to this build's own bundle`
+      : patch.failures.join(' | '),
+    patch.failures,
+  );
+
+  // ---- 4. repack, then put the real entry-module name back ----------------------------------
+  // What goes back in is the PATCHED bundle, not the pristine one: repacking bytes nobody patched
+  // would leave the thing users actually receive — clodex's emitted patch, kilobytes of it,
+  // surviving a PE/ELF/Mach-O round trip — unproven by the byte-for-byte readback below. When the
+  // patch aborted there is nothing patched to write, so the pristine source stands in and the
+  // container half is still measured; `patch-sites-apply` above has already reported the abort.
   const repackStarted = Date.now();
-  const written = `${source}\n${PROBE_MARKER}${PROBE_PADDING}`;
+  const written = `${patch.patchedSource ?? source}\n${PROBE_MARKER}${PROBE_PADDING}`;
   const writeShim = shimEntryModuleName(scratch);
   await writeContent(installation, written);
   let restoreError = null;
@@ -338,7 +396,7 @@ try {
         : 'no shim was needed, so there was no entry-module name to put back'),
   );
 
-  // ---- 4. is the binary that WOULD be published actually sound? -----------------------------
+  // ---- 5. is the binary that WOULD be published actually sound? -----------------------------
   // Reading OK from the steps above is not evidence of that: the checks below are on the bytes
   // that would be renamed over the live install.
   if (writeShim) {
@@ -438,6 +496,31 @@ try {
       mismatch || `${republished.length} bytes read back, byte-for-byte what was written`,
     );
 
+    // `published-content` compares the readback against what this probe CHOSE to write, so it is
+    // silent about whether that was the patched bundle or the pristine one — repack the wrong
+    // string and it stays green. This is the independent half: the bytes that would be published
+    // must carry the markers clodex's own transforms emitted, which is the same evidence the host
+    // and container legs take from the real patched binary.
+    //
+    // Read off the patched bundle rather than hard-coded, so a new marker is covered the day it
+    // is added and a renamed one does not fail here for a reason that has nothing to do with the
+    // release.
+    const emitted = [...new Set(patch.patchedSource?.match(/ccpatch:[a-zA-Z0-9_-]+/g) ?? [])];
+    info.patchMarkers = emitted;
+    if (emitted.length === 0) {
+      // Only reachable when the patch aborted; `patch-sites-apply` has already said so.
+      info.notChecked = [...(info.notChecked ?? []), 'published-carries-patch'];
+      note('published-carries-patch was NOT checked: the patch produced no bundle to look for');
+    } else {
+      const absent = emitted.filter((marker) => !republished.includes(marker));
+      record(
+        'published-carries-patch',
+        absent.length === 0,
+        absent.length === 0
+          ? `the published bytes carry all ${emitted.length} clodex patch markers (${emitted.join(', ')})`
+          : `the published bytes are missing ${absent.join(', ')} — what was repacked is not what the patch produced`,
+      );
+    }
   } finally {
     // Undoing the verification shim is housekeeping, not a check: leaving it on would hand an
     // investigator a binary that cannot run and a symptom the probe invented. When it fails for
@@ -484,7 +567,9 @@ try {
   info.durationMs = Date.now() - started;
   info.failed = failed;
   info.verdict = failed === 0 ? 'pass' : 'fail';
-  info.reasons = info.checks.filter((c) => !c.ok).map((c) => `${c.name}: ${c.detail}`);
+  info.reasons = info.checks
+    .filter((c) => !c.ok)
+    .flatMap((c) => c.reasons ?? [`${c.name}: ${c.detail}`]);
   // scratchDir is always one this run made, so removing it wholesale takes nothing that was not
   // put there by this run.
   if (opts.keep) info.scratch = scratch;

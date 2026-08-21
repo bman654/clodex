@@ -9,7 +9,7 @@
 #   3. syncs a private clone of clodex to a freshly fetched origin/main and builds it
 #   4. downloads that release for EVERY published platform into a throwaway sandbox and tests each
 #      one — the real `clodex patch` on this Mac, the real `clodex patch` in a Linux container for
-#      arm64 glibc and musl, and the binary-handling probe for the rest. See
+#      arm64 glibc and musl, and a bundle-patch + binary-handling probe for the rest. See
 #      clodex-patch-canary-platforms.sh for why, and for what each leg proves.
 #   5. if any platform's patch mechanism is broken, launches ONE background Claude session to
 #      investigate all of them, fix, and open a PR — and pings Slack at the start
@@ -24,7 +24,7 @@
 #   --retriage VER      forget VER's recorded verdict, then run
 #   --force             ignore the already-triaged record and the in-flight deferral
 #   --platforms LIST    comma-separated platforms to test instead of all of them
-#   --no-container      never use Docker; test Linux with the probe only
+#   --no-container      never use Docker; test Linux with the probe only (no binary is started)
 #   --no-launch         report a failure but do not start the background Claude session
 #   --no-slack          never post to Slack
 #   --keep-work         keep the sandbox even when the run passes
@@ -593,7 +593,7 @@ write_repro_script() {
     printf '#   %s/repro.sh linux-arm64 <your-worktree>  # the same leg against your fix\n' "$WORK"
     printf '#\n'
     printf '# The leg matches the platform: the host runs the real `clodex patch`; linux-arm64 and\n'
-    printf '# linux-arm64-musl run it inside a container; the rest run the binary-handling probe,\n'
+    printf '# linux-arm64-musl run it inside a container; the rest run the bundle-patch probe,\n'
     printf '# scripts/probe-patch-mechanism.mjs. Your worktree does NOT need to be built first —\n'
     printf '# the host leg builds it if dist is missing and the container legs always rebuild.\n'
     printf '#\n'
@@ -614,7 +614,7 @@ ENTRY="$(jq -s -c --arg p "$PLATFORM" 'map(select(.platform == $p)) | last // em
   exit 1
 }
 # The leg this platform actually got. MODE=container overrides it: if the canary ran without
-# Docker, the recorded leg is a probe, and a probe pass does NOT verify a patch-site fix.
+# Docker, the recorded leg is a probe, and a probe never starts the binary it patched.
 MODE="${MODE:-$(printf '%s' "$ENTRY" | jq -r '.mode')}"
 TARBALL="$(printf '%s' "$ENTRY" | jq -r '.tarball')"
 MEMBER=claude
@@ -747,9 +747,11 @@ scope:
   container  the real \`clodex patch\` inside a native-arch Linux container. \`clodex patch\`
              resolves the version by EXECUTING the binary, so a foreign binary can only go through
              the real command this way.
-  probe      scripts/probe-patch-mechanism.mjs — the same shim/read/repack/restore cycle
-             src/patcher.ts runs, driven against the binary's bytes without executing it. It
-             covers EXECUTABLE-FORMAT handling ONLY, not the patch sites.
+  probe      scripts/probe-patch-mechanism.mjs — it applies every clodex patch site to the
+             bundle extracted from that build, repacks the result, and runs the same
+             shim/read/repack/restore cycle src/patcher.ts runs, all without executing the
+             binary. It covers the anchors AND the executable format; it never starts the
+             patched binary.
 A failure confined to one executable format (ELF, Mach-O, PE) points at src/bun-entry-module.ts or
 tweakcc's repack, not at the patch anchors. A failure on every platform at once points at the
 anchors in src/patch-transforms.ts. If instead the reasons say a check that passed on an earlier
@@ -757,8 +759,10 @@ release now SKIPs, the release is patchable and an ANCHOR DRIFTED: diff the two 
 scripts/extract-cc-bundles.mjs (last clean release: $BASE_VERSION) before touching anything.
 
 Two limits on what a green leg proves, so you do not report a fix as verified when it is not:
-- A leg recorded as \`probe\` exercises ZERO patch sites. If a platform above says [probe] and your
-  fix touches patch sites, a pass there verifies nothing — re-run it as
+- A leg recorded as \`probe\` never STARTS the binary it patched. It proves the anchors matched and
+  the repack round-tripped; it cannot prove the patched binary runs, and it cannot tell an anchor
+  that bound to the wrong function from one that bound to the right one. Where that distinction
+  decides your fix, re-run the leg as
   \`MODE=container $WORK/repro.sh <platform> <your-worktree>\`, and if Docker is unavailable, say so
   in your concluding Slack rather than calling it verified.
 - No leg ever EXECUTES an x64 ELF binary; x64 coverage is bytes-only by design. Check x64
@@ -1334,11 +1338,11 @@ $UNTESTED_COUNT build(s) could not be tested at all this run — they are marked
     # judged on has a hole in it, and a hole reported as a clean pass is the original incident.
     PASS_HEAD=":warning: *Claude Code $VERSION — nothing broke, but this is not a full all-clear.*"
   fi
-  # Only mention the byte-level tier when something is actually in it. "0 got the byte-level check
-  # only" next to five untested builds reads as a contradiction.
+  # Only mention the bundle-level tier when something is actually in it. "0 got the bundle-level
+  # check only" next to five untested builds reads as a contradiction.
   PROBE_LINE=""
   [ "$PROBE_COUNT" -eq 0 ] || PROBE_LINE="
-$PROBE_COUNT got the byte-level check only — enough to catch a repack or format break, not enough to say the patch sites still land there."
+$PROBE_COUNT got the bundle-level check only: every clodex patch site applied to their own bundle and the repack round-tripped, but no patched binary was started there."
   slack "$PASS_HEAD
 The real \`clodex patch\` ran on $FULL_COUNT of $TOTAL_COUNT builds ($FULL_LEGS): $HOST_LINE.$PROBE_LINE$UNTESTED_LINE
 Tested against clodex origin/main \`${MAIN_SHA:0:8}\` (not the published $(node -p "require('$REPO_DIR/package.json').version" 2>/dev/null || echo release)), so this is a verdict on main.

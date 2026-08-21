@@ -9,9 +9,13 @@
 # WHY THIS EXISTS
 # `clodex patch` does two separable things, and they fail for different reasons:
 #
-#   the patch sites  match anchors in the extracted JavaScript, which is near-identical on every
-#                    platform (26,599,210 bytes on darwin vs 26,596,328 on linux for 2.1.233).
-#                    One platform genuinely covers them.
+#   the patch sites  match anchors in the extracted JavaScript. This was assumed to be
+#                    near-identical on every platform (26,599,210 bytes on darwin vs 26,596,328 on
+#                    linux for 2.1.233), so that one platform covered them all. 2.1.238 disproved
+#                    it: `PATCH 5: model picker options` matched on darwin-arm64, darwin-x64,
+#                    linux-x64, linux-x64-musl and win32-x64 and NOT on linux-arm64,
+#                    linux-arm64-musl or win32-arm64. Every build's anchors are now checked
+#                    against that build's own bundle.
 #   the container    the entry-module shim, tweakcc's read, the repack, the restore and the
 #                    Mach-O re-sign all depend on the executable format — and that is the half
 #                    that broke. Every ELF build of Claude Code from 2.1.229 on was unpatchable
@@ -21,15 +25,18 @@
 # So every published platform is now tested, by the strongest means available for it:
 #
 #   host       the real `clodex patch` on this Mac — the authoritative "is it safe for me to
-#              update" answer, and the only leg that exercises all 11 patch sites end to end.
+#              update" answer, and the only leg that patches AND then starts the binary here.
 #   container  the real `clodex patch` inside a native-architecture Linux container. `clodex
 #              patch` resolves the version by EXECUTING the binary, so a foreign binary cannot go
 #              through the real command on the host — a container is the only way to run the whole
 #              thing against ELF.
-#   probe      scripts/probe-patch-mechanism.mjs from the clodex checkout under test: the same
-#              shim/read/repack/restore cycle the patcher runs, driven directly against the
-#              binary's bytes. It never executes the binary, so it works from macOS against every
+#   probe      scripts/probe-patch-mechanism.mjs from the clodex checkout under test: it applies
+#              every clodex patch site to the bundle it extracts from THAT build, repacks what
+#              those transforms produced, and runs the same shim/read/repack/restore cycle the
+#              patcher runs. It never executes the binary, so it works from macOS against every
 #              format, and it is the only coverage win32 and linux-x64 can have cheaply.
+#              What it cannot show: that the patched binary starts, and that an anchor bound to
+#              the function it was meant to bind to rather than a lookalike that also parses.
 #
 # A leg that cannot RUN (no Docker, a platform package that has not published yet, a container
 # that could not install its dependencies) is an `error`, never a `fail`. Only evidence that the
@@ -430,7 +437,7 @@ run_leg_container() { # run_leg_container <platform> <version>
   return 0
 }
 
-# ---- probe: the mechanism only, no execution ---------------------------------------------------
+# ---- probe: the bundle patch and the binary handling, without execution ------------------------
 
 # The most informative line of a failed probe's stderr. `tail -3` of a Node crash is the tail of
 # its stack trace — "}", blank, "Node.js v24.14.1" — which is exactly the useless thing a Slack
@@ -471,6 +478,15 @@ run_leg_probe() { # run_leg_probe <platform> <version>
   set -e
   rm -rf "$WORK/$platform/probe-scratch"
 
+  evaluate_probe_leg "$platform" "$json" "$rc" "$WORK/$platform/probe.stderr"
+  return 0
+}
+
+# Turn a captured probe.json into a verdict. Split out from the leg above — like evaluate_report —
+# so the self-test can drive it against hand-written results without downloading a 300 MB binary.
+evaluate_probe_leg() { # evaluate_probe_leg <platform> <probe.json> <exit-code> <stderr-file>
+  local platform="$1" json="$2" rc="$3" stderr="$4" failed_sites
+
   # Both halves matter: `jq -e .` alone accepts any valid JSON, and the `.checks[]` extraction
   # below then dies with "Cannot iterate over null" — under errexit that kills the whole canary
   # before any verdict is recorded, so one schema change would leave releases untriaged.
@@ -479,15 +495,35 @@ run_leg_probe() { # run_leg_probe <platform> <version>
     # No JSON at all means the probe itself did not run (a missing script on an older origin/main,
     # a Node too old for the .ts import). That is the canary's problem, not the release's.
     LEG_STATUS=error
-    LEG_REASONS="- the $platform mechanism probe produced no usable result (exit $rc): $(probe_error_summary "$WORK/$platform/probe.stderr")
+    LEG_REASONS="- the $platform probe produced no usable result (exit $rc): $(probe_error_summary "$stderr")
+"
+    return 0
+  fi
+
+  # A probe that reports no patch sites is the OLD probe — the one that checked executable-format
+  # handling only and reported a clean pass on win32-arm64 while `PATCH 5: model picker options`
+  # had stopped matching there. Its verdict says nothing about the anchors, so it may not be
+  # recorded as if it did. An `error`, not a `fail`: the clodex build under test is behind, the
+  # release is not implicated — and an error is already enough to withhold the green tick.
+  if ! jq -e '(.patchSites | type) == "array" and (.patchSites | length) > 0' \
+       "$json" >/dev/null 2>&1; then
+    LEG_STATUS=error
+    LEG_REASONS="- the $platform probe reported no patch-site results, so only this build's executable format was checked and its patch anchors were not — the clodex build under test (${MAIN_SHA:-unknown} on $CANARY_BRANCH) predates per-build patch-site checking
 "
     return 0
   fi
 
   LEG_DETAIL="$(jq -c '{format, entryState, shimUsed, pristineSize, publishedSize, growth,
-                        detectedVersion, sourceBytes, durationMs}' "$json")"
-  LEG_SITES="$(jq -c '[.checks[] | {key: .name, value: (if .ok then "OK" else "FAIL" end)}]
-                      | from_entries' "$json")"
+                        detectedVersion, sourceBytes, durationMs, patchSites: (.patchSiteSummary // null)}' "$json")"
+  # Both sets of names, in one map, because both are checks that must keep holding: the mechanism
+  # checks are what the baseline comparison has always watched, and the patch sites are what this
+  # leg could not see at all before. The two name spaces do not overlap.
+  # `// []` even though the guard above already refused a result without patchSites: reached with
+  # a null here, `.patchSites[]` dies with "Cannot iterate over null" and errexit takes the whole
+  # canary down before ANY platform's verdict is recorded — one schema change, every release left
+  # untriaged. The guard decides the verdict; this keeps a regression in the guard survivable.
+  LEG_SITES="$(jq -c '([.checks[] | {key: .name, value: (if .ok then "OK" else "FAIL" end)}] | from_entries)
+                      + ([(.patchSites // [])[] | {key: .name, value: .status}] | from_entries)' "$json")"
   if [ "$(jq -r '.verdict' "$json")" = "pass" ]; then
     LEG_STATUS=pass
   else
@@ -495,7 +531,8 @@ run_leg_probe() { # run_leg_probe <platform> <version>
     LEG_REASONS="$(jq -r '(.reasons // []) | map("- " + .) | join("\n")' "$json")
 "
   fi
-  log "$platform probe: $(jq -r '.verdict' "$json") ($(jq -r '(.durationMs/1000|floor)' "$json")s, $(jq -r '.format' "$json"))"
+  failed_sites="$(jq -r '[(.patchSites // [])[] | select(.status == "FAIL") | .name] | join("; ")' "$json")"
+  log "$platform probe: $(jq -r '.verdict' "$json") ($(jq -r '(.durationMs/1000|floor)' "$json")s, $(jq -r '.format' "$json"), $(jq -r '.patchSiteSummary.applied // 0') patch sites applied${failed_sites:+, FAILED: $failed_sites})"
   return 0
 }
 
@@ -626,7 +663,7 @@ matrix_downgrade_notes() {
   jq -r -s --arg why "$why" '
     map(select(.downgraded == true) | .platform) as $d
     | if ($d | length) == 0 then ""
-      else "- \($why), so \($d | join(" and ")) got the binary-handling probe instead of a full `clodex patch` in a container. NO patch site was exercised on Linux this run."
+      else "- \($why), so \($d | join(" and ")) got the bundle-patch + binary-handling probe instead of a full `clodex patch` in a container. The patch sites were checked against those builds bundles, but NO patched Linux binary was started this run."
       end' "$MATRIX"
 }
 
@@ -641,8 +678,9 @@ matrix_coverage_line() {
              elif .mode == "host" then "full patch, this Mac"
              elif .mode == "container" then "full patch in \(.detail.image // "a container")"
              elif .mode == "probe" and .downgraded then
-               "binary handling ONLY — no container, so no patch site ran here"
-             elif .mode == "probe" then "binary handling"
+               "bundle patch + binary handling — no container, so the patched binary was never started here"
+             elif .mode == "probe" then
+               "bundle patch + binary handling; native execution not checked"
              else "not tested" end;
     map("\(sym) *\(.platform)* — \(how)") | join("\n")' "$MATRIX"
 }
@@ -654,7 +692,7 @@ matrix_coverage_brief() {
     def sym: if .status == "fail" then ":x:" else ":grey_question:" end;
     def how: if .mode == "host" then "full patch, this Mac"
              elif .mode == "container" then "full patch in \(.detail.image // "a container")"
-             elif .mode == "probe" then "binary handling"
+             elif .mode == "probe" then "bundle patch + binary handling"
              else "not tested" end;
     (map(select(.status != "pass")) | map("\(sym) *\(.platform)* — \(how)")) as $bad
     | (map(select(.status == "pass") | .platform)) as $good

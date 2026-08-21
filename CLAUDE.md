@@ -197,6 +197,11 @@ ELF build of Claude Code across two releases while macOS stayed green. Before ch
 `scripts/probe-patch-mechanism.mjs` against a build for each format — Mach-O, ELF and PE. It needs
 no Linux or Windows host, because it never executes the binary. See `.claude/docs/patcher.md`.
 
+**Patch anchors are not platform-independent either.** Claude Code 2.1.238 minified one helper's
+parameter differently on its arm64 builds, so `PATCH 5: model picker options` matched five builds
+and missed `linux-arm64`, `linux-arm64-musl` and `win32-arm64`. The probe now applies every patch
+site to each build's own bundle; run it per format when you touch `src/patch-transforms.ts` too.
+
 **`claude -p` end-to-end tests are manual only — NEVER add them to the automated suite.**
 
 ## Key constraints

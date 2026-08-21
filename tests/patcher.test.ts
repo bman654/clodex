@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tweakccRecognizesModuleName } from '../src/bun-entry-module.js';
 import {
+  CLAUDE_CORE_FIXTURE,
+  CLAUDE_FIXTURE,
+  CLAUDE_PROXY_EFFORT_FIXTURE,
+} from './fixtures/claude-bundle.js';
+import {
   buildFakeNativeClaude,
   MACHO_MAGIC,
   parseBunBlob,
@@ -762,17 +767,6 @@ describe('summarizePatchResults', () => {
   });
 });
 
-// A minified stand-in for the Claude Code bundle carrying every anchor the
-// patch transforms key on, so they can be executed end to end.
-const CLAUDE_CORE_FIXTURE = [
-  '.enum(["sonnet","opus","haiku","fable"]).optional().describe(`Optional model override for this agent. Defaults to inherit.`)',
-  'var KNOWN=["sonnet","opus","haiku","fable","opusplan"];',
-  'function rz(x){switch(x){case"best":{return "opus"}default:return null}}',
-  'function opts(e,t,r){let n=cur(),o=(n==="opus")?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}',
-  'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
-  'function cwdOf(){let p=process.env.PWD;return p}',
-  'function childEnv(){let e=extra(),t=Object.keys(e).length>0,n=Object.keys(e).length>0,s=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};let o=[process.env.CLAUDE_CODE_OAUTH_TOKEN,process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE,process.env.CLAUDE_BG_PTY_AUTH,"OTEL_",process.env.CLAUDE_CODE_OTEL_DIAG_STDERR],u=["CLAUDE_CODE_OAUTH_TOKEN"];if(!t&&!n&&!o[0])return process.env;let v={...process.env,...e,...s};for(let k of u)delete v[k],delete v[`INPUT_${k}`];return v}function mcpAllow(){let e=process.env.CLAUDE_CODE_MCP_ALLOWLIST_ENV;return e}',
-].join('\n');
 
 const digestOf = (text: string) => createHash('sha256').update(text).digest('hex');
 
@@ -1188,21 +1182,6 @@ describe('applyPatch', () => {
   });
 });
 
-const CLAUDE_FIXTURE = [
-  CLAUDE_CORE_FIXTURE,
-  'function OI(e){if(SNr(e))return!1;let t=Ede(e,"effort");if(t!==void 0)return t;return!1}',
-  'function I_e(e){if(SNr(e))return!1;let t=Ede(e,"xhigh_effort");if(t!==void 0)return t;return!1}',
-  'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return!1}',
-  'function ait(e){return ww(lo(e))?.default_effort??"high"}',
-].join('\n');
-
-const CLAUDE_PROXY_EFFORT_FIXTURE = [
-  CLAUDE_CORE_FIXTURE,
-  'function OI(e){if(SNr(e))return!1;let t=Ede(e,"effort");if(t!==void 0)return t;return proxyMode(e)}',
-  'function I_e(e){if(SNr(e))return!1;let t=Ede(e,"xhigh_effort");if(t!==void 0)return t;return proxyMode(e)}',
-  'function eqe(e){if(SNr(e))return!1;let t=Ede(e,"max_effort");if(t!==void 0)return t;return proxyMode(e)}',
-  'function ait(e){return ww(lo(e))?.default_effort??"high"}',
-].join('\n');
 
 function runPatchScript(config: Parameters<typeof applyClodexPatches>[1], source = CLAUDE_FIXTURE): string {
   return applyClodexPatches(source, config).content;

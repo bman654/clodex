@@ -141,10 +141,26 @@ tweakcc's own repack reads back as an ordinary module name.
   It checks that the binary parses, that the seeded candidate is byte-identical to the release
   (what the content-addressed pristine backup depends on), that the restore leaves no stand-in
   behind, that a repacked Mach-O still verifies under `codesign`, and that the published bytes read
-  back carrying what was written. It does **not** exercise the patch sites, and it cannot tell you
-  the patched binary runs — only a host or containerised `clodex patch` does that. `clodex patch`
-  resolves the version by executing the binary (`getClaudeVersionForBinary`), which is exactly why
-  a foreign binary can go through the probe and not through the real command.
+  back carrying what was written.
+
+  **It also applies every patch site to that build's own bundle** (`scripts/probe-patch-sites.mjs`,
+  which calls the real `applyClodexPatches` with a synthetic config that activates all of them),
+  fails on any `FAIL`, `SKIP`, missing or duplicated site, and repacks **what the transforms
+  produced** rather than the pristine bytes — so the byte-for-byte readback also proves clodex's
+  own emitted patch survives the PE/ELF/Mach-O round trip. Anchors were assumed platform-independent
+  until Claude Code 2.1.238, where `PATCH 5: model picker options` matched five builds and missed
+  `linux-arm64`, `linux-arm64-musl` and `win32-arm64`.
+
+  Two things it still cannot tell you: **that the patched binary runs**, and **that an anchor bound
+  to the function it was aimed at** rather than a lookalike that also emits valid JavaScript. Only a
+  host or containerised `clodex patch` answers the first. `clodex patch` resolves the version by
+  executing the binary (`getClaudeVersionForBinary`), which is exactly why a foreign binary can go
+  through the probe and not through the real command.
+
+  `tests/probe-patch-sites.test.ts` pins the probe's synthetic config and its expected-site list
+  against the real transform set — so a new or renamed `PATCH` site reddens `pnpm test` rather than
+  failing five platforms in the hourly canary. Revisit it whenever you bump
+  `PATCH_TRANSFORMS_VERSION`.
 
 ## Patcher invariants
 

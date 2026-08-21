@@ -401,12 +401,130 @@ case "$FULL" in
   *":warning: *linux-arm64*"*) pass=$((pass + 1)); printf 'ok   %s\n' "a downgraded leg is not shown as a clean tick" ;;
   *) fail=$((fail + 1)); printf 'FAIL a downgraded leg is not shown as a clean tick — got:\n%s\n' "$FULL" ;;
 esac
+# win32 has no container image, so its probe is the strongest leg it can have and keeps its tick.
+# But the tick alone used to be the whole assertion, and that is what let win32-arm64 be reported
+# clean on 2.1.238 while `PATCH 5: model picker options` no longer matched there. A probe now
+# exercises the patch sites, so the tick is earned — and the line must still say what was NOT
+# established, or the tick means more than it should.
 case "$FULL" in
   *":white_check_mark: *win32-x64*"*) pass=$((pass + 1)); printf 'ok   %s\n' "a probe-by-design leg still shows a clean tick" ;;
   *) fail=$((fail + 1)); printf 'FAIL a probe-by-design leg lost its tick — got:\n%s\n' "$FULL" ;;
 esac
+case "$FULL" in
+  *"win32-x64* — bundle patch + binary handling; native execution not checked"*)
+    pass=$((pass + 1)); printf 'ok   %s\n' "a probe-by-design leg discloses that nothing was executed" ;;
+  *) fail=$((fail + 1)); printf 'FAIL a probe-by-design leg discloses that nothing was executed — got:\n%s\n' "$FULL" ;;
+esac
+case "$(matrix_downgrade_notes)" in
+  *"NO patched Linux binary was started"*)
+    pass=$((pass + 1)); printf 'ok   %s\n' "a downgraded leg says what it did and did not cover" ;;
+  *) fail=$((fail + 1)); printf 'FAIL a downgraded leg says what it did and did not cover — got: %s\n' "$(matrix_downgrade_notes)" ;;
+esac
 matrix_check "--no-container is not reported as Docker being down" "0" \
   "$(opt_container=0 matrix_downgrade_notes | grep -c 'Docker was not available')"
+
+# 19b. The probe's verdict, driven through the real evaluate_probe_leg against hand-written
+#      results — the leg itself needs a 300 MB binary, this does not.
+#
+#      This is the blind spot that let Claude Code 2.1.238 through. win32-arm64 has no container
+#      image, so it is always a probe; the probe exercised zero patch sites; `PATCH 5: model
+#      picker options` had stopped matching on that build; and the canary reported win32-arm64 as
+#      a clean pass while reporting the same break on the two Linux builds that DO have images.
+MECHANISM_CHECKS='[{"name":"pristine-parses","ok":true,"detail":"entry module is needs-shim"},
+                   {"name":"read-content","ok":true,"detail":"28147627 bytes of JavaScript"},
+                   {"name":"published-content","ok":true,"detail":"byte-for-byte"}]'
+
+# write_probe_json <file> <verdict> <patch-sites-json> [reasons-json] [extra-check-json]
+write_probe_json() {
+  jq -n --argjson checks "$MECHANISM_CHECKS" --arg verdict "$2" --argjson sites "$3" \
+        --argjson reasons "${4:-[]}" --argjson extra "${5:-null}" \
+    '{label: "win32-arm64", format: "pe", entryState: "needs-shim", shimUsed: true,
+      pristineSize: 322051744, publishedSize: 322133550, growth: 1, detectedVersion: "2.1.238",
+      sourceBytes: 28147627, durationMs: 33016, verdict: $verdict, reasons: $reasons,
+      checks: ($checks + (if $extra == null then [] else [$extra] end)),
+      patchSites: $sites,
+      patchSiteSummary: {applied: ($sites | map(select(.status == "OK")) | length),
+                         skipped: ($sites | map(select(.status == "SKIP")) | length),
+                         failed:  ($sites | map(select(.status == "FAIL")) | length),
+                         total: ($sites | length)}}' > "$1"
+}
+
+ALL_SITES_OK='[{"name":"PATCH 1: Agent tool model enum","status":"OK"},
+               {"name":"PATCH 5: model picker options","status":"OK"},
+               {"name":"PATCH 10: child network environment","status":"OK"}]'
+PATCH5_MISSING='[{"name":"PATCH 1: Agent tool model enum","status":"OK"},
+                 {"name":"PATCH 5: model picker options","status":"FAIL","extra":"anchor not found"},
+                 {"name":"PATCH 10: child network environment","status":"OK"}]'
+
+: > "$TMP/probe.stderr"
+leg_reset
+write_probe_json "$TMP/probe-ok.json" pass "$ALL_SITES_OK"
+evaluate_probe_leg win32-arm64 "$TMP/probe-ok.json" 0 "$TMP/probe.stderr" >/dev/null
+matrix_check "a clean probe passes" "pass" "$LEG_STATUS"
+matrix_check "a clean probe reports no reasons" "" "$LEG_REASONS"
+# Both name spaces, in one map: losing the mechanism checks here would silently retire the
+# regression detection that has watched them since the ELF break.
+matrix_check "a probe records its patch sites alongside its mechanism checks" "OK OK" \
+  "$(printf '%s' "$LEG_SITES" | jq -r '."PATCH 5: model picker options" + " " + ."published-content"')"
+matrix_check "a probe records how many patch sites applied" "3" \
+  "$(printf '%s' "$LEG_DETAIL" | jq -r '.patchSites.applied')"
+
+leg_reset
+write_probe_json "$TMP/probe-p5.json" fail "$PATCH5_MISSING" \
+  '["patch sites FAILED: PATCH 5: model picker options"]' \
+  '{"name":"patch-sites-apply","ok":false,"detail":"patch sites FAILED: PATCH 5: model picker options"}'
+evaluate_probe_leg win32-arm64 "$TMP/probe-p5.json" 1 "$TMP/probe.stderr" >/dev/null
+matrix_check "a probe that loses PATCH 5 FAILS" "fail" "$LEG_STATUS"
+matrix_check "a probe names the patch site it lost" \
+  "- patch sites FAILED: PATCH 5: model picker options" "$(printf '%s' "$LEG_REASONS" | head -1)"
+matrix_check "a failing patch site is recorded as FAIL, not as a missing key" "FAIL" \
+  "$(printf '%s' "$LEG_SITES" | jq -r '."PATCH 5: model picker options"')"
+
+# The old probe: mechanism checks, verdict pass, no patch sites at all. Recording that as a pass
+# is precisely the report that made 2.1.238 look safe on Windows, so it may not be one.
+leg_reset
+jq -n --argjson checks "$MECHANISM_CHECKS" \
+  '{label: "win32-arm64", format: "pe", durationMs: 1, verdict: "pass", reasons: [], checks: $checks}' \
+  > "$TMP/probe-old.json"
+evaluate_probe_leg win32-arm64 "$TMP/probe-old.json" 0 "$TMP/probe.stderr" >/dev/null
+matrix_check "a probe with no patch-site results is never a pass" "error" "$LEG_STATUS"
+case "$LEG_REASONS" in
+  *"patch anchors were not"*) pass=$((pass + 1)); printf 'ok   %s\n' "a probe with no patch-site results says why it is not a verdict" ;;
+  *) fail=$((fail + 1)); printf 'FAIL a probe with no patch-site results says why — got: %s\n' "$LEG_REASONS" ;;
+esac
+
+# 19c. The whole incident, end to end at the matrix level: 2.1.238 lost PATCH 5 on the two arm64
+#      Linux builds AND on win32-arm64. All three must fail, as one grouped cause, and the run
+#      must not earn the green tick.
+write_matrix \
+  "darwin-arm64:host:pass" "darwin-x64:probe:pass" "linux-x64:probe:pass" \
+  "linux-arm64:container:fail:patch sites FAILED: PATCH 5: model picker options" \
+  "linux-x64-musl:probe:pass" \
+  "linux-arm64-musl:container:fail:patch sites FAILED: PATCH 5: model picker options" \
+  "win32-x64:probe:pass" \
+  "win32-arm64:probe:fail:patch sites FAILED: PATCH 5: model picker options"
+matrix_check "2.1.238: win32-arm64 fails with the Linux builds instead of passing beside them" \
+  "linux-arm64 linux-arm64-musl win32-arm64" "$(matrix_platforms fail)"
+matrix_check "2.1.238: one anchor on three builds is one alert line" "1" \
+  "$(matrix_reason_groups | grep -c '^- ')"
+case "$(matrix_reason_groups)" in
+  *"[linux-arm64, linux-arm64-musl, win32-arm64]"*)
+    pass=$((pass + 1)); printf 'ok   %s\n' "2.1.238: the grouped line names all three builds" ;;
+  *) fail=$((fail + 1)); printf 'FAIL 2.1.238 grouped line — got: %s\n' "$(matrix_reason_groups)" ;;
+esac
+# The gate the main flow actually branches on. `coverage_is_complete` is deliberately NOT it: it
+# asks "was every platform tested", and a leg that failed was tested — it is the non-empty reason
+# list that sends the run down the alert path instead of the "safe to update" one.
+if [ -n "$(matrix_reason_groups)" ]; then
+  pass=$((pass + 1)); printf 'ok   %s\n' "2.1.238: a lost patch anchor sends the run down the alert path"
+else
+  fail=$((fail + 1)); printf 'FAIL 2.1.238 produced no reasons, so it would have been announced as safe\n'
+fi
+# And the quieter half of the same failure: a platform recorded as clean becomes next release's
+# baseline, so win32-arm64 passing here would ALSO have taught the canary that a bundle missing
+# PATCH 5 is what win32-arm64 is supposed to look like.
+matrix_check "2.1.238: a build that lost a patch anchor sets no baseline" "" \
+  "$(jq -s -r 'map(select(.status == "pass") | .platform) | map(select(. == "win32-arm64")) | join("")' "$MATRIX")"
 
 # 20. The state machine. These filters decide whether a release is ever retested and whether
 #     regression detection keeps working, so they are driven through the real state_update.
