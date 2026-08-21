@@ -86,17 +86,37 @@ startup notice (`if (n !== "unknown-model") return null`) and the auto-compact s
 labels the source and seeds its initial value differently. Both are **cosmetic**, so `KJe` remains the
 only behavioural gate — but the bundle already renders `model-default` as a first-class label.
 
-## The shared child-environment builder (verified 2.1.221)
+## The shared child-environment builder (verified 2.1.221, re-verified 2.1.239)
 
-`pH()` is the shared child-env builder, with 14 call sites. The split that matters for bridge
-isolation:
+The shared child-env builder — `pH()` in 2.1.221, with 14 call sites there and 16 in every 2.1.239
+build. The split that matters for bridge isolation:
 
-**Its minified name and declarator list change release to release** — `pH()` in 2.1.221, `XH()` in
-2.1.224, `$M()` in 2.1.226, `o1()` in 2.1.228, which also hoisted the settings-colour env into its
-own binding (`r=<mod>.settingsColorEnv`) inside the opening `let`. That is why PATCH 10's anchor
-identifies the function by the landmarks inside its body — the `CLAUDE_CODE_REMOTE` ternary, the
-`INPUT_${…}` deletion tail, and the required-literal check — and tolerates declarator drift ahead of
-the ternary rather than counting bindings.
+**Its minified name, its declarator list and its statements change release to release, and the
+name is not even stable across one release's eight platform builds** — `pH()` in 2.1.221,
+`XH()` in 2.1.224, `$M()` in 2.1.226, `o1()` in 2.1.228, which also hoisted the settings-colour
+env into its own binding (`r=<mod>.settingsColorEnv`) inside the opening `let`,
+`YR()`/`JP()`/`YI()` across the builds of 2.1.238, and `nO()`/`nL()`/`rO()`/`nP()` across the
+builds of 2.1.239, which moved the agent-proxy env behind a registry lookup
+(`sUn.of(lr().host)`), turned the settings-colour binding into a **destructuring** declarator
+(`{settingsColorEnv:n}=e`), added a second computed deny list, and **deleted** the GitHub-Actions
+`INPUT_${…}` scrub from the tail entirely. That is why PATCH 10's anchor identifies the function
+by landmarks inside its body that survive all of that — the `CLAUDE_CODE_REMOTE` ternary, the
+passthrough early-out `)return process.env;let <copy>={` (counted across the whole bundle), the
+back-referenced `return <copy>}` tail, and the required-literal, nested-function and brace-balance
+checks — rather than by counting bindings or by naming a statement upstream is free to delete.
+
+**Two paths overlay the child env AFTER PATCH 10's restore, and neither is inside the builder.**
+The merge is `{...<restored>,...<settingsColour>,...<agentProxy>,...<remote>}`, so the agent-proxy
+helper wins over the reverted values. Its active branch returns Claude Code's own proxy and is
+meant to be authoritative. Its **disabled fallback** is the one to know about: gated on ambient
+`HTTPS_PROXY && SSL_CERT_FILE`, it copies the live ambient proxy variables forward — and under
+clodex the ambient `HTTPS_PROXY` *is* the injection, so the bridge URL reaches the child. Verified
+by executing the real helper against the patched builder on every 2.1.238 and 2.1.239 build.
+Reachability is nil from clodex alone: the helper is only registered under `CLAUDE_CODE_REMOTE`, and
+clodex sets neither that nor `SSL_CERT_FILE` (it sets only `HTTPS_PROXY`, `HTTP_PROXY` and
+`NODE_EXTRA_CA_CERTS`), so both gates need the user's own environment. It is **not** fixable by
+moving PATCH 10's anchor — the gate and the copy both read `process.env` outside the builder's
+matched span — and would need its own patch site or a launch-side guard.
 
 - **Shell-mediated** (reachable from a `.zshenv`-style user snippet): the Bash tool, hooks, subagent
   status line, the shell snapshot/env probe.

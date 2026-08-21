@@ -580,8 +580,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 7,
-      digest: '64e9fc9836e8eda0a6dfa7ab6b77c45838f8df4d38593018f21ea2df122651e0',
+      version: 8,
+      digest: '27786b410c68236925ea247f0ca46eacae3a71e035a7017694be7c0c688abf8b',
     });
   });
 });
@@ -1201,7 +1201,8 @@ function executeChildEnv(
     'extra',
     'flag',
     'remote',
-    // Only the 2.1.228-shaped fixture reads this; the base fixture ignores it.
+    // Only the 2.1.228- and 2.1.239-shaped fixtures read this; the base fixture
+    // ignores it. `getExtra` stands in for the optional call 2.1.239 introduced.
     'settings',
     `${declaration};return childEnv;`,
   )(
@@ -1209,7 +1210,7 @@ function executeChildEnv(
     () => extraEnv,
     () => false,
     () => ({}),
-    { settingsColorEnv: {} },
+    { settingsColorEnv: {}, getExtra: () => extraEnv },
   ) as () => NodeJS.ProcessEnv;
   return childEnv();
 }
@@ -1506,13 +1507,29 @@ describe('patch script identity naming', () => {
     'let e=extra(),t=Object.keys(e).length>0,c=settings.settingsColorEnv,n=Object.keys(c).length>0,',
   );
 
-  // The tolerated run is bounded to `[^;{}]` so it cannot reach out of the `let`
-  // statement it starts in. Widen it to `[\s\S]` and the anchor starts at the
-  // NEAREST preceding function whose head happens to fit, swallowing everything
-  // up to the real builder's tail — so a decoy that opens with the same two
-  // bindings must not be able to steal the match. Without this fixture the only
-  // test that reddens on that mutation is the sha256 transform-source pin, which
-  // is a tripwire, not a behavioural test.
+  // Claude Code 2.1.239 moved BOTH ends of the same builder in one release, and
+  // `clodex patch` refused every one of the eight published builds:
+  //   * head — the agent-proxy env moved behind an optional call on a registry
+  //     lookup (`e.getAgentProxyEnv?.()??{}`) and the settings-colour env became
+  //     a DESTRUCTURING declarator, so the opening `let` now carries braces;
+  //   * tail — the GitHub-Actions input scrub (``delete v[`INPUT_${k}`]``) that
+  //     the anchor ended on was deleted outright.
+  const CLAUDE_FIXTURE_239 = CLAUDE_FIXTURE
+    .replace(
+      'let e=extra(),t=Object.keys(e).length>0,n=Object.keys(e).length>0,',
+      'let h=settings,e=h.getExtra?.()??{},t=Object.keys(e).length>0,'
+      + '{settingsColorEnv:c}=h,n=Object.keys(c).length>0,',
+    )
+    .replace('delete v[k],delete v[`INPUT_${k}`];return v}', 'delete v[k];return v}');
+
+  // The tolerated run admits `[^;{}]` characters or one balanced `{...}` group,
+  // so it cannot reach out of the `let` statement it starts in — consuming the
+  // enclosing function's closing brace would need an UNMATCHED one. Widen it to
+  // `[\s\S]` and the anchor starts at the NEAREST preceding function whose head
+  // happens to fit, swallowing everything up to the real builder's tail — so a
+  // decoy that opens with the same two bindings must not be able to steal the
+  // match. Without this fixture the only test that reddens on that mutation is
+  // the sha256 transform-source pin, which is a tripwire, not a behavioural test.
   const CLAUDE_FIXTURE_DECOY = CLAUDE_FIXTURE_228.replace(
     'function childEnv(){',
     'function zzDecoy(){let q=extra(),w=Object.keys(q).length>0,z=w?1:2;return z}'
@@ -1574,6 +1591,239 @@ describe('patch script identity naming', () => {
     });
     expect(env['NODE_EXTRA_CA_CERTS']).toBeUndefined();
     expect(env[NETWORK_ENV_CONTRACT_VAR]).toBeUndefined();
+  });
+
+  it('patches a child builder whose opening let destructures and whose tail lost a scrub', () => {
+    expect(CLAUDE_FIXTURE_239, 'fixture drifted from the shape this test mutates')
+      .not.toBe(CLAUDE_FIXTURE);
+    expect(CLAUDE_FIXTURE_239, 'the 2.1.239 head rewrite must be present')
+      .toContain('{settingsColorEnv:c}=h');
+    expect(CLAUDE_FIXTURE_239, 'the 2.1.239 tail rewrite must be present')
+      .not.toContain('INPUT_$');
+
+    const result = applyClodexPatches(CLAUDE_FIXTURE_239, config);
+
+    expect(result.results.at(-1)).toEqual({
+      status: 'OK',
+      name: 'PATCH 10: child network environment',
+    });
+    expect(result.content.match(/\/\*ccpatch:child-network-env\*\//g)).toHaveLength(1);
+    expect(result.content).toContain('function childEnv(){/*ccpatch:child-network-env*/');
+    // The rewritten head survives verbatim and the body reads the local copy.
+    expect(result.content).toContain('let h=settings,e=h.getExtra?.()??{}');
+    expect(result.content).toContain('let v={..._clodexChildEnv,...e,...s}');
+  });
+
+  it('restores the original network environment through the destructuring builder', () => {
+    const env = executeChildEnv(runPatchScript(config, CLAUDE_FIXTURE_239), {
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://127.0.0.1:3457',
+      NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
+      [NETWORK_ENV_CONTRACT_VAR]: JSON.stringify({
+        version: 1,
+        original: {
+          HTTPS_PROXY: 'http://corp-proxy.example:8080',
+          NODE_EXTRA_CA_CERTS: null,
+        },
+        injected: {
+          HTTPS_PROXY: 'http://127.0.0.1:3457',
+          NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
+        },
+      }),
+    });
+
+    expect(env).toMatchObject({
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://corp-proxy.example:8080',
+    });
+    expect(env['NODE_EXTRA_CA_CERTS']).toBeUndefined();
+    expect(env[NETWORK_ENV_CONTRACT_VAR]).toBeUndefined();
+  });
+
+  // The passthrough early-out identifies the builder, so a bundle carrying two
+  // of them means clodex can no longer tell which function it is looking at.
+  // `js.match` would silently hand the leftmost one to the anchor.
+  it('refuses to guess when a second child-env passthrough appears in the bundle', () => {
+    const twin = 'function twinEnv(){if(cond)return process.env;let w={...process.env};return w}';
+    const source = CLAUDE_FIXTURE_239.replace('function mcpAllow(){', twin + 'function mcpAllow(){');
+
+    expect(source, 'fixture drifted from the shape this test mutates').toContain(twin);
+    // Without the twin the very same fixture patches, so the refusal below is
+    // attributable to the second passthrough and not to an unrelated mismatch.
+    expect(runPatchScript(config, CLAUDE_FIXTURE_239)).toContain(
+      'function childEnv(){/*ccpatch:child-network-env*/',
+    );
+
+    let thrown: unknown;
+    try {
+      applyClodexPatches(source, config);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(PatchApplyError);
+    expect((thrown as PatchApplyError).message).toBe(
+      'clodex patch: required patch failed: PATCH 10: child network environment',
+    );
+    expect((thrown as PatchApplyError).results.at(-1)).toEqual({
+      status: 'FAIL',
+      name: 'PATCH 10: child network environment',
+      extra: 'child env passthrough appears 2 times (expected 1)',
+    });
+  });
+
+  // Swallowing a NEIGHBOUR is the other direction, and the `}<space>function`
+  // guard in the anchor does not stop it: a neighbour introduced as
+  // `};var x=()=>{` never matches that guard. If upstream ever minifies the
+  // builder's own `return <copy>}` into the comma form `return f(),<copy>}` —
+  // a shape that already occurs 400+ times elsewhere in the real 2.1.239
+  // bundle — the lazy tail runs past the true end and rewrites the neighbour's
+  // `process.env` to a name that is out of scope there, which throws at
+  // runtime. Walking the block is what catches it; without that it reports OK.
+  it('refuses to run past the builder into a neighbouring arrow function', () => {
+    const source = CLAUDE_FIXTURE_239.replace(
+      'for(let k of u)delete v[k];return v}',
+      'for(let k of u)delete v[k];return finalize(),v};var zzNext=()=>{let v={...process.env};return v}',
+    );
+
+    expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE_239);
+    expect(source, 'the neighbour must not be introduced by `function`, or the anchor guard hides the case')
+      .toContain('};var zzNext=()=>{');
+
+    expect(() => runPatchScript(config, source)).toThrow(
+      'clodex patch: child network environment target validation failed',
+    );
+  });
+
+  // The count identifies the builder, so it has to be taken over Claude Code's
+  // own bytes. Earlier sites splice the user's model DISPLAY text into the
+  // bundle, so counting the partly-patched buffer lets a model label decide
+  // whether clodex can patch at all.
+  it('counts the passthrough over the release, not over spliced-in model labels', () => {
+    const withHostileLabel = {
+      'clodex:openai:gpt-5.6-sol': {
+        alias: 'sol',
+        display: 'Sol )return process.env;let x={ (OpenAI)',
+      },
+    };
+
+    const out = applyClodexPatches(CLAUDE_FIXTURE_239, withHostileLabel);
+
+    expect(out.content, 'the label really does reach the bundle')
+      .toContain(')return process.env;let x={');
+    expect(out.results.at(-1)).toEqual({
+      status: 'OK',
+      name: 'PATCH 10: child network environment',
+    });
+    expect(out.content).toContain('function childEnv(){/*ccpatch:child-network-env*/');
+  });
+
+  // A `}` inside a string literal is not a closing brace. Counting `{`/`}` as
+  // characters says otherwise and refuses a builder clodex can patch perfectly
+  // well, so the end-of-function check walks the block instead of tallying.
+  it('patches a child builder that carries a closing brace inside a string', () => {
+    const source = CLAUDE_FIXTURE_239.replace(
+      'for(let k of u)delete v[k];return v}',
+      'let z="}";for(let k of u)delete v[k];return v}',
+    );
+
+    expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE_239);
+
+    const result = applyClodexPatches(source, config);
+
+    expect(result.results.at(-1)).toEqual({
+      status: 'OK',
+      name: 'PATCH 10: child network environment',
+    });
+    expect(result.content).toContain('function childEnv(){/*ccpatch:child-network-env*/');
+    // The whole function was rewritten: nothing after the string brace kept a
+    // live `process.env`, which is what a truncated match would leave behind.
+    expect(result.content).toContain('let v={..._clodexChildEnv,...e,...s}');
+  });
+
+  // The pair that defeats a character tally: a string brace offsets the `{` of a
+  // nested `return <copy>}`, so the tally reads a truncated match as balanced and
+  // the patch reports OK while leaving the rest of the function unrewritten.
+  it('refuses a truncated match that a brace tally would read as balanced', () => {
+    const source = CLAUDE_FIXTURE_239.replace(
+      'for(let k of u)delete v[k];return v}',
+      'let z="}";if(o[0]){return v}for(let k of u)delete v[k];return v}',
+    );
+
+    expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE_239);
+    // Prove the tally really is fooled, so this test cannot pass for some other
+    // reason: over the region a truncated match would capture, `{` and `}` balance.
+    const truncated = source.slice(
+      source.indexOf('function childEnv(){') + 'function childEnv(){'.length,
+      source.indexOf('if(o[0]){return v}') + 'if(o[0]){return v'.length,
+    );
+    expect([...truncated].reduce((d, c) => d + (c === '{' ? 1 : c === '}' ? -1 : 0), 0)).toBe(0);
+
+    expect(() => runPatchScript(config, source)).toThrow(
+      'clodex patch: child network environment target validation failed',
+    );
+  });
+
+  // The tail is found lazily, so a nested `return <copy>}` earlier in the body
+  // would end the match inside the function and the replacement would truncate
+  // it into unparseable JavaScript. Walking the block turns that into a loud
+  // refusal instead.
+  it('refuses a match that would end at a nested return of the merged copy', () => {
+    const source = CLAUDE_FIXTURE_239.replace(
+      'for(let k of u)delete v[k];return v}',
+      'if(o[0]){delete v.CLAUDE_CODE_OAUTH_TOKEN;return v}for(let k of u)delete v[k];return v}',
+    );
+
+    expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE_239);
+    expect(() => runPatchScript(config, source)).toThrow(
+      'clodex patch: child network environment target validation failed',
+    );
+  });
+
+  // The tail is `return <copy>}` with <copy> BACK-REFERENCED from the merged copy
+  // the builder declares. Spell it `return [\w$]+` instead and a nested return of
+  // any OTHER variable ends the match early, which the brace-balance check then
+  // refuses — so a builder clodex can patch today would stop being patchable.
+  it('skips a nested return of a different variable to reach the real tail', () => {
+    const source = CLAUDE_FIXTURE_239.replace(
+      'for(let k of u)delete v[k];return v}',
+      'if(o[0]){delete v.CLAUDE_CODE_OAUTH_TOKEN;return e}for(let k of u)delete v[k];return v}',
+    );
+
+    expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE_239);
+
+    const result = applyClodexPatches(source, config);
+
+    expect(result.results.at(-1)).toEqual({
+      status: 'OK',
+      name: 'PATCH 10: child network environment',
+    });
+    expect(result.content).toContain('function childEnv(){/*ccpatch:child-network-env*/');
+    // The nested early return is inside the patched body, so the match ran past it
+    // to the builder's own closing brace rather than stopping short.
+    expect(result.content).toContain('if(o[0]){delete v.CLAUDE_CODE_OAUTH_TOKEN;return e}');
+  });
+
+  // Each literal is an independent statement about what the target function does.
+  // The anchor alone cannot tell the child-env builder from another function that
+  // merges process.env, so dropping any one of these must refuse rather than
+  // patch a lookalike.
+  it.each([
+    ['the OAuth credential it scrubs', 'CLAUDE_CODE_OAUTH_TOKEN', 'SOMETHING_ELSE_TOKEN'],
+    ['the subscription type it scrubs', 'CLAUDE_CODE_SUBSCRIPTION_TYPE', 'SOMETHING_ELSE_TYPE'],
+    ['the background PTY token it scrubs', 'CLAUDE_BG_PTY_AUTH', 'SOMETHING_ELSE_AUTH'],
+    ['the OTEL prefix it strips', '"OTEL_"', '"UNRELATED_"'],
+    ['the OTEL diagnostic flag it strips', 'CLAUDE_CODE_OTEL_DIAG_STDERR', 'SOMETHING_ELSE_DIAG'],
+  ])('refuses a child builder that no longer references %s', (_name, literal, replacement) => {
+    // Replace EVERY occurrence: the check is `body.includes(literal)`, so one
+    // surviving mention anywhere in the body keeps the guard satisfied and the
+    // test passes without testing anything.
+    const source = CLAUDE_FIXTURE_239.split(literal).join(replacement);
+
+    expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE_239);
+    expect(source, 'no occurrence of the literal may survive').not.toContain(literal);
+    expect(() => runPatchScript(config, source)).toThrow(
+      'clodex patch: child network environment target validation failed',
+    );
   });
 
   it('targets the child builder when a token-bearing function follows it', () => {

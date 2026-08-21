@@ -196,6 +196,53 @@ tweakcc's own repack reads back as an ordinary module name.
   harness over **every platform's** bundle (`scripts/extract-cc-bundles.mjs` reads a foreign binary
   fine), not just this Mac's: the canary's probe legs exercise zero patch sites, so win32-arm64
   recorded a `pass` for the release this broke.
+- **An anchor that spells out a statement upstream can delete is a required patch waiting to fail.**
+  Claude Code 2.1.239 moved BOTH ends of PATCH 10's child-env builder in a single release — the
+  opening `let` gained an optional call and a *destructuring* declarator (`{settingsColorEnv:n}=e`,
+  so the declarator run now carries braces), and the GitHub-Actions input scrub the anchor ended on
+  (``delete p[`INPUT_${f}`]``) was deleted outright. PATCH 10 is required, so every one of the eight
+  published builds refused to patch at all. Neither end was load-bearing for the replacement: what
+  the transform needs is the function's opening brace, its body, and its closing brace. Describe
+  each end by what the builder MEANS and let back-references tie the repeats:
+  * the head runs from `function X(){let ` to the `CLAUDE_CODE_REMOTE` ternary over `[^;{}]`
+    characters **or one balanced `{...}` group** — that admits the destructuring and the `??{}`
+    while still making it impossible to consume the enclosing function's closing brace, which
+    would need an *unmatched* one;
+  * the tail is `return <copy>}` where `<copy>` is **back-referenced** from the merged copy the
+    builder declares (`let <copy>={...process.env,...}`), so it moves with any upstream rename and
+    steps over a nested return of some *other* variable. It does NOT prove the match stopped on
+    the function's own brace — the walk below does that.
+  Identity is carried by the passthrough early-out — `)return process.env;let <copy>={` —
+  counted across the WHOLE bundle before the anchor runs, the same discipline PATCH 5 uses. Over
+  29 real bundles (2.1.208 through all eight 2.1.239 builds) it occurs exactly once and exactly one
+  `<fn>(process.env.CLAUDE_CODE_REMOTE)?` ternary precedes it; on the 21 pre-2.1.239 bundles the
+  widened anchor's matched span is **byte-identical** to the one it replaces, which is what shows
+  this is a widening and not a rebinding. The last line is a postcondition: walk the real block
+  from the function's own `{` and require that it ends exactly where the anchor ended. A lazily
+  found tail can stop in the wrong place in **either** direction and both are silent without it.
+  Short: a nested `return <copy>}` ends the match inside the function, so only part of it is
+  rewritten and live `process.env` reads survive. Long: minify the builder's own final
+  `return <copy>}` into the comma form `return f(),<copy>}` — 400+ of those already exist
+  elsewhere in 2.1.239 — and the tail runs past the true end into a neighbour and rewrites ITS
+  `process.env` to a name out of scope there, which throws at runtime. **Do not credit the
+  `}<space>function` guard with stopping that**: a neighbour introduced as `};var x=()=>{` never
+  matches it. Both shapes were executed against a real 2.1.239 bundle; with the walk they refuse,
+  without it they report `OK`.
+  **Tally `{` and `}` as characters and you get this backwards in both directions**: a single `"}"`
+  in a string refuses a builder that patches fine, and that same string brace offsets the `{` of a
+  nested `return <copy>}` so a truncated match reads as balanced. The walk therefore skips strings,
+  template literals and comments. It reads `/` as division, never as a regex literal — telling
+  those apart needs the grammar. **That is a known limit, not a safe approximation.** A review
+  built `…if(x){var re=/}/;return <copy>}…;return <copy>}`, where the unbalanced `}` inside the
+  regex literal moves the walk's zero-crossing onto the nested return: the truncated match agrees
+  with it and PATCH 10 reports `OK` with a live `process.env` read stranded past the rewritten
+  span. Left as-is deliberately — zero instances across the 29 real bundles, it needs a regex
+  literal no minifier emits here, and closing it means parsing JavaScript. Calibrate it the way
+  this file calibrates PATCH 5's surviving hole: every wrong bind reachable from a shape a real
+  build could emit fails loud.
+  Count the discriminator against the **original source**, not the partly-patched buffer: PATCH 4
+  and PATCH 5 splice user-supplied model display text into the bundle, so counting afterwards lets
+  a model label that happens to contain the signal refuse a patch that would otherwise succeed.
 - **Calibrate a patch-anchor weakness by corpus reachability and by which direction it fails, not
   by whether an attack can be constructed** — one always can, against every site we ship.
   PATCH 5's surviving hole needs upstream to make two coordinated changes at once (respell its own

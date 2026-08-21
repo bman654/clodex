@@ -38,7 +38,7 @@ import {
  * hash of the transform inputs to force that decision to be made rather than
  * forgotten.
  */
-export const PATCH_TRANSFORMS_VERSION = 7;
+export const PATCH_TRANSFORMS_VERSION = 8;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -610,12 +610,41 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // Settings-level overrides therefore remain authoritative, and the builder's
   // existing filtering continues against the resulting copy.
   //
-  // The anchor tolerates extra declarators between the first `Object.keys(...)
-  // .length>0` binding and the `CLAUDE_CODE_REMOTE` ternary: Claude Code 2.1.228
-  // hoisted the settings-colour env into one (`r=<mod>.settingsColorEnv`), which
-  // a fixed declarator count would have read as a missing anchor. `[^;{}]` keeps
-  // the run inside the same `let` statement, and the literal + nested-function
-  // checks below still prove the target really is the child-env builder.
+  // Both ends of the anchor are described by what the builder MEANS, because both
+  // ends have drifted with upstream refactors:
+  //
+  //   * head — Claude Code 2.1.228 hoisted the settings-colour env into its own
+  //     declarator, and 2.1.239 rewrote the whole opening `let` again: the agent
+  //     proxy env moved behind `sUn.of(lr().host)` and the settings-colour env
+  //     became a DESTRUCTURING declarator (`{settingsColorEnv:n}=e`). Spelling
+  //     the declarators out, or forbidding braces in the run between them, read
+  //     both of those as "anchor not found" — and because PATCH 10 is required,
+  //     `clodex patch` then refused to patch the release at all, on every
+  //     platform. So the head run is now "anything up to the CLAUDE_CODE_REMOTE
+  //     ternary, containing no `;` and no unmatched brace": `[^;{}]` characters
+  //     or a single balanced `{...}` group. That still cannot leave the `let`
+  //     statement it starts in, let alone the function — consuming the enclosing
+  //     function's closing `}` would need an unmatched brace.
+  //
+  //   * tail — through 2.1.238 the builder ended by scrubbing GitHub Actions
+  //     inputs (``delete p[`INPUT_${f}`]``); 2.1.239 dropped that entirely. The
+  //     tail is now tied to the merged copy by BACK-REFERENCE: the same variable
+  //     the builder declares for `{...process.env,...}` is the one it returns at
+  //     the end. That is upstream-refactor-proof in a way a named statement is
+  //     not, and it also proves we stopped at the function's own closing brace.
+  //
+  // Identity is carried by the passthrough early-out — `)return process.env;let
+  // <copy>={` — which only the shared child-env builder can mean ("nothing to
+  // change, so hand the parent's own env straight through, otherwise start a
+  // copy"). It is counted across the WHOLE bundle before the anchor runs, so a
+  // second candidate fails loud instead of being silently preferred; over 29
+  // real bundles (2.1.208 through every 2.1.239 build) it occurs exactly once,
+  // and exactly one `<fn>(process.env.CLAUDE_CODE_REMOTE)?` ternary precedes it.
+  // Those two facts together are what pin the head to the real builder.
+  //
+  // The literal, nested-function and brace-balance checks below are the last
+  // line: they reject a match that ends at a nested `return <copy>}` (which
+  // would truncate the function) or that swallowed a neighbour.
   // ---------------------------------------------------------------------------
   {
     const patchName = 'PATCH 10: child network environment';
@@ -631,12 +660,111 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       '"OTEL_"',
       'CLAUDE_CODE_OTEL_DIAG_STDERR',
     ];
+    /**
+     * Index of the `}` closing the block opened at `open`, or -1 if the scan runs
+     * off the end. Braces inside strings, template literals and comments do not
+     * count — a plain `{`/`}` tally does, and a single `"}"` in a string is enough
+     * to make it agree with a match that stopped in the middle of the function.
+     *
+     * A `/` is read as division, never as the start of a regex literal, because
+     * telling those apart needs the grammar. That is a real limit, not a safe
+     * approximation: a review built a builder ending
+     * `…if(x){var re=/}/;return <copy>}…;return <copy>}` where the unbalanced `}`
+     * inside the regex literal moved this walk's zero-crossing onto the NESTED
+     * return, so a truncated match agreed with it and PATCH 10 reported OK with
+     * a live `process.env` read stranded past the rewritten span. It is left
+     * as-is deliberately: no such shape occurs in any of the 29 real bundles
+     * from 2.1.208 to 2.1.239, it needs a regex literal no minifier emits here,
+     * and closing it means parsing JavaScript. Every wrong bind reachable from a
+     * shape a real build could emit fails LOUD instead.
+     */
+    const blockEndIndex = (text: string, open: number): number => {
+      // Each entry is a brace depth; a new entry is pushed on entering `${`.
+      const depths: number[] = [0];
+      const templates: boolean[] = [false];
+      for (let i = open; i < text.length; i++) {
+        const ch = text[i];
+        const inTemplate = templates[templates.length - 1]!;
+        if (inTemplate) {
+          if (ch === '\\') { i++; continue; }
+          if (ch === '`') { templates.pop(); depths.pop(); continue; }
+          if (ch === '$' && text[i + 1] === '{') { templates.push(false); depths.push(0); i++; }
+          continue;
+        }
+        if (ch === '\\') { i++; continue; }
+        if (ch === '"' || ch === "'") {
+          const quote = ch;
+          for (i++; i < text.length; i++) {
+            if (text[i] === '\\') { i++; continue; }
+            if (text[i] === quote) break;
+          }
+          continue;
+        }
+        if (ch === '`') { templates.push(true); depths.push(0); continue; }
+        if (ch === '/' && text[i + 1] === '/') {
+          while (i < text.length && text[i] !== '\n') i++;
+          continue;
+        }
+        if (ch === '/' && text[i + 1] === '*') {
+          i = text.indexOf('*/', i + 2);
+          if (i < 0) return -1;
+          i++;
+          continue;
+        }
+        if (ch === '{') { depths[depths.length - 1]!++; continue; }
+        if (ch === '}') {
+          if (depths[depths.length - 1] === 0 && templates.length > 1) {
+            // Closes a `${…}` and hands control back to the template literal.
+            templates.pop();
+            depths.pop();
+            continue;
+          }
+          depths[depths.length - 1]!--;
+          if (depths.length === 1 && depths[0] === 0) return i;
+        }
+      }
+      return -1;
+    };
+    // Count against the ORIGINAL source, not the partly-patched `js`: PATCH 4 and
+    // PATCH 5 splice user-supplied model display text into the bundle, so counting
+    // afterwards lets a model label that happens to contain this signal refuse a
+    // patch that would otherwise succeed.
+    //
+    // Patching an already-patched bundle rewrites `return process.env` to
+    // `return _clodexChildEnv`, so the count is only meaningful pre-patch —
+    // applyOnce reports SKIP for that case and must still be allowed to.
+    const passthroughSites = source.includes(marker)
+      ? 1
+      : (source.match(/\)return process\.env;let [\w$]+=\{/g) ?? []).length;
+    if (passthroughSites !== 1) {
+      log('FAIL', patchName, 'child env passthrough appears ' + passthroughSites + ' times (expected 1)');
+      fail('clodex patch: required patch failed: ' + patchName);
+    }
     applyOnce(
       patchName,
-      /(function [\w$]+\(\)\{)(let [\w$]+=[\w$]+\(\),[\w$]+=Object\.keys\([\w$]+\)\.length>0,[^;{}]*?[\w$]+=[\w$]+\(process\.env\.CLAUDE_CODE_REMOTE\)\?(?:(?!\}\s*function )[\s\S])*?for\(let [\w$]+ of [\w$]+\)delete [\w$]+\[[\w$]+\],delete [\w$]+\[`INPUT_\$\{[\w$]+\}`\];return [\w$]+)(\})/,
-      (_match, head, body, tail) => {
+      /(function [\w$]+\(\)\{)(let (?:[^;{}]|\{[^;{}]*\})*?[\w$]+\(process\.env\.CLAUDE_CODE_REMOTE\)\?(?:(?!\}\s*function )[\s\S])*?\)return process\.env;let ([\w$]+)=\{(?:(?!\}\s*function )[\s\S])*?return \3)(\})/,
+      (match, head, body, _copyVar, tail) => {
+        // The tail is found lazily, so it can stop in the wrong place in EITHER
+        // direction, and both are silent without this check:
+        //   * short — a nested `return <copy>}` ends the match inside the
+        //     function, so only part of it is rewritten and live `process.env`
+        //     reads survive;
+        //   * long — if the builder's own final `return <copy>}` is ever
+        //     minified to the comma form `return f(),<copy>}` (400+ of those
+        //     already exist elsewhere in 2.1.239), the tail runs past the true
+        //     end into a neighbour and rewrites ITS `process.env` to a name
+        //     that is out of scope there, which throws at runtime. The
+        //     `}<space>function` guard does not stop this: a neighbour written
+        //     `};var x=()=>{` never matches it.
+        // Walking the real block from the function's own `{` rules out both:
+        // the anchor's end must BE the function's end.
+        const at = js.indexOf(match);
+        const bound = at < 0
+          ? -1
+          : blockEndIndex(js, at + head!.length - 1) - at - (match.length - 1);
         const targetIsValid = requiredBodyLiterals.every(literal => body!.includes(literal))
-          && !/\bfunction\s*[\w$]*\(/.test(body!);
+          && !/\bfunction\s*[\w$]*\(/.test(body!)
+          && bound === 0;
         if (!targetIsValid) {
           log('FAIL', patchName, 'target validation failed');
           fail('clodex patch: child network environment target validation failed');
