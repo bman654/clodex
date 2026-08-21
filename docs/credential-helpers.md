@@ -156,13 +156,61 @@ helper delete clodex <account>
 
 The service and account arguments are identifiers, not secrets. Credential
 contents are never passed in arguments or environment variables. Helper
-standard error is not copied into Clodex diagnostics, and output and runtime
-are bounded.
+standard error is drained and discarded rather than copied into Clodex
+diagnostics. Captured standard output is capped at 1 MiB; exceeding it fails
+the operation. Runtime is bounded for the process Clodex starts: at ten seconds
+it is sent `SIGKILL` and the operation fails. Processes that helper starts are
+outside both bounds, so a helper that forks has to bound them itself. See
+[Process lifetime](#process-lifetime).
 
 The helper protocol transports credential bytes without interpreting them.
 For non-OAuth provider references, Clodex preserves valid opaque JSON secrets.
 OAuth references accept only complete OAuth records or well-known token
 records; malformed or unknown JSON is never used as a bearer token.
+
+## Process lifetime
+
+Clodex starts the helper directly, waits at most ten seconds, and enforces that
+limit with `SIGKILL`. That is the only signal Clodex ever sends a helper, and it
+reaches only the process Clodex started. A process that one forked may keep
+running after the credential operation has already failed, usually reparented to
+PID 1, still holding the standard output and standard error it inherited.
+
+A wrapper script around `pass`, `gpg`, or `secret-tool` is the common shape for
+a helper, and it is the shape that forks. Nothing Clodex can send will reach
+what it leaves behind, so the wrapper has to take care of its own descendants:
+
+- **Prefer `exec`.** `exec gpg --decrypt "$path"` replaces the wrapper, so the
+  process Clodex kills is the one doing the work. This removes the wrapper as a
+  layer; it does not constrain the program you exec, whose own children are
+  still outside Clodex's bound.
+- **Give anything you fork a hard deadline.** GNU coreutils `timeout` needs
+  `--kill-after` to be a real bound: plain `timeout 5 cmd` sends `SIGTERM` and
+  then waits forever if `cmd` ignores it, while `timeout --kill-after=1 5 cmd`
+  escalates to `SIGKILL`. Note `timeout` ships with GNU coreutils and is absent
+  from stock macOS and from minimal container images.
+- **Clean up on interrupt by pid, never with `kill 0`.** Ctrl-C does reach the
+  helper: Clodex does not detach it, so it shares Clodex's process group. A
+  handler that
+  signals the whole group also re-signals the wrapper and re-enters itself,
+  which has been observed looping over a thousand times in five seconds. Track
+  what you start and signal that:
+
+  ```sh
+  child=""
+  trap 'kill "$child" 2>/dev/null; exit 143' INT TERM HUP
+  gpg --decrypt "$path" & child=$!
+  wait "$child"
+  ```
+
+  This is worth having, but it is not a substitute for the two points above:
+  `SIGKILL` cannot be trapped, so no handler runs at the ten-second limit.
+
+Prefer a non-interactive credential path. Clodex gives the helper pipes for
+standard input, output, and error, but the controlling terminal is still
+reachable through `/dev/tty`, so a program like `gpg` can still prompt through
+`pinentry`. A helper waiting on a passphrase is a helper waiting out the ten
+seconds.
 
 ## Security responsibilities
 
