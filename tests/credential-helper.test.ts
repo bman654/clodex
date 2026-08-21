@@ -45,6 +45,26 @@ async function waitForPath(path: string): Promise<void> {
   if (!existsSync(path)) throw new Error(`Timed out waiting for ${path}`);
 }
 
+/**
+ * Poll a condition on a clock the fake timers are not driving. Callers under
+ * `vi.useFakeTimers()` cannot use `waitForPath`: its `setTimeout` and `Date.now`
+ * are both faked, so it would spin without ever yielding to the real world.
+ * `performance.now()` keeps advancing, which is what makes the budget a real
+ * wall-clock bound rather than a count of sleeps that each last longer than asked.
+ */
+async function pollOnRealClock(
+  done: () => boolean,
+  sleep: (ms: number) => Promise<void>,
+  budgetMs: number,
+): Promise<boolean> {
+  const deadline = performance.now() + budgetMs;
+  while (performance.now() < deadline) {
+    if (done()) return true;
+    await sleep(5);
+  }
+  return done();
+}
+
 describe('external credential helper', () => {
   let tempDir = '';
 
@@ -273,35 +293,76 @@ describe('external credential helper', () => {
     expect(diagnostics.join('\n')).toContain('does not match the helper that owns this credential');
   });
 
+  // The watchdog that force-kills a hung helper has to be disarmed when the helper
+  // answers in time, or every successful credential read holds the event loop open
+  // for the full timeout and the command appears to hang before it exits.
+  it('disarms the runtime watchdog when the helper answers in time', async () => {
+    await writeCredentialHelperAccount('provider:test', 'value');
+    vi.useFakeTimers();
+    try {
+      await expect(readCredentialHelperAccount('provider:test')).resolves.toBe('value');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('force-kills a helper that exceeds the runtime limit', async () => {
     process.env.CLODEX_TEST_CREDENTIAL_HELPER_MODE = 'hang-ignore-term';
     const storePath = process.env.CLODEX_TEST_CREDENTIAL_HELPER_STORE!;
+    const pidPath = `${storePath}.helper-pid`;
     const realSetTimeout = globalThis.setTimeout;
+    const sleep = (ms: number): Promise<void> =>
+      new Promise(resolve => { realSetTimeout(resolve, ms); });
+    let pid = 0;
     vi.useFakeTimers();
     try {
       const outcome = readCredentialHelperAccount('provider:test').catch(error => error);
-      await new Promise(resolve => realSetTimeout(resolve, 100));
-      const pid = Number.parseInt(readFileSync(`${storePath}.helper-pid`, 'utf8'), 10);
+
+      // Wait for the helper to announce itself instead of guessing how long its
+      // interpreter needs to boot: that took 322ms on an idle machine against the
+      // 100ms this once allowed, and losing the race stranded the helper for the
+      // life of the host rather than merely failing.
+      await pollOnRealClock(() => existsSync(pidPath), sleep, 15_000);
+      // Whole-file match, not `parseInt`: `parseInt('999999junk')` yields a pid this
+      // test would then happily probe, passing on an unrelated process while its own
+      // helper ran on. The range check matters for the same reason -- an over-long
+      // run of digits becomes `Infinity`, which no `process.kill` can ever find.
+      const announced = readFileSync(pidPath, 'utf8').trim();
+      expect(announced).toMatch(/^[1-9][0-9]*$/);
+      pid = Number(announced);
+      expect(Number.isSafeInteger(pid)).toBe(true);
 
       await vi.advanceTimersByTimeAsync(10_001);
       await expect(outcome).resolves.toMatchObject({
         message: 'credential helper get timed out',
       });
 
-      vi.useRealTimers();
-      let running = true;
-      const deadline = Date.now() + 2_000;
-      while (running && Date.now() < deadline) {
+      const exited = await pollOnRealClock(() => {
         try {
           process.kill(pid, 0);
-          await new Promise(resolve => realSetTimeout(resolve, 10));
+          return false;
         } catch {
-          running = false;
+          return true;
+        }
+      }, sleep, 5_000);
+      expect(exited).toBe(true);
+    } finally {
+      // Fire a timeout still pending on the fake clock before that clock is torn
+      // down, so a failure above still reaches the force-kill. Restoring real
+      // timers discards pending fake ones silently, and the helper ignores SIGTERM,
+      // so a skipped kill strands it until the fixture's own 60s fail-safe fires.
+      await vi.advanceTimersByTimeAsync(10_001);
+      vi.useRealTimers();
+      if (Number.isInteger(pid) && pid > 0) {
+        // Unreachable on a passing run: the assertion above is what proves the
+        // helper is already gone.
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // Already reaped, which is the expected outcome.
         }
       }
-      expect(running).toBe(false);
-    } finally {
-      vi.useRealTimers();
     }
-  });
+  }, 30_000);
 });
