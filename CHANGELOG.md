@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.6.3](https://github.com/bman654/clodex/compare/v2.6.2...v2.6.3) (2026-08-21)
+
+
+### Bug Fixes
+
+* **patch:** restore patching on Claude Code 2.1.239 so model aliases and effort settings work again ([#135](https://github.com/bman654/clodex/issues/135)) ([8c7007c](https://github.com/bman654/clodex/commit/8c7007c869945c22b1764a2f29f52a4460f7bf27))
+
 ## [2.6.2](https://github.com/bman654/clodex/compare/v2.6.1...v2.6.2) (2026-08-21)
 
 
