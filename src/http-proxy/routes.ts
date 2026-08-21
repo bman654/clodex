@@ -1,5 +1,6 @@
 import { MAX_MODEL_CATALOG } from '../constants.js';
 import { localModelToRoute } from '../catalog.js';
+import { projectFavoriteExposure } from '../favorites.js';
 import { isSdkMigratedNpm } from '../provider-factory.js';
 import { claudeCodeClientModelId } from '../context-model-id.js';
 import type { ProxyRoute } from '../proxy.js';
@@ -33,6 +34,7 @@ export interface HttpProxyRouteResult {
   routes: ProxyRoute[];
   unavailable: FavoriteModel[];
   unsupported: FavoriteModel[];
+  capacitySkippedFavorites: FavoriteModel[];
   aliases: ResolvedHttpProxyAlias[];
   unavailableAliases: StoredModelAlias[];
 }
@@ -52,14 +54,14 @@ export function buildHttpProxyRoutes(
   modelAliases: unknown = undefined,
   max = MAX_MODEL_CATALOG,
 ): HttpProxyRouteResult {
+  const projection = projectFavoriteExposure(favorites, { max });
   const routes: ProxyRoute[] = [];
   const unavailable: FavoriteModel[] = [];
   const unsupported: FavoriteModel[] = [];
   const seen = new Set<string>();
   const routesByFavorite = new Map<string, ProxyRoute>();
 
-  for (const favorite of favorites) {
-    if (routes.length >= max) break;
+  for (const favorite of projection.exposedFavorites) {
     const provider = providers.find(item => item.id === favorite.providerId);
     const model = provider?.models.find(item => item.id === favorite.modelId);
     if (!provider || !model) {
@@ -115,5 +117,12 @@ export function buildHttpProxyRoutes(
     });
   }
 
-  return { routes, unavailable, unsupported, aliases, unavailableAliases };
+  return {
+    routes,
+    unavailable,
+    unsupported,
+    capacitySkippedFavorites: projection.capacitySkippedFavorites,
+    aliases,
+    unavailableAliases,
+  };
 }

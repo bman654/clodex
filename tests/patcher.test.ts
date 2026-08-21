@@ -229,6 +229,29 @@ describe('buildPatchModelConfig', () => {
       warn.mockRestore();
     }
   });
+
+  it('patches only the first catalog-sized favorite window and rejects aliases beyond it', () => {
+    const manyFavorites = Array.from({ length: 25 }, (_, index) => ({
+      providerId: 'provider',
+      modelId: `model-${index}`,
+    }));
+    const desired = buildPatchModelConfig(
+      manyFavorites,
+      [{ name: 'late', providerId: 'provider', modelId: 'model-20' }],
+      () => ({ contextWindow: 200_000 }),
+    );
+
+    expect(Object.keys(desired.config)).toEqual(
+      manyFavorites.slice(0, 20).map(favorite => (
+        `clodex:${favorite.providerId}:${favorite.modelId}`
+      )),
+    );
+    expect(desired.capacitySkippedFavorites).toEqual(manyFavorites.slice(20));
+    expect(desired.rejectedAliasRejections).toEqual([{
+      alias: { name: 'late', providerId: 'provider', modelId: 'model-20' },
+      reason: 'target-not-exposed',
+    }]);
+  });
 });
 
 describe('buildDesiredPatchConfig', () => {
@@ -390,6 +413,58 @@ describe('buildDesiredPatchConfig', () => {
     expect(readFileSync(join(home, 'providers.json'), 'utf8')).toBe(providersBefore);
   });
 
+  it('does not backfill past a stale retained favorite in the exposure window', () => {
+    const ordinaryFavorites = Array.from({ length: 19 }, (_, index) => ({
+      providerId: 'custom-provider',
+      modelId: `custom-${index}`,
+    }));
+    const staleFavorite = { providerId: 'opencode-go', modelId: 'stale-future-model' };
+    const lateFavorite = { providerId: 'opencode-go', modelId: 'qwen3.8-max' };
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [staleFavorite, ...ordinaryFavorites, lateFavorite],
+      modelAliases: [
+        { name: 'stale', ...staleFavorite },
+        { name: 'late', ...lateFavorite },
+      ],
+    }));
+    writeFileSync(join(home, 'providers.json'), JSON.stringify({
+      schemaVersion: 1,
+      providers: [{
+        id: 'opencode-go',
+        templateId: 'opencode-go',
+        name: 'OpenCode Go',
+        enabled: true,
+        authRef: 'keyring:provider:opencode-go',
+        authType: 'api',
+        api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
+        modelsCache: {
+          fetchedAt: '2026-08-12T00:00:00.000Z',
+          models: [{
+            id: staleFavorite.modelId,
+            name: 'Stale future model',
+            modelFormat: 'openai',
+          }, {
+            id: lateFavorite.modelId,
+            name: 'Qwen 3.8 Max',
+            modelFormat: 'openai',
+          }],
+        },
+        addedAt: '2026-08-12T00:00:00.000Z',
+      }],
+    }));
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(Object.keys(desired.config)).toEqual(
+      ordinaryFavorites.map(favorite => `clodex:${favorite.providerId}:${favorite.modelId}`),
+    );
+    expect(desired.capacitySkippedFavorites).toEqual([lateFavorite]);
+    expect(desired.rejectedAliasRejections).toEqual([
+      { alias: { name: 'stale', ...staleFavorite }, reason: 'target-not-exposed' },
+      { alias: { name: 'late', ...lateFavorite }, reason: 'target-not-exposed' },
+    ]);
+  });
+
   it('preserves the native high default when provider metadata defaults to medium', () => {
     writeInputs({
       id: 'gpt-5.6-sol',
@@ -457,6 +532,46 @@ describe('buildDesiredPatchConfig', () => {
     const desired = buildDesiredPatchConfig();
 
     expect(desired.config['clodex:qiniu-ai:kimi-k2']?.effort).toBeUndefined();
+  });
+
+  it('enforces the Claude-facing cap through the disk-only desired config path', () => {
+    const models = Array.from({ length: 25 }, (_, index) => ({
+      id: `model-${index}`,
+      name: `Model ${index}`,
+      contextWindow: 200_000,
+      modelFormat: 'openai',
+    }));
+    const favorites = models.map(model => ({ providerId: 'openai', modelId: model.id }));
+    writeFileSync(
+      join(home, 'config.json'),
+      JSON.stringify({ favoriteModels: favorites }),
+    );
+    writeFileSync(
+      join(home, 'providers.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        providers: [{
+          id: 'openai',
+          templateId: 'openai',
+          name: 'OpenAI',
+          enabled: true,
+          authRef: 'env:OPENAI_API_KEY',
+          api: { npm: '@ai-sdk/openai' },
+          modelsCache: {
+            fetchedAt: '2026-07-27T00:00:00.000Z',
+            models,
+          },
+          addedAt: '2026-07-27T00:00:00.000Z',
+        }],
+      }),
+    );
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(Object.keys(desired.config)).toEqual(
+      favorites.slice(0, 20).map(favorite => `clodex:${favorite.providerId}:${favorite.modelId}`),
+    );
+    expect(desired.capacitySkippedFavorites).toEqual(favorites.slice(20));
   });
 });
 

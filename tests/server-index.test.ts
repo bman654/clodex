@@ -18,6 +18,7 @@ const state = vi.hoisted(() => ({
   favoritesOnly: false,
   maskGatewayIds: true,
   startMode: 'quick' as 'configure' | 'quick' | null,
+  favoriteModels: [] as Array<{ providerId: string; modelId: string }>,
   modelAliases: [] as Array<{ name: string; providerId: string; modelId: string }>,
   startServerOptions: null as any,
   close: vi.fn<() => Promise<void>>(async () => undefined),
@@ -47,11 +48,11 @@ vi.mock('../src/config.js', () => ({
   getSavedServerPassword: () => state.savedPassword,
   getServerExposedProviders: () => null,
   getServerMaskGatewayIds: () => true,
-  getServerFavoritesOnly: () => false,
+  getServerFavoritesOnly: () => state.favoritesOnly,
   getServerFreeModelsOnly: () => false,
   getServerListenMode: () => state.savedListenMode,
   loadPreferences: () => ({
-    favoriteModels: [],
+    favoriteModels: state.favoriteModels,
     modelAliases: state.modelAliases,
   }),
   setSavedServerPassword: (password: string) => {
@@ -153,6 +154,7 @@ describe('runServerCommand', () => {
     state.favoritesOnly = false;
     state.maskGatewayIds = true;
     state.startMode = 'configure';
+    state.favoriteModels = [];
     state.modelAliases = [];
     state.startServerOptions = null;
     state.close.mockClear();
@@ -288,6 +290,37 @@ describe('runServerCommand', () => {
       });
       expect(state.startServerOptions.catalog.get('orbit')).toBeUndefined();
       expect(state.startServerOptions.catalog.get('archived')).toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('reports exact favorites omitted from a favorites-only catalog at capacity', async () => {
+    state.favoritesOnly = true;
+    state.favoriteModels = [
+      { providerId: 'zen', modelId: 'claude-test' },
+      ...Array.from({ length: 21 }, (_, index) => ({
+        providerId: 'missing',
+        modelId: `model-${index + 1}`,
+      })),
+    ];
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+
+    try {
+      const { runServerCommand } = await import('../src/server/index.js');
+      const result = runServerCommand({ quick: true, noDiscovery: true });
+      await vi.waitFor(() => expect(state.startServerOptions).not.toBeNull());
+      process.emit('SIGINT');
+
+      await expect(result).resolves.toBe(0);
+      expect(warn).toHaveBeenCalledWith(
+        '2 saved favorites not exposed because clodex limits this Claude-facing catalog to 20 models. '
+        + 'Capacity is selected from saved order before availability and support checks; unavailable '
+        + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+        + 'entries reclaims positions. Skipped entries were preserved:\n'
+        + '  clodex:missing:model-20\n'
+        + '  clodex:missing:model-21',
+      );
     } finally {
       warn.mockRestore();
     }

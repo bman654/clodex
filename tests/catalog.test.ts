@@ -39,6 +39,61 @@ describe('buildCatalogRoutes', () => {
     expect(routes).toHaveLength(2);
     expect(droppedFavorites).toEqual([{ providerId: 'zen', modelId: 'claude-sonnet-4' }]);
   });
+
+  it('reserves the starting-model slot and reports capacity omissions in saved order', () => {
+    const favorites = Array.from({ length: 5 }, (_, index) => ({
+      providerId: 'provider',
+      modelId: `model-${index}`,
+    }));
+    const result = buildCatalogRoutes(
+      starting,
+      favorites,
+      (providerId, modelId) => ({
+        ...starting,
+        aliasId: `anthropic-${providerId}__${modelId}`,
+        realModelId: modelId,
+      }),
+      3,
+      { providerId: 'starting-provider', modelId: 'starting-model' },
+    );
+
+    expect(result.routes.map(route => route.aliasId)).toEqual([
+      'claude-sonnet-4',
+      'anthropic-provider__model-0',
+      'anthropic-provider__model-1',
+    ]);
+    expect(result.capacitySkippedFavorites).toEqual(favorites.slice(2));
+  });
+
+  it('keeps the saved launching model off the capacity-selected tail', () => {
+    const startingFavorite = { providerId: 'launch', modelId: 'launch-model' };
+    const favorites = [
+      startingFavorite,
+      ...Array.from({ length: 24 }, (_, index) => ({
+        providerId: 'provider',
+        modelId: `model-${index}`,
+      })),
+    ];
+    const result = buildCatalogRoutes(
+      starting,
+      favorites,
+      (providerId, modelId) =>
+        providerId === startingFavorite.providerId && modelId === startingFavorite.modelId
+          ? starting
+          : {
+              ...starting,
+              aliasId: `anthropic-${providerId}__${modelId}`,
+              realModelId: modelId,
+            },
+      MAX_MODEL_CATALOG,
+      startingFavorite,
+    );
+
+    expect(result.routes).toHaveLength(MAX_MODEL_CATALOG);
+    expect(new Set(result.routes.map(route => route.aliasId)).size).toBe(MAX_MODEL_CATALOG);
+    expect(result.routes.filter(route => route.aliasId === starting.aliasId)).toHaveLength(1);
+    expect(result.capacitySkippedFavorites).toEqual(favorites.slice(MAX_MODEL_CATALOG));
+  });
 });
 
 describe('resolveCatalogModelAliases', () => {
@@ -165,6 +220,27 @@ describe('resolveCatalogModelAliases', () => {
         unavailableReason: 'conflicts with a catalog model id',
       },
     ]);
+  });
+
+  it('keeps an alias inactive when its favorite target is outside the exposed catalog', () => {
+    const targetRoute = {
+      aliasId: 'anthropic-other__model-b',
+      realModelId: 'model-b',
+      displayName: 'Model B',
+      upstreamUrl: 'https://example.com',
+      apiKey: 'key',
+      modelFormat: 'openai' as const,
+    };
+
+    expect(resolveCatalogModelAliases(
+      [{ name: 'later', providerId: 'other', modelId: 'model-b' }],
+      () => targetRoute,
+      [{ aliasId: 'anthropic-other__model-a' }],
+    )).toEqual([{
+      name: 'later',
+      routeId: targetRoute.aliasId,
+      unavailableReason: 'target unavailable',
+    }]);
   });
 
   it('rejects malformed array elements before resolving catalog routes', () => {

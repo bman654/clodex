@@ -1,11 +1,15 @@
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import { loadPreferences } from '../config.js';
-import { DEFAULT_SERVER_PORT } from '../constants.js';
+import { DEFAULT_SERVER_PORT, MAX_MODEL_CATALOG } from '../constants.js';
 import { fetchProviderCatalog, resolveLocalProviderApiKey } from '../provider-catalog.js';
 import { providersForTarget } from '../target-compatibility.js';
 import type { ProxyRoute } from '../proxy.js';
-import { buildHttpProxyRoutes, type HttpProxyRouteResult } from './routes.js';
+import {
+  buildHttpProxyRoutes,
+  httpProxyModelId,
+  type HttpProxyRouteResult,
+} from './routes.js';
 import { startHttpProxy, type HttpProxyHandle, type HttpProxyOptions } from './server.js';
 import { ensureHttpProxyCaBundle } from './ca.js';
 import { registerServerRuntimeState, unregisterServerRuntimeState } from '../server-runtime.js';
@@ -34,6 +38,7 @@ export async function loadHttpProxyRoutes(): Promise<LoadedHttpProxyRoutes> {
       routes: [],
       unavailable: [],
       unsupported: [],
+      capacitySkippedFavorites: [],
       aliases: [],
       unavailableAliases: [
         ...normalizedAliases.rejected,
@@ -87,12 +92,33 @@ export function printHttpProxyModels(
 
 export function reportSkippedHttpProxyFavorites(loaded: LoadedHttpProxyRoutes): void {
   if (loaded.unavailable.length > 0) {
-    p.log.warn(`${loaded.unavailable.length} favorite${loaded.unavailable.length === 1 ? '' : 's'} unavailable or missing credentials.`);
+    p.log.warn(
+      `${loaded.unavailable.length} favorite${loaded.unavailable.length === 1 ? '' : 's'} unavailable or missing credentials. `
+      + 'Saved entries were preserved:\n'
+      + loaded.unavailable
+        .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+        .join('\n'),
+    );
   }
   if (loaded.unsupported.length > 0) {
     p.log.warn(
       `${loaded.unsupported.length} favorite${loaded.unsupported.length === 1 ? '' : 's'} skipped — `
-      + 'HTTP proxy mode supports non-Anthropic AI SDK routes only.',
+      + 'HTTP proxy mode supports non-Anthropic AI SDK routes only. Saved entries were preserved:\n'
+      + loaded.unsupported
+        .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+        .join('\n'),
+    );
+  }
+  if (loaded.capacitySkippedFavorites.length > 0) {
+    p.log.warn(
+      `${loaded.capacitySkippedFavorites.length} saved favorite${loaded.capacitySkippedFavorites.length === 1 ? '' : 's'} `
+      + `not exposed because clodex limits this Claude-facing catalog to ${MAX_MODEL_CATALOG} models. `
+      + 'Capacity is selected from saved order before availability and support checks; unavailable '
+      + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+      + 'entries reclaims positions. Skipped entries were preserved:\n'
+      + loaded.capacitySkippedFavorites
+        .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+        .join('\n'),
     );
   }
   if (loaded.unavailableAliases.length > 0) {

@@ -15,9 +15,7 @@ export interface ResolvedFavorite {
 }
 
 /**
- * Per-surface resolution context. Each surface (Claude, Codex, Server) builds
- * its own context and passes it to resolveFavorite / buildFavoritesList.
- * The resolver is route-shape-agnostic — each caller builds its own route type.
+ * Resolution context consumed by resolveFavorite. The resolver is route-shape-agnostic; callers build their own route type.
  */
 export interface ResolveContext {
   /** When set, call shouldHideModel with this agent to filter blacklisted favorites. */
@@ -60,61 +58,6 @@ export async function resolveFavorite(
   }
 
   return undefined;
-}
-
-export interface BuildFavoritesListOptions {
-  dropEmptyApiKey?: boolean;
-  trackCapacitySkipped?: boolean;
-}
-
-export async function buildFavoritesList(
-  starting: ResolvedFavorite | undefined,
-  favorites: FavoriteModel[],
-  ctx: ResolveContext,
-  max = 20,
-  options: BuildFavoritesListOptions = {},
-): Promise<{
-  resolved: ResolvedFavorite[];
-  droppedFavorites: FavoriteModel[];
-  capacitySkippedFavorites: FavoriteModel[];
-}> {
-  const seen = new Set<string>();
-  const out: ResolvedFavorite[] = [];
-
-  if (starting) {
-    seen.add(`${starting.providerId}::${starting.model.id}`);
-    out.push(starting);
-  }
-
-  const uniqueFavorites = favorites.filter(fav => {
-    const key = `${fav.providerId}::${fav.modelId}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
-  const resolutions = await Promise.all(uniqueFavorites.map(fav => resolveFavorite(fav, ctx)));
-
-  const droppedFavorites: FavoriteModel[] = [];
-  const capacitySkippedFavorites: FavoriteModel[] = [];
-  for (let i = 0; i < uniqueFavorites.length; i++) {
-    const resolved = resolutions[i];
-    if (!resolved || (
-      options.dropEmptyApiKey &&
-      !resolved.apiKey.trim() &&
-      resolved.authType !== 'none'
-    )) {
-      droppedFavorites.push(uniqueFavorites[i]!);
-      continue;
-    }
-    if (out.length < max) {
-      out.push(resolved);
-    } else if (options.trackCapacitySkipped) {
-      capacitySkippedFavorites.push(uniqueFavorites[i]!);
-    }
-  }
-
-  return { resolved: out, droppedFavorites, capacitySkippedFavorites };
 }
 
 export function resolveFirstAvailableFavorite(

@@ -42,10 +42,11 @@ import {
 import { createGatewayModelCatalog } from './models.js';
 import { startServer } from './router.js';
 import {
-  filterServerModelsByFavorites,
+  buildServerFavoriteCatalog,
   filterServerModelsByProviders,
   summarizeServerProviders,
 } from './catalog-filter.js';
+import { httpProxyModelId } from '../http-proxy/routes.js';
 import { selectServerProviders, type ServerProviderOption } from './provider-select.js';
 import { runHttpProxyServerCommand } from '../http-proxy/index.js';
 import {
@@ -412,7 +413,30 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
         p.log.error('Run `clodex models` to add favorites, or turn off favorites-only in the server wizard.');
         return 1;
       }
-      models = filterServerModelsByFavorites(models, favorites).slice(0, MAX_MODEL_CATALOG);
+      const favoriteCatalog = buildServerFavoriteCatalog(models, favorites);
+      models = favoriteCatalog.models;
+      if (favoriteCatalog.unavailableFavorites.length > 0) {
+        p.log.warn(
+          `${favoriteCatalog.unavailableFavorites.length} favorite${favoriteCatalog.unavailableFavorites.length === 1 ? '' : 's'} `
+          + 'not exposed because the target is unavailable under the current provider filter. '
+          + 'Saved entries were preserved:\n'
+          + favoriteCatalog.unavailableFavorites
+            .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+            .join('\n'),
+        );
+      }
+      if (favoriteCatalog.capacitySkippedFavorites.length > 0) {
+        p.log.warn(
+          `${favoriteCatalog.capacitySkippedFavorites.length} saved favorite${favoriteCatalog.capacitySkippedFavorites.length === 1 ? '' : 's'} `
+          + `not exposed because clodex limits this Claude-facing catalog to ${MAX_MODEL_CATALOG} models. `
+          + 'Capacity is selected from saved order before availability and support checks; unavailable '
+          + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+          + 'entries reclaims positions. Skipped entries were preserved:\n'
+          + favoriteCatalog.capacitySkippedFavorites
+            .map(favorite => `  ${httpProxyModelId(favorite.providerId, favorite.modelId)}`)
+            .join('\n'),
+        );
+      }
       if (models.length === 0) {
         spinner.stop(pc.red('No favorite models matched the current provider filter'));
         p.log.error('Adjust favorites with `clodex models` or change exposed providers in the server wizard.');

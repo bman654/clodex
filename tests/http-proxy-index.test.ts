@@ -95,6 +95,7 @@ describe('HTTP proxy startup model list', () => {
       aliases: [],
       unavailable: [],
       unsupported: [],
+      capacitySkippedFavorites: [],
       unavailableAliases: [
         {
           name: ' Orbit ',
@@ -141,6 +142,7 @@ describe('HTTP proxy startup model list', () => {
       }],
       unavailable: [],
       unsupported: [],
+      capacitySkippedFavorites: [],
       unavailableAliases: [],
       favoriteCount: 1,
     };
@@ -249,6 +251,7 @@ describe('HTTP proxy startup model list', () => {
       aliases: [],
       unavailable: [],
       unsupported: [],
+      capacitySkippedFavorites: [],
       unavailableAliases: [
         { name: 'default', providerId: 'openai', modelId: 'model-a' },
         { name: 'Orbit', providerId: 'openai', modelId: 'model-a' },
@@ -268,6 +271,36 @@ describe('HTTP proxy startup model list', () => {
         + '  "ORBIT" — conflicting targets\n'
         + '  "bad:name" — invalid name\n'
         + '  "missing" — target unavailable',
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('reports every favorite omitted by the Claude-facing capacity limit', () => {
+    const warn = vi.spyOn(p.log, 'warn').mockImplementation(() => {});
+    const loaded: LoadedHttpProxyRoutes = {
+      routes: [],
+      aliases: [],
+      unavailable: [],
+      unsupported: [],
+      capacitySkippedFavorites: [
+        { providerId: 'one', modelId: 'model-20' },
+        { providerId: 'two', modelId: 'model-21' },
+      ],
+      unavailableAliases: [],
+      favoriteCount: 22,
+    };
+
+    try {
+      reportSkippedHttpProxyFavorites(loaded);
+      expect(warn).toHaveBeenCalledWith(
+        '2 saved favorites not exposed because clodex limits this Claude-facing catalog to 20 models. '
+        + 'Capacity is selected from saved order before availability and support checks; unavailable '
+        + 'entries keep a position and can leave fewer active models. Removing or reordering those '
+        + 'entries reclaims positions. Skipped entries were preserved:\n'
+        + '  clodex:one:model-20\n'
+        + '  clodex:two:model-21',
       );
     } finally {
       warn.mockRestore();
