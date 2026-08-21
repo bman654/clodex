@@ -11,7 +11,11 @@ if (mode === 'fail' || mode === `fail-${operation}`) process.exit(1);
 if (mode === 'hang-ignore-term') {
   writeFileSync(`${storePath}.helper-pid`, String(process.pid), { encoding: 'utf8', mode: 0o600 });
   process.on('SIGTERM', () => {});
-  setInterval(() => {}, 1_000);
+  // Hang for the test, but bound the hang. A runner that dies without reaching its
+  // cleanup (a vitest timeout, a killed worker) cannot kill this process, and it
+  // ignores SIGTERM by design, so without a fail-safe the leak is permanent. 60s is
+  // far longer than any passing run and far shorter than forever.
+  setTimeout(() => process.exit(9), 60_000);
   await new Promise(() => {});
 }
 
