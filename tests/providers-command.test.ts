@@ -979,6 +979,7 @@ describe('provider command cleanup reconciliation', () => {
     selectMock
       .mockResolvedValueOnce('provider:openai')
       .mockResolvedValueOnce('auth')
+      .mockResolvedValueOnce('native')
       .mockResolvedValueOnce('done');
     authenticateProviderMock.mockImplementation(async () => {
       await queueCredentialDelete(authRef);

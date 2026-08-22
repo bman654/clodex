@@ -405,6 +405,23 @@ function providerLabel(name: string, modelCount: number, enabled: boolean): stri
   return `${fmtEnabledStar(enabled)} ${fmtProvider(name)} ${pc.dim(`(${modelCount} model${modelCount === 1 ? '' : 's'})`)}`;
 }
 
+/** Interactive method picker; Enter keeps the device-code default. Null = cancelled. */
+export async function promptOAuthMethod(): Promise<ProviderAuthMethod | null> {
+  const choice = await p.select({
+    message: 'How do you want to sign in?',
+    initialValue: 'native' as ProviderAuthMethod,
+    options: [
+      { value: 'native', label: 'Device code', hint: 'works everywhere, including SSH/VPS' },
+      { value: 'browser', label: 'Browser', hint: 'for workspaces that disable device code authorization' },
+    ],
+  });
+  if (p.isCancel(choice)) {
+    p.cancel('Cancelled.');
+    return null;
+  }
+  return choice as ProviderAuthMethod;
+}
+
 async function runProvidersAuthWithCleanupState(
   providerId: string,
   method?: ProviderAuthMethod,
@@ -621,7 +638,7 @@ async function runProvidersAddWithCleanupState(
     options.push({
       value: 'oauth',
       label: 'Sign in with ChatGPT (Plus/Pro plan)',
-      hint: 'OAuth device code — no API key needed',
+      hint: 'OAuth (device code or browser) — no API key needed',
     });
   }
   for (const template of listRegistryAddableTemplates(providers)) {
@@ -649,7 +666,9 @@ async function runProvidersAddWithCleanupState(
   }
 
   if (choice === 'oauth') {
-    return runProvidersAuthWithCleanupState('openai', undefined, cleanupState);
+    const method = await promptOAuthMethod();
+    if (method === null) return 0;
+    return runProvidersAuthWithCleanupState('openai', method, cleanupState);
   }
   if (typeof choice === 'string' && choice.startsWith('api:')) {
     return runTemplateAddFlow(choice.slice('api:'.length), cleanupState);
@@ -818,8 +837,10 @@ async function runProviderDetail(id: string): Promise<'back' | 'removed'> {
   }
 
   if (action === 'auth') {
+    const method = await promptOAuthMethod();
+    if (method === null) return 'back';
     await runWithCredentialCleanup(state =>
-      runProvidersAuthWithCleanupState(id, undefined, state));
+      runProvidersAuthWithCleanupState(id, method, state));
     return 'back';
   }
 
@@ -949,7 +970,7 @@ export async function runProvidersHub(): Promise<number> {
 
     const configuredIds = new Set(entries.map(entry => entry.id));
     if (listVisibleOAuthTemplates(configuredIds).length > 0) {
-      options.push({ value: 'auth-menu', label: '→ Sign in with ChatGPT (OAuth)', hint: 'device code' });
+      options.push({ value: 'auth-menu', label: '→ Sign in with ChatGPT (OAuth)', hint: 'device code or browser' });
     } else if (configuredIds.has('openai-oauth')) {
       options.push({
         value: 'auth-account',
@@ -978,8 +999,10 @@ export async function runProvidersHub(): Promise<number> {
       continue;
     }
     if (choice === 'auth-menu') {
+      const method = await promptOAuthMethod();
+      if (method === null) continue;
       await runWithCredentialCleanup(state =>
-        runProvidersAuthWithCleanupState('openai', undefined, state));
+        runProvidersAuthWithCleanupState('openai', method, state));
       continue;
     }
     if (choice === 'auth-account') {
@@ -996,8 +1019,10 @@ export async function runProvidersHub(): Promise<number> {
         },
       });
       if (p.isCancel(name)) continue;
+      const accountMethod = await promptOAuthMethod();
+      if (accountMethod === null) continue;
       await runWithCredentialCleanup(state =>
-        runProvidersAuthWithCleanupState('openai', undefined, state, String(name)));
+        runProvidersAuthWithCleanupState('openai', accountMethod, state, String(name)));
       continue;
     }
     if (typeof choice === 'string' && choice.startsWith('provider:')) {
