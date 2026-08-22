@@ -150,21 +150,21 @@ export async function exchangeOpenAiAuthorizationCode(
   redirectUri: string,
   codeVerifier: string,
 ): Promise<OAuthTokenResponse> {
-  const response = await fetch(`${ISSUER}/oauth/token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
+  return postOAuthRefresh(
+    `${ISSUER}/oauth/token`,
+    new URLSearchParams({
       grant_type: 'authorization_code',
       code,
       redirect_uri: redirectUri,
       client_id: CLIENT_ID,
       code_verifier: codeVerifier,
-    }).toString(),
-  });
-  if (!response.ok) {
-    throw new Error(`OpenAI token exchange failed (${response.status})`);
-  }
-  return response.json() as Promise<OAuthTokenResponse>;
+    }),
+    {
+      contentType: 'form',
+      errorPrefix: 'OpenAI token exchange failed',
+      includeStatus: true,
+    },
+  );
 }
 
 /**
@@ -179,17 +179,25 @@ export async function runOpenAiBrowserFlow(
   const { verifier, challenge } = await generatePkce();
   const state = generateOAuthState();
 
+  const ports = opts?.ports ?? BROWSER_CALLBACK_PORTS;
   let server;
   try {
     server = await startCallbackServer({
-      ports: opts?.ports ?? BROWSER_CALLBACK_PORTS,
+      ports,
       path: BROWSER_CALLBACK_PATH,
       redirectHost: 'localhost',
+      expectedState: state,
     });
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') {
+      throw new Error(
+        `Ports ${ports.join(' and ')} are in use — close any other OpenAI sign-in `
+        + '(e.g. codex login) and try again.',
+      );
+    }
     throw new Error(
-      `Ports ${BROWSER_CALLBACK_PORTS.join(' and ')} are in use — close any other OpenAI sign-in `
-      + '(e.g. codex login) and try again.',
+      `Could not start the OAuth callback listener: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
     );
   }
 
@@ -198,6 +206,7 @@ export async function runOpenAiBrowserFlow(
     const params = await server.waitForCallback(opts?.timeoutMs);
     if (params.error) throw new Error(`OpenAI sign-in failed: ${params.error}`);
     if (!params.code) throw new Error('OpenAI sign-in returned no authorization code');
+    // Defense in depth: the callback server already filters on expectedState.
     if (params.state !== state) {
       throw new Error('OpenAI sign-in returned a mismatched state — try again');
     }
