@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import http from 'node:http';
 import {
+  buildOpenAiAuthorizeUrl,
   extractOpenAiAccountId,
   refreshOpenAiAccessToken,
+  runOpenAiBrowserFlow,
   runOpenAiDeviceCodeFlow,
 } from '../src/oauth/openai.js';
 
@@ -69,6 +72,93 @@ describe('oauth/openai', () => {
       } as Response);
 
       await expect(refreshOpenAiAccessToken('refresh_123')).rejects.toThrow(/OpenAI token refresh failed \(401\)/);
+    });
+  });
+
+  describe('buildOpenAiAuthorizeUrl', () => {
+    it('builds the PKCE authorize URL with the registered client id', () => {
+      const url = new URL(buildOpenAiAuthorizeUrl('http://localhost:1455/auth/callback', 'chal', 'st4te'));
+      expect(url.origin).toBe('https://auth.openai.com');
+      expect(url.pathname).toBe('/oauth/authorize');
+      expect(url.searchParams.get('response_type')).toBe('code');
+      expect(url.searchParams.get('client_id')).toBe('app_EMoamEEZ73f0CkXaXp7hrann');
+      expect(url.searchParams.get('redirect_uri')).toBe('http://localhost:1455/auth/callback');
+      expect(url.searchParams.get('scope')).toBe('openid profile email offline_access');
+      expect(url.searchParams.get('code_challenge')).toBe('chal');
+      expect(url.searchParams.get('code_challenge_method')).toBe('S256');
+      expect(url.searchParams.get('state')).toBe('st4te');
+    });
+  });
+
+  describe('runOpenAiBrowserFlow', () => {
+    function hitCallback(authorizeUrl: string, query: (state: string) => string): void {
+      const redirect = new URL(new URL(authorizeUrl).searchParams.get('redirect_uri')!);
+      const state = new URL(authorizeUrl).searchParams.get('state')!;
+      http.get(`http://127.0.0.1:${redirect.port}${redirect.pathname}?${query(state)}`);
+    }
+
+    it('exchanges the callback code for tokens', async () => {
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ access_token: 'browser_access', refresh_token: 'browser_refresh' }),
+      } as Response);
+
+      let seenUrl = '';
+      const result = await runOpenAiBrowserFlow(({ url }) => {
+        seenUrl = url;
+        hitCallback(url, state => `code=auth_code_1&state=${encodeURIComponent(state)}`);
+      }, { ports: [0] });
+
+      expect(result.tokens.access_token).toBe('browser_access');
+      const [exchangeUrl, exchangeInit] = vi.mocked(global.fetch).mock.calls[0]!;
+      expect(exchangeUrl).toBe('https://auth.openai.com/oauth/token');
+      const body = new URLSearchParams(String((exchangeInit as RequestInit).body));
+      expect(body.get('grant_type')).toBe('authorization_code');
+      expect(body.get('code')).toBe('auth_code_1');
+      expect(body.get('redirect_uri')).toBe(new URL(seenUrl).searchParams.get('redirect_uri'));
+      expect(body.get('code_verifier')).toBeTruthy();
+    });
+
+    it('rejects a callback with a mismatched state', async () => {
+      await expect(runOpenAiBrowserFlow(({ url }) => {
+        hitCallback(url, () => 'code=auth_code_1&state=forged');
+      }, { ports: [0] })).rejects.toThrow(/mismatched state/);
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('rejects when the provider returns an error instead of a code', async () => {
+      await expect(runOpenAiBrowserFlow(({ url }) => {
+        hitCallback(url, state => `error=access_denied&state=${encodeURIComponent(state)}`);
+      }, { ports: [0] })).rejects.toThrow(/access_denied/);
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('reports busy ports instead of a raw bind error', async () => {
+      const blockers = await Promise.all([1455, 1457].map(port =>
+        new Promise<http.Server>((resolve, reject) => {
+          const srv = http.createServer();
+          srv.once('error', reject);
+          srv.listen(port, '127.0.0.1', () => resolve(srv));
+        }),
+      ));
+      try {
+        await expect(runOpenAiBrowserFlow(vi.fn())).rejects.toThrow(/1455 and 1457 are in use/);
+      } finally {
+        for (const srv of blockers) srv.close();
+      }
+    });
+
+    it('times out when the browser never completes sign-in', async () => {
+      await expect(runOpenAiBrowserFlow(vi.fn(), { ports: [0], timeoutMs: 50 }))
+        .rejects.toThrow(/OAuth timeout/);
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('throws on a failed token exchange', async () => {
+      vi.mocked(global.fetch).mockResolvedValueOnce({ ok: false, status: 400 } as Response);
+      await expect(runOpenAiBrowserFlow(({ url }) => {
+        hitCallback(url, state => `code=auth_code_1&state=${encodeURIComponent(state)}`);
+      }, { ports: [0] })).rejects.toThrow(/token exchange failed \(400\)/);
     });
   });
 

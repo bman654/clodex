@@ -200,6 +200,14 @@ export function printOAuthStepsPanel(title: string, providerLabel: string): void
   ]);
 }
 
+export function printOAuthBrowserPanel(title: string, providerLabel: string): void {
+  printPanel(pc.cyan(title), [
+    `${pc.white('1. Sign in on the page that opens in your browser')}`,
+    `${pc.white('2. Approve access for ')}${fmtProvider(providerLabel)}`,
+    `${pc.white('3. Return to this terminal')}`,
+  ]);
+}
+
 
 export function printGatewayMaskPanel(): void {
   printPanel(pc.cyan('Claude Desktop / Cowork'), [

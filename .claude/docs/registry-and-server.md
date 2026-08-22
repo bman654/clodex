@@ -6,7 +6,8 @@
 
 `src/registry/`. The shipped registry has three provider templates in `src/provider-templates.ts`:
 `openai` (API key), `openai-oauth`, and `opencode-go`. `provider-auth.ts` implements the OpenAI
-device-code OAuth flow; `refresh-models.ts` fetches the model list (3-tier fetch for OAuth).
+OAuth sign-in (device code by default; browser PKCE via `--browser` for workspaces that disable
+device codes); `refresh-models.ts` fetches the model list (3-tier fetch for OAuth).
 Materialization (`materialize.ts`) turns registry providers into `LocalProvider`s with per-model
 `npm`/`baseUrl`/`upstreamModelId`.
 

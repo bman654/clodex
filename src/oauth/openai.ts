@@ -1,14 +1,20 @@
 // openai.ts — native OpenAI ChatGPT Plus/Pro OAuth (device code, ported from OpenCode)
 
-import { positiveSecondsToMs, sleepMs } from './pkce.js';
+import { generatePkce, generateOAuthState, positiveSecondsToMs, sleepMs } from './pkce.js';
 import type { OAuthTokenResponse } from './types.js';
 import { VERSION } from '../constants.js';
 import { postOAuthRefresh } from './refresh-http.js';
+import { startCallbackServer } from './callback-server.js';
 
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 const ISSUER = 'https://auth.openai.com';
 const OAUTH_POLLING_SAFETY_MARGIN_MS = 3_000;
 const DEVICE_CODE_DEFAULT_EXPIRES_MS = 5 * 60 * 1000;
+// The only redirect URIs registered for this client id (shared with the Codex
+// CLI): http://localhost:{1455|1457}/auth/callback. Any other port is rejected
+// by auth.openai.com, so the callback server must win one of these two.
+const BROWSER_CALLBACK_PORTS = [1455, 1457] as const;
+const BROWSER_CALLBACK_PATH = '/auth/callback';
 
 export interface OpenAiIdTokenClaims {
   chatgpt_account_id?: string;
@@ -122,6 +128,84 @@ export async function refreshOpenAiAccessToken(refreshToken: string): Promise<OA
       includeStatus: true,
     },
   );
+}
+
+export function buildOpenAiAuthorizeUrl(redirectUri: string, challenge: string, state: string): string {
+  const qs = new URLSearchParams({
+    response_type: 'code',
+    client_id: CLIENT_ID,
+    redirect_uri: redirectUri,
+    scope: 'openid profile email offline_access',
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+    id_token_add_organizations: 'true',
+    codex_cli_simplified_flow: 'true',
+    state,
+  });
+  return `${ISSUER}/oauth/authorize?${qs.toString()}`;
+}
+
+export async function exchangeOpenAiAuthorizationCode(
+  code: string,
+  redirectUri: string,
+  codeVerifier: string,
+): Promise<OAuthTokenResponse> {
+  const response = await fetch(`${ISSUER}/oauth/token`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: redirectUri,
+      client_id: CLIENT_ID,
+      code_verifier: codeVerifier,
+    }).toString(),
+  });
+  if (!response.ok) {
+    throw new Error(`OpenAI token exchange failed (${response.status})`);
+  }
+  return response.json() as Promise<OAuthTokenResponse>;
+}
+
+/**
+ * Browser PKCE sign-in — for ChatGPT workspaces whose admin has disabled
+ * device-code authorization. Needs a browser that can reach this machine's
+ * loopback, so it does not work over plain SSH.
+ */
+export async function runOpenAiBrowserFlow(
+  onAuthorizeUrl: (info: { url: string }) => void,
+  opts?: { ports?: readonly number[]; timeoutMs?: number },
+): Promise<{ tokens: OAuthTokenResponse; accountId?: string }> {
+  const { verifier, challenge } = await generatePkce();
+  const state = generateOAuthState();
+
+  let server;
+  try {
+    server = await startCallbackServer({
+      ports: opts?.ports ?? BROWSER_CALLBACK_PORTS,
+      path: BROWSER_CALLBACK_PATH,
+      redirectHost: 'localhost',
+    });
+  } catch {
+    throw new Error(
+      `Ports ${BROWSER_CALLBACK_PORTS.join(' and ')} are in use — close any other OpenAI sign-in `
+      + '(e.g. codex login) and try again.',
+    );
+  }
+
+  try {
+    onAuthorizeUrl({ url: buildOpenAiAuthorizeUrl(server.redirectUri, challenge, state) });
+    const params = await server.waitForCallback(opts?.timeoutMs);
+    if (params.error) throw new Error(`OpenAI sign-in failed: ${params.error}`);
+    if (!params.code) throw new Error('OpenAI sign-in returned no authorization code');
+    if (params.state !== state) {
+      throw new Error('OpenAI sign-in returned a mismatched state — try again');
+    }
+    const tokens = await exchangeOpenAiAuthorizationCode(params.code, server.redirectUri, verifier);
+    return { tokens, accountId: extractOpenAiAccountId(tokens) };
+  } finally {
+    server.close();
+  }
 }
 
 export async function runOpenAiDeviceCodeFlow(
