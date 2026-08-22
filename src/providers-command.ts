@@ -128,6 +128,7 @@ export function parseProvidersArgs(args: string[]): {
     for (let i = 0; i < rest.length; i++) {
       const arg = rest[i]!;
       if (arg === '--native') authMethod = 'native';
+      else if (arg === '--browser') authMethod = 'browser';
       else if (arg === '--account') {
         const value = rest[i + 1];
         if (!value || value.startsWith('-')) {
@@ -173,7 +174,7 @@ ${pc.bold('Usage:')}
 ${pc.bold('Subcommands:')}
   (none)      Provider hub wizard
   add         Add a built-in provider or sign in with ChatGPT
-  auth        Sign in with ChatGPT/Codex-plan OAuth (device code)
+  auth        Sign in with ChatGPT/Codex-plan OAuth (device code, or --browser)
   list        Show configured providers
   remove      Remove a provider by id
   refresh-models  Update cached model lists`;

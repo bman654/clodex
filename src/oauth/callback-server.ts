@@ -11,6 +11,15 @@ export interface CallbackParams {
   error?: string;
 }
 
+export interface CallbackServerOptions {
+  /** Fixed ports to try in order; default [0] (ephemeral). */
+  ports?: readonly number[];
+  /** Only accept this callback path; default '/callback' and '/oauth/callback'. */
+  path?: string;
+  /** Hostname used in redirectUri; default '127.0.0.1'. */
+  redirectHost?: string;
+}
+
 export interface CallbackServer {
   port: number;
   redirectUri: string;
@@ -26,13 +35,16 @@ const SUCCESS_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Au
 <p style="color:#666">You can close this tab and return to the terminal.</p>
 </div></body></html>`;
 
-export async function startCallbackServer(): Promise<CallbackServer> {
+export async function startCallbackServer(options: CallbackServerOptions = {}): Promise<CallbackServer> {
   let codeResolve: ((p: CallbackParams) => void) | undefined;
   let codeReject: ((e: Error) => void) | undefined;
+  // The browser can hit the callback before waitForCallback arms the promise.
+  let buffered: CallbackParams | undefined;
 
+  const acceptedPaths = options.path ? [options.path] : ['/callback', '/oauth/callback'];
   const server = http.createServer((req, res) => {
     const u = new URL(req.url ?? '/', 'http://localhost');
-    if (u.pathname !== '/callback' && u.pathname !== '/oauth/callback') {
+    if (!acceptedPaths.includes(u.pathname)) {
       res.writeHead(404); res.end(); return;
     }
     const code = u.searchParams.get('code') ?? '';
@@ -40,21 +52,41 @@ export async function startCallbackServer(): Promise<CallbackServer> {
     const error = u.searchParams.get('error') ?? '';
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
     res.end(SUCCESS_HTML);
-    codeResolve?.({ code, state, error: error || undefined });
+    const params: CallbackParams = { code, state, error: error || undefined };
+    if (codeResolve) codeResolve(params);
+    else buffered ??= params;
   });
 
-  const address = await listenTcpServer(server, 0, '127.0.0.1');
+  const ports = options.ports?.length ? options.ports : [0];
+  let address: Awaited<ReturnType<typeof listenTcpServer>> | undefined;
+  let lastError: unknown;
+  for (const port of ports) {
+    try {
+      address = await listenTcpServer(server, port, '127.0.0.1');
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!address) throw lastError ?? new Error('OAuth callback server could not bind');
+
+  const redirectHost = options.redirectHost ?? '127.0.0.1';
   return {
     port: address.port,
-    redirectUri: `http://127.0.0.1:${address.port}/callback`,
+    redirectUri: `http://${redirectHost}:${address.port}${options.path ?? '/callback'}`,
     waitForCallback(timeoutMs = 300_000) {
       return new Promise<CallbackParams>((resolve, reject) => {
-        codeResolve = resolve;
-        codeReject = reject;
-        setTimeout(
+        if (buffered) {
+          resolve(buffered);
+          buffered = undefined;
+          return;
+        }
+        const timer = setTimeout(
           () => reject(new Error('OAuth timeout — browser closed without completing sign-in')),
           timeoutMs,
         );
+        codeResolve = params => { clearTimeout(timer); resolve(params); };
+        codeReject = err => { clearTimeout(timer); reject(err); };
       });
     },
     close() { server.close(); codeReject?.(new Error('Server closed')); },

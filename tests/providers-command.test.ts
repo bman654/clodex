@@ -138,6 +138,12 @@ describe('parseProvidersArgs', () => {
       removeId: 'openai',
       authMethod: 'native',
     });
+    expect(parseProvidersArgs(['auth', 'openai', '--browser'])).toEqual({
+      subcommand: 'auth',
+      showHelp: false,
+      removeId: 'openai',
+      authMethod: 'browser',
+    });
   });
 
   it('rejects the removed import subcommand', () => {

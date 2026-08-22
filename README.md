@@ -30,7 +30,7 @@ clodex claude                  # 5. launch Claude Code on an OpenAI model
 ```
 
 1. **Install** — puts the `clodex` command on your PATH.
-2. **Sign in** — opens a device-code OAuth flow for your ChatGPT/Codex plan; the token is stored in your OS credential store. (API-key users: `clodex providers add` instead.)
+2. **Sign in** — opens a device-code OAuth flow for your ChatGPT/Codex plan; the token is stored in your OS credential store. If your workspace admin has disabled device code authorization, add `--browser` to sign in through your browser instead. (API-key users: `clodex providers add` instead.)
 3. **Pick models** — an interactive manager for favorites (max 20) and short aliases like `sol` so you do not need to type the long names. Favorites drive the `/model` switch menu, proxy-mode routing, and the patcher.
 4. **Patch** *(optional but recommended for proxy mode)* — bakes your favorites and aliases into the Claude Code binary so they pass model validation, appear in `/model`, and report their real context windows. Re-run after each `claude` update; `clodex patch --restore` undoes it. This step is required if you want to use clodex-routed models as subagents via the Agent tool.
 5. **Launch** — starts Claude Code bridged to the model you choose.
@@ -273,7 +273,7 @@ Two things worth knowing about the numbers:
 | --- | --- |
 | *(none)* | Provider hub wizard |
 | `add` | Add OpenAI or OpenCode Go with an API key, or sign in with ChatGPT |
-| `auth openai` | Sign in with ChatGPT/Codex-plan OAuth (device code) |
+| `auth openai` | Sign in with ChatGPT/Codex-plan OAuth (device code; `--browser` for workspaces that disable device codes) |
 | `list` | Show configured providers |
 | `remove <id>` | Remove a provider by id |
 | `refresh-models [id]` | Update cached model lists |

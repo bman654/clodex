@@ -21,6 +21,7 @@ const journalState = vi.hoisted(() => ({
 
 vi.mock('../src/ui.js', () => ({
   printOAuthStepsPanel: vi.fn(),
+  printOAuthBrowserPanel: vi.fn(),
 }));
 vi.mock('../src/oauth/openai.js', () => ({
   runOpenAiDeviceCodeFlow: vi.fn(async () => ({
@@ -30,6 +31,14 @@ vi.mock('../src/oauth/openai.js', () => ({
       expires_in: 3600,
     },
     accountId: 'acct-123',
+  })),
+  runOpenAiBrowserFlow: vi.fn(async () => ({
+    tokens: {
+      access_token: 'openai-browser-access',
+      refresh_token: 'openai-browser-refresh',
+      expires_in: 3600,
+    },
+    accountId: 'acct-browser',
   })),
 }));
 vi.mock('../src/env.js', async importOriginal => {
@@ -128,7 +137,7 @@ import {
   resolveProviderCredential,
   saveProviderCredential,
 } from '../src/env.js';
-import { runOpenAiDeviceCodeFlow } from '../src/oauth/openai.js';
+import { runOpenAiBrowserFlow, runOpenAiDeviceCodeFlow } from '../src/oauth/openai.js';
 import { reconcilePendingCredentialDeletes } from '../src/registry/credential-lifecycle.js';
 import * as cleanupJournal from '../src/registry/credential-cleanup-journal.js';
 import { loadRegistryStrict, saveRegistry } from '../src/registry/io.js';
@@ -182,6 +191,10 @@ describe('authenticateProvider', () => {
     vi.mocked(runOpenAiDeviceCodeFlow).mockReset().mockResolvedValue({
       tokens: { access_token: 'openai-access', refresh_token: 'openai-refresh', expires_in: 3600 },
       accountId: 'acct-123',
+    });
+    vi.mocked(runOpenAiBrowserFlow).mockReset().mockResolvedValue({
+      tokens: { access_token: 'openai-browser-access', refresh_token: 'openai-browser-refresh', expires_in: 3600 },
+      accountId: 'acct-browser',
     });
     vi.mocked(refreshProviderModels).mockReset().mockResolvedValue({
       id: 'openai-oauth',
@@ -657,6 +670,15 @@ describe('authenticateProvider', () => {
     expect(result.credential.access).toBe('openai-access');
     expect(result.registryProvider.name).toBe('OpenAI (ChatGPT)');
     expect(result.registryProvider.authRef).toBe(credentialRef);
+  });
+
+  it('runs the browser PKCE flow instead of device code when method is browser', async () => {
+    const result = await authenticateProvider('openai', { method: 'browser' });
+
+    expect(runOpenAiBrowserFlow).toHaveBeenCalled();
+    expect(runOpenAiDeviceCodeFlow).not.toHaveBeenCalled();
+    expect(result.providerId).toBe('openai-oauth');
+    expect(result.credential.access).toBe('openai-browser-access');
   });
 
   it('stops before device authorization when the credential store preflight fails', async () => {

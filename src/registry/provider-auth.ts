@@ -1,6 +1,6 @@
 // provider-auth.ts — clodex providers auth (native OpenAI device-code flow)
 
-import { printOAuthStepsPanel } from '../ui.js';
+import { printOAuthBrowserPanel, printOAuthStepsPanel } from '../ui.js';
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import open from 'open';
@@ -12,7 +12,7 @@ import {
 } from '../env.js';
 import { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
 import { credentialInstanceAuthRef } from '../credential-helper.js';
-import { runOpenAiDeviceCodeFlow } from '../oauth/openai.js';
+import { runOpenAiBrowserFlow, runOpenAiDeviceCodeFlow } from '../oauth/openai.js';
 import {
   supportsNativeOAuth,
   tokensToStoredCredential,
@@ -44,7 +44,7 @@ import {
 
 export type { StoredOAuthCredential } from '../oauth/types.js';
 
-export type ProviderAuthMethod = 'native';
+export type ProviderAuthMethod = 'native' | 'browser';
 
 export interface ProviderAuthOptions {
   method?: ProviderAuthMethod;
@@ -94,6 +94,28 @@ async function runNativeDeviceCode(providerId: NativeOAuthProviderId): Promise<S
       p.log.info(`Enter code: ${pc.bold(userCode)}`);
       openBrowser(url);
       spinner.start('Waiting for authorization...');
+    });
+    spinner.stop(pc.green('Signed in to OpenAI ChatGPT'));
+    return tokensToStoredCredential(tokens, undefined, accountId);
+  } catch (err) {
+    spinner.stop('');
+    throw err;
+  }
+}
+
+async function runNativeBrowserSignIn(providerId: NativeOAuthProviderId): Promise<StoredOAuthCredential> {
+  const label = PROVIDER_DISPLAY[providerId];
+  printOAuthBrowserPanel(`${label} — Sign in`, label);
+
+  const spinner = p.spinner();
+  spinner.start('Opening your browser...');
+
+  try {
+    const { tokens, accountId } = await runOpenAiBrowserFlow(({ url }) => {
+      spinner.stop('');
+      p.log.info(`If the browser did not open, visit: ${pc.cyan(url)}`);
+      openBrowser(url);
+      spinner.start('Waiting for sign-in in your browser...');
     });
     spinner.stop(pc.green('Signed in to OpenAI ChatGPT'));
     return tokensToStoredCredential(tokens, undefined, accountId);
@@ -379,7 +401,9 @@ export async function authenticateProvider(
     );
   }
 
-  const cred = await runNativeDeviceCode(providerId);
+  const cred = options.method === 'browser'
+    ? await runNativeBrowserSignIn(providerId)
+    : await runNativeDeviceCode(providerId);
   const persisted = await persistNativeOAuthCredential(providerId, cred, accountName);
 
   const refreshSpinner = p.spinner();
@@ -430,10 +454,16 @@ export function providerAuthHelpText(): string {
 
 ${pc.bold('Usage:')}
   clodex providers auth openai
+  clodex providers auth openai --browser
   clodex providers auth openai --account work
 
 ${pc.bold('Device code (works on SSH/VPS):')}
   openai   ChatGPT Plus/Pro (device code at auth.openai.com/codex/device)
+
+${pc.bold('Browser sign-in:')}
+  --browser   sign in through your browser instead of a device code — use this
+              when your workspace admin has disabled device code authorization.
+              Needs a local browser, so it does not work over plain SSH.
 
 ${pc.bold('Named accounts:')}
   --account <name>   store an additional ChatGPT account under a named slot
