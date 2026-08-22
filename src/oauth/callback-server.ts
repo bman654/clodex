@@ -14,10 +14,12 @@ export interface CallbackParams {
 export interface CallbackServerOptions {
   /** Fixed ports to try in order; default [0] (ephemeral). */
   ports?: readonly number[];
-  /** Only accept this callback path; default '/callback' and '/oauth/callback'. */
-  path?: string;
-  /** Hostname used in redirectUri; default '127.0.0.1'. */
-  redirectHost?: string;
+  /** The callback path registered with the provider; the only path accepted. */
+  path: string;
+  /** Loopback hostname used in redirectUri and bound by the listener. */
+  redirectHost: 'localhost' | '127.0.0.1';
+  /** Only accept callbacks carrying this OAuth state. */
+  expectedState?: string;
 }
 
 export interface CallbackServer {
@@ -35,23 +37,37 @@ const SUCCESS_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Au
 <p style="color:#666">You can close this tab and return to the terminal.</p>
 </div></body></html>`;
 
-export async function startCallbackServer(options: CallbackServerOptions = {}): Promise<CallbackServer> {
+const FAILURE_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Sign-in failed</title></head>
+<body style="font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0">
+<div style="text-align:center;padding:2rem;background:#fff;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.1)">
+<div style="color:#ef4444;font-size:2.5rem">&#10007;</div>
+<h1 style="margin:.5rem 0">Sign-in failed</h1>
+<p style="color:#666">Return to the terminal for details.</p>
+</div></body></html>`;
+
+export async function startCallbackServer(options: CallbackServerOptions): Promise<CallbackServer> {
   let codeResolve: ((p: CallbackParams) => void) | undefined;
   let codeReject: ((e: Error) => void) | undefined;
   // The browser can hit the callback before waitForCallback arms the promise.
   let buffered: CallbackParams | undefined;
 
-  const acceptedPaths = options.path ? [options.path] : ['/callback', '/oauth/callback'];
+  const { path, redirectHost } = options;
   const server = http.createServer((req, res) => {
     const u = new URL(req.url ?? '/', 'http://localhost');
-    if (!acceptedPaths.includes(u.pathname)) {
+    if (u.pathname !== path) {
       res.writeHead(404); res.end(); return;
     }
     const code = u.searchParams.get('code') ?? '';
     const state = u.searchParams.get('state') ?? '';
     const error = u.searchParams.get('error') ?? '';
+    if (options.expectedState !== undefined && state !== options.expectedState) {
+      res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+      res.end('Invalid OAuth state');
+      return;
+    }
+    const failed = Boolean(error) || !code;
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-    res.end(SUCCESS_HTML);
+    res.end(failed ? FAILURE_HTML : SUCCESS_HTML);
     const params: CallbackParams = { code, state, error: error || undefined };
     if (codeResolve) codeResolve(params);
     else buffered ??= params;
@@ -62,7 +78,7 @@ export async function startCallbackServer(options: CallbackServerOptions = {}): 
   let lastError: unknown;
   for (const port of ports) {
     try {
-      address = await listenTcpServer(server, port, '127.0.0.1');
+      address = await listenTcpServer(server, port, redirectHost);
       break;
     } catch (error) {
       lastError = error;
@@ -70,10 +86,9 @@ export async function startCallbackServer(options: CallbackServerOptions = {}): 
   }
   if (!address) throw lastError ?? new Error('OAuth callback server could not bind');
 
-  const redirectHost = options.redirectHost ?? '127.0.0.1';
   return {
     port: address.port,
-    redirectUri: `http://${redirectHost}:${address.port}${options.path ?? '/callback'}`,
+    redirectUri: `http://${redirectHost}:${address.port}${path}`,
     waitForCallback(timeoutMs = 300_000) {
       return new Promise<CallbackParams>((resolve, reject) => {
         if (buffered) {
