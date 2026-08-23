@@ -110,6 +110,10 @@ describe('oauth/openai', () => {
       });
     }
 
+    function redirectUriHost(authorizeUrl: string): string {
+      return new URL(new URL(authorizeUrl).searchParams.get('redirect_uri')!).host;
+    }
+
     it('exchanges the callback code for tokens', async () => {
       vi.mocked(global.fetch).mockResolvedValueOnce({
         ok: true,
@@ -221,6 +225,42 @@ describe('oauth/openai', () => {
       } finally {
         for (const srv of blockers) srv.close();
         dns.setDefaultResultOrder(previousOrder);
+      }
+    });
+
+    it('treats a port held on the other loopback family as taken and falls back', async () => {
+      // A foreign listener on the loopback family our bind does NOT take would
+      // receive the browser's localhost redirect while our bind "succeeds" and
+      // the flow hangs until timeout.
+      const { address: boundFamily } = await dns.promises.lookup('localhost');
+      const otherFamily = boundFamily === '::1' ? '127.0.0.1' : '::1';
+      const squatter = http.createServer();
+      try {
+        await new Promise<void>((resolve, reject) => {
+          squatter.once('error', reject);
+          squatter.listen(0, otherFamily, resolve);
+        });
+      } catch {
+        squatter.close();
+        return; // Single-family host: the mismatch this test pins cannot occur.
+      }
+      const squattedPort = (squatter.address() as { port: number }).port;
+
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ access_token: 'browser_access' }),
+      } as Response);
+
+      let advertisedPort = 0;
+      try {
+        const result = await runOpenAiBrowserFlow(({ url }) => {
+          advertisedPort = Number(redirectUriHost(url).split(':')[1]);
+          void hitCallback(url, state => `code=auth_code_1&state=${encodeURIComponent(state)}`);
+        }, { ports: [squattedPort, 0], timeoutMs: 5_000 });
+        expect(advertisedPort).not.toBe(squattedPort);
+        expect(result.tokens.access_token).toBe('browser_access');
+      } finally {
+        squatter.close();
       }
     });
 

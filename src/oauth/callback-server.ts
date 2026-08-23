@@ -3,7 +3,7 @@
 // This is only used when running `clodex providers auth <provider>` without the GUI.
 
 import http from 'node:http';
-import { listenTcpServer } from '../listener-ready.js';
+import { listenTcpServer, waitForTcpListener } from '../listener-ready.js';
 
 export interface CallbackParams {
   code: string;
@@ -45,6 +45,16 @@ const FAILURE_HTML = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Si
 <p style="color:#666">Return to the terminal for details.</p>
 </div></body></html>`;
 
+const LOOPBACK_PROBE_TIMEOUT_MS = 250;
+
+async function isLoopbackPortTaken(port: number): Promise<boolean> {
+  const probes = await Promise.all(['127.0.0.1', '::1'].map(host =>
+    waitForTcpListener(host, port, LOOPBACK_PROBE_TIMEOUT_MS)
+      .catch(() => false),
+  ));
+  return probes.some(Boolean);
+}
+
 export async function startCallbackServer(options: CallbackServerOptions): Promise<CallbackServer> {
   let codeResolve: ((p: CallbackParams) => void) | undefined;
   let codeReject: ((e: Error) => void) | undefined;
@@ -77,6 +87,15 @@ export async function startCallbackServer(options: CallbackServerOptions): Promi
   let address: Awaited<ReturnType<typeof listenTcpServer>> | undefined;
   let lastError: unknown;
   for (const port of ports) {
+    // 'localhost' binds one loopback family, but the browser may resolve the
+    // other; a foreign listener there would swallow the redirect while our
+    // bind "succeeds". Treat a port answering on either family as taken.
+    if (port !== 0 && redirectHost === 'localhost' && await isLoopbackPortTaken(port)) {
+      const busy: NodeJS.ErrnoException = new Error(`listen EADDRINUSE: address already in use localhost:${port}`);
+      busy.code = 'EADDRINUSE';
+      lastError = busy;
+      continue;
+    }
     try {
       address = await listenTcpServer(server, port, redirectHost);
       break;
