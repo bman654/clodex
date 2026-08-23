@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createHash } from 'node:crypto';
 import dns from 'node:dns';
 import http from 'node:http';
 import {
@@ -129,7 +130,10 @@ describe('oauth/openai', () => {
       expect(body.get('grant_type')).toBe('authorization_code');
       expect(body.get('code')).toBe('auth_code_1');
       expect(body.get('redirect_uri')).toBe(new URL(seenUrl).searchParams.get('redirect_uri'));
-      expect(body.get('code_verifier')).toBeTruthy();
+      const verifier = body.get('code_verifier')!;
+      // PKCE binding: the exchanged verifier must hash to the advertised challenge.
+      expect(createHash('sha256').update(verifier).digest('base64url'))
+        .toBe(new URL(seenUrl).searchParams.get('code_challenge'));
     });
 
     it('ignores a mismatched callback before accepting a valid one', async () => {
@@ -200,24 +204,22 @@ describe('oauth/openai', () => {
       const previousOrder = dns.getDefaultResultOrder();
       // Make localhost resolve away from 127.0.0.1 so a hardcoded IPv4 bind misses the blockers.
       dns.setDefaultResultOrder('ipv6first');
+      // Retain server objects before awaiting listens so a partial bind never leaks.
+      const blockers = [http.createServer(), http.createServer()];
       try {
         const { address } = await dns.promises.lookup('localhost');
         // Ephemeral blockers so the test never claims OpenAI's real 1455/1457.
-        const blockers = await Promise.all([0, 0].map(port =>
-          new Promise<http.Server>((resolve, reject) => {
-            const srv = http.createServer();
+        await Promise.all(blockers.map(srv =>
+          new Promise<void>((resolve, reject) => {
             srv.once('error', reject);
-            srv.listen(port, address, () => resolve(srv));
+            srv.listen(0, address, resolve);
           }),
         ));
         const busyPorts = blockers.map(srv => (srv.address() as { port: number }).port);
-        try {
-          await expect(runOpenAiBrowserFlow(vi.fn(), { ports: busyPorts, timeoutMs: 200 }))
-            .rejects.toThrow(new RegExp(`${busyPorts[0]} and ${busyPorts[1]} are in use`));
-        } finally {
-          for (const srv of blockers) srv.close();
-        }
+        await expect(runOpenAiBrowserFlow(vi.fn(), { ports: busyPorts, timeoutMs: 200 }))
+          .rejects.toThrow(new RegExp(`${busyPorts[0]} and ${busyPorts[1]} are in use`));
       } finally {
+        for (const srv of blockers) srv.close();
         dns.setDefaultResultOrder(previousOrder);
       }
     });
