@@ -1000,6 +1000,69 @@ describe('provider command cleanup reconciliation', () => {
   });
 });
 
+describe('hub OAuth method picker', () => {
+  let home: string;
+  const prevHome = process.env.CLODEX_HOME;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'clodex-oauth-picker-'));
+    process.env.CLODEX_HOME = home;
+    selectMock.mockReset();
+    authenticateProviderMock.mockReset();
+    logSuccessMock.mockReset();
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.CLODEX_HOME;
+    else process.env.CLODEX_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('forwards the picked browser method to authenticateProvider', async () => {
+    selectMock
+      .mockResolvedValueOnce('auth-menu')
+      .mockResolvedValueOnce('browser')
+      .mockResolvedValueOnce('done');
+    authenticateProviderMock.mockResolvedValue({
+      registryProvider: openaiEntry({ id: 'openai-oauth', name: 'OpenAI (ChatGPT)' }),
+      credentialCleanupPending: false,
+    });
+
+    await expect(runProvidersCommand([])).resolves.toBe(0);
+
+    expect(authenticateProviderMock).toHaveBeenCalledOnce();
+    expect(authenticateProviderMock).toHaveBeenCalledWith(
+      'openai',
+      expect.objectContaining({ method: 'browser' }),
+    );
+  });
+
+  it('keeps device code as the picker default so Enter preserves today\'s behavior', async () => {
+    selectMock
+      .mockResolvedValueOnce('auth-menu')
+      .mockResolvedValueOnce('native')
+      .mockResolvedValueOnce('done');
+    authenticateProviderMock.mockResolvedValue({
+      registryProvider: openaiEntry({ id: 'openai-oauth', name: 'OpenAI (ChatGPT)' }),
+      credentialCleanupPending: false,
+    });
+
+    await expect(runProvidersCommand([])).resolves.toBe(0);
+
+    const pickerCall = selectMock.mock.calls[1]?.[0] as {
+      initialValue?: string;
+      options: Array<{ value: string }>;
+    };
+    expect(pickerCall.initialValue).toBe('native');
+    expect(pickerCall.options.map(option => option.value)).toEqual(['native', 'browser']);
+    expect(authenticateProviderMock).toHaveBeenCalledWith(
+      'openai',
+      expect.objectContaining({ method: 'native' }),
+    );
+  });
+});
+
 describe('providers add menu', () => {
   let home: string;
   const prevHome = process.env.CLODEX_HOME;
