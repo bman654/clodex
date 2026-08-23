@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.8.0](https://github.com/bman654/clodex/compare/v2.7.0...v2.8.0) (2026-08-23)
+
+
+### Features
+
+* **auth:** add browser sign-in for workspaces that disable device codes ([#141](https://github.com/bman654/clodex/issues/141)) ([6db13fa](https://github.com/bman654/clodex/commit/6db13fa2197b2e7ddea9f6196210fa9dd4babe8e))
+
 ## [2.7.0](https://github.com/bman654/clodex/compare/v2.6.3...v2.7.0) (2026-08-21)
 
 
