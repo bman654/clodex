@@ -170,6 +170,7 @@ ${pc.bold('Usage:')}
   clodex providers remove <id>
   clodex providers refresh-models [id]
   clodex providers auth openai
+  clodex providers auth openai --browser
 
 ${pc.bold('Subcommands:')}
   (none)      Provider hub wizard

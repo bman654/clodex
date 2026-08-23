@@ -7,7 +7,11 @@
 `src/registry/`. The shipped registry has three provider templates in `src/provider-templates.ts`:
 `openai` (API key), `openai-oauth`, and `opencode-go`. `provider-auth.ts` implements the OpenAI
 OAuth sign-in (device code by default; browser PKCE via `--browser` for workspaces that disable
-device codes); `refresh-models.ts` fetches the model list (3-tier fetch for OAuth).
+device codes). Interactive entry points that don't take flags — the providers hub's auth and
+add-account actions, the provider detail menu, `providers add`'s OAuth path, and the first-run
+wizard — ask instead through `promptOAuthMethod` (`providers-command.ts`), a device-code/browser
+picker whose Enter default is device code; the chosen method is forwarded to
+`authenticateProvider`. `refresh-models.ts` fetches the model list (3-tier fetch for OAuth).
 Materialization (`materialize.ts`) turns registry providers into `LocalProvider`s with per-model
 `npm`/`baseUrl`/`upstreamModelId`.
 

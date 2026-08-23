@@ -160,6 +160,7 @@ describe('parseProvidersArgs', () => {
     expect(help).toContain('providers remove');
     expect(help).toContain('refresh-models');
     expect(help).toContain('auth openai');
+    expect(help).toContain('auth openai --browser');
     expect(help).not.toContain('import');
     expect(help).toContain('built-in provider');
   });
