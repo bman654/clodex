@@ -87,13 +87,23 @@ the whole-bundle count guards in PATCH 5 and PATCH 10 look at.
   module, because a pre-split blob carries five loader-1 helper stubs beside it — verified on 18
   binaries from 2.1.208 to 2.1.241, all six-module, entry first. For a built-in that is inert
   (measured on a real 2.1.232: no anchor and no count-guard text in any of the five), but a LOCAL
-  patch that appends or prepends by position rather than matching an anchor now lands in a
-  different module than it used to. README says so where a local-patch author will see it.
+  patch that APPENDS by position rather than matching an anchor now lands in a different module
+  than it used to — the end of the joined document is the last helper stub, not the end of the
+  entry. Prepending is unchanged on those releases, because they are all entry-first; on a split
+  build neither end is the entry. README says so where a local-patch author will see it.
 - **A repoint is a write AFTER tweakcc's repack, which signs on its way out.** Restoring the
   entry-module name re-signs and covers the normal path; `resignMachOBinary` covers the binary that
   needed no shim. Skip either and macOS refuses to start the result.
 - Bun runs the module SOURCE, not the bytecode that sits beside it — verified on a real 2.1.243
   build, see `claude-code-internals.md`. Without that, none of this would have any effect.
+  **That guarantee has no automated coverage and cannot get any**: 1,377 of the 1,391 module
+  structs on a real darwin-arm64 2.1.243 carry a non-empty bytecode range (and a matching
+  `moduleInfo` and `bytecodeOriginPath`), while `repointBunModuleContents` rewrites only the
+  `contents` pair — so after a patch every chunk points at new source beside its pre-patch
+  compiled form. The blob fixture writes empty bytecode ranges for every module, so there is
+  nothing stale for a test to trip over. This is the one place where fixture and implementation
+  share an assumption the fixture cannot falsify; re-check it with the probe on a real binary
+  whenever the write path changes.
 
 ## The entry-module shim (`bun-entry-module.ts`)
 

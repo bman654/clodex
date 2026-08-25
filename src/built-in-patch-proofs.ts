@@ -119,7 +119,7 @@ export function captureBuiltInPatchProofs(
   // postconditions" — the same drift PATCH 4's own anchor had to absorb.
   addPattern(
     'PATCH 4: Agent tool model description',
-    /describe\(`Optional model override for this agent[^`]*?`/,
+    /describe\(`Optional model override for this agent(?:[^`\\]|\\.)*?`/,
   );
 
   const aliases = configuredAliases(config);

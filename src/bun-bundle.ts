@@ -51,12 +51,19 @@ export function writableModuleIndex(path: string): number | null {
  * What the modules are joined with: a line-delimited block comment, so the joined document stays
  * parseable JavaScript and reads as a boundary to anyone looking at it.
  *
- * The punctuation inside it is not decoration. Every built-in anchor bounds its wildcards with a
- * character class — `[^`]*?` in PATCH 4, `[^{}]*` in PATCH 6, `[^;{}]` in PATCH 5, `[^"]+` in the
- * alias arrays, `[^\]]*` in PATCH 7 — and a separator those classes accept is one they can match
- * ACROSS, binding a patch to a span that belongs to two modules at once. Carrying one of each
- * makes that impossible by construction rather than by inspection. They are inside a comment, so
- * none of them mean anything to JavaScript.
+ * The punctuation inside it is not decoration. Nearly every built-in anchor bounds its wildcards
+ * with a character class — `` (?:[^`\]|\.)*? `` in PATCH 4, `[^{}]*` in PATCH 6, `[^;{}]` in
+ * PATCH 5, `[^"]+` in the alias arrays, `[^\]]*` in PATCH 7 — and a separator those classes
+ * accept is one they can match ACROSS, binding a patch to a span that belongs to two modules at
+ * once. Carrying one of each makes that impossible by construction rather than by inspection.
+ * They are inside a comment, so none of them mean anything to JavaScript.
+ *
+ * It is NOT a whole-file invariant, and do not write one down: PATCH 10's anchor and its proof
+ * bound their wildcards with a negative lookahead (`(?:(?!\}\s*function )[\s\S])*?`) rather
+ * than a class, so those two CAN run across this separator. PATCH 10 is safe for its own reason —
+ * it separately validates that the end it matched is the starting function's real block end, which
+ * rejects a cross-module bind — and local patches are trusted code that may use any regex at all.
+ * The punctuation is what protects the class-bounded majority; it is not a proof about every site.
  *
  * `splitBundleSource` still counts the separators back out, because a patch that DELETED one would
  * be caught by nothing else.
@@ -90,6 +97,11 @@ export function readClaudeBundle(path: string): ClaudeBundle | null {
   return { modules, source: modules.map(module => module.source).join(BUNDLE_MODULE_SEPARATOR) };
 }
 
+// Only the U+FFFD half is independently pinned, and that is not an oversight: `byteLength` is the
+// length of the very bytes `source` was decoded from, so the length comparison can only differ
+// when the decode inserted a replacement character — which the second half already catches. It is
+// kept as belt-and-braces against a future reader path that supplies the two from different
+// places. Do not write a test claiming to pin it alone; no input can trip it alone.
 function roundTripsAsUtf8(source: string, byteLength: number): boolean {
   return Buffer.byteLength(source, 'utf8') === byteLength && !source.includes('\uFFFD');
 }

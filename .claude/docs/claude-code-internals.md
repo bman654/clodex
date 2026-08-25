@@ -28,10 +28,12 @@ skipping any it has already extracted. It uses clodex's own tweakcc dependency f
 `readClaudeBundle` for the JavaScript, which is why it has to run from inside this repo, where
 `node_modules` resolves.
 
-**Since 2.1.242 the file it writes is a JOIN of every JavaScript module**, separated by
-`/*clodex:module-boundary*/` lines — the same document `clodex patch` matches its anchors against.
-Do not go back to tweakcc's `readContent` for this: it returns only the module it recognizes by
-name, which since 2.1.242 is a ~20 KB stub holding none of Claude Code's behaviour.
+**The file it writes is a JOIN of every JavaScript module**, separated by
+``/*clodex:module-boundary`;{}"]*/`` lines — the same document `clodex patch` matches its anchors
+against. That is true of every version, not only the split ones: a pre-2.1.242 binary carries the
+bundle plus five ~2 KB helper modules, so its extract is a six-module join. Since 2.1.242 it is
+roughly 1,380. Do not go back to tweakcc's `readContent` for this: it returns only the module it
+recognizes by name, which since 2.1.242 is a ~20 KB stub holding none of Claude Code's behaviour.
 
 Extract from a **pristine** `.orig` backup, never a patched live binary: a patched claude reports
 its version perfectly well, so the only thing distinguishing them is the patch marker.

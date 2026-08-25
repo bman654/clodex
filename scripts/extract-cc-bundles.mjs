@@ -27,10 +27,29 @@ import {
   copyFileSync,
   rmSync,
 } from 'node:fs';
+import { registerHooks } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { inspectEntryModule, shimEntryModuleName } from '../src/bun-entry-module.ts';
-import { readClaudeBundle } from '../src/bun-bundle.ts';
+
+// `src/` spells its own imports the TypeScript way — `./bun-entry-module.js` for a file that is
+// really `./bun-entry-module.ts`. tsup and vitest understand that; bare `node` does not, and
+// resolves it to a file that does not exist. bun-entry-module.ts imports nothing relative, which is
+// why the static import above works; bun-bundle.ts does, so it is loaded dynamically BELOW this
+// hook — a static import would be resolved before this line ever runs. Same pattern, and the same
+// reason, as scripts/probe-patch-mechanism.mjs.
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier.startsWith('.') && specifier.endsWith('.js') && context.parentURL) {
+      const candidate = new URL(`${specifier.slice(0, -3)}.ts`, context.parentURL);
+      if (candidate.protocol === 'file:' && existsSync(candidate)) {
+        return nextResolve(candidate.href, context);
+      }
+    }
+    return nextResolve(specifier, context);
+  },
+});
+const { readClaudeBundle } = await import('../src/bun-bundle.ts');
 
 const args = process.argv.slice(2);
 if (args.includes('-h') || args.includes('--help')) {

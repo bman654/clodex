@@ -583,7 +583,7 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
       version: 9,
-      digest: '16f99bc4a9cf55f59119268ca7bc4d8a3c4ef688b61b894f5349286456f0da8e',
+      digest: '035f6e47ba23d35432405deb64b7b3a91c759fd528d1a1862ff5e1549d30fdfe',
     });
   });
 });
@@ -2405,6 +2405,32 @@ describe('patch script identity naming', () => {
 
     expect(out).toContain('case"constructor":return "constructor";');
     expect(out).toContain('{value:"constructor",label:"Constructor",description:"Model"}');
+  });
+
+  it('splices the model list at the template\'s real close even when it holds an escaped backtick', () => {
+    // The anchor ends at the template's closing backtick and deliberately says nothing about what
+    // FOLLOWS it — requiring `)` is exactly what drifted when 2.1.242 started concatenating a
+    // conditional sentence onto the same string. But a wildcard that stops at the first backtick
+    // BYTE stops mid-escape on a description containing `` \` ``, and splicing there turns the
+    // once-escaped backtick into a live terminator: a syntax error in a module Bun loads at
+    // startup. The wildcard skips backslash pairs so it cannot stop there.
+    //
+    // No shipped release has an escaped backtick here, so this pins a corner that must stay
+    // fail-safe rather than one that fires today.
+    const escaped = CLAUDE_FIXTURE.replace(
+      'Optional model override for this agent',
+      'Optional model override for this agent, or \\` inherit \\` instead',
+    );
+    expect(escaped, 'fixture drifted from the shape this test rewrites').not.toBe(CLAUDE_FIXTURE);
+
+    const out = applyClodexPatches(escaped, config);
+    expect(out.results.find(r => r.name.startsWith('PATCH 4'))!.status).toBe('OK');
+    // The addition lands after the LAST segment of the description, not after the backslash.
+    expect(out.content).toContain('inherit \\` instead. Defaults to inherit. Additional custom models:');
+    // ...and the result is still parseable JavaScript: the template still has exactly one opener
+    // and one closer, so nothing after it became live tokens.
+    const described = /describe\(`(?:[^`\\]|\\.)*`/.exec(out.content)![0];
+    expect(() => new Function('describe', `return ${described});`)).not.toThrow();
   });
 
   it('is idempotent — re-running the same patch changes nothing', () => {

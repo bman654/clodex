@@ -25,6 +25,8 @@ import {
 } from '../src/bun-entry-module.js';
 import { closeSync, openSync, writeSync } from 'node:fs';
 import { buildFakeNativeClaude, parseBunBlob, rebuildFakeNativeClaude } from './bun-blob-fixture.js';
+import { applyClodexPatches } from '../src/patch-transforms.js';
+import { CLAUDE_FIXTURE } from './fixtures/claude-bundle.js';
 
 /**
  * Table positions and bundle positions are DIFFERENT NUMBERS, and this fixture is built so they
@@ -150,6 +152,32 @@ describe('readClaudeBundle', () => {
     });
   });
 
+  it('stops an anchor binding across a boundary, which a punctuation-free separator would not', () => {
+    // The BEHAVIOURAL version of the assertion below, and the reason the punctuation is there. A
+    // module whose text ends mid-template — a shape a code-split chunk can genuinely have — is
+    // joined ahead of the real bundle.
+    //
+    // With a plain `/*clodex:module-boundary*/` separator, PATCH 4's wildcard runs from the stray
+    // `describe(` ACROSS the boundary and the replacement consumes the span between them, so the
+    // real Agent-tool description is DESTROYED — what is left is `describe(` with its template
+    // opener eaten — and the site still reports OK. The boundary count is unchanged, the split
+    // succeeds and the read-back succeeds, so nothing else in the pipeline notices.
+    const stray = 'var stray=describe(`Optional model override for this agent. Truncated';
+    const config = { 'clodex:openai:m': { alias: 'luna', display: 'Luna' } };
+    const across = (separator: string) => {
+      const out = applyClodexPatches([stray, CLAUDE_FIXTURE].join(separator), config);
+      return {
+        status: out.results.find(result => result.name.startsWith('PATCH 4'))!.status,
+        // The template opener the real module owned, eaten by a match that started in the stray.
+        mangled: out.content.includes('describe( '),
+      };
+    };
+    expect(across('\n/*clodex:module-boundary*/\n')).toEqual({ status: 'OK', mangled: true });
+    // The separator carries a backtick, so it closes the stray template instead of being crossed:
+    // the anchor finds two candidates and refuses rather than corrupting a module it never owned.
+    expect(across(BUNDLE_MODULE_SEPARATOR)).toEqual({ status: 'FAIL', mangled: false });
+  });
+
   it('keeps the module boundary out of reach of every anchor\'s wildcards', () => {
     // Each built-in anchor bounds its wildcard with a character class. A separator any of them
     // accepts is one they can match ACROSS, binding a patch to a span belonging to two modules —
@@ -269,6 +297,35 @@ describe('applyBundleWritePlan', () => {
         MODULES[WRITABLE_ID]!.contents,
         'export const c=333;',
       ]);
+    });
+  });
+
+  it('refuses to repoint when the repack reordered the module table', () => {
+    // The ONLY guard that can see a repack which preserves every module but changes their table
+    // order — and the read-back loop provably cannot substitute for it, because it compares each
+    // index AFTER writing that index, so a repoint into a shuffled table reads back as exactly
+    // what was just written. The pinned tweakcc preserves order today, which is what makes this
+    // calibration rather than a live hole; it is also what would silently disarm on a bump.
+    withBinary(MODULES, path => {
+      const bundle = readClaudeBundle(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=111;';
+      const plan = planBundleWrite(bundle, patched, WRITABLE_ID);
+      fakeWriteContent(path, plan.content);
+      // Rebuild the blob with the SAME modules in a rotated order: nothing is lost, but the
+      // module tweakcc now exposes is no longer the one the plan was addressed to.
+      const parsed = parseBunBlob(readFileSync(path));
+      const rotate = <T,>(xs: T[]) => [...xs.slice(1), xs[0]!];
+      writeFileSync(path, buildFakeNativeClaude(
+        '2.1.243',
+        rotate(parsed.names.map((name, index) => ({
+          name,
+          contents: parsed.contents[index]!,
+          loader: parsed.loaders[index]!,
+        }))),
+        { entryPointId: parsed.entryPointId },
+      ));
+      expect(() => applyBundleWritePlan(path, plan)).toThrow(/planned around module/);
     });
   });
 
