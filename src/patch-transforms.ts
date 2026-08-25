@@ -2,9 +2,10 @@
 //
 // Ported from the relay-ai scripts/patch-custom-models wrapper, originally run
 // as a tweakcc `adhoc-patch --script` inside tweakcc's sandbox (with the Claude
-// Code source as global `js`). Now a pure function: patcher.ts extracts the
-// bundled JS with tweakcc's programmatic `readContent`, calls
-// `applyClodexPatches`, and repacks with `writeContent`. The patch sites and
+// Code source as global `js`). Now a pure function: patcher.ts reads every
+// JavaScript module out of the binary, calls `applyClodexPatches`, and publishes
+// the result itself (`bun-bundle.ts`); tweakcc's `writeContent` is used only to
+// resize the binary's Bun section. The patch sites and
 // their regex/replacement logic are unchanged — they are hard-won; do not
 // "improve" them.
 //
@@ -32,13 +33,31 @@ import {
  * is what makes an existing install read as `stale-config` and repatch.
  *
  * IMPORTANT: bump this whenever the transform set changes materially — adding or
- * removing a PATCH site, or changing a site's regex, replacement, or ordering.
- * Without a bump, users whose favorites are unchanged keep the OLD patch forever
- * and never receive the new transforms, silently. `tests/patcher.test.ts` pins a
- * hash of the transform inputs to force that decision to be made rather than
- * forgotten.
+ * removing a PATCH site, or changing a site's regex, replacement, or ordering —
+ * and whenever a binary an older clodex produced has to be replaced rather than
+ * left alone. Without a bump, users whose favorites are unchanged keep the OLD
+ * patch forever and never receive the new transforms, silently.
+ * `tests/patcher.test.ts` pins a hash of the transform inputs to force that
+ * decision to be made rather than forgotten.
+ *
+ * 10 — the transforms are unchanged, but the way the patched bundle is written
+ * back into the binary is not: clodex 2.8.1 and earlier let tweakcc rebuild the
+ * Bun blob, dropping structures Bun 1.4.1 needs and leaving a patched module's
+ * stale bytecode in place. Any binary written by that mechanism has to be
+ * replaced rather than read as current.
+ *
+ * Note what the bump does NOT do: it cannot rescue an install whose patched binary
+ * no longer STARTS, because `clodex patch` resolves the version by executing the
+ * binary and then fails at `version-unknown` long before the staleness check.
+ * Those users need `clodex patch --restore`, which reads the version from the
+ * manifest instead, and then a fresh `clodex patch`. Measured, that is the two
+ * arm64 Linux builds of 2.1.246, the only ones any leg here executes; macOS
+ * refused rather than publishing, so it left nothing broken, and what a
+ * 2.8.1-patched Windows binary does is not measured. The bump is for every install
+ * that still starts: a patch written the old way carries stale bytecode beside
+ * patched source, and on 2.1.246 that stale bytecode runs.
  */
-export const PATCH_TRANSFORMS_VERSION = 9;
+export const PATCH_TRANSFORMS_VERSION = 10;
 
 export interface PatchScriptModelEntry {
   alias?: string;

@@ -13,9 +13,15 @@
 //   the patch sites the anchors clodex matches in the extracted JavaScript. These were long
 //                   assumed to be platform-independent — "one platform covers them all". 2.1.238
 //                   proved otherwise: `PATCH 5: model picker options` matched on five builds and
-//                   not on linux-arm64, linux-arm64-musl or win32-arm64. So this probe now applies
-//                   the real transforms to the real bundle it extracted from THIS build, and
-//                   repacks what they produced rather than the pristine bytes.
+//                   not on linux-arm64, linux-arm64-musl or win32-arm64. So this probe applies the
+//                   real transforms to the real bundle it extracted from THIS build, and publishes
+//                   what they produced rather than the pristine bytes.
+//
+// Read the second half precisely, because it changed. tweakcc's repack is no longer given the
+// patched bundle at all — it is given a placeholder, purely to resize the container's Bun section,
+// and clodex publishes the patched blob over that section itself. So the readback below proves the
+// RESIZE works on this format and that clodex's own publish round-trips byte for byte; it no longer
+// proves anything about the patched bytes surviving tweakcc's rebuild, because they never enter it.
 //
 // What it still does NOT establish, and must never be reported as if it did: the patched binary is
 // never started, so nothing here says a PE runs on Windows or an ELF runs on Linux. And an anchor
@@ -55,6 +61,7 @@ import path from 'node:path';
 import {
   inspectEntryModule,
   listBunModuleNames,
+  readBunModuleTable,
   resignMachOBinary,
   restoreEntryModuleName,
   shimEntryModuleName,
@@ -82,6 +89,7 @@ const { checkPatchSites } = await import('./probe-patch-sites.mjs');
 // loaded once the resolve hook is installed.
 const {
   applyBundleWritePlan,
+  PLACEHOLDER_SLACK_BYTES,
   planBundleWrite,
   readClaudeBundle,
   splitBundleSource,
@@ -377,7 +385,7 @@ try {
   );
 
   // ---- 4. repack, then put the real entry-module name back ----------------------------------
-  // What goes back in is the PATCHED bundle, not the pristine one: repacking bytes nobody patched
+  // What goes back in is the PATCHED bundle, not the pristine one: publishing bytes nobody patched
   // would leave the thing users actually receive — clodex's emitted patch, kilobytes of it,
   // surviving a PE/ELF/Mach-O round trip — unproven by the byte-for-byte readback below. When the
   // patch aborted there is nothing patched to write, so the pristine source stands in and the
@@ -385,14 +393,16 @@ try {
   const repackStarted = Date.now();
   const written = `${patch.patchedSource ?? source}\n${PROBE_MARKER}${PROBE_PADDING}`;
   const writeShim = shimEntryModuleName(scratch);
-  let repointed = false;
+  let publishedBlob = false;
+  let publishedPlan = null;
   if (bundle) {
     const writable = writableModuleIndex(scratch);
     if (writable === null) throw new Error('no module of this build carries a name tweakcc can write to');
-    const plan = planBundleWrite(bundle, splitBundleSource(bundle, written), writable);
+    const plan = planBundleWrite(scratch, bundle, splitBundleSource(bundle, written), writable);
     await writeContent(installation, plan.content);
+    publishedPlan = plan;
     applyBundleWritePlan(scratch, plan);
-    repointed = plan.repoints.length > 0;
+    publishedBlob = true;
   } else {
     await writeContent(installation, written);
   }
@@ -403,15 +413,16 @@ try {
     } catch (err) {
       restoreError = err instanceof Error ? err.message : String(err);
     }
-  } else if (repointed) {
+  } else if (publishedBlob) {
     resignMachOBinary(scratch);
   }
   info.repackMs = Date.now() - repackStarted;
   info.publishedSize = statSync(scratch).size;
   info.growth = Number((info.publishedSize / info.pristineSize).toFixed(3));
-  // The ratio rounds to 1.000 on Mach-O and PE, where the repack assigns in place, so the signed
-  // delta is what shows whether the bundle actually grew — and growing is the point of the padding
-  // above, since that is what makes tweakcc extend the segment.
+  // Growth is now structural: the placeholder is sized for the pristine blob plus the appended
+  // sources plus slack, so the section always extends. `repack-grew` is kept because a build where
+  // it somehow did NOT grow would mean the sizing collapsed, but it is no longer the interesting
+  // number — `blob-sized-as-planned` below is.
   info.sizeDelta = info.publishedSize - info.pristineSize;
   note(`repacked to ${info.publishedSize} bytes (${info.growth}x, ${info.sizeDelta >= 0 ? '+' : ''}${info.sizeDelta})`);
   record(
@@ -419,6 +430,24 @@ try {
     info.sizeDelta > 0,
     `${info.sizeDelta >= 0 ? '+' : ''}${info.sizeDelta} bytes — a repack that did not grow leaves the segment-extension path untested`,
   );
+  // The one check that pins `repackedBlobBytes` — clodex's arithmetic mirror of tweakcc's rebuild —
+  // against the real thing, on this build's real module table. A unit test cannot: it can only
+  // compare the mirror to a fixture that models the same rebuild. If the mirror is exact, the blob
+  // the repack produced is the planned one plus exactly the slack; if it drifts, the placeholder is
+  // mis-sized on every patch of this release and only the size of the slack is hiding it.
+  if (publishedPlan) {
+    const repackedTable = readBunModuleTable(scratch);
+    const expected = publishedPlan.data.length + PLACEHOLDER_SLACK_BYTES;
+    info.blobSizeDrift = repackedTable ? repackedTable.byteCount - expected : null;
+    record(
+      'blob-sized-as-planned',
+      info.blobSizeDrift === 0,
+      info.blobSizeDrift === null
+        ? 'the repacked blob could not be read back'
+        : `the repack made a ${expected + info.blobSizeDrift}-byte blob where clodex sized the `
+          + `placeholder for ${expected} (drift ${info.blobSizeDrift})`,
+    );
+  }
   record(
     'restore-entry-name',
     restoreError === null,

@@ -50,10 +50,31 @@ const MODULE_STRUCT_BYTES_CURRENT = 52;
 const MODULE_STRUCT_BYTES_LEGACY = 36;
 
 /**
- * A module struct opens with `{ name, contents }` as two `{ u32 offset, u32 length }` pairs, so
- * the payload pointer is always the second one, in both struct sizes.
+ * A module struct opens with `{ name, contents, sourcemap, bytecode }` as four
+ * `{ u32 offset, u32 length }` pairs, so those four are at the same place in both struct sizes.
+ * The 52-byte struct adds `{ moduleInfo, bytecodeOriginPath }` after them.
  */
 const CONTENTS_FIELD_AT = 8;
+const SOURCEMAP_FIELD_AT = 16;
+const BYTECODE_FIELD_AT = 24;
+const MODULE_INFO_FIELD_AT = 32;
+const BYTECODE_ORIGIN_PATH_FIELD_AT = 40;
+
+/**
+ * The bits of the blob's `flags` word clodex reasons about. Bun 1.4.1 added everything above
+ * `SOURCE_TEXT_CONTIGUOUS`; a blob that sets them carries structures after the module table that
+ * no per-module struct points at. See `.claude/docs/claude-code-internals.md`.
+ */
+export const BUN_BLOB_FLAGS = {
+  /** Every module's source text lies in one run no other region falls inside. */
+  SOURCE_TEXT_CONTIGUOUS: 1 << 4,
+  /** A `[u32; modules]` of each module's source hash follows the module table. */
+  HAS_SOURCE_HASHES: 1 << 5,
+  /** After the source hashes: `u32 count`, then `count` x `{ u32 id, offset, length }`. */
+  HAS_BUILTIN_BYTECODE: 1 << 6,
+  /** After the builtin-bytecode table: one `{ offset, length }` for the shared string table. */
+  HAS_BYTECODE_STRING_TABLE: 1 << 7,
+} as const;
 
 /**
  * The struct ends with four `u8`s — `encoding, loader, moduleFormat, side` — so the loader is
@@ -104,7 +125,7 @@ export function entryModuleShimName(byteLength: number): string | null {
   return '/clodex'.padEnd(padding, '-').slice(0, padding) + '/claude';
 }
 
-interface BunModuleNames {
+export interface BunModuleNames {
   /** Every module name in the blob, in blob order. */
   names: string[];
   /** Index of the module Bun starts at. */
@@ -113,16 +134,39 @@ interface BunModuleNames {
   offsets: number[];
   /** Where each module's payload lives, blob-relative, parallel to `names`. */
   contents: BunModuleRange[];
+  /** Each module's source map, blob-relative, parallel to `names`. Empty on every build measured. */
+  sourcemap: BunModuleRange[];
+  /** Each module's cached JSC bytecode, blob-relative, parallel to `names`. Empty when it has none. */
+  bytecode: BunModuleRange[];
+  /** Each module's JSC module info, blob-relative, parallel to `names`. Empty on a 36-byte struct. */
+  moduleInfo: BunModuleRange[];
+  /**
+   * The path each module's bytecode cache was generated under, blob-relative, parallel to `names`.
+   * Non-empty on almost every module of a real build, and empty on a 36-byte struct.
+   */
+  bytecodeOriginPath: BunModuleRange[];
   /** Bun's loader id for each module, parallel to `names`. `1` is JavaScript. */
   loaders: number[];
   /** Absolute file offset the blob starts at; `contents` offsets are relative to it. */
   blobAt: number;
   /** Absolute file offset of the module struct table. */
   modulesAt: number;
+  /** Blob-relative offset of the module struct table — where Bun's tail structures start after it. */
+  modulesOffset: number;
+  /** Byte length of the module struct table. */
+  modulesLength: number;
   /** Bytes per module struct (36 or 52). */
   structBytes: number;
   /** The blob's own recorded size, used to bounds-check a rewritten range. */
   byteCount: number;
+  /** The `compile_exec_argv` string, blob-relative. */
+  compileExecArgv: BunModuleRange;
+  /**
+   * The blob's `flags` word. Bun 1.4.1 uses its high bits to announce the tail structures written
+   * after the module table (source hashes, builtin bytecode, the shared bytecode string table);
+   * `BUN_BLOB_FLAGS` names the ones clodex reasons about.
+   */
+  flags: number;
 }
 
 /** A `{ offset, length }` pair out of a module struct, blob-relative. */
@@ -186,6 +230,9 @@ function parseBunModuleNamesAtUnchecked(fd: number, offsetsAt: number): BunModul
   const modulesOffset = offsets.readUInt32LE(8);
   const modulesLength = offsets.readUInt32LE(12);
   const entryPointId = offsets.readUInt32LE(16);
+  const compileExecArgvOffset = offsets.readUInt32LE(20);
+  const compileExecArgvLength = offsets.readUInt32LE(24);
+  const flags = offsets.readUInt32LE(28);
 
   // `byteCount` is where the blob records its own offsets struct, which is how the
   // blob's start is recovered without knowing anything about the container.
@@ -207,6 +254,10 @@ function parseBunModuleNamesAtUnchecked(fd: number, offsetsAt: number): BunModul
   const names: string[] = [];
   const nameOffsets: number[] = [];
   const contents: BunModuleRange[] = [];
+  const sourcemap: BunModuleRange[] = [];
+  const bytecode: BunModuleRange[] = [];
+  const moduleInfo: BunModuleRange[] = [];
+  const bytecodeOriginPath: BunModuleRange[] = [];
   const loaders: number[] = [];
   for (let index = 0; index < moduleCount; index++) {
     const nameOffset = modules.readUInt32LE(index * structBytes);
@@ -221,10 +272,19 @@ function parseBunModuleNamesAtUnchecked(fd: number, offsetsAt: number): BunModul
     if (!/^[\x20-\x7e]+$/.test(name)) return null;
     names.push(name);
     nameOffsets.push(blobAt + nameOffset);
-    contents.push({
-      offset: modules.readUInt32LE(index * structBytes + CONTENTS_FIELD_AT),
-      length: modules.readUInt32LE(index * structBytes + CONTENTS_FIELD_AT + 4),
+    const pairAt = (field: number): BunModuleRange => ({
+      offset: modules.readUInt32LE(index * structBytes + field),
+      length: modules.readUInt32LE(index * structBytes + field + 4),
     });
+    contents.push(pairAt(CONTENTS_FIELD_AT));
+    sourcemap.push(pairAt(SOURCEMAP_FIELD_AT));
+    bytecode.push(pairAt(BYTECODE_FIELD_AT));
+    // The 36-byte struct stops after `bytecode`; reading further would run into the next module.
+    const current = structBytes === MODULE_STRUCT_BYTES_CURRENT;
+    moduleInfo.push(current ? pairAt(MODULE_INFO_FIELD_AT) : { offset: 0, length: 0 });
+    bytecodeOriginPath.push(
+      current ? pairAt(BYTECODE_ORIGIN_PATH_FIELD_AT) : { offset: 0, length: 0 },
+    );
     loaders.push(modules.readUInt8(index * structBytes + structBytes - LOADER_FROM_END));
   }
   return {
@@ -232,11 +292,19 @@ function parseBunModuleNamesAtUnchecked(fd: number, offsetsAt: number): BunModul
     entryPointId,
     offsets: nameOffsets,
     contents,
+    sourcemap,
+    bytecode,
+    moduleInfo,
+    bytecodeOriginPath,
     loaders,
     blobAt,
     modulesAt: blobAt + modulesOffset,
+    modulesOffset,
+    modulesLength,
     structBytes,
     byteCount: Number(byteCount),
+    compileExecArgv: { offset: compileExecArgvOffset, length: compileExecArgvLength },
+    flags,
   };
 }
 
@@ -357,17 +425,7 @@ export function listBunModuleNames(path: string): string[] | null {
 }
 
 /** Everything about the blob's module table a caller needs to read or repoint a payload. */
-export interface BunModuleTable {
-  names: string[];
-  loaders: number[];
-  /** Where each module's payload lives, blob-relative. */
-  contents: BunModuleRange[];
-  entryPointId: number;
-  blobAt: number;
-  modulesAt: number;
-  structBytes: number;
-  byteCount: number;
-}
+export type BunModuleTable = BunModuleNames;
 
 /**
  * The blob's module table, or null when the blob cannot be located and validated. Opens read-only,
@@ -376,10 +434,7 @@ export interface BunModuleTable {
 export function readBunModuleTable(path: string): BunModuleTable | null {
   const fd = openSync(path, 'r');
   try {
-    const parsed = readBunModuleNames(fd, statSync(path).size);
-    if (!parsed) return null;
-    const { names, loaders, contents, entryPointId, blobAt, modulesAt, structBytes, byteCount } = parsed;
-    return { names, loaders, contents, entryPointId, blobAt, modulesAt, structBytes, byteCount };
+    return readBunModuleNames(fd, statSync(path).size);
   } finally {
     closeSync(fd);
   }
@@ -434,45 +489,6 @@ export function readBunJavaScriptModules(path: string): BunModuleSnapshot[] | nu
       });
     }
     return modules;
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/**
- * Point modules at different payload bytes, by rewriting the `{ offset, length }` pair in their
- * module structs. Nothing is moved: every new range must already lie inside the blob, which is what
- * makes this a pure pointer edit rather than a repack.
- *
- * `path` must be a private copy: this WRITES to it.
- */
-export function repointBunModuleContents(
-  path: string,
-  edits: { index: number; range: BunModuleRange }[],
-): void {
-  if (edits.length === 0) return;
-  const fd = openSync(path, 'r+');
-  try {
-    const parsed = readBunModuleNames(fd, statSync(path).size);
-    if (!parsed) throw new Error(`cannot read the Bun module table of ${path}`);
-    for (const { index, range } of edits) {
-      if (index < 0 || index >= parsed.names.length) {
-        throw new Error(`module ${index} is outside the ${parsed.names.length}-module table of ${path}`);
-      }
-      if (range.offset < 0 || range.length < 0 || range.offset + range.length > parsed.byteCount) {
-        throw new Error(
-          `module ${index} would point at ${range.offset}+${range.length}, outside the `
-          + `${parsed.byteCount}-byte blob of ${path}`,
-        );
-      }
-      const at = parsed.modulesAt + index * parsed.structBytes + CONTENTS_FIELD_AT;
-      const pair = Buffer.alloc(8);
-      pair.writeUInt32LE(range.offset, 0);
-      pair.writeUInt32LE(range.length, 4);
-      if (writeSync(fd, pair, 0, pair.length, at) !== pair.length) {
-        throw new Error(`short write repointing module ${index} of ${path}`);
-      }
-    }
   } finally {
     closeSync(fd);
   }

@@ -36,8 +36,11 @@ executes anything.
 
 A probe **does** now prove: every clodex patch site matched an anchor in that specific build's
 bundle exactly once; no site was ambiguous, missing or silently skipped; the transforms threw
-nothing; and the bundle they produced survived the PE/ELF/Mach-O read-repack-restore round trip
-byte for byte, still carrying clodex's own `ccpatch:` markers.
+nothing; and the bundle they produced survived the PE/ELF/Mach-O read-resize-publish-restore round
+trip byte for byte, still carrying clodex's own `ccpatch:` markers. Since the write stopped
+rebuilding the Bun blob, the resize is tweakcc's half and the publish is clodex's; the probe also
+checks that the blob the resize produced is exactly the size clodex sized its placeholder for, which
+is the only place that arithmetic meets a real repack.
 
 A probe **does not** prove:
 

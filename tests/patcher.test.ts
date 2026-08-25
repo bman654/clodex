@@ -582,8 +582,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 9,
-      digest: '035f6e47ba23d35432405deb64b7b3a91c759fd528d1a1862ff5e1549d30fdfe',
+      version: 10,
+      digest: 'b7897568a924dfa98b828d6cf4f136638777e5d11216e38a8e7408b9b5639b16',
     });
   });
 });
@@ -1190,10 +1190,11 @@ describe('applyPatch', () => {
    * failed on every platform and every executable format at once.
    *
    * The stand-in below reproduces the shape exactly, including the part that makes the write hard:
-   * `writeContent` puts the WHOLE buffer into the one module it recognizes. Everything the patch
-   * changed rides along in that buffer and is then repointed, so a regression that drops the
-   * repoint publishes an entry module holding every chunk's source concatenated — which the entry
-   * assertion below catches.
+   * `writeContent` puts the WHOLE buffer into the one module it recognizes, whatever that buffer
+   * is. Since the write stopped rebuilding the blob that buffer is a placeholder, and the patched
+   * sources are published over it — so a regression that drops the publish leaves the entry module
+   * holding the placeholder rather than its patched source, which the entry assertion below
+   * catches.
    */
   it('patches a code-split binary whose anchors live in chunks tweakcc never returns', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-split-bundle-'));

@@ -13,7 +13,8 @@ its picker, which is why `patcher.ts` loads it via lazy `import()`). **Never `np
 network.** Flow: `tryDetectInstallation({ path })` → `readClaudeBundle` → `applyClodexPatches(source,
 config)` (in-process pure function applying built-in PATCH 1–10 sites) → optional
 `applyLocalPatches` transaction with built-in postcondition verification → `writeContent` (repacks
-the native binary) → `applyBundleWritePlan` (points each patched module at its own payload). Both
+the native binary, here only to resize its Bun section) → `applyBundleWritePlan` (publishes the
+pristine blob with every patched module's source appended over that section). Both
 layers return per-site OK/SKIP/FAIL results shown by `--trace`. Since 2.1.229, the reads and the
 repack are each wrapped in the entry-module shim below, without which tweakcc cannot find the
 bundle at all.
@@ -61,49 +62,114 @@ pre-split blob holds five ~2 KB loader-1 stubs (`image-processor.js`, `audio-cap
 Checked on a real 2.1.232: none of them contains any anchor, any `process.env` read, or anything
 the whole-bundle count guards in PATCH 5 and PATCH 10 look at.
 
-**The write is one repack plus a pointer edit, and both halves are load-bearing.**
+**The write does not rebuild the blob. It resizes the section and publishes the pristine bytes.**
+(One path still does: when `readClaudeBundle` returns null, `patcher.ts` falls back to tweakcc's own
+single-module `writeContent`. That is the correct path for an npm `cli.js` install, and on a native
+2.1.242-or-later binary it cannot publish anything — the module tweakcc recognizes is the ~20 KB
+stub, so `PATCH 1` fails first and the patch aborts before any write.)
 
-- Calling `writeContent` once per changed module is not an alternative. Each ELF repack relocates
-  the whole ~290 MB blob to `align(nextVirtualAddress())` and extends the segment, so six of them
-  would leave a multi-gigabyte `claude` and take minutes. Mach-O and PE assign in place, so this is
-  invisible on macOS and Windows — the same asymmetry that hid the restore-sweep bug.
-- So every changed module's patched source is concatenated (NUL-separated, because Bun
-  NUL-terminates every string in the blob and tweakcc only terminates the buffer as a whole) into
-  the one buffer tweakcc writes, and then `repointBunModuleContents` rewrites the 8-byte
-  `{ offset, length }` pair in each module's struct to address its own slice. Nothing moves and
-  nothing grows; the bytes are already in the blob.
-- **The module tweakcc writes has to come first in that buffer**, because its position is the only
-  one knowable before the repack — every other slice is addressed relative to it. After the repack
-  `applyBundleWritePlan` re-reads the table, refuses if the recognized module is not the one the
-  plan was built around or does not hold exactly the bytes that were written, and then reads every
-  repointed module back and compares it to the patched source it should be. A module left pointing
-  at its neighbour's bytes would start and then misbehave, which is much worse than a patch that
-  refuses.
-- **When the only changed module is the one tweakcc writes, the plan degrades to today's single
-  call with no pointer edit** — which is every release up to 2.1.241, **for the built-ins**. Read it
-  as a statement about the WRITE, and only about a patch whose edits all land in that one module: a
-  local patch that changes a helper module does produce a repoint on those releases too.
-  The READ changed on every version. The joined document has always been more than the entry
-  module, because a pre-split blob carries five loader-1 helper stubs beside it — verified on 18
-  binaries from 2.1.208 to 2.1.241, all six-module, entry first. For a built-in that is inert
-  (measured on a real 2.1.232: no anchor and no count-guard text in any of the five), but a LOCAL
-  patch that APPENDS by position rather than matching an anchor now lands in a different module
-  than it used to — the end of the joined document is the last helper stub, not the end of the
-  entry. Prepending is unchanged on those releases, because they are all entry-first; on a split
-  build neither end is the entry. README says so where a local-patch author will see it.
-- **A repoint is a write AFTER tweakcc's repack, which signs on its way out.** Restoring the
+tweakcc's `writeContent` rebuilds the Bun blob's payload region from the per-module
+`{ offset, length }` pairs and the exec-argv string, renumbering every offset. (It does carry
+`entryPointId`, `flags` and each module's loader/encoding/format/side across — but those are
+scalars, not regions.) Through Bun 1.4.0 that was close enough to lossless. Bun 1.4.1 (Claude Code
+2.1.246) added a source-hash array and a builtin-bytecode table after the module table, plus an
+8-byte record pointing at a ~9.9 MB shared bytecode string table written among the payloads —
+announced in the blob's `flags` and reachable from no module range. The rebuild kept the flags,
+dropped all of it, and Bun segfaulted reading what was no longer there.
+`.claude/docs/claude-code-internals.md` has the layout.
+
+So the blob is published, not rebuilt:
+
+- Calling `writeContent` once per changed module is still not an alternative. Each ELF repack
+  relocates the whole ~290 MB blob to `align(nextVirtualAddress())` and extends the segment, so six
+  of them would leave a multi-gigabyte `claude` and take minutes. Mach-O and PE assign in place, so
+  this is invisible on macOS and Windows — the same asymmetry that hid the restore-sweep bug.
+- **tweakcc's repack is used for exactly one thing: making the container's Bun section big enough.**
+  That is the part that needs node-lief and knows Mach-O from ELF from PE. What it is handed is a
+  PLACEHOLDER (`/*clodex:placeholder*/`), sized so the section it produces has room for the blob
+  clodex is about to write, and every byte of the blob it produces is then overwritten. The
+  section's own 8-byte length header is the one thing kept: Bun reads the blob's length from it, so
+  the published blob is padded to exactly the length it declares.
+- **`planBundleWrite` reads the blob's whole data region and appends.** Each patched module's source
+  goes past the end of the pristine bytes, 8-byte aligned, NUL-terminated, and its module struct is
+  repointed at it. Nothing that was already in the blob moves, so everything clodex does not
+  understand — the tail structures, the 128-byte bytecode alignment, whatever Bun adds next —
+  survives by construction rather than by being enumerated.
+- **A patched module's cached bytecode and module info are cleared, and its source hash zeroed.**
+  On 2.1.246 the stale bytecode WINS over changed source — measured both ways on a real binary, see
+  `claude-code-internals.md` — because Bun 1.4.1 records the hash JSC keys its code cache on instead
+  of computing it from the source that is there. An empty bytecode range leaves Bun no choice but to
+  compile what it finds. JSC's key also carries the source length, so an edit that changes a
+  module's length is rejected anyway; that covers every built-in patch site but NOT a same-length
+  local patch, which is the reachable case this closes.
+- **`SOURCE_TEXT_CONTIGUOUS` is cleared** because the appended sources make it false. It is only a
+  `madvise` hint; a blob that does not claim it simply does not get the hint.
+- **The published blob is the same total length as the section tweakcc produced**, so the trailer
+  ends exactly where it did. Everything between the last appended source and the offsets struct is
+  padding. Bun takes the blob's length from the section's own 8-byte header on all three formats —
+  `macho::get_data` and `elf::get_data` read it directly and the PE binding returns the same `u64`
+  and data at header + 8 — so the length is the one tweakcc wrote, and the blob clodex publishes
+  never leaves slack after its own trailer. (The PE *container* may: a pristine `.bun` carries a few
+  hundred bytes of `FileAlignment` padding past the trailer, which Bun ignores because the header
+  is what bounds the blob.)
+- **The repack has to put the blob back at the same offset modulo 128.** Every unpatched module
+  keeps its cached bytecode where it was, and JSC decodes that in place at a 128-byte boundary; Bun
+  writes each range at `120 mod 128` from the blob's start, which lands correctly only because of
+  how the section base is aligned — ELF and Mach-O map a section at `vaddr ≡ fileoff (mod
+  pagesize)`, and a PE section's file offset is `FileAlignment`-aligned, at least 512. All of those
+  are multiples of 128, which is why comparing FILE offsets is sound for a requirement that is
+  really about the mapped address. Mach-O and PE assign in place and ELF relocates to a page-aligned
+  address, so all three preserve the residue today (measured on real 2.1.245 and 2.1.246 builds) —
+  but nothing else in the verification could see one that did not, and the result would be a claude
+  that starts and then dies inside JSC. So it is checked.
+- **The cost is file size, and it is not the same on every format.** The pristine copy of every
+  patched module's source stays in the blob as dead space, so on Mach-O and PE — where the repack
+  assigns the section in place — a patched binary grows by roughly the size of the modules that
+  changed: +7.5 MB on 2.1.246 (230,824,016 to 238,390,496 on darwin-arm64; +7.5 MB on win32-x64),
+  and +28 MB on a pre-split release where the one module IS the bundle. **On ELF the published
+  binary is ~1.75x pristine** (247,389,632 to 434,470,336 on linux-arm64 2.1.246) because tweakcc
+  relocates the whole blob to the end of the file and strands the original — that predates this
+  change and predates the shim, and what this change adds to it is the same appended sources. The
+  candidate IS the published binary on every format: `patcher.ts` renames it into place.
+- `applyBundleWritePlan` refuses rather than publishing a doubtful blob: the module tweakcc wrote
+  has to hold exactly the placeholder (which is also what proves the located blob is the one the
+  repack just wrote, not a stale trailer left above it), the module table has to have the same
+  names in the same order, the section has to be big enough, and afterwards every patched module is
+  read back through the same parser Bun's loader agrees with.
+- **The publish is a write AFTER tweakcc's repack, which signs on its way out.** Restoring the
   entry-module name re-signs and covers the normal path; `resignMachOBinary` covers the binary that
   needed no shim. Skip either and macOS refuses to start the result.
-- Bun runs the module SOURCE, not the bytecode that sits beside it — verified on a real 2.1.243
-  build, see `claude-code-internals.md`. Without that, none of this would have any effect.
-  **That guarantee has no automated coverage and cannot get any**: 1,377 of the 1,391 module
-  structs on a real darwin-arm64 2.1.243 carry a non-empty bytecode range (and a matching
-  `moduleInfo` and `bytecodeOriginPath`), while `repointBunModuleContents` rewrites only the
-  `contents` pair — so after a patch every chunk points at new source beside its pre-patch
-  compiled form. The blob fixture writes empty bytecode ranges for every module, so there is
-  nothing stale for a test to trip over. This is the one place where fixture and implementation
-  share an assumption the fixture cannot falsify; re-check it with the probe on a real binary
-  whenever the write path changes.
+- The sizing arithmetic in `repackedBlobBytes` mirrors code clodex does not own. It is a hint, not a
+  contract: a tweakcc whose repack lays the blob out differently produces a section that is too
+  small, and the patch refuses instead of publishing a truncated blob. 64 KiB of slack absorbs
+  drift too small to be worth a release.
+- **"Bun runs the module SOURCE, not the bytecode that sits beside it" was true through 2.1.245 and
+  is FALSE from 2.1.246.** The old paragraph here said that guarantee had no automated coverage,
+  could not get any, and had to be re-checked on a real binary whenever the write path changed. It
+  was re-checked, and it had stopped being true — so the instruction stays, and so does this note
+  that following it is what caught this.
+  Measured on a pristine 2.1.246 darwin-arm64: rewriting all 1,659 occurrences of the version string
+  in the JavaScript to the same-length `2.1.XXX`, leaving every bytecode range and source hash
+  alone, then re-signing, still prints `2.1.246` — the stale compiled form runs. The identical edit
+  with each touched module's bytecode, module info and source hash cleared prints `2.1.XXX`. Bun
+  1.4.1 records the hash JSC keys its code cache on instead of computing it from the source that is
+  there, which is the whole difference.
+  The bound is that JSC's key also carries the source LENGTH, so an edit that changes a module's
+  length is rejected whatever the hash says. That covers every built-in patch site — the transforms
+  change six chunks on 2.1.246 and all six grow, at every model count measured — but NOT a
+  same-length local patch. (The per-site deltas scale with the configured model count, so quoting
+  them would be quoting one config.) clodex no longer depends on any of it for the modules it patches, because their bytecode is
+  cleared; an unpatched module keeps its bytecode and its hash exactly as shipped.
+  **This is why a patch that "applied 11 sites" and produces a binary that starts is not evidence of
+  anything.** On this release the only thing that distinguishes a working patch from a silent no-op
+  is running the patched binary beside a pristine one and diffing what they emit.
+  The technique that works, offline, with no credentials: point both at a stand-in Anthropic
+  endpoint (`ANTHROPIC_BASE_URL=http://127.0.0.1:<port>`, `ANTHROPIC_API_KEY=sk-fake`) that logs the
+  request body and answers `/v1/messages` with a one-token SSE reply, run
+  `claude --model <alias> -p hi` against each, and diff the `Agent` tool's `model` schema in the two
+  bodies. A patched binary emits the clodex aliases in its `enum` and description; a pristine one
+  emits four. Do NOT use `--version` or `--help` (byte-identical between the two) or the model id on
+  the wire (passed through unvalidated by both).
 
 ## The entry-module shim (`bun-entry-module.ts`)
 
@@ -177,10 +243,16 @@ tweakcc's own repack reads back as an ordinary module name.
   arm64, glibc and musl — unpatchable from clodex 2.5.2 on, for every Claude Code release since
   2.1.229; macOS and Windows were never affected.
   Relocation is also why an ELF candidate is ~2.4x the pristine binary (324 MB → 770 MB on
-  linux-x64 2.1.233), with roughly 2 GB live while candidate, backup and tweakcc's temp coexist.
+  linux-x64 2.1.233; measured again on 2.1.246, 248 MB → 435 MB, ~1.75x now that the blob is a
+  smaller share of the file), with roughly 2 GB live while candidate, backup and tweakcc's temp
+  coexist — plus, since the write stopped rebuilding the blob, one more copy of the blob's data
+  region held in memory across the repack (~164 MB on 2.1.246, ~290 MB on a pre-split release).
   That predates the shim — 2.1.228, which needs no shim at all, balloons identically — and it does
   not compound, because the candidate is reseeded from pristine bytes on every run. Do not add a
-  size sanity bound: at 2.37x today, any plausible cap would recreate the refusal this replaced.
+  size sanity bound: any plausible cap would recreate the refusal this replaced. Note that the
+  candidate is renamed into place, so on ELF this ratio is what the USER ends up with — the "+7.5 MB
+  of appended sources" figure above is a Mach-O and PE number, and on ELF that growth rides on top
+  of the relocation rather than replacing it.
   Rewriting is sound only while every rewritten copy is one the shim wrote, so `isModuleNameAt`
   requires a trailing NUL and `shimEntryModuleName` declines a binary whose blob already carries a
   marker *as a module name*. Without that test the sweep reached content the guard could never have
@@ -217,9 +289,12 @@ tweakcc's own repack reads back as an ordinary module name.
 
   **It also applies every patch site to that build's own bundle** (`scripts/probe-patch-sites.mjs`,
   which calls the real `applyClodexPatches` with a synthetic config that activates all of them),
-  fails on any `FAIL`, `SKIP`, missing or duplicated site, and repacks **what the transforms
-  produced** rather than the pristine bytes — so the byte-for-byte readback also proves clodex's
-  own emitted patch survives the PE/ELF/Mach-O round trip. Anchors were assumed platform-independent
+  fails on any `FAIL`, `SKIP`, missing or duplicated site, and publishes **what the transforms
+  produced** rather than the pristine bytes — so the byte-for-byte readback also proves clodex's own
+  emitted patch survives the PE/ELF/Mach-O round trip. Read that precisely: since the write stopped
+  rebuilding the blob, the patched bytes never enter tweakcc's repack, so what the readback proves
+  is that the container RESIZE works on this format and that clodex's own publish round-trips. What
+  pins the sizing arithmetic against the real repack is the probe's `blob-sized-as-planned` check. Anchors were assumed platform-independent
   until Claude Code 2.1.238, where `PATCH 5: model picker options` matched five builds and missed
   `linux-arm64`, `linux-arm64-musl` and `win32-arm64`.
 

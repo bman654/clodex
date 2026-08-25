@@ -55,21 +55,74 @@ builds of the same release.
 | 2.1.232 | 15 | 26,504,651 bytes — the whole bundle |
 | 2.1.241 | 15 | 28,252,504 bytes — the whole bundle |
 | 2.1.242, 2.1.243 | 1,391 | ~19,950 bytes — an import stub |
+| 2.1.245 | 1,393 | 19,949 bytes — an import stub |
+| 2.1.246 | 1,582 | 20,605 bytes — an import stub |
 
 (Measured on darwin-arm64. 2.1.242 and 2.1.243 have the same module count and differ only in their
-chunk hashes and version string.)
+chunk hashes and version string. 2.1.246 adds 189 modules over 2.1.245: 25 more JavaScript chunks
+and 164 embedded text files — 118 `.md` and 46 `.txt`, carrying a loader id, 13, that no earlier
+release used, and which Bun does not execute as JavaScript.)
 
 Consequences worth knowing before you touch any of this:
 
 - **The anchors did not move; the reader did.** Every clodex patch site still occurs exactly once
   across the bundle — they are just in six different chunks on 2.1.243, none of them the entry.
-- **Bun executes the chunk SOURCE, not the chunk bytecode.** Verified on 2.1.243 darwin-arm64 by
-  overwriting eleven bytes of one chunk's payload in place (`Your prompt` → `YOUR_PROMPT`),
-  re-signing, and running `claude --help`: the edited string is what printed.
+- **Bun executed the chunk SOURCE, not the chunk bytecode — through 2.1.245 only.** Verified on
+  2.1.243 darwin-arm64 by overwriting eleven bytes of one chunk's payload in place (`Your prompt` →
+  `YOUR_PROMPT`), re-signing, and running `claude --help`: the edited string is what printed. **On
+  2.1.246 this is no longer true** — see the Bun 1.4.1 section below. The reason it changed is that
+  the source hash JSC keys its code cache on used to be computed from the source that is actually
+  there; since Bun 1.4.1 it is read out of the blob.
 - **A module's payload can be repointed without moving it.** `{ offset, length }` in the module
   struct is the only thing that says where a module's source is, so several modules can be patched
-  in ONE repack by concatenating their new sources into the buffer tweakcc writes and then pointing
-  each module at its own slice. That is what `src/bun-bundle.ts` does.
+  in ONE repack by appending their new sources past the end of the blob and pointing each module at
+  its own slice. That is what `src/bun-bundle.ts` does.
+
+## The blob carries more than the module structs describe (Bun 1.4.1, 2.1.246)
+
+Claude Code 2.1.245 ships Bun 1.4.0; 2.1.246 ships **Bun 1.4.1**, and 1.4.1 writes three structures
+after the module table that no module struct points at. Which of them are present is announced by
+the blob's `flags` word — 15 on 2.1.245, 255 on 2.1.246 — and every one of them is addressed by an
+offset relative to the start of the blob:
+
+| Flag | Bit | What follows the module table |
+| --- | --- | --- |
+| `SOURCE_TEXT_CONTIGUOUS` | 4 | nothing; it asserts every module's source lies in one run |
+| `HAS_SOURCE_HASHES` | 5 | `[u32; modules]`, each module's WTF source hash (`0` = not recorded) |
+| `HAS_BUILTIN_BYTECODE` | 6 | `u32 count`, then `count` x `{ u32 id, u32 offset, u32 length }` |
+| `HAS_BYTECODE_STRING_TABLE` | 7 | one `{ u32 offset, u32 length }` for the shared string table |
+
+On a real 2.1.246 darwin-arm64 that is 6,328 bytes of source hashes, a builtin-bytecode table with a
+count of zero, and a pointer to a **9,878,164-byte shared bytecode string table** every chunk's
+compiled form references by ordinal — 6,341 bytes of tail plus ~9.9 MB of payload, none of it
+reachable from a module struct. Read the layout precisely: only the tail records follow the module
+table. The string table PAYLOAD is written among the other payloads, well before it (offset
+103,812,984 of 164,222,846 on that build, with the module table at 164,134,241); it is the 8-byte
+`{offset, length}` record pointing at it that comes after. Two more invariants come with it, from Bun's own source
+(`src/standalone_graph/StandaloneModuleGraph.rs`, `append_bytecode_aligned`):
+
+- **Cached bytecode must start 128-byte aligned once mapped**, because JSC decodes it in place. The
+  blob's section base is aligned to at least 512 bytes in every container Bun emits and its data
+  begins 8 bytes in, so every bytecode offset is `120 mod 128` blob-relative and `0 mod 128` once
+  mapped — checked and true on 2.1.245 and on all six 2.1.246 builds.
+- **A source hash vouches for the bytecode beside it, and on 2.1.246 the bytecode WINS.** The hash
+  exists so a module loaded from bytecode never has to page in its source text to hash it — so a
+  module whose source is replaced while its recorded hash and bytecode are left alone runs its
+  PRE-PATCH compiled form. Measured, on a pristine 2.1.246 darwin-arm64: rewriting all 1,659
+  occurrences of `2.1.246` in the JavaScript source to the same-length `2.1.XXX`, leaving every
+  bytecode range and source hash alone, re-signing, then `claude --version` → prints **`2.1.246`**.
+  The identical edit with each touched module's bytecode, module info and source hash cleared →
+  prints **`2.1.XXX`**. That matched pair is why `clodex patch` clears them.
+  The bound on the risk is that JSC's cache key also carries the source LENGTH, so an edit that
+  changes a module's length is rejected regardless. Every built-in clodex patch site clears that
+  bar: the transforms change six chunks on a real 2.1.246 bundle and all six GROW, at every model
+  count measured (1, 2 and 3 favourites). Do not quote the individual byte deltas — they scale with
+  the configured model count. A SAME-LENGTH edit, which is exactly what a local patch may be, is the
+  reachable case.
+
+Rebuilding the blob from the module structs — which is what tweakcc's repack does — keeps the flags
+and drops all of it. That is what broke `clodex patch` on 2.1.246 on every platform: see
+`patcher.md`.
 
 ## The entry module's name is not stable (renamed in 2.1.229)
 
@@ -95,8 +148,10 @@ packaging fault described in `patcher.md` and is not it. tweakcc carried the old
 Two things that are easy to assume wrongly about the blob:
 
 - **Every JavaScript module also carries Bun bytecode** (`// @bun @bytecode`) — ~190 MB on the
-  single-module releases, a few hundred KB per chunk since the split — and repacking preserves it
-  verbatim. It does **not** win over the patched source — a canary injected
+  single-module releases, a few hundred KB per chunk since the split — and the write preserves it
+  verbatim for every module clodex did not patch. (A module clodex DOES patch has its bytecode
+  range cleared, because since Bun 1.4.1 the recorded source hash would otherwise vouch for it.)
+  It does **not** win over the patched source — a canary injected
   into the JS prints at startup on a repacked 2.1.231 (verified twice on macOS arm64 — once by
   hand and once through clodex's own local-patches feature, both printing the canary on stderr
   ahead of `--version`). Bytecode has been present since at least 2.1.226, so this was never the

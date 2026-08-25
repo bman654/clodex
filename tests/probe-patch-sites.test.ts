@@ -44,10 +44,10 @@ describe('the canary probe against a healthy bundle', () => {
     });
   });
 
-  it('returns the patched bundle, which is what the probe repacks into the binary', () => {
+  it('returns the patched bundle, which is what the probe publishes into the binary', () => {
     const { patchedSource } = checkPatchSites(CLAUDE_FIXTURE);
 
-    // Repacking pristine bytes would leave the thing users actually receive — clodex's emitted
+    // Publishing pristine bytes would leave the thing users actually receive — clodex's emitted
     // patch surviving a PE/ELF/Mach-O round trip — unproven by the probe's byte-for-byte readback.
     expect(patchedSource).not.toBeNull();
     expect(patchedSource!.length).toBeGreaterThan(CLAUDE_FIXTURE.length);

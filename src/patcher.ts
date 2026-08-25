@@ -899,30 +899,32 @@ export async function applyPatch(
     // because Claude Code's sibling native modules resolve against the entry
     // module's own path.
     const writeShim = shimEntryModuleName(candidatePath);
-    let repointed = false;
+    let publishedBlob = false;
     if (loaded.bundle) {
-      // One repack, however many modules the patch touched: everything changed goes into the
-      // buffer tweakcc writes, and each module is then pointed at its own slice of it. Repacking
-      // once per module instead would relocate the whole blob every time on ELF builds.
+      // One repack, however many modules the patch touched — and the repack is used only to RESIZE
+      // the binary's Bun section. What it rebuilds is thrown away: Bun's blob carries structures no
+      // module struct points at (see `bun-bundle.ts`), so the published blob is the pristine one
+      // with every patched source appended past the end of it.
       const writable = writableModuleIndex(candidatePath);
       if (writable === null) {
         throw new Error('no module of the patch candidate carries a name tweakcc can write to');
       }
       const plan = planBundleWrite(
+        candidatePath,
         loaded.bundle,
         splitBundleSource(loaded.bundle, local.content),
         writable,
       );
       await writeContent(loaded.installation, plan.content);
       applyBundleWritePlan(candidatePath, plan);
-      repointed = plan.repoints.length > 0;
+      publishedBlob = true;
     } else {
       await writeContent(loaded.installation, local.content);
     }
     if (writeShim) restoreEntryModuleName(candidatePath, writeShim, { resign: true });
-    // The repack signs on its way out, so a repoint after it leaves an invalid signature. Restoring
-    // the entry-module name re-signs already; this covers the binary that needed no shim.
-    else if (repointed) resignMachOBinary(candidatePath);
+    // The repack signs on its way out, so publishing the blob after it leaves an invalid signature.
+    // Restoring the entry-module name re-signs already; this covers the binary that needed no shim.
+    else if (publishedBlob) resignMachOBinary(candidatePath);
     patchedSize = statSync(candidatePath).size;
     patchedSha256 = sha256File(candidatePath);
     renameSync(candidatePath, binaryPath);

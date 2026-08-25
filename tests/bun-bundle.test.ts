@@ -12,15 +12,16 @@ import { join } from 'node:path';
 import {
   applyBundleWritePlan,
   BUNDLE_MODULE_SEPARATOR,
+  PLACEHOLDER_SLACK_BYTES,
   planBundleWrite,
   readClaudeBundle,
   splitBundleSource,
   writableModuleIndex,
 } from '../src/bun-bundle.js';
 import {
+  BUN_BLOB_FLAGS,
   readBunJavaScriptModules,
   readBunModuleTable,
-  repointBunModuleContents,
   tweakccRecognizesModuleName,
 } from '../src/bun-entry-module.js';
 import { closeSync, openSync, writeSync } from 'node:fs';
@@ -49,8 +50,12 @@ const MODULES = [
 const WRITABLE_ID = 4;
 /** Its position within the bundle — not the same number. */
 const WRITABLE_AT = 2;
-/** The module Bun starts at, deliberately not the one tweakcc writes. */
-const ENTRY_ID = 0;
+/**
+ * The module Bun starts at, deliberately not the one tweakcc writes AND deliberately not zero: at
+ * zero, publishing `entryPointId` and publishing nothing are the same bytes, so a write that
+ * dropped it would pass. On a real 2.1.246 it is 7.
+ */
+const ENTRY_ID = 2;
 /** Table positions of the JavaScript modules, in bundle order. */
 const JS_IDS = [0, 2, 4, 5];
 
@@ -215,15 +220,6 @@ describe('readClaudeBundle', () => {
     }
   });
 
-  it('refuses to point a module outside the blob', () => {
-    withBinary(MODULES, path => {
-      const table = readBunModuleTable(path)!;
-      expect(() => repointBunModuleContents(path, [
-        { index: 0, range: { offset: 1, length: table.byteCount } },
-      ])).toThrow(/outside the .*-byte blob/);
-    });
-  });
-
   it('reports no bundle when the file carries no readable Bun blob', () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-bun-bundle-'));
     try {
@@ -249,33 +245,109 @@ describe('splitBundleSource', () => {
 });
 
 describe('planBundleWrite', () => {
-  it('writes only the module tweakcc writes when nothing else changed', () => {
+  it('appends only the modules whose source changed, and leaves the rest where they were', () => {
     withBinary(MODULES, path => {
       const bundle = readClaudeBundle(path)!;
+      const before = readBunModuleTable(path)!;
       const patched = bundle.modules.map(module => module.source);
-      patched[WRITABLE_AT] = 'patched entry';
-      const plan = planBundleWrite(bundle, patched, WRITABLE_ID);
-      // The pre-2.1.242 shape: exactly the call clodex has always made, and no pointer edit.
-      expect(plan).toEqual({ content: 'patched entry', repoints: [] });
+      patched[3] = 'export const c=33;';
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
+
+      expect(plan.appends.map(append => append.index)).toEqual([JS_IDS[3]]);
+      // Past the end of the pristine blob, so no offset that was already in it moves.
+      expect(plan.appends[0]!.range.offset).toBeGreaterThanOrEqual(before.byteCount);
+      expect(plan.data.subarray(0, before.byteCount / 2))
+        .toEqual(readFileSync(path).subarray(before.blobAt, before.blobAt + before.byteCount / 2));
     });
   });
 
-  it('puts the writable module first and NUL-separates the slices', () => {
+  it('is the pristine bytes plus the patched sources, not a rebuild of them', () => {
+    withBinary(MODULES, path => {
+      const bundle = readClaudeBundle(path)!;
+      const before = readBunModuleTable(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=111;';
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
+      // Everything before the module table is untouched — including whatever no module struct
+      // points at, which is what a rebuild loses.
+      expect(plan.data.subarray(0, before.modulesOffset))
+        .toEqual(readFileSync(path).subarray(before.blobAt, before.blobAt + before.modulesOffset));
+      expect(plan.data.length).toBeGreaterThan(before.byteCount);
+    });
+  });
+
+  it('refuses a patched document that lost or gained a module', () => {
     withBinary(MODULES, path => {
       const bundle = readClaudeBundle(path)!;
       const patched = bundle.modules.map(module => module.source);
-      patched[3] = 'export const c=33;';
-      const plan = planBundleWrite(bundle, patched, WRITABLE_ID);
-      expect(plan.content).toBe(`${MODULES[WRITABLE_ID]!.contents}\0export const c=33;\0`);
-      // Addressed by TABLE position, not by position within the bundle.
-      expect(plan.repoints.map(repoint => repoint.index)).toEqual([WRITABLE_ID, JS_IDS[3]]);
-      expect(plan.repoints[1]!.start).toBe(MODULES[WRITABLE_ID]!.contents.length + 1);
+      expect(() => planBundleWrite(path, bundle, patched.slice(0, -1), WRITABLE_ID))
+        .toThrow(/expected 4 patched module sources, got 3/);
+      expect(() => planBundleWrite(path, bundle, [...patched, 'extra'], WRITABLE_ID))
+        .toThrow(/expected 4 patched module sources, got 5/);
+    });
+  });
+
+  it('refuses to size a placeholder when the module table double-counts its own payloads', () => {
+    // The mirror of tweakcc's rebuild sums each module's six payload ranges. A table whose ranges
+    // OVERLAP makes it count the same bytes more than once and predict a bigger blob than the one
+    // being planned — the only direction that can leave a section too small to publish into. Left
+    // to clamp at zero, the repack comes back LARGER than the planned blob, so the truncation
+    // refusal never fires and clodex publishes into a section sized off arithmetic it knows is
+    // wrong.
+    withBinary(MODULES, path => {
+      const bundle = readClaudeBundle(path)!;
+      const table = readBunModuleTable(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=111;';
+      // Point every module's `bytecodeOriginPath` at one oversized shared range, which is what a
+      // misparsed struct size or field offset produces.
+      const fd = openSync(path, 'r+');
+      try {
+        for (let index = 0; index < table.names.length; index++) {
+          const pair = Buffer.alloc(8);
+          pair.writeUInt32LE(0, 0);
+          pair.writeUInt32LE(1 << 24, 4);
+          writeSync(fd, pair, 0, 8, table.modulesAt + index * table.structBytes + 40);
+        }
+      } finally {
+        closeSync(fd);
+      }
+      expect(() => planBundleWrite(path, bundle, patched, WRITABLE_ID))
+        .toThrow(/overlapping payload ranges/);
+    });
+  });
+
+  it('refuses a writable index that is not the module tweakcc writes to', () => {
+    withBinary(MODULES, path => {
+      const bundle = readClaudeBundle(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=111;';
+      // Every offset in the plan is computed against the module tweakcc will overwrite, so being
+      // handed the wrong one silently mis-sizes the placeholder.
+      expect(() => planBundleWrite(path, bundle, patched, 0))
+        .toThrow(/is not the one tweakcc writes to/);
+    });
+  });
+
+  it('refuses more than one module tweakcc would write to', () => {
+    // tweakcc puts its buffer into EVERY recognized module, and the size the placeholder is
+    // computed for assumes exactly one. The entry-module shim declines to fire when a recognized
+    // name already exists precisely so that stays true.
+    const twoRecognized = MODULES.map((module, index) => index === 0
+      ? { ...module, name: '/$bunfs/root/src/entrypoints/cli.js' }
+      : module);
+    withBinary(twoRecognized, path => {
+      const bundle = readClaudeBundle(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[3] = 'export const c=333;';
+      expect(() => planBundleWrite(path, bundle, patched, 0))
+        .toThrow(/2 modules tweakcc would write to/);
     });
   });
 });
 
 describe('applyBundleWritePlan', () => {
-  it('points every patched module at its own slice of the one buffer that was written', () => {
+  it('publishes every module at its patched source over the repacked section', () => {
     withBinary(MODULES, path => {
       const bundle = readClaudeBundle(path)!;
       const patched = bundle.modules.map(module => module.source);
@@ -283,11 +355,11 @@ describe('applyBundleWritePlan', () => {
       patched[3] = 'export const c=333;';
       // Found by the name tweakcc recognizes, which is NOT `entryPointId` here.
       expect(writableModuleIndex(path)).toBe(WRITABLE_ID);
-      const plan = planBundleWrite(bundle, patched, writableModuleIndex(path)!);
+      const plan = planBundleWrite(path, bundle, patched, writableModuleIndex(path)!);
 
       fakeWriteContent(path, plan.content);
-      // Before the repoint, the module tweakcc wrote holds ALL of it — which is exactly the
-      // corruption this step exists to undo.
+      // What the repack leaves behind: the placeholder in the module tweakcc writes, and none of
+      // the patched code anywhere.
       expect(readBunJavaScriptModules(path)![WRITABLE_AT]!.source).toBe(plan.content);
 
       applyBundleWritePlan(path, plan);
@@ -300,97 +372,366 @@ describe('applyBundleWritePlan', () => {
     });
   });
 
-  it('refuses to repoint when the repack reordered the module table', () => {
+  it('keeps the blob regions no module struct points at, which the repack drops', () => {
+    // The Claude Code 2.1.246 failure, in miniature. Bun 1.4.1 writes a `[u32; modules]` of source
+    // hashes, a builtin-bytecode table and a shared bytecode string table after the module table,
+    // announces them in `flags`, and points at none of them from a module struct. tweakcc rebuilds
+    // the blob from the module structs, so it published a binary whose flags promised structures
+    // that were no longer there — and Bun segfaulted reading them.
+    const table = 'shared-bytecode-string-table-every-chunk-references-by-ordinal';
+    const options = {
+      entryPointId: ENTRY_ID,
+      flags: BUN_BLOB_FLAGS.SOURCE_TEXT_CONTIGUOUS
+        | BUN_BLOB_FLAGS.HAS_SOURCE_HASHES
+        | BUN_BLOB_FLAGS.HAS_BUILTIN_BYTECODE
+        | BUN_BLOB_FLAGS.HAS_BYTECODE_STRING_TABLE,
+      sourceHashes: MODULES.map((_, index) => 0xc0de0000 + index),
+      bytecodeStringTable: table,
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-bun-bundle-'));
+    try {
+      const path = join(dir, 'claude');
+      writeFileSync(path, buildFakeNativeClaude('2.1.246', MODULES, options));
+      const before = readBunModuleTable(path)!;
+      const tailAt = before.modulesOffset + before.modulesLength;
+      const pointerAt = tailAt + before.names.length * 4 + 4;
+      const pristine = readFileSync(path);
+      const stringTableAt = pristine.readUInt32LE(before.blobAt + pointerAt);
+
+      const bundle = readClaudeBundle(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=111;';
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
+      fakeWriteContent(path, plan.content);
+      // What the repack leaves: a blob whose `flags` still promise all three structures, and whose
+      // bytes no longer hold any of them. This is the state clodex used to publish.
+      const repacked = readBunModuleTable(path)!;
+      expect(repacked.flags).toBe(options.flags);
+      expect(readFileSync(path).subarray(repacked.blobAt, repacked.blobAt + repacked.byteCount)
+        .includes(table)).toBe(false);
+
+      applyBundleWritePlan(path, plan);
+
+      const after = readBunModuleTable(path)!;
+      const published = readFileSync(path);
+      // The pointer still addresses the same offset, and that offset still holds the table.
+      expect(published.readUInt32LE(after.blobAt + pointerAt)).toBe(stringTableAt);
+      expect(published.readUInt32LE(after.blobAt + pointerAt + 4)).toBe(table.length);
+      expect(published.subarray(after.blobAt + stringTableAt, after.blobAt + stringTableAt + table.length)
+        .toString('utf8')).toBe(table);
+      // Every module's source hash survives except the patched one's, whose bytecode was compiled
+      // from source that is no longer there.
+      const hashes = MODULES.map((_, index) => published.readUInt32LE(after.blobAt + tailAt + index * 4));
+      expect(hashes).toEqual(options.sourceHashes.map((hash, index) => (index === JS_IDS[0] ? 0 : hash)));
+      // `SOURCE_TEXT_CONTIGUOUS` is the one flag that stops being true: the appended sources are
+      // outside the run Bun laid out. Nothing else may be dropped.
+      expect(after.flags).toBe(options.flags & ~BUN_BLOB_FLAGS.SOURCE_TEXT_CONTIGUOUS);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('clears the cached bytecode of a patched module and keeps every other module\'s', () => {
+    // Bun 1.4.1 records a source hash so that loading from bytecode never has to re-hash the
+    // source. Leaving a patched module's pre-patch bytecode in place would let that recorded hash
+    // vouch for it, and the module would run its UNPATCHED compiled form.
+    const withBytecode = MODULES.map(module => ({
+      ...module,
+      bytecode: `compiled:${module.name}`,
+      moduleInfo: 'info',
+      bytecodeOriginPath: `origin:${module.name}`,
+    }));
+    withBinary(withBytecode, path => {
+      const bundle = readClaudeBundle(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=111;';
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
+      fakeWriteContent(path, plan.content);
+      applyBundleWritePlan(path, plan);
+
+      const after = readBunModuleTable(path)!;
+      // The whole group goes: the compiled form, its module info, and the path it was compiled
+      // under. Leaving the origin path behind would describe bytecode that is no longer there.
+      expect(after.bytecode[JS_IDS[0]!]).toEqual({ offset: 0, length: 0 });
+      expect(after.moduleInfo[JS_IDS[0]!]).toEqual({ offset: 0, length: 0 });
+      expect(after.bytecodeOriginPath[JS_IDS[0]!]).toEqual({ offset: 0, length: 0 });
+      expect(after.bytecode[JS_IDS[1]!]!.length).toBeGreaterThan(0);
+      expect(after.bytecodeOriginPath[JS_IDS[1]!]!.length).toBeGreaterThan(0);
+    });
+  });
+
+  it('refuses to publish when the repack did not leave the placeholder it was addressed to', () => {
+    withBinary(MODULES, path => {
+      const bundle = readClaudeBundle(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=111;';
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
+      // A repack that does not grow the blob leaves the PREVIOUS one's trailer behind at a higher
+      // offset, and the scan that finds a blob works backwards from the end of the file — so
+      // "these are the bytes tweakcc just wrote" has to be proved, not assumed.
+      fakeWriteContent(path, `${plan.content}unexpected extra bytes`);
+      expect(() => applyBundleWritePlan(path, plan)).toThrow(/refusing to publish a blob addressed/);
+    });
+  });
+
+  it('leaves every module it did not patch exactly as it found it', () => {
+    // The read-back loop only looks at modules Bun executes as JavaScript, so an over-scoped
+    // repoint into the vendored asset or the napi module beside them is invisible to it — and on a
+    // real 2.1.246 that class is 173 modules, including five `*.node` helpers. Clobbering one
+    // publishes a claude that starts and then dies loading a native helper.
+    const withBytecode = MODULES.map(module => ({
+      ...module,
+      bytecode: `compiled:${module.name}`,
+      moduleInfo: `info:${module.name}`,
+      bytecodeOriginPath: `origin:${module.name}`,
+    }));
+    withBinary(withBytecode, path => {
+      const bundle = readClaudeBundle(path)!;
+      const before = readBunModuleTable(path)!;
+      const beforeBlob = parseBunBlob(readFileSync(path));
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=111;';
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
+      fakeWriteContent(path, plan.content);
+      applyBundleWritePlan(path, plan);
+
+      const after = readBunModuleTable(path)!;
+      const afterBlob = parseBunBlob(readFileSync(path));
+      const untouched = MODULES.map((_, index) => index).filter(index => index !== JS_IDS[0]);
+      for (const index of untouched) {
+        expect([index, afterBlob.contents[index]]).toEqual([index, beforeBlob.contents[index]]);
+        expect([index, afterBlob.bytecode[index]]).toEqual([index, beforeBlob.bytecode[index]]);
+        expect([index, afterBlob.moduleInfo[index]]).toEqual([index, beforeBlob.moduleInfo[index]]);
+        expect([index, after.contents[index]]).toEqual([index, before.contents[index]]);
+        expect([index, after.bytecode[index]]).toEqual([index, before.bytecode[index]]);
+        expect([index, after.moduleInfo[index]]).toEqual([index, before.moduleInfo[index]]);
+      }
+      // And the one that WAS patched moved, so the loop above is not vacuously true.
+      expect(after.contents[JS_IDS[0]!]).not.toEqual(before.contents[JS_IDS[0]!]);
+    });
+  });
+
+  it('appends 8-byte aligned, NUL-terminated payloads', () => {
+    // Neither is observable through clodex's own reader — it addresses a payload by
+    // `{offset,length}` and only checks the NUL after names — so nothing else can see this code
+    // stop doing either.
+    const odd = MODULES.map((module, index) => index === 0
+      ? { ...module, contents: `${module.contents}xyz` }
+      : module);
+    withBinary(odd, path => {
+      const bundle = readClaudeBundle(path)!;
+      const before = readBunModuleTable(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=1111;';
+      patched[3] = 'export const c=3333;';
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
+      // A pristine blob whose length is not a multiple of 8, so the first append has to pad.
+      expect(before.byteCount % 8).not.toBe(0);
+      for (const append of plan.appends) {
+        expect(append.range.offset % 8).toBe(0);
+        expect(plan.data[append.range.offset + append.range.length]).toBe(0);
+        expect(append.range.offset).toBeGreaterThanOrEqual(before.byteCount);
+      }
+    });
+  });
+
+  it('sizes the placeholder from the repack it is about to get, not from a guess', () => {
+    // `repackedBlobBytes` mirrors arithmetic clodex does not own, and its terms — the NUL after
+    // each copied field, each field's own length, the exec-argv byte — can be wrong without any
+    // other assertion noticing. Hardcoding `bytecodeOriginPath` as empty wasted 33,652 bytes of
+    // section on a real 2.1.246. If the mirror is exact, the blob the repack produces is the
+    // planned one plus exactly the slack.
+    //
+    // The one term this does NOT reach is the `structBytes === 52` branch: nothing here builds a
+    // 36-byte blob and drives it through the write, so that branch is pinned only by reading it
+    // against tweakcc's own `r === 52 ? … : …`. The probe's `blob-sized-as-planned` check covers
+    // the rest against a real repack, per format.
+    const withBytecode = MODULES.map(module => ({
+      ...module,
+      sourcemap: `map:${module.name}`,
+      bytecode: `compiled:${module.name}`,
+      moduleInfo: `info:${module.name}`,
+      bytecodeOriginPath: `origin:${module.name}`,
+    }));
+    withBinary(withBytecode, path => {
+      const bundle = readClaudeBundle(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=111;';
+      patched[3] = 'export const c=333;';
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
+      fakeWriteContent(path, plan.content);
+      expect(readBunModuleTable(path)!.byteCount)
+        .toBe(plan.data.length + PLACEHOLDER_SLACK_BYTES);
+    });
+  });
+
+  it('publishes the offsets struct the plan built, not the one the repack left', () => {
+    withBinary(MODULES, path => {
+      const bundle = readClaudeBundle(path)!;
+      const before = readBunModuleTable(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=111;';
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
+      fakeWriteContent(path, plan.content);
+      applyBundleWritePlan(path, plan);
+
+      const after = readBunModuleTable(path)!;
+      expect(after.entryPointId).toBe(ENTRY_ID);
+      expect(after.compileExecArgv).toEqual(before.compileExecArgv);
+      expect(after.modulesOffset).toBe(before.modulesOffset);
+      expect(after.modulesLength).toBe(before.modulesLength);
+    });
+  });
+
+  it('appends nothing when the patch changed nothing', () => {
+    withBinary(MODULES, path => {
+      const bundle = readClaudeBundle(path)!;
+      const before = readBunModuleTable(path)!;
+      const pristine = readFileSync(path).subarray(before.blobAt, before.blobAt + before.byteCount);
+      const plan = planBundleWrite(path, bundle, bundle.modules.map(module => module.source), WRITABLE_ID);
+      expect(plan.appends).toEqual([]);
+      expect(plan.data).toEqual(pristine);
+      // Still republished, and still verified: the repack ran either way.
+      fakeWriteContent(path, plan.content);
+      applyBundleWritePlan(path, plan);
+      expect(readBunJavaScriptModules(path)!.map(module => module.source))
+        .toEqual(bundle.modules.map(module => module.source));
+    });
+  });
+
+  it('refuses to publish when the repack reordered the module table', () => {
     // The ONLY guard that can see a repack which preserves every module but changes their table
-    // order — and the read-back loop provably cannot substitute for it, because it compares each
-    // index AFTER writing that index, so a repoint into a shuffled table reads back as exactly
+    // order. The read-back loop provably cannot substitute for it, because it compares each index
+    // AFTER writing that index, so a blob published over a shuffled table reads back as exactly
     // what was just written. The pinned tweakcc preserves order today, which is what makes this
     // calibration rather than a live hole; it is also what would silently disarm on a bump.
+    //
+    // The shuffle deliberately LEAVES the module tweakcc wrote where the plan addressed it. Rotate
+    // the whole table instead and the placeholder moves off `writableIndex`, the placeholder-length
+    // check fires first, and this guard is never reached — which is how this test used to pass.
     withBinary(MODULES, path => {
       const bundle = readClaudeBundle(path)!;
       const patched = bundle.modules.map(module => module.source);
       patched[0] = 'export const a=111;';
-      const plan = planBundleWrite(bundle, patched, WRITABLE_ID);
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
       fakeWriteContent(path, plan.content);
-      // Rebuild the blob with the SAME modules in a rotated order: nothing is lost, but the
-      // module tweakcc now exposes is no longer the one the plan was addressed to.
       const parsed = parseBunBlob(readFileSync(path));
-      const rotate = <T,>(xs: T[]) => [...xs.slice(1), xs[0]!];
-      writeFileSync(path, buildFakeNativeClaude(
-        '2.1.243',
-        rotate(parsed.names.map((name, index) => ({
-          name,
-          contents: parsed.contents[index]!,
-          loader: parsed.loaders[index]!,
-        }))),
-        { entryPointId: parsed.entryPointId },
-      ));
-      expect(() => applyBundleWritePlan(path, plan)).toThrow(/planned around module/);
+      const modules = parsed.names.map((name, index) => ({
+        name,
+        contents: parsed.contents[index]!,
+        bytecode: parsed.bytecode[index]!,
+        moduleInfo: parsed.moduleInfo[index]!,
+        bytecodeOriginPath: parsed.bytecodeOriginPath[index]!,
+        loader: parsed.loaders[index]!,
+      }));
+      // Swap two modules that are NOT the one tweakcc wrote: nothing is lost, the placeholder is
+      // still at `WRITABLE_ID`, and every length is still what the plan expects.
+      [modules[0], modules[2]] = [modules[2]!, modules[0]!];
+      writeFileSync(path, buildFakeNativeClaude('2.1.243', modules, {
+        entryPointId: parsed.entryPointId,
+        flags: parsed.flags,
+      }));
+      expect(() => applyBundleWritePlan(path, plan)).toThrow(/different module table/);
     });
   });
 
-  it('refuses to repoint when the bytes in the binary are not the ones it planned around', () => {
+  it('refuses to publish when the repack moved the blob off its 128-byte residue', () => {
+    // Every unpatched module keeps its cached bytecode exactly where it was, and JSC decodes that
+    // in place at a 128-byte boundary. Nothing else here can see a repack that put the blob back
+    // at a different residue, and the result would be a claude that starts and then dies in JSC.
     withBinary(MODULES, path => {
       const bundle = readClaudeBundle(path)!;
       const patched = bundle.modules.map(module => module.source);
       patched[0] = 'export const a=111;';
-      const plan = planBundleWrite(bundle, patched, WRITABLE_ID);
-      // A repack that wrote a different string — or a different module — would leave every offset
-      // below computed against the wrong base, so this has to fail loudly rather than repoint into
-      // whatever happens to be there.
-      fakeWriteContent(path, `${plan.content}unexpected extra bytes`);
-      expect(() => applyBundleWritePlan(path, plan)).toThrow(/refusing to repoint/);
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
+      fakeWriteContent(path, plan.content);
+      // Shift the whole file down by one byte, which is what a repack that padded differently
+      // would do to the blob's start. Everything else about the blob is untouched.
+      writeFileSync(path, Buffer.concat([Buffer.from('#'), readFileSync(path)]));
+      expect(() => applyBundleWritePlan(path, plan)).toThrow(/different offset modulo 128/);
     });
   });
 
-  it('refuses more than one module tweakcc would write to even when nothing needs repointing', () => {
-    // The common shape — every release up to 2.1.241 patches only the module tweakcc writes — and
-    // therefore the one an early return would exempt. tweakcc would still have put the same buffer
-    // into the second recognized module, and with no repoint to follow there is nothing else that
-    // would ever look at it.
-    const twoRecognized = MODULES.map((module, index) => index === 0
-      ? { ...module, name: '/$bunfs/root/src/entrypoints/cli.js' }
-      : module);
-    withBinary(twoRecognized, path => {
+  it('accepts a blob the repack relocated by a multiple of 128', () => {
+    // The check above passes for a guard that demanded the blob come back at the SAME offset — and
+    // that guard would refuse every Linux patch, because tweakcc's ELF repack relocates the blob
+    // to a fresh page-aligned address (86,638,600 -> 266,207,240 on a real linux-arm64 2.1.246,
+    // both 8 mod 128). What has to hold is the residue, not the offset.
+    withBinary(MODULES, path => {
       const bundle = readClaudeBundle(path)!;
       const patched = bundle.modules.map(module => module.source);
-      patched[0] = 'patched entry';
-      const plan = planBundleWrite(bundle, patched, 0);
-      expect(plan.repoints).toEqual([]);
+      patched[0] = 'export const a=111;';
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
       fakeWriteContent(path, plan.content);
-      expect(() => applyBundleWritePlan(path, plan)).toThrow(/2 modules tweakcc would write to/);
+      writeFileSync(path, Buffer.concat([Buffer.alloc(128 * 32, 0x23), readFileSync(path)]));
+      applyBundleWritePlan(path, plan);
+      expect(readBunJavaScriptModules(path)!.map(module => module.source)).toEqual([
+        'export const a=111;',
+        MODULES[2]!.contents,
+        MODULES[WRITABLE_ID]!.contents,
+        MODULES[5]!.contents,
+      ]);
     });
   });
 
-  it('refuses when the blob has more than one module tweakcc would write to', () => {
-    // tweakcc puts its buffer into EVERY recognized module, and the plan repoints exactly one — so
-    // the second would be published holding the whole concatenation of unrelated chunks. The
-    // read-back loop cannot see it, because a module nobody repointed is a module nobody checks.
-    const twoRecognized = MODULES.map((module, index) => index === 0
-      ? { ...module, name: '/$bunfs/root/src/entrypoints/cli.js' }
-      : module);
-    withBinary(twoRecognized, path => {
+  it('refuses to publish when the section is too small for the planned blob', () => {
+    withBinary(MODULES, path => {
       const bundle = readClaudeBundle(path)!;
       const patched = bundle.modules.map(module => module.source);
-      patched[3] = 'export const c=333;';
-      const plan = planBundleWrite(bundle, patched, 0);
+      patched[0] = 'export const a=111;';
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
       fakeWriteContent(path, plan.content);
-      expect(() => applyBundleWritePlan(path, plan))
-        .toThrow(/2 modules tweakcc would write to/);
+      // What a tweakcc whose repack laid the blob out differently would leave: room for less than
+      // the planned blob. One byte past the boundary, so a guard that drifted by any margin at all
+      // is caught — the section the repack produced is the planned blob plus exactly the slack.
+      plan.data = Buffer.concat([plan.data, Buffer.alloc(PLACEHOLDER_SLACK_BYTES + 1)]);
+      expect(() => applyBundleWritePlan(path, plan)).toThrow(/refusing to publish a truncated one/);
     });
   });
 
-  it('refuses when a repointed module does not read back as the patched source', () => {
+  it('refuses when the published blob does not read back as the one that was planned', () => {
+    withBinary(MODULES, path => {
+      const bundle = readClaudeBundle(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=111;';
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
+      fakeWriteContent(path, plan.content);
+      // Every module still reads back as its patched source, so only comparing the OFFSETS STRUCT
+      // can see this: the blob is published claiming a flag the plan says it does not carry.
+      plan.offsets.writeUInt32LE(plan.flags | BUN_BLOB_FLAGS.SOURCE_TEXT_CONTIGUOUS, 28);
+      expect(() => applyBundleWritePlan(path, plan)).toThrow(/does not read back as the one/);
+    });
+  });
+
+  it('refuses when a module it planned to move is not one Bun executes as JavaScript', () => {
+    withBinary(MODULES, path => {
+      const bundle = readClaudeBundle(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=111;';
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
+      // Table position 1 is the vendored asset. The read-back walks the JavaScript modules, so an
+      // expectation about a module it never visits would otherwise pass by never being checked.
+      plan.appends.push({ ...plan.appends[0]!, index: 1 });
+      fakeWriteContent(path, plan.content);
+      expect(() => applyBundleWritePlan(path, plan)).toThrow(/came back as JavaScript Bun will execute/);
+    });
+  });
+
+  it('refuses when a patched module does not read back as its patched source', () => {
     withBinary(MODULES, path => {
       const bundle = readClaudeBundle(path)!;
       const patched = bundle.modules.map(module => module.source);
       patched[0] = 'export const a=111;';
       patched[3] = 'export const c=333;';
-      const plan = planBundleWrite(bundle, patched, WRITABLE_ID);
+      const before = readBunModuleTable(path)!;
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
       fakeWriteContent(path, plan.content);
-      // The buffer is intact and the right length, so the length check above still passes — only
-      // reading each module back can catch a slice that starts one byte late.
-      plan.repoints[1]!.start += 1;
+      // Nudge what the published table says about one module, leaving everything else — the
+      // module count, the names, the length of the section, the appended bytes themselves —
+      // exactly as planned. Only reading each module back can catch a range that starts one byte
+      // late.
+      const structAt = before.modulesOffset + JS_IDS[3]! * before.structBytes;
+      plan.data.writeUInt32LE(plan.data.readUInt32LE(structAt + 8) + 1, structAt + 8);
       expect(() => applyBundleWritePlan(path, plan)).toThrow(/did not read back/);
     });
   });
