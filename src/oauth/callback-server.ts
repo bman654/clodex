@@ -60,6 +60,7 @@ export async function startCallbackServer(options: CallbackServerOptions): Promi
   let codeReject: ((e: Error) => void) | undefined;
   // The browser can hit the callback before waitForCallback arms the promise.
   let buffered: CallbackParams | undefined;
+  let ignoredStateMismatchCount = 0;
 
   const { path, redirectHost } = options;
   const server = http.createServer((req, res) => {
@@ -71,6 +72,7 @@ export async function startCallbackServer(options: CallbackServerOptions): Promi
     const state = u.searchParams.get('state') ?? '';
     const error = u.searchParams.get('error') ?? '';
     if (options.expectedState !== undefined && state !== options.expectedState) {
+      ignoredStateMismatchCount++;
       res.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('Invalid OAuth state');
       return;
@@ -116,7 +118,12 @@ export async function startCallbackServer(options: CallbackServerOptions): Promi
           return;
         }
         const timer = setTimeout(
-          () => reject(new Error('OAuth timeout — browser closed without completing sign-in')),
+          () => reject(new Error(
+            ignoredStateMismatchCount > 0
+              ? `OAuth timeout — ignored ${ignoredStateMismatchCount} callback(s) carrying a different sign-in state; `
+                + 'you probably completed an older browser tab. Run the command again and use the newest tab.'
+              : 'OAuth timeout — browser closed without completing sign-in',
+          )),
           timeoutMs,
         );
         codeResolve = params => { clearTimeout(timer); resolve(params); };

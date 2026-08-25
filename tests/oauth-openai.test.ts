@@ -168,6 +168,25 @@ describe('oauth/openai', () => {
       expect(body.get('code')).toBe('auth_code_1');
     });
 
+    it('reports ignored stale callbacks when sign-in times out', async () => {
+      let resolveCallback!: (status: number) => void;
+      let rejectCallback!: (error: unknown) => void;
+      const callbackResponse = new Promise<number>((resolve, reject) => {
+        resolveCallback = resolve;
+        rejectCallback = reject;
+      });
+      const flow = runOpenAiBrowserFlow(({ url }) => {
+        void hitCallback(url, () => 'code=stale&state=stale').then(resolveCallback, rejectCallback);
+      }, { ports: [0], timeoutMs: 50 });
+
+      expect(await callbackResponse).toBe(400);
+      await expect(flow).rejects.toThrow(
+        'OAuth timeout — ignored 1 callback(s) carrying a different sign-in state; '
+        + 'you probably completed an older browser tab. Run the command again and use the newest tab.',
+      );
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
     it('rejects when the provider returns an error instead of a code', async () => {
       await expect(runOpenAiBrowserFlow(({ url }) => {
         void hitCallback(url, state => `error=access_denied&state=${encodeURIComponent(state)}`);
@@ -266,7 +285,7 @@ describe('oauth/openai', () => {
 
     it('times out when the browser never completes sign-in', async () => {
       await expect(runOpenAiBrowserFlow(vi.fn(), { ports: [0], timeoutMs: 50 }))
-        .rejects.toThrow(/OAuth timeout/);
+        .rejects.toThrow('OAuth timeout — browser closed without completing sign-in');
       expect(global.fetch).not.toHaveBeenCalled();
     });
 
