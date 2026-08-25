@@ -1,6 +1,10 @@
-// src/oauth/callback-server.ts — CLI fallback local callback server for PKCE OAuth flows.
-// Primary path: the GUI server handles /oauth/callback when the UI is open.
-// This is only used when running `clodex providers auth <provider>` without the GUI.
+// src/oauth/callback-server.ts — loopback callback server for PKCE OAuth flows.
+// It serves the callback path the caller registered with the provider, on the loopback port the
+// caller supplies, and hands the authorization code back to the flow. Today its only caller is
+// browser sign-in (`clodex providers auth openai --browser`, or the Browser option in the
+// interactive picker), and nothing else in src/ receives an OAuth callback. The UI server that
+// used to own this module's job, for the since-removed Antigravity flow, went with the strip to
+// the Claude-to-OpenAI bridge (d01d0eb).
 
 import http from 'node:http';
 import { listenTcpServer, waitForTcpListener } from '../listener-ready.js';

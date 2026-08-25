@@ -239,8 +239,15 @@ describe('oauth/openai', () => {
           }),
         ));
         const busyPorts = blockers.map(srv => (srv.address() as { port: number }).port);
+        // Pin the message exactly, not as a substring: it must state the observed fact (the
+        // ports are busy) and never assert a cause we did not observe. toThrow(string) matches a
+        // substring, so appended copy would slip through — compare the Error for equality.
         await expect(runOpenAiBrowserFlow(vi.fn(), { ports: busyPorts, timeoutMs: 200 }))
-          .rejects.toThrow(new RegExp(`${busyPorts[0]} and ${busyPorts[1]} are in use`));
+          .rejects.toThrowError(new Error(
+            `Ports ${busyPorts[0]} and ${busyPorts[1]} are in use — browser sign-in needs one free. `
+            + 'Check for another OpenAI sign-in (e.g. `codex login`), or any other process '
+            + 'holding them, then try again.',
+          ));
       } finally {
         for (const srv of blockers) srv.close();
         dns.setDefaultResultOrder(previousOrder);

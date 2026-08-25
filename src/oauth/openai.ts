@@ -191,8 +191,9 @@ export async function runOpenAiBrowserFlow(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') {
       throw new Error(
-        `Ports ${ports.join(' and ')} are in use — close any other OpenAI sign-in `
-        + '(e.g. codex login) and try again.',
+        `Ports ${ports.join(' and ')} are in use — browser sign-in needs one free. `
+        + 'Check for another OpenAI sign-in (e.g. `codex login`), or any other process '
+        + 'holding them, then try again.',
       );
     }
     throw new Error(
@@ -206,7 +207,10 @@ export async function runOpenAiBrowserFlow(
     const params = await server.waitForCallback(opts?.timeoutMs);
     if (params.error) throw new Error(`OpenAI sign-in failed: ${params.error}`);
     if (!params.code) throw new Error('OpenAI sign-in returned no authorization code');
-    // Defense in depth: the callback server already filters on expectedState.
+    // Unreachable as written: this flow always passes expectedState, so the callback server
+    // answers 400 and keeps waiting rather than delivering a mismatched state here. Kept as a
+    // backstop in case this flow ever stops passing it — but it is not what protects the flow
+    // today, so do not weaken the server-side check on the strength of this one.
     if (params.state !== state) {
       throw new Error('OpenAI sign-in returned a mismatched state — try again');
     }
