@@ -55,6 +55,7 @@ import path from 'node:path';
 import {
   inspectEntryModule,
   listBunModuleNames,
+  resignMachOBinary,
   restoreEntryModuleName,
   shimEntryModuleName,
 } from '../src/bun-entry-module.ts';
@@ -77,6 +78,15 @@ registerHooks({
   },
 });
 const { checkPatchSites } = await import('./probe-patch-sites.mjs');
+// Same reason as above: bun-bundle.ts imports a sibling the TypeScript way, so it can only be
+// loaded once the resolve hook is installed.
+const {
+  applyBundleWritePlan,
+  planBundleWrite,
+  readClaudeBundle,
+  splitBundleSource,
+  writableModuleIndex,
+} = await import('../src/bun-bundle.ts');
 
 const args = process.argv.slice(2);
 if (args.length === 0 || args.includes('-h') || args.includes('--help')) {
@@ -324,10 +334,20 @@ try {
     );
   }
 
-  const source = await readContent(installation);
-  record('read-content', Boolean(source) && source.length > 1_000_000, `${source ? source.length : 0} bytes of JavaScript`);
+  // The whole bundle, not just the module tweakcc names: since 2.1.242 that module is a stub and
+  // every anchor clodex matches lives in a sibling chunk. `clodex patch` reads it the same way, so
+  // a build whose split shape defeats the reader is caught here rather than on a user's machine.
+  const bundle = readClaudeBundle(scratch);
+  const source = bundle ? bundle.source : await readContent(installation);
+  record(
+    'read-content',
+    Boolean(source) && source.length > 1_000_000,
+    `${source ? source.length : 0} bytes of JavaScript`
+      + (bundle ? ` across ${bundle.modules.length} module(s)` : ' (tweakcc single-module read)'),
+  );
   if (!source) throw new Error('nothing further can be probed');
   info.sourceBytes = source.length;
+  info.bundleModules = bundle ? bundle.modules.length : null;
   info.readMs = Date.now() - started;
 
   if (readShim) restoreEntryModuleName(scratch, readShim, { resign: false });
@@ -365,7 +385,17 @@ try {
   const repackStarted = Date.now();
   const written = `${patch.patchedSource ?? source}\n${PROBE_MARKER}${PROBE_PADDING}`;
   const writeShim = shimEntryModuleName(scratch);
-  await writeContent(installation, written);
+  let repointed = false;
+  if (bundle) {
+    const writable = writableModuleIndex(scratch);
+    if (writable === null) throw new Error('no module of this build carries a name tweakcc can write to');
+    const plan = planBundleWrite(bundle, splitBundleSource(bundle, written), writable);
+    await writeContent(installation, plan.content);
+    applyBundleWritePlan(scratch, plan);
+    repointed = plan.repoints.length > 0;
+  } else {
+    await writeContent(installation, written);
+  }
   let restoreError = null;
   if (writeShim) {
     try {
@@ -373,6 +403,8 @@ try {
     } catch (err) {
       restoreError = err instanceof Error ? err.message : String(err);
     }
+  } else if (repointed) {
+    resignMachOBinary(scratch);
   }
   info.repackMs = Date.now() - repackStarted;
   info.publishedSize = statSync(scratch).size;
@@ -476,7 +508,10 @@ try {
   );
   try {
     const verifyInstallation = await tryDetectInstallation({ path: scratch });
-    const republished = verifyInstallation ? await readContent(verifyInstallation) : '';
+    const republishedBundle = readClaudeBundle(scratch);
+    const republished = republishedBundle
+      ? republishedBundle.source
+      : (verifyInstallation ? await readContent(verifyInstallation) : '');
     // Exact equality, not "the marker is in there". Checking only for the marker passed a mutation
     // that dropped the first byte of Claude Code's entry JavaScript: a repack that flips, drops,
     // duplicates or re-encodes source bytes while carrying the marker through is precisely the
@@ -547,13 +582,22 @@ try {
   const publishedModules = listBunModuleNames(scratch) ?? [];
   const lost = pristineModules.filter((n) => !publishedModules.includes(n));
   const gained = publishedModules.filter((n) => !pristineModules.includes(n));
+  // ORDER, not just membership. This used to compare the two as sets, so a repack that kept every
+  // module but shuffled the table read as green — and clodex now addresses each patched module by
+  // its table position, so a silent reorder between the read and the write is exactly the shape
+  // that would point a module at its neighbour's source.
+  const reordered = lost.length === 0 && gained.length === 0
+    && pristineModules.some((name, at) => publishedModules[at] !== name);
   info.moduleCount = { pristine: pristineModules.length, published: publishedModules.length };
   record(
     'modules-intact',
-    lost.length === 0 && gained.length === 0 && pristineModules.length === publishedModules.length,
-    lost.length === 0 && gained.length === 0
-      ? `all ${publishedModules.length} modules survived the repack`
-      : `the repack changed the module list — lost [${lost.slice(0, 5).join(', ')}], gained [${gained.slice(0, 5).join(', ')}]`,
+    lost.length === 0 && gained.length === 0 && !reordered
+      && pristineModules.length === publishedModules.length,
+    reordered
+      ? 'the repack kept every module but changed their order in the table'
+      : lost.length === 0 && gained.length === 0
+        ? `all ${publishedModules.length} modules survived the repack, in the same order`
+        : `the repack changed the module list — lost [${lost.slice(0, 5).join(', ')}], gained [${gained.slice(0, 5).join(', ')}]`,
   );
 
   exitCode = failed === 0 ? 0 : 1;

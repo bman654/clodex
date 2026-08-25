@@ -4,6 +4,8 @@ import {
   CLAUDE_CORE_FIXTURE,
   CLAUDE_FIXTURE,
   CLAUDE_PROXY_EFFORT_FIXTURE,
+  CLAUDE_SPLIT_ENTRY_ID,
+  CLAUDE_SPLIT_MODULES,
 } from './fixtures/claude-bundle.js';
 import {
   buildFakeNativeClaude,
@@ -580,8 +582,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 8,
-      digest: '27786b410c68236925ea247f0ca46eacae3a71e035a7017694be7c0c688abf8b',
+      version: 9,
+      digest: '16f99bc4a9cf55f59119268ca7bc4d8a3c4ef688b61b894f5349286456f0da8e',
     });
   });
 });
@@ -1171,6 +1173,139 @@ describe('applyPatch', () => {
       // Code's own signature and made the bytes above stop matching the install they came from.
       const signings = vi.mocked(execFileSync).mock.calls.filter(([command]) => command === 'codesign');
       expect(signings).toHaveLength(1);
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * Claude Code 2.1.242 code-split its bundle. What used to be one module became a small entry that
+   * imports ~1,370 `chunk-*.js` siblings, and tweakcc reads and writes only the module it
+   * recognizes by name — so `clodex patch` saw a stub with none of its anchors in it and PATCH 1
+   * failed on every platform and every executable format at once.
+   *
+   * The stand-in below reproduces the shape exactly, including the part that makes the write hard:
+   * `writeContent` puts the WHOLE buffer into the one module it recognizes. Everything the patch
+   * changed rides along in that buffer and is then repointed, so a regression that drops the
+   * repoint publishes an entry module holding every chunk's source concatenated — which the entry
+   * assertion below catches.
+   */
+  it('patches a code-split binary whose anchors live in chunks tweakcc never returns', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-split-bundle-'));
+    const binaryPath = join(dir, 'claude');
+    const tweakccHome = join(dir, 'tweakcc-home');
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    const pristine = Buffer.concat([MACHO_MAGIC, buildFakeNativeClaude(
+      'test-version',
+      CLAUDE_SPLIT_MODULES,
+      { entryPointId: CLAUDE_SPLIT_ENTRY_ID },
+    )]);
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+    vi.mocked(execFileSync).mockReset();
+    // What the binary looked like at the moment it was signed. A signature taken BEFORE the
+    // pointer edit covers bytes the published file no longer has, and macOS refuses to start it —
+    // a failure that counting `codesign` calls cannot see, because the count is the same.
+    let signedBytes: Buffer | null = null;
+    vi.mocked(execFileSync).mockImplementation(((command: string, args: string[]) => {
+      if (command === 'codesign') signedBytes = readFileSync(args[args.length - 1]!);
+      return '';
+    }) as unknown as typeof execFileSync);
+    mkdirSync(tweakccHome, { recursive: true });
+    writeFileSync(binaryPath, pristine, { mode: 0o755 });
+    process.env.CLODEX_HOME = dir;
+    process.env.TWEAKCC_CONFIG_DIR = tweakccHome;
+
+    tweakccMocks.tryDetectInstallation.mockReset();
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+    tweakccMocks.tryDetectInstallation.mockImplementation(
+      async ({ path }: { path: string }) => ({ path, version: 'test-version', kind: 'native' }),
+    );
+    tweakccMocks.readContent.mockImplementation(async ({ path }: { path: string }) => {
+      const parsed = parseBunBlob(readFileSync(path));
+      const index = parsed.names.findIndex(tweakccRecognizesModuleName);
+      if (index < 0) {
+        throw new Error(`Failed to extract JavaScript from native installation: ${path}`);
+      }
+      return parsed.contents[index]!;
+    });
+    tweakccMocks.writeContent.mockImplementation(
+      async ({ path }: { path: string }, content: string) => {
+        const parsed = parseBunBlob(readFileSync(path));
+        writeFileSync(
+          path,
+          Buffer.concat([MACHO_MAGIC, rebuildFakeNativeClaude(
+            readFileSync(path),
+            'test-version',
+            // EVERY recognized module, exactly as tweakcc does — it has no way to say "this one".
+            (index, previous) => (tweakccRecognizesModuleName(parsed.names[index]!)
+              ? content
+              : previous),
+          )]),
+          { mode: 0o755 },
+        );
+      },
+    );
+
+    try {
+      const outcome = await applyPatch(
+        binaryPath,
+        'test-version',
+        {
+          config: {
+            'clodex:test:extended': {
+              alias: 'extended',
+              context: 272_000,
+              display: 'Extended (test)',
+              effort: { levels: ['low', 'medium', 'high', 'xhigh', 'max'], defaultLevel: 'high' },
+            },
+          },
+          unknownWindows: [],
+        },
+        'desired-config-hash',
+        { trace: false, manifest: null },
+      );
+
+      expect(outcome.ok ? 'ok' : outcome.message).toBe('ok');
+
+      const published = parseBunBlob(readFileSync(binaryPath));
+      expect(published.names[published.entryPointId]).toBe('/$bunfs/root/cli');
+      // Every chunk got its OWN patch — the enum in one module, the alias resolver in another,
+      // the context and effort tables in a third.
+      expect(published.contents[0]).toContain('"extended"');
+      expect(published.contents[0]).toContain('Additional custom models: extended = Extended (test).');
+      expect(published.contents[2]).toContain('case"extended":return "extended";');
+      expect(published.contents[6]).toContain('/*ccpatch:ctx*/');
+      expect(published.contents[6]).toContain('/*ccpatch:effort*/');
+      // ...and the entry module is still the entry module, not every chunk concatenated into it.
+      expect(published.contents[CLAUDE_SPLIT_ENTRY_ID])
+        .toBe(CLAUDE_SPLIT_MODULES[CLAUDE_SPLIT_ENTRY_ID]!.contents);
+      // The modules Bun does not execute as JavaScript are untouched — including the vendored one
+      // at index 1 that carries a copy of the enum anchor. Patch it and the anchor matches twice
+      // and the whole patch refuses, which is the only thing keeping the bundle selection honest.
+      // Index 5 is different in kind: a real JavaScript helper that IS in the bundle and carries a
+      // near-miss, so it proves the transforms left it alone rather than that it was excluded.
+      for (const untouched of [1, 4, 5]) {
+        expect(published.contents[untouched]).toBe(CLAUDE_SPLIT_MODULES[untouched]!.contents);
+      }
+
+      // The pristine backup is the install's own bytes, not a shimmed or re-signed variant.
+      expect(readFileSync(join(tweakccHome, 'native-binary.backup')).equals(pristine)).toBe(true);
+      // One re-sign, and the bytes it covered already carried the repointed modules.
+      const signings = vi.mocked(execFileSync).mock.calls.filter(([command]) => command === 'codesign');
+      expect(signings).toHaveLength(1);
+      expect(signedBytes).not.toBeNull();
+      const atSigning = parseBunBlob(signedBytes!);
+      expect(atSigning.contents[0]).toContain('"extended"');
+      expect(atSigning.contents[CLAUDE_SPLIT_ENTRY_ID])
+        .toBe(CLAUDE_SPLIT_MODULES[CLAUDE_SPLIT_ENTRY_ID]!.contents);
     } finally {
       Object.defineProperty(process, 'platform', platform);
       if (previousAppHome === undefined) delete process.env.CLODEX_HOME;

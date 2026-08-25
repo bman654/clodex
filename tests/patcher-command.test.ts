@@ -178,6 +178,24 @@ describe('runPatchCommand version resolution', () => {
     expect(manifest?.pristineSha256).toBe(createHash('sha256').update(pristineBytes).digest('hex'));
   });
 
+  it('says so when it can only read the one module tweakcc names', async () => {
+    // These fixtures carry their "bundle" after a sentinel rather than in a Bun blob, so the
+    // module table is unreadable and the single-module fallback is what runs — the same state a
+    // real binary would be in if its blob ever stopped parsing.
+    //
+    // On Claude Code 2.1.242 and later that fallback returns a stub with no anchors in it, and the
+    // patch then fails at its first required site. Without this line the report names that site
+    // and nothing else, which reads exactly like an anchor that drifted upstream and sends whoever
+    // triages it looking in the wrong place.
+    const real = installClaude('2.1.220');
+
+    expect(await runPatchCommand({})).toBe(0);
+
+    expect(bundleOf(real)).toContain('"sol"');
+    expect(logs.join('\n')).toMatch(/Could not read .* as a Bun module table/);
+    expect(logs.join('\n')).toMatch(/the cause is this read, not a changed anchor/);
+  });
+
   it('takes the version from TWEAKCC_CC_INSTALLATION_PATH\'s binary, not from PATH', async () => {
     const target = join(home, 'opt', 'claude-2.1.999');
     writeFakeClaude(target, '2.1.999');

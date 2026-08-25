@@ -49,6 +49,21 @@ const TAIL_SCAN_BYTES = 16 * 1024 * 1024;
 const MODULE_STRUCT_BYTES_CURRENT = 52;
 const MODULE_STRUCT_BYTES_LEGACY = 36;
 
+/**
+ * A module struct opens with `{ name, contents }` as two `{ u32 offset, u32 length }` pairs, so
+ * the payload pointer is always the second one, in both struct sizes.
+ */
+const CONTENTS_FIELD_AT = 8;
+
+/**
+ * The struct ends with four `u8`s — `encoding, loader, moduleFormat, side` — so the loader is
+ * three bytes from the end whichever struct size this blob uses.
+ */
+const LOADER_FROM_END = 3;
+
+/** Bun's loader id for a module it will execute as JavaScript. */
+export const BUN_JAVASCRIPT_LOADER = 1;
+
 /** A module path far longer than this is a misparse, not a name. */
 const MAX_MODULE_NAME_BYTES = 4096;
 
@@ -96,6 +111,24 @@ interface BunModuleNames {
   entryPointId: number;
   /** Absolute file offset of each name's bytes, parallel to `names`. */
   offsets: number[];
+  /** Where each module's payload lives, blob-relative, parallel to `names`. */
+  contents: BunModuleRange[];
+  /** Bun's loader id for each module, parallel to `names`. `1` is JavaScript. */
+  loaders: number[];
+  /** Absolute file offset the blob starts at; `contents` offsets are relative to it. */
+  blobAt: number;
+  /** Absolute file offset of the module struct table. */
+  modulesAt: number;
+  /** Bytes per module struct (36 or 52). */
+  structBytes: number;
+  /** The blob's own recorded size, used to bounds-check a rewritten range. */
+  byteCount: number;
+}
+
+/** A `{ offset, length }` pair out of a module struct, blob-relative. */
+export interface BunModuleRange {
+  offset: number;
+  length: number;
 }
 
 function readAt(fd: number, length: number, position: number): Buffer | null {
@@ -173,6 +206,8 @@ function parseBunModuleNamesAtUnchecked(fd: number, offsetsAt: number): BunModul
 
   const names: string[] = [];
   const nameOffsets: number[] = [];
+  const contents: BunModuleRange[] = [];
+  const loaders: number[] = [];
   for (let index = 0; index < moduleCount; index++) {
     const nameOffset = modules.readUInt32LE(index * structBytes);
     const nameLength = modules.readUInt32LE(index * structBytes + 4);
@@ -186,8 +221,23 @@ function parseBunModuleNamesAtUnchecked(fd: number, offsetsAt: number): BunModul
     if (!/^[\x20-\x7e]+$/.test(name)) return null;
     names.push(name);
     nameOffsets.push(blobAt + nameOffset);
+    contents.push({
+      offset: modules.readUInt32LE(index * structBytes + CONTENTS_FIELD_AT),
+      length: modules.readUInt32LE(index * structBytes + CONTENTS_FIELD_AT + 4),
+    });
+    loaders.push(modules.readUInt8(index * structBytes + structBytes - LOADER_FROM_END));
   }
-  return { names, entryPointId, offsets: nameOffsets };
+  return {
+    names,
+    entryPointId,
+    offsets: nameOffsets,
+    contents,
+    loaders,
+    blobAt,
+    modulesAt: blobAt + modulesOffset,
+    structBytes,
+    byteCount: Number(byteCount),
+  };
 }
 
 /** Every absolute offset of `marker`. A match cannot fit inside the needle-1 carry, so each is
@@ -306,6 +356,128 @@ export function listBunModuleNames(path: string): string[] | null {
   }
 }
 
+/** Everything about the blob's module table a caller needs to read or repoint a payload. */
+export interface BunModuleTable {
+  names: string[];
+  loaders: number[];
+  /** Where each module's payload lives, blob-relative. */
+  contents: BunModuleRange[];
+  entryPointId: number;
+  blobAt: number;
+  modulesAt: number;
+  structBytes: number;
+  byteCount: number;
+}
+
+/**
+ * The blob's module table, or null when the blob cannot be located and validated. Opens read-only,
+ * so it is safe on a pristine backup.
+ */
+export function readBunModuleTable(path: string): BunModuleTable | null {
+  const fd = openSync(path, 'r');
+  try {
+    const parsed = readBunModuleNames(fd, statSync(path).size);
+    if (!parsed) return null;
+    const { names, loaders, contents, entryPointId, blobAt, modulesAt, structBytes, byteCount } = parsed;
+    return { names, loaders, contents, entryPointId, blobAt, modulesAt, structBytes, byteCount };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** One module's name, position and payload, read out of the blob. */
+export interface BunModuleSnapshot {
+  /** Position in the blob's module table — the key a repoint is addressed by. */
+  index: number;
+  name: string;
+  source: string;
+  /** How many bytes the payload occupies in the blob, before any decoding. */
+  byteLength: number;
+}
+
+/**
+ * Every module Bun will execute as JavaScript, in blob order, or null when the blob cannot be read.
+ *
+ * Claude Code 2.1.242 split its bundle: what used to be one ~28 MB module is now a ~20 KB entry
+ * that imports ~1,370 `chunk-*.js` siblings, and tweakcc's `readContent` returns only the module it
+ * recognizes by name — the entry — which no longer holds any of the code clodex patches. Reading
+ * every JavaScript module is what puts the whole bundle back in front of the transforms.
+ *
+ * Assets (`mermaid.min.js`, `*.node`, the HTML payload) carry a different loader id and are left
+ * out: they are never executed as part of the bundle, and feeding megabytes of vendored JavaScript
+ * to anchors that must match exactly once is a way to invent ambiguity.
+ */
+export function readBunJavaScriptModules(path: string): BunModuleSnapshot[] | null {
+  const fd = openSync(path, 'r');
+  try {
+    const parsed = readBunModuleNames(fd, statSync(path).size);
+    if (!parsed) return null;
+    const modules: BunModuleSnapshot[] = [];
+    for (let index = 0; index < parsed.names.length; index++) {
+      if (parsed.loaders[index] !== BUN_JAVASCRIPT_LOADER) continue;
+      const range = parsed.contents[index]!;
+      // Bounds-checked against the blob's own recorded size, like every other derived offset here:
+      // a misparsed length is a `Buffer.alloc` of up to 4 GB, and a misparse has to degrade to "no
+      // bundle" rather than to a throw from inside a read.
+      if (range.offset < 0 || range.length < 0 || range.offset + range.length > parsed.byteCount) {
+        return null;
+      }
+      const bytes = range.length === 0
+        ? Buffer.alloc(0)
+        : readAt(fd, range.length, parsed.blobAt + range.offset);
+      if (!bytes) return null;
+      modules.push({
+        index,
+        name: parsed.names[index]!,
+        source: bytes.toString('utf8'),
+        byteLength: bytes.length,
+      });
+    }
+    return modules;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Point modules at different payload bytes, by rewriting the `{ offset, length }` pair in their
+ * module structs. Nothing is moved: every new range must already lie inside the blob, which is what
+ * makes this a pure pointer edit rather than a repack.
+ *
+ * `path` must be a private copy: this WRITES to it.
+ */
+export function repointBunModuleContents(
+  path: string,
+  edits: { index: number; range: BunModuleRange }[],
+): void {
+  if (edits.length === 0) return;
+  const fd = openSync(path, 'r+');
+  try {
+    const parsed = readBunModuleNames(fd, statSync(path).size);
+    if (!parsed) throw new Error(`cannot read the Bun module table of ${path}`);
+    for (const { index, range } of edits) {
+      if (index < 0 || index >= parsed.names.length) {
+        throw new Error(`module ${index} is outside the ${parsed.names.length}-module table of ${path}`);
+      }
+      if (range.offset < 0 || range.length < 0 || range.offset + range.length > parsed.byteCount) {
+        throw new Error(
+          `module ${index} would point at ${range.offset}+${range.length}, outside the `
+          + `${parsed.byteCount}-byte blob of ${path}`,
+        );
+      }
+      const at = parsed.modulesAt + index * parsed.structBytes + CONTENTS_FIELD_AT;
+      const pair = Buffer.alloc(8);
+      pair.writeUInt32LE(range.offset, 0);
+      pair.writeUInt32LE(range.length, 4);
+      if (writeSync(fd, pair, 0, pair.length, at) !== pair.length) {
+        throw new Error(`short write repointing module ${index} of ${path}`);
+      }
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /**
  * Give an unpatchable Claude Code binary a module name tweakcc recognizes, so it
  * can read and repack it. Returns null — no write — when the binary already has a
@@ -380,7 +552,25 @@ export function restoreEntryModuleName(
     }
     writeNameBytes(fd, shim.original, offset);
     restoreEveryStandIn(fd, statSync(path).size, shim);
-    machO = resign && isMachO(fd);
+    machO = resign;
+  } finally {
+    closeSync(fd);
+  }
+  if (machO) resignMachOBinary(path);
+}
+
+/**
+ * Re-apply an ad-hoc Mach-O signature, which any write to a signed binary invalidates. A no-op on
+ * every other format and on every other host, because `codesign` only exists on macOS.
+ *
+ * Call this after ANY byte written past tweakcc's repack — the repack signs on its way out, so an
+ * edit after it leaves a binary macOS refuses to start.
+ */
+export function resignMachOBinary(path: string): void {
+  const fd = openSync(path, 'r');
+  let machO: boolean;
+  try {
+    machO = isMachO(fd);
   } finally {
     closeSync(fd);
   }

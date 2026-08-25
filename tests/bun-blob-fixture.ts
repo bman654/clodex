@@ -16,6 +16,14 @@ export interface BunModuleFixture {
   name: string;
   /** The module's payload. Only the entry module's is ever read as the bundle. */
   contents?: string;
+  /**
+   * Bun's loader id. `1` is JavaScript and is the default; real binaries also carry `5` (vendored
+   * text assets like `mermaid.min.js`) and `10` (napi `*.node` modules). Those are NOT part of the
+   * bundle, so `readBunJavaScriptModules` skips them — which means blob-table positions and
+   * positions within the bundle are different numbers, and a fixture with only JavaScript in it
+   * cannot tell the two apart.
+   */
+  loader?: number;
 }
 
 export interface BunBlobOptions {
@@ -77,7 +85,7 @@ export function buildBunBlob(
       at += 8;
     }
     blob.writeUInt8(1, at); // encoding
-    blob.writeUInt8(1, at + 1); // loader
+    blob.writeUInt8(modules[module]!.loader ?? 1, at + 1); // loader
     blob.writeUInt8(2, at + 2); // moduleFormat
     blob.writeUInt8(0, at + 3); // side
   }
@@ -100,6 +108,7 @@ export function buildBunBlob(
 export interface ParsedBunBlob {
   names: string[];
   contents: string[];
+  loaders: number[];
   entryPointId: number;
 }
 
@@ -119,6 +128,7 @@ export function parseBunBlob(binary: Buffer): ParsedBunBlob {
 
   const names: string[] = [];
   const contents: string[] = [];
+  const loaders: number[] = [];
   for (let module = 0; module < modulesLength / structBytes; module++) {
     const at = blobAt + modulesOffset + module * structBytes;
     const read = (field: number) => {
@@ -128,8 +138,9 @@ export function parseBunBlob(binary: Buffer): ParsedBunBlob {
     };
     names.push(read(0));
     contents.push(read(1));
+    loaders.push(binary.readUInt8(at + structBytes - 3));
   }
-  return { names, contents, entryPointId };
+  return { names, contents, loaders, entryPointId };
 }
 
 /**
@@ -157,6 +168,7 @@ export function rebuildFakeNativeClaude(
     parsed.names.map((name, index) => ({
       name,
       contents: contentsByIndex(index, parsed.contents[index]!),
+      loader: parsed.loaders[index]!,
     })),
     { entryPointId: parsed.entryPointId },
   );

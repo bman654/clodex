@@ -63,7 +63,19 @@ import { projectProviderCachedModels } from './registry/materialize.js';
 import { isRetainedOpenCodeGoProvider } from './registry/resolve-template.js';
 import { findModelsDevModel } from './registry/models-dev.js';
 import { findClaudeBinary, getClaudeVersionForBinary } from './launch.js';
-import { restoreEntryModuleName, shimEntryModuleName } from './bun-entry-module.js';
+import {
+  resignMachOBinary,
+  restoreEntryModuleName,
+  shimEntryModuleName,
+} from './bun-entry-module.js';
+import {
+  applyBundleWritePlan,
+  planBundleWrite,
+  readClaudeBundle,
+  splitBundleSource,
+  writableModuleIndex,
+  type ClaudeBundle,
+} from './bun-bundle.js';
 import {
   backupDir,
   collectPristineFacts,
@@ -697,7 +709,9 @@ export async function applyPatch(
     // unless the seed itself has to change.
     candidateDir = mkdtempSync(join(dirname(binaryPath), '.clodex-patch-'));
     const candidatePath = join(candidateDir, basename(binaryPath));
-    const seedCandidate = async (from: string): Promise<{ installation: Installation; source: string }> => {
+    const seedCandidate = async (
+      from: string,
+    ): Promise<{ installation: Installation; source: string; bundle: ClaudeBundle | null }> => {
       copyFileSync(from, candidatePath);
       // Claude Code 2.1.229 renamed the module tweakcc looks for; the shim is a
       // same-length rename that only has to be in place while tweakcc reads. It
@@ -707,9 +721,29 @@ export async function applyPatch(
       // Claude Code's signature for an ad-hoc one) must not happen.
       const shim = shimEntryModuleName(candidatePath);
       const installation = await tryDetectInstallation({ path: candidatePath });
-      const source = await readContent(installation);
+      // Claude Code 2.1.242 split the bundle across ~1,370 modules, and tweakcc's
+      // `readContent` returns only the one it recognizes by name — since that
+      // release, a stub holding none of the code clodex patches. Read every
+      // JavaScript module instead and hand the transforms all of it; fall back to
+      // tweakcc when the blob cannot be parsed, which is exactly what clodex did
+      // before code splitting existed.
+      const bundle = readClaudeBundle(candidatePath);
+      // Say so when the fallback fires on a native binary. Otherwise a bundle clodex declined to
+      // read looks EXACTLY like a drifted anchor: the single-module read returns the entry, which
+      // on 2.1.242 and later is a stub, so the patch fails at its first required site and the
+      // report names that site and nothing else. (An npm install is plain JavaScript with no Bun
+      // blob in it, so its fallback is the normal path and says nothing.)
+      if (!bundle && installation.kind === 'native') {
+        p.log.warn(
+          `Could not read ${candidatePath} as a Bun module table, so only the module tweakcc names `
+          + 'is being patched. On Claude Code 2.1.242 and later that module is a stub holding none '
+          + 'of the code clodex patches, and the patch below will fail at its first required '
+          + 'site — the cause is this read, not a changed anchor.',
+        );
+      }
+      const source = bundle ? bundle.source : await readContent(installation);
       if (shim) restoreEntryModuleName(candidatePath, shim, { resign: false });
-      return { installation, source };
+      return { installation, source, bundle };
     };
 
     const facts: PristineFacts = collectPristineFacts({
@@ -719,7 +753,7 @@ export async function applyPatch(
     });
 
     const initial = planPristineSource(facts);
-    let loaded: { installation: Installation; source: string } | null = null;
+    let loaded: { installation: Installation; source: string; bundle: ClaudeBundle | null } | null = null;
     let plan: ResolvedPristinePlan;
     if (initial.action === 'inspect') {
       // Unrecognized bytes. The only reliable "is this already patched?" signal
@@ -865,8 +899,30 @@ export async function applyPatch(
     // because Claude Code's sibling native modules resolve against the entry
     // module's own path.
     const writeShim = shimEntryModuleName(candidatePath);
-    await writeContent(loaded.installation, local.content);
+    let repointed = false;
+    if (loaded.bundle) {
+      // One repack, however many modules the patch touched: everything changed goes into the
+      // buffer tweakcc writes, and each module is then pointed at its own slice of it. Repacking
+      // once per module instead would relocate the whole blob every time on ELF builds.
+      const writable = writableModuleIndex(candidatePath);
+      if (writable === null) {
+        throw new Error('no module of the patch candidate carries a name tweakcc can write to');
+      }
+      const plan = planBundleWrite(
+        loaded.bundle,
+        splitBundleSource(loaded.bundle, local.content),
+        writable,
+      );
+      await writeContent(loaded.installation, plan.content);
+      applyBundleWritePlan(candidatePath, plan);
+      repointed = plan.repoints.length > 0;
+    } else {
+      await writeContent(loaded.installation, local.content);
+    }
     if (writeShim) restoreEntryModuleName(candidatePath, writeShim, { resign: true });
+    // The repack signs on its way out, so a repoint after it leaves an invalid signature. Restoring
+    // the entry-module name re-signs already; this covers the binary that needed no shim.
+    else if (repointed) resignMachOBinary(candidatePath);
     patchedSize = statSync(candidatePath).size;
     patchedSha256 = sha256File(candidatePath);
     renameSync(candidatePath, binaryPath);

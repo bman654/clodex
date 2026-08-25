@@ -23,9 +23,15 @@ export REVIEW_BUNDLE_DIR=<that directory>     # the real-bundle harnesses read t
 ```
 
 That script walks every pristine `*.orig` backup in `~/.tweakcc` (override with
-`TWEAKCC_CONFIG_DIR`) and writes one ~23 MB `.js` per version, skipping any it has already
-extracted. It uses clodex's own tweakcc dependency — `tryDetectInstallation({ path })` then
-`readContent` — which is why it has to run from inside this repo, where `node_modules` resolves.
+`TWEAKCC_CONFIG_DIR`) and writes one `.js` per version (~23 MB before 2.1.242, ~36 MB after),
+skipping any it has already extracted. It uses clodex's own tweakcc dependency for detection, and
+`readClaudeBundle` for the JavaScript, which is why it has to run from inside this repo, where
+`node_modules` resolves.
+
+**Since 2.1.242 the file it writes is a JOIN of every JavaScript module**, separated by
+`/*clodex:module-boundary*/` lines — the same document `clodex patch` matches its anchors against.
+Do not go back to tweakcc's `readContent` for this: it returns only the module it recognizes by
+name, which since 2.1.242 is a ~20 KB stub holding none of Claude Code's behaviour.
 
 Extract from a **pristine** `.orig` backup, never a patched live binary: a patched claude reports
 its version perfectly well, so the only thing distinguishing them is the patch marker.
@@ -34,15 +40,45 @@ Then **enumerate every branch of the function yourself.** Shipped bugs have come
 gates that happened to be visible, and from grepping one syntactic form of a comparison — grep the
 *value*, then trace every hit.
 
+## The bundle was code-split in 2.1.242
+
+Through 2.1.241 the whole ~28 MB bundle was ONE Bun module. 2.1.242 split it: the entry module is
+now a ~20 KB ESM stub whose body is `import{…}from"/$bunfs/root/chunk-<hash>.js"` plus a `main()`
+call, and the code lives in ~1,374 sibling `chunk-*.js` modules — 1,391 modules in the blob, against
+15 before. Chunk names are content-hashed, so they differ between releases AND between platform
+builds of the same release.
+
+| Version | Modules in the blob | Entry module payload |
+| --- | --- | --- |
+| 2.1.232 | 15 | 26,504,651 bytes — the whole bundle |
+| 2.1.241 | 15 | 28,252,504 bytes — the whole bundle |
+| 2.1.242, 2.1.243 | 1,391 | ~19,950 bytes — an import stub |
+
+(Measured on darwin-arm64. 2.1.242 and 2.1.243 have the same module count and differ only in their
+chunk hashes and version string.)
+
+Consequences worth knowing before you touch any of this:
+
+- **The anchors did not move; the reader did.** Every clodex patch site still occurs exactly once
+  across the bundle — they are just in six different chunks on 2.1.243, none of them the entry.
+- **Bun executes the chunk SOURCE, not the chunk bytecode.** Verified on 2.1.243 darwin-arm64 by
+  overwriting eleven bytes of one chunk's payload in place (`Your prompt` → `YOUR_PROMPT`),
+  re-signing, and running `claude --help`: the edited string is what printed.
+- **A module's payload can be repointed without moving it.** `{ offset, length }` in the module
+  struct is the only thing that says where a module's source is, so several modules can be patched
+  in ONE repack by concatenating their new sources into the buffer tweakcc writes and then pointing
+  each module at its own slice. That is what `src/bun-bundle.ts` does.
+
 ## The entry module's name is not stable (renamed in 2.1.229)
 
-The bundle lives in a Bun data blob as one module among ~15, and tweakcc finds it **by name**:
+The bundle lived in a Bun data blob as one module among ~15 (see the code-split section above for
+what changed in 2.1.242), and tweakcc finds it **by name**:
 `/claude`, `claude`, `/claude.exe`, `claude.exe`, `/src/entrypoints/cli.js`, `src/entrypoints/cli.js`.
 
 | Version | Entry module |
 | --- | --- |
 | 2.1.224, 2.1.226, 2.1.228 | `/$bunfs/root/src/entrypoints/cli.js` |
-| 2.1.229, 2.1.231–2.1.234 | `/$bunfs/root/cli` |
+| 2.1.229, 2.1.231–2.1.234, 2.1.241–2.1.243 | `/$bunfs/root/cli` |
 
 (2.1.228 is the last release clodex's pinned tweakcc 4.3.0 — and clodex's own mirrored copy of its
 name list — can discover, and 2.1.230 was never published for any platform package, so 2.1.229 is
@@ -56,8 +92,9 @@ packaging fault described in `patcher.md` and is not it. tweakcc carried the old
 
 Two things that are easy to assume wrongly about the blob:
 
-- **The entry module also carries ~190 MB of Bun bytecode** (`// @bun @bytecode @bun-cjs`), and
-  repacking preserves it verbatim. It does **not** win over the patched source — a canary injected
+- **Every JavaScript module also carries Bun bytecode** (`// @bun @bytecode`) — ~190 MB on the
+  single-module releases, a few hundred KB per chunk since the split — and repacking preserves it
+  verbatim. It does **not** win over the patched source — a canary injected
   into the JS prints at startup on a repacked 2.1.231 (verified twice on macOS arm64 — once by
   hand and once through clodex's own local-patches feature, both printing the canary on stderr
   ahead of `--version`). Bytecode has been present since at least 2.1.226, so this was never the

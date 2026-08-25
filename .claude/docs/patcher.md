@@ -1,20 +1,22 @@
 <!-- Read when changing src/patcher.ts, patch-transforms.ts, patch-backup.ts, local-patches.ts,
-     built-in-patch-proofs.ts, bun-entry-module.ts, or anything about `clodex patch`. -->
+     built-in-patch-proofs.ts, bun-entry-module.ts, bun-bundle.ts, or anything about
+     `clodex patch`. -->
 
 # Patcher
 
 `src/patcher.ts` + `src/patch-transforms.ts` + `src/built-in-patch-proofs.ts` +
-`src/local-patches.ts` + `src/patch-backup.ts` + `src/bun-entry-module.ts`.
+`src/local-patches.ts` + `src/patch-backup.ts` + `src/bun-entry-module.ts` + `src/bun-bundle.ts`.
 
 `clodex patch` uses tweakcc's programmatic API — an exact-pinned, declared runtime dependency
 (externalized in `tsup.config.ts`; it brings `node-lief` for native repacking and `ink`/`react` for
 its picker, which is why `patcher.ts` loads it via lazy `import()`). **Never `npx`, never the
-network.** Flow: `tryDetectInstallation({ path })` → `readContent` → `applyClodexPatches(source,
+network.** Flow: `tryDetectInstallation({ path })` → `readClaudeBundle` → `applyClodexPatches(source,
 config)` (in-process pure function applying built-in PATCH 1–10 sites) → optional
 `applyLocalPatches` transaction with built-in postcondition verification → `writeContent` (repacks
-the native binary). Both layers return per-site OK/SKIP/FAIL results shown by `--trace`. Since
-2.1.229, the reads and the repack are each wrapped in the entry-module shim below, without which
-tweakcc cannot find the bundle at all.
+the native binary) → `applyBundleWritePlan` (points each patched module at its own payload). Both
+layers return per-site OK/SKIP/FAIL results shown by `--trace`. Since 2.1.229, the reads and the
+repack are each wrapped in the entry-module shim below, without which tweakcc cannot find the
+bundle at all.
 
 tweakcc ships no `.d.ts` despite its `types` field — `src/tweakcc.d.ts` declares the verified API
 surface; re-verify when bumping the pin. `node-gyp-build` is a deliberate direct dependency even
@@ -32,6 +34,66 @@ layout with exact pins. Keep it even after node-lief fixes the packaging.
 The built-ins bake favorites + aliases into the binary: model validation, `/model` listing, alias
 resolution, context windows via a `/*ccpatch:ctx*/`-marked map, per-model effort
 capabilities/defaults, and child-command network isolation.
+
+## The bundle is many modules (`bun-bundle.ts`)
+
+Claude Code 2.1.242 code-split its bundle — one ~28 MB Bun module became a ~20 KB entry stub plus
+~1,374 `chunk-*.js` siblings. tweakcc reads and writes exactly ONE module, the one it recognizes by
+name, so `clodex patch` started seeing a stub with none of its anchors in it and aborted at
+`PATCH 1` on all eight published builds at once. `.claude/docs/claude-code-internals.md` has the
+bundle-side detail and the module counts.
+
+`bun-bundle.ts` keeps the old contract: `readClaudeBundle` reads every module Bun will execute as
+JavaScript and joins them with a ``/*clodex:module-boundary`;{}"]*/`` line, `applyClodexPatches` still sees
+one document, and `splitBundleSource` cuts it back up. **The transforms did not change and must not
+have to.** A patched document with the wrong number of boundaries is a hard failure, not a best
+effort: a boundary consumed by an anchor would silently move code between modules.
+
+**Selection is by Bun's loader id, not by name.** Only `loader === 1` — what Bun executes as
+JavaScript — is part of the bundle. The vendored assets (`mermaid.min.js`,
+`hljsBundle.generated.min.js`, `chart.umd.min.js`) are `.js` files that Bun never runs, and feeding
+megabytes of foreign JavaScript to anchors that must match exactly once is a way to invent
+ambiguity and refuse a release that is perfectly patchable. Two consequences follow, and the second
+is easy to miss: **a module's position in the blob table is not its position in the bundle**, so
+every repoint is addressed by table index; and **the read corpus grew for old releases too** — a
+pre-split blob holds five ~2 KB loader-1 stubs (`image-processor.js`, `audio-capture.js`,
+`url-handler.js`, `computer-use-*.js`) beside the bundle, which tweakcc's read never included.
+Checked on a real 2.1.232: none of them contains any anchor, any `process.env` read, or anything
+the whole-bundle count guards in PATCH 5 and PATCH 10 look at.
+
+**The write is one repack plus a pointer edit, and both halves are load-bearing.**
+
+- Calling `writeContent` once per changed module is not an alternative. Each ELF repack relocates
+  the whole ~290 MB blob to `align(nextVirtualAddress())` and extends the segment, so six of them
+  would leave a multi-gigabyte `claude` and take minutes. Mach-O and PE assign in place, so this is
+  invisible on macOS and Windows — the same asymmetry that hid the restore-sweep bug.
+- So every changed module's patched source is concatenated (NUL-separated, because Bun
+  NUL-terminates every string in the blob and tweakcc only terminates the buffer as a whole) into
+  the one buffer tweakcc writes, and then `repointBunModuleContents` rewrites the 8-byte
+  `{ offset, length }` pair in each module's struct to address its own slice. Nothing moves and
+  nothing grows; the bytes are already in the blob.
+- **The module tweakcc writes has to come first in that buffer**, because its position is the only
+  one knowable before the repack — every other slice is addressed relative to it. After the repack
+  `applyBundleWritePlan` re-reads the table, refuses if the recognized module is not the one the
+  plan was built around or does not hold exactly the bytes that were written, and then reads every
+  repointed module back and compares it to the patched source it should be. A module left pointing
+  at its neighbour's bytes would start and then misbehave, which is much worse than a patch that
+  refuses.
+- **When the only changed module is the one tweakcc writes, the plan degrades to today's single
+  call with no pointer edit** — which is every release up to 2.1.241, **for the built-ins**. Read it
+  as a statement about the WRITE, and only about a patch whose edits all land in that one module: a
+  local patch that changes a helper module does produce a repoint on those releases too.
+  The READ changed on every version. The joined document has always been more than the entry
+  module, because a pre-split blob carries five loader-1 helper stubs beside it — verified on 18
+  binaries from 2.1.208 to 2.1.241, all six-module, entry first. For a built-in that is inert
+  (measured on a real 2.1.232: no anchor and no count-guard text in any of the five), but a LOCAL
+  patch that appends or prepends by position rather than matching an anchor now lands in a
+  different module than it used to. README says so where a local-patch author will see it.
+- **A repoint is a write AFTER tweakcc's repack, which signs on its way out.** Restoring the
+  entry-module name re-signs and covers the normal path; `resignMachOBinary` covers the binary that
+  needed no shim. Skip either and macOS refuses to start the result.
+- Bun runs the module SOURCE, not the bytecode that sits beside it — verified on a real 2.1.243
+  build, see `claude-code-internals.md`. Without that, none of this would have any effect.
 
 ## The entry-module shim (`bun-entry-module.ts`)
 
@@ -330,7 +392,17 @@ tweakcc's own repack reads back as an ordinary module name.
   publishes the complete built-ins. Host-generated `/*clodex-local:<id>*/` markers are distinct from
   the blocking `/*ccpatch:` tier, and local transforms may not alter prior local markers or built-in
   sites. Keep the module deterministic and self-contained — only its entry bytes participate in
-  freshness.
+  freshness. The `source` a local patch receives is **every JavaScript module joined with
+  ``/*clodex:module-boundary`;{}"]*/`` lines**, not one module's text — on every version, not only the
+  split ones, because a pre-split blob already carried five helper modules beside the bundle.
+  A transform that adds or removes a boundary fails the whole patch loudly. State the rest of the
+  guarantee precisely, because it is narrower than it looks: that is a COUNT check, so a local
+  transform that MOVES text across a boundary while leaving the separators intact would relocate
+  code into another module's scope and nothing would report it. What rules the built-ins out is the
+  separator itself, not the count — see `bun-bundle.ts` — and local patches are explicitly trusted
+  code that may use any regex at all, so for them this is a documented limit rather than a hole to
+  plug. The positional case (append/prepend rather than match) is called out in README, where a
+  local-patch author will see it.
 - **Patch-marker detection is two-tier** (`patch-backup.ts`). Only the `/*ccpatch:` prefix —
   clodex's own injected text — may *block*, and it covers everything current clodex publishes
   because PATCH 8a/8b/8c/9 are required and each emits one. The weaker legacy signals (PATCH 4's

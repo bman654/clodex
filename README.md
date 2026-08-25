@@ -205,6 +205,10 @@ Enabling this feature executes that JavaScript with your full user permissions; 
 
 The module must default-export an array. Each site has a unique lowercase `id` and an `apply` function that returns the complete source and emits the generated `marker` exactly once when it applies:
 
+The `source` your `apply` receives is every JavaScript module in the binary joined together, with a ``/*clodex:module-boundary`;{}"]*/`` line between them. This is true of every Claude Code version — a pre-2.1.242 binary carries the bundle plus five small helper modules; a 2.1.242-or-later one carries the bundle split across roughly 1,370. Match and replace as you always have; just do not add or remove one of those lines, or the whole patch is refused. (The punctuation in the marker is there so that a wildcard bounded by a character class cannot run across a module boundary.)
+
+If your transform works by **position** rather than by matching an anchor, mind where it lands: text prepended to `source` goes into the first module and text appended to it goes into the last, and neither is necessarily the module that runs at startup. Anchor your edit to text you match, the way the examples below do.
+
 ```js
 export default [
   {

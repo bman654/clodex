@@ -113,9 +113,13 @@ export function captureBuiltInPatchProofs(
     'PATCH 3: known-alias validator list',
     /\["sonnet","opus","haiku","fable"(?:,"[^"]+")*,"opusplan"(?:,"[^"]+")*\]/,
   );
+  // Ends at the template's own closing backtick, not at the `)` that used to follow it: Claude
+  // Code 2.1.242 started concatenating a conditional sentence onto the same string, and a proof
+  // that could no longer find the site turned every local patch into "could not capture built-in
+  // postconditions" — the same drift PATCH 4's own anchor had to absorb.
   addPattern(
     'PATCH 4: Agent tool model description',
-    /describe\(`Optional model override for this agent[^`]*?`\)/,
+    /describe\(`Optional model override for this agent[^`]*?`/,
   );
 
   const aliases = configuredAliases(config);
