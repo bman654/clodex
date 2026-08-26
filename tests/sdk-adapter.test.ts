@@ -43,10 +43,72 @@ describe('translateTools', () => {
   it('builds client-side tools (no execute) keyed by name', () => {
     const tools = translateTools([
       { name: 'Read', description: 'read a file', input_schema: { type: 'object', properties: { path: { type: 'string' } } } },
-    ]);
+    ], '@ai-sdk/openai-compatible');
     expect(tools && Object.keys(tools)).toEqual(['Read']);
     expect(tools!.Read.execute).toBeUndefined();
+    expect(tools?.Read.strict).toBeUndefined();
   });
+  it('serializes optional properties as optional OpenAI function arguments', async () => {
+    const requestBodies: unknown[] = [];
+    const provider = createOpenAI({
+      apiKey: 'synthetic-test-key',
+      fetch: async (_input, init) => {
+        requestBodies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({
+          id: 'resp_synthetic',
+          model: 'gpt-5.6-sol',
+          output: [],
+          usage: {
+            input_tokens: 1,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens: 0,
+            output_tokens_details: { reasoning_tokens: 0 },
+          },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    });
+    const params = translateRequest({
+      model: 'gpt-5.6-sol',
+      messages: [{ role: 'user', content: 'delegate this task' }],
+      tools: [{
+        name: 'Agent',
+        description: 'Launch an agent',
+        input_schema: {
+          type: 'object',
+          properties: {
+            description: { type: 'string' },
+            prompt: { type: 'string' },
+            isolation: { type: 'string', enum: ['worktree', 'remote'] },
+          },
+          required: ['description', 'prompt'],
+        },
+      }],
+    }, '@ai-sdk/openai', { openAiOAuth: true });
+
+    await generateAnthropicResponse(
+      provider.responses('gpt-5.6-sol'), params, 'gpt-5.6-sol');
+
+    expect(requestBodies).toEqual([
+      expect.objectContaining({
+        tools: [{
+          type: 'function',
+          name: 'Agent',
+          description: 'Launch an agent',
+          strict: false,
+          parameters: {
+            type: 'object',
+            properties: {
+              description: { type: 'string' },
+              prompt: { type: 'string' },
+              isolation: { type: 'string', enum: ['worktree', 'remote'] },
+            },
+            required: ['description', 'prompt'],
+          },
+        }],
+      }),
+    ]);
+  });
+
   it('returns undefined for empty/missing tools', () => {
     expect(translateTools(undefined)).toBeUndefined();
     expect(translateTools([])).toBeUndefined();
