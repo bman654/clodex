@@ -577,6 +577,25 @@ fp_case "same config compares"        '{"configFingerprint":"aaa"}' aaa compare
 fp_case "changed config skips"        '{"configFingerprint":"aaa"}' bbb skip
 fp_case "a pre-fingerprint entry falls back" '{}'                   bbb compare
 
+# 21b. A baseline entry recorded before the leg-mode field existed cannot be compared at all. The
+#      two modes' check names are disjoint sets — patch sites for host/container, probe check names
+#      for a probe — so an entry whose mode is unknown cannot be placed in either. Comparing one
+#      anyway reports every name in the other set as dropped: it invented 16 lost probe checks on a
+#      container leg that had never run as a probe, on two consecutive runs. A missing
+#      configFingerprint only leaves the config unknown and can fall back to comparing; a missing
+#      mode makes the comparison itself meaningless, so it re-takes the baseline instead.
+mode_case() { # mode_case <name> <base-entry-json> <current-mode> <expect: compare|skip>
+  local name="$1" base_mode cur="$3" want="$4" got
+  base_mode="$(printf '%s' "$2" | jq -r '.mode // ""')"
+  if [ -z "$base_mode" ]; then got=skip
+  elif [ "$base_mode" != "$cur" ]; then got=skip
+  else got=compare; fi
+  matrix_check "$name" "$want" "$got"
+}
+mode_case "same mode compares"        '{"mode":"container"}' container compare
+mode_case "changed mode skips"        '{"mode":"probe"}'     container skip
+mode_case "a pre-mode entry is re-taken, not compared" '{}'  container skip
+
 # 22. The container leg must tell a patch that HUNG from a container that never got that far —
 #     one is a broken release, the other is the canary's own infrastructure.
 hang_case() { # hang_case <name> <started-marker-exists> <expect>

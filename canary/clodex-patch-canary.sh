@@ -1186,8 +1186,17 @@ if [ "$BASE_PLATFORMS" != "{}" ]; then
     # A leg's checks are named per mode — patch sites for host/container, probe check names for a
     # probe. Comparing across modes reports every name in the other set as a lost site, so a single
     # Docker outage would produce a page of invented regressions on the run after it.
+    # An entry recorded before this field existed carries no mode, so its names cannot be placed in
+    # either set. Comparing it anyway does the exact damage the mode check exists to prevent — it
+    # reported all 16 probe names as dropped on two consecutive container runs — so an entry with no
+    # mode is re-taken rather than compared. Unlike a missing configFingerprint, which only leaves
+    # the config unknown, a missing mode makes the comparison itself meaningless.
     BASE_MODE="$(printf '%s' "$BASE_PLATFORMS" | jq -r --arg p "$PLATFORM" '.[$p].mode // ""')"
-    if [ -n "$BASE_MODE" ] && [ "$BASE_MODE" != "$(matrix_mode_of "$PLATFORM")" ]; then
+    if [ -z "$BASE_MODE" ]; then
+      add_soft "$PLATFORM's baseline predates the leg-mode record, so its checks were not compared; its baseline is re-taken from $VERSION"
+      continue
+    fi
+    if [ "$BASE_MODE" != "$(matrix_mode_of "$PLATFORM")" ]; then
       add_soft "$PLATFORM was tested as a $(matrix_mode_of "$PLATFORM") leg this time and a $BASE_MODE leg on $BASE_VERSION, so its checks were not compared"
       continue
     fi
