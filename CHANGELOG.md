@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.8.2](https://github.com/bman654/clodex/compare/v2.8.1...v2.8.2) (2026-08-26)
+
+
+### Bug Fixes
+
+* **auth:** stop blaming a closed browser when sign-in was completed in an older tab ([7812a78](https://github.com/bman654/clodex/commit/7812a78e832e61da51be60280853c48ba3277219))
+* **auth:** stop blaming another sign-in when a busy port blocks browser sign-in ([0b239fa](https://github.com/bman654/clodex/commit/0b239fa20a7a34cdee76e72aa6a6b2605c40e19c))
+* **patch:** restore patching on Claude Code 2.1.246, where the patch was lost or crashed claude ([6a3b627](https://github.com/bman654/clodex/commit/6a3b627eabad518c22aec1ab20afff3285a36a5c))
+
 ## [2.8.1](https://github.com/bman654/clodex/compare/v2.8.0...v2.8.1) (2026-08-25)
 
 
