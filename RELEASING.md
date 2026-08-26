@@ -44,6 +44,28 @@ Publishing happens inside the release-please job deliberately: a tag created by 
   (`src/constants.ts::VERSION` reads `pkg.version`).
 - **Never commit `dist/`.** It is gitignored; `prepublishOnly` and release CI rebuild it.
 
+## Before releasing a patcher change
+
+`clodex patch` rewrites the user's own Claude Code binary, so a bad patcher release is the most
+expensive thing this project can ship. Two checks belong in every patcher release. Neither is
+covered by CI, and both exist because the obvious signal lied.
+
+- **A green probe is not evidence that a patched binary runs.** `scripts/probe-patch-mechanism.mjs`
+  reads, patches and repacks, but it never *executes* what it produced — that is by design, and it
+  is what lets one Mac cover the ELF and PE builds. It reports only what it can see. On Claude Code
+  2.1.246 the probe reported a clean pass against the real ELF build whose patched form segfaulted
+  before it could print its version.
+
+- **`claude --version` cannot tell a working patch from a silent no-op.** Run the patched binary
+  against a **pristine control** and diff something only the patch changes. The Agent-tool model
+  enum does it: patched offers the clodex aliases (`...,"luna","sol","terra"`), pristine offers only
+  Claude's own. That the binary starts, and that it reports the expected version, prove neither — a
+  2.1.246 binary patched by clodex 2.8.1 did both while running entirely unpatched code, because
+  Bun 1.4.1 runs a module's cached bytecode rather than the patched source beside it.
+
+Both are the same failure shape, and it is the dangerous one: the patch appears to apply and does
+nothing. `.claude/docs/patcher.md` covers why 2.1.246 made it reachable and what the fix relies on.
+
 ## Version bumping
 
 Normal conventional-commit bumping applies (the repo is past 1.0). To force a specific
