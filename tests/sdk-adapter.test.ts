@@ -1400,6 +1400,49 @@ describe('writeAnthropicStream', () => {
     expect(toolInputFromEvents(events)).toEqual({ query: 'who won' });
   });
 
+  // A model can emit arguments that parse to an array or a scalar, or that do
+  // not parse at all — the SDK then hands the raw string through as the input.
+  // Iterating those with Object.entries invented a character-index map, which
+  // is neither what the model said nor what the OAuth head snapshot records for
+  // the same call (sanitizedCallArguments returns those shapes untouched).
+  it.each([
+    ['a malformed JSON string', '{"query":'],
+    ['a JSON array', ['a', 'b']],
+    ['a bare string', 'just a string'],
+  ])('passes %s through instead of inventing a character-index map', async (_label, raw) => {
+    const requestBodies: unknown[] = [];
+    const provider = createOpenAI({
+      apiKey: 'synthetic-test-key',
+      fetch: async () => {
+        requestBodies.push(null);
+        return new Response(JSON.stringify({
+          id: 'resp_synthetic',
+          model: 'm',
+          output: [{ type: 'function_call', id: 'fc1', call_id: 'call_1', name: 'WebSearch', arguments: typeof raw === 'string' ? raw : JSON.stringify(raw) }],
+          usage: {
+            input_tokens: 1,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens: 1,
+            output_tokens_details: { reasoning_tokens: 0 },
+          },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    });
+    const params = translateRequest({
+      model: 'm',
+      messages: [{ role: 'user', content: 'go' }],
+      tools: [{
+        name: 'WebSearch',
+        description: 'Search the web',
+        input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
+      }],
+    }, '@ai-sdk/openai');
+
+    const out = await generateAnthropicResponse(provider.responses('m'), params, 'm');
+    const toolUse = out.content.find((c: { type: string }) => c.type === 'tool_use') as { input: unknown } | undefined;
+    expect(toolUse?.input).toEqual(raw);
+  });
+
   it('preserves an intentional empty array for a schema-required property', async () => {
     const todoTools = translateTools([{
       name: 'TodoWrite',

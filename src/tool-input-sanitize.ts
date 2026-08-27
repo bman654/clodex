@@ -23,13 +23,24 @@
  * The returned object is prototype-less so model-controlled keys like
  * `__proto__` are stored as ordinary own properties instead of silently
  * invoking the plain-object setter.
+ *
+ * Anything that is not a plain object is returned unchanged. A model can emit
+ * arguments that parse to an array or a scalar, or that do not parse at all —
+ * in which case the SDK hands the raw string through as the input. Iterating
+ * those with `Object.entries` invents a character-index map
+ * (`'{"path":'` -> `{"0":"{","1":"\""...}`), which is not what the model said
+ * and is not what `sanitizedCallArguments` in oauth/responses-websocket.ts
+ * records for the same call — it returns those shapes untouched. Passing them
+ * through keeps the one shared rule single-valued, and lets the malformed
+ * input reach the client as itself so it can be rejected honestly.
  */
 export function sanitizeToolInput(
-  input: Record<string, unknown>,
+  input: unknown,
   requiredProps?: ReadonlySet<string>,
-): Record<string, unknown> {
+): unknown {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return input;
   const out: Record<string, unknown> = Object.create(null);
-  for (const [k, v] of Object.entries(input)) {
+  for (const [k, v] of Object.entries(input as Record<string, unknown>)) {
     if (v === null) continue;
     if (Array.isArray(v) && v.length === 0 && !requiredProps?.has(k)) continue;
     out[k] = v;

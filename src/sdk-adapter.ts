@@ -856,7 +856,7 @@ export async function writeAnthropicStream(
           // falling back to the buffered raw JSON if the SDK gave no parsed input.
           if (!flushedTools.has(id)) {
             const json = part.input !== undefined && part.input !== null
-              ? JSON.stringify(sanitizeToolInput(part.input as Record<string, unknown>, requiredProps.get(part.toolName ?? '')))
+              ? JSON.stringify(sanitizeToolInput(part.input, requiredProps.get(part.toolName ?? '')))
               : (toolJsonBuffer.get(id) ?? '');
             if (json) {
               emit('content_block_delta', {
@@ -874,7 +874,7 @@ export async function writeAnthropicStream(
           });
           emit('content_block_delta', {
             type: 'content_block_delta', index: blockIndex,
-            delta: { type: 'input_json_delta', partial_json: JSON.stringify(sanitizeToolInput(part.input as Record<string, unknown> ?? {}, requiredProps.get(part.toolName ?? ''))) },
+            delta: { type: 'input_json_delta', partial_json: JSON.stringify(sanitizeToolInput(part.input ?? {}, requiredProps.get(part.toolName ?? ''))) },
           });
           flushedTools.add(id);
         }
@@ -1105,7 +1105,7 @@ export async function generateAnthropicResponse(
         type: 'tool_use',
         id: encodeToolUseId(tc.toolCallId, grabRoundTripSignature(tc as FullStreamPart)),
         name: tc.toolName,
-        input: sanitizeToolInput(tc.input as Record<string, unknown> ?? {}, requiredProps.get(tc.toolName)),
+        input: sanitizeToolInput(tc.input ?? {}, requiredProps.get(tc.toolName)),
       })),
     ],
     stop_reason: finishReason === 'tool-calls' ? 'tool_use' : 'end_turn',
