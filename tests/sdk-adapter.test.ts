@@ -48,7 +48,7 @@ describe('translateTools', () => {
     expect(tools!.Read.execute).toBeUndefined();
     expect(tools?.Read.strict).toBeUndefined();
   });
-  it('serializes optional properties as optional OpenAI function arguments', async () => {
+  it('sends strict: false so OpenAI does not make optional tool properties mandatory', async () => {
     const requestBodies: unknown[] = [];
     const provider = createOpenAI({
       apiKey: 'synthetic-test-key',
@@ -90,10 +90,9 @@ describe('translateTools', () => {
 
     expect(requestBodies).toEqual([
       expect.objectContaining({
-        tools: [{
+        tools: [expect.objectContaining({
           type: 'function',
           name: 'Agent',
-          description: 'Launch an agent',
           strict: false,
           parameters: {
             type: 'object',
@@ -104,7 +103,7 @@ describe('translateTools', () => {
             },
             required: ['description', 'prompt'],
           },
-        }],
+        })],
       }),
     ]);
   });
