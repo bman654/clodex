@@ -409,6 +409,19 @@ export function translateMessages(
   return out;
 }
 
+/**
+ * Claude Code's non-streaming fallback rejects a `tool_use` whose `input` is
+ * neither a string nor an object (lodash `isObject`, so arrays pass but numbers
+ * and booleans do not) by throwing rather than answering with a tool_result the
+ * model can retry. A scalar is never valid Anthropic tool input anyway, so send
+ * the empty object it used to collapse to and let schema validation reject it
+ * the ordinary, retryable way. Strings and arrays reach the client unchanged.
+ */
+function representableToolInput(input: unknown): unknown {
+  if (typeof input === 'string') return input;
+  return input !== null && typeof input === 'object' ? input : {};
+}
+
 /** Per-tool `required` property sets, read back out of the translated tool schemas. */
 function toolRequiredProps(tools?: SdkCallParams['tools']): Map<string, ReadonlySet<string>> {
   const map = new Map<string, ReadonlySet<string>>();
@@ -1105,7 +1118,7 @@ export async function generateAnthropicResponse(
         type: 'tool_use',
         id: encodeToolUseId(tc.toolCallId, grabRoundTripSignature(tc as FullStreamPart)),
         name: tc.toolName,
-        input: sanitizeToolInput(tc.input ?? {}, requiredProps.get(tc.toolName)),
+        input: representableToolInput(sanitizeToolInput(tc.input ?? {}, requiredProps.get(tc.toolName))),
       })),
     ],
     stop_reason: finishReason === 'tool-calls' ? 'tool_use' : 'end_turn',

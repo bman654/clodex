@@ -1406,10 +1406,16 @@ describe('writeAnthropicStream', () => {
   // is neither what the model said nor what the OAuth head snapshot records for
   // the same call (sanitizedCallArguments returns those shapes untouched).
   it.each([
-    ['a malformed JSON string', '{"query":'],
-    ['a JSON array', ['a', 'b']],
-    ['a bare string', 'just a string'],
-  ])('passes %s through on the non-streamed path instead of inventing a character-index map', async (_label, raw) => {
+    ['a malformed JSON string', '{"query":', '{"query":'],
+    ['a JSON array', ['a', 'b'], ['a', 'b']],
+    ['a bare string', 'just a string', 'just a string'],
+    // Claude Code's non-streaming fallback throws on a tool_use input that is
+    // neither a string nor an object, instead of answering with a tool_result
+    // the model can retry. A scalar is never valid Anthropic tool input, so it
+    // collapses to {} and gets rejected the ordinary, retryable way.
+    ['a number', 42, {}],
+    ['a boolean', true, {}],
+  ])('sends %s in a shape the client can represent, on the non-streamed path', async (_label, raw, expected) => {
     const requestBodies: unknown[] = [];
     const provider = createOpenAI({
       apiKey: 'synthetic-test-key',
@@ -1440,7 +1446,7 @@ describe('writeAnthropicStream', () => {
 
     const out = await generateAnthropicResponse(provider.responses('m'), params, 'm');
     const toolUse = out.content.find((c: { type: string }) => c.type === 'tool_use') as { input: unknown } | undefined;
-    expect(toolUse?.input).toEqual(raw);
+    expect(toolUse?.input).toEqual(expected);
   });
 
   // The streaming path is the one Claude Code actually uses (and OAuth forces
