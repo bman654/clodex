@@ -93,6 +93,7 @@ describe('translateTools', () => {
         tools: [expect.objectContaining({
           type: 'function',
           name: 'Agent',
+          description: 'Launch an agent',
           strict: false,
           parameters: {
             type: 'object',
@@ -1408,7 +1409,7 @@ describe('writeAnthropicStream', () => {
     ['a malformed JSON string', '{"query":'],
     ['a JSON array', ['a', 'b']],
     ['a bare string', 'just a string'],
-  ])('passes %s through instead of inventing a character-index map', async (_label, raw) => {
+  ])('passes %s through on the non-streamed path instead of inventing a character-index map', async (_label, raw) => {
     const requestBodies: unknown[] = [];
     const provider = createOpenAI({
       apiKey: 'synthetic-test-key',
@@ -1440,6 +1441,33 @@ describe('writeAnthropicStream', () => {
     const out = await generateAnthropicResponse(provider.responses('m'), params, 'm');
     const toolUse = out.content.find((c: { type: string }) => c.type === 'tool_use') as { input: unknown } | undefined;
     expect(toolUse?.input).toEqual(raw);
+  });
+
+  // The streaming path is the one Claude Code actually uses (and OAuth forces
+  // it), so it needs its own coverage: the raw-JSON buffer only stands in when
+  // the SDK supplies no parsed input, and for an array or an invalid dynamic
+  // tool call it supplies a non-object one instead.
+  it.each([
+    ['a malformed JSON string', '{"path":'],
+    ['a JSON array', ['a', 'b']],
+    ['a bare string', 'hello'],
+  ])('passes %s through on the streamed path too', async (_label, bad) => {
+    const readTools = translateTools([{
+      name: 'Read',
+      description: 'Read a file',
+      input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    }]);
+    const { events } = await collect([
+      { type: 'start' },
+      { type: 'tool-input-start', id: 'c1', toolName: 'Read' },
+      { type: 'tool-call', toolCallId: 'c1', toolName: 'Read', input: bad },
+      { type: 'finish', finishReason: 'tool-calls' },
+    ], 'm', undefined, readTools);
+    const json = events
+      .filter(e => e.event === 'content_block_delta' && e.data.delta.type === 'input_json_delta')
+      .map(e => e.data.delta.partial_json)
+      .join('');
+    expect(JSON.parse(json)).toEqual(bad);
   });
 
   it('preserves an intentional empty array for a schema-required property', async () => {
