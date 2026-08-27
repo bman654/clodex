@@ -409,6 +409,31 @@ export function translateMessages(
   return out;
 }
 
+/** True for a JSON object — the only shape the tool-input strip rule applies to. */
+function isPlainObject(value: unknown): boolean {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** True when `text` is parseable JSON, so forwarding it verbatim would not surface an error. */
+function parsesAsJson(text: string): boolean {
+  if (text.trim() === '') return true;
+  try { JSON.parse(text); return true; } catch { return false; }
+}
+
+/**
+ * Claude Code's non-streaming fallback rejects a `tool_use` whose `input` is
+ * neither a string nor an object (lodash `isObject`, so arrays pass but numbers
+ * and booleans do not) by throwing rather than answering with a tool_result the
+ * model can retry. A scalar is never valid Anthropic tool input, so send the
+ * empty object it used to collapse to and let validation reject it the ordinary
+ * way. A string is kept: that path re-parses it, and an unparseable one becomes
+ * the same retryable JSON-parse error the streamed path now produces.
+ */
+function representableToolInput(input: unknown): unknown {
+  if (typeof input === 'string') return input;
+  return isPlainObject(input) || Array.isArray(input) ? input : {};
+}
+
 /** Per-tool `required` property sets, read back out of the translated tool schemas. */
 function toolRequiredProps(tools?: SdkCallParams['tools']): Map<string, ReadonlySet<string>> {
   const map = new Map<string, ReadonlySet<string>>();
@@ -854,10 +879,20 @@ export async function writeAnthropicStream(
         if (idToBlock.has(id)) {
           // Streamed input: emit the sanitized complete input as one delta,
           // falling back to the buffered raw JSON if the SDK gave no parsed input.
+          //
+          // Arguments that do not parse at all are forwarded as the model's own
+          // bytes. Claude Code re-parses this text, so anything derived from a
+          // failed parse — the SDK's raw-string passthrough, JSON-quoted — parses
+          // cleanly on its side and is spread into a character-index map that it
+          // then acts on. Sending the bytes makes its parse fail as ours did, and
+          // it answers the model with a retryable "could not be parsed as JSON".
           if (!flushedTools.has(id)) {
-            const json = part.input !== undefined && part.input !== null
-              ? JSON.stringify(sanitizeToolInput(part.input as Record<string, unknown>, requiredProps.get(part.toolName ?? '')))
-              : (toolJsonBuffer.get(id) ?? '');
+            const buffered = toolJsonBuffer.get(id);
+            const json = buffered !== undefined && !isPlainObject(part.input) && !parsesAsJson(buffered)
+              ? buffered
+              : part.input !== undefined && part.input !== null
+                ? JSON.stringify(sanitizeToolInput(part.input, requiredProps.get(part.toolName ?? '')))
+                : (buffered ?? '');
             if (json) {
               emit('content_block_delta', {
                 type: 'content_block_delta', index: idToBlock.get(id) ?? blockIndex,
@@ -874,7 +909,7 @@ export async function writeAnthropicStream(
           });
           emit('content_block_delta', {
             type: 'content_block_delta', index: blockIndex,
-            delta: { type: 'input_json_delta', partial_json: JSON.stringify(sanitizeToolInput(part.input as Record<string, unknown> ?? {}, requiredProps.get(part.toolName ?? ''))) },
+            delta: { type: 'input_json_delta', partial_json: JSON.stringify(sanitizeToolInput(part.input ?? {}, requiredProps.get(part.toolName ?? ''))) },
           });
           flushedTools.add(id);
         }
@@ -1105,7 +1140,7 @@ export async function generateAnthropicResponse(
         type: 'tool_use',
         id: encodeToolUseId(tc.toolCallId, grabRoundTripSignature(tc as FullStreamPart)),
         name: tc.toolName,
-        input: sanitizeToolInput(tc.input as Record<string, unknown> ?? {}, requiredProps.get(tc.toolName)),
+        input: representableToolInput(sanitizeToolInput(tc.input ?? {}, requiredProps.get(tc.toolName))),
       })),
     ],
     stop_reason: finishReason === 'tool-calls' ? 'tool_use' : 'end_turn',

@@ -568,7 +568,7 @@ function toolArgumentNormalizationGap(
       // `arguments` cannot be reported as the filler-strip rule having forked.
       return canonicalJson({
         ...(normalizeToolCallJson(item) as JsonObject),
-        arguments: canonicalJson(sanitizeToolInput(parsed as Record<string, unknown>, required)),
+        arguments: canonicalJson(sanitizeToolInput(parsed, required)),
       });
     } catch { return undefined; }
   };
@@ -1234,7 +1234,7 @@ function sanitizedCallArguments(item: JsonObject, requiredProps: Map<string, Set
   const required = requiredProps.get(typeof item.name === 'string' ? item.name : '');
   return {
     ...item,
-    arguments: JSON.stringify(sanitizeToolInput(parsed as Record<string, unknown>, required)),
+    arguments: JSON.stringify(sanitizeToolInput(parsed, required)),
   };
 }
 

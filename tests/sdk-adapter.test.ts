@@ -1400,6 +1400,68 @@ describe('writeAnthropicStream', () => {
     expect(toolInputFromEvents(events)).toEqual({ query: 'who won' });
   });
 
+  // Unparseable arguments must reach the client as the model's own bytes: it
+  // re-parses this text, and anything that parses cleanly gets spread into a
+  // character-index map it will act on. A failed parse instead becomes a
+  // retryable "could not be parsed as JSON" tool_result.
+  it('forwards unparseable streamed arguments as the raw bytes the model sent', async () => {
+    const readTools = translateTools([{
+      name: 'Read', description: 'Read a file',
+      input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    }]);
+    const raw = '{"path":';
+    const { events } = await collect([
+      { type: 'start' },
+      { type: 'tool-input-start', id: 'c1', toolName: 'Read' },
+      { type: 'tool-input-delta', id: 'c1', delta: raw },
+      // the SDK hands the unparsed text back as the input when it cannot parse it
+      { type: 'tool-call', toolCallId: 'c1', toolName: 'Read', input: raw },
+      { type: 'finish', finishReason: 'tool-calls' },
+    ], 'm', undefined, readTools);
+    const json = events
+      .filter(e => e.event === 'content_block_delta' && e.data.delta.type === 'input_json_delta')
+      .map(e => e.data.delta.partial_json).join('');
+    expect(json).toBe(raw);
+    expect(() => JSON.parse(json)).toThrow();
+  });
+
+  it('still sends parseable streamed arguments as sanitized JSON', async () => {
+    const { events } = await collect([
+      { type: 'start' },
+      { type: 'tool-input-start', id: 'c1', toolName: 'WebSearch' },
+      { type: 'tool-input-delta', id: 'c1', delta: '{"query":"q","blocked_domains":[]}' },
+      { type: 'tool-call', toolCallId: 'c1', toolName: 'WebSearch', input: { query: 'q', blocked_domains: [] } },
+      { type: 'finish', finishReason: 'tool-calls' },
+    ], 'm', undefined, webSearchTools);
+    expect(toolInputFromEvents(events)).toEqual({ query: 'q' });
+  });
+
+  it.each([
+    ['a JSON array', ['a', 'b'], ['a', 'b']],
+    ['a bare string', 'just a string', 'just a string'],
+    // Claude Code's non-streaming fallback throws on input that is neither a
+    // string nor an object, instead of answering with a retryable tool_result.
+    ['a number', 42, {}],
+    ['a boolean', true, {}],
+  ])('sends %s in a shape the client can represent, on the non-streamed path', async (_label, raw, expected) => {
+    const provider = createOpenAI({
+      apiKey: 'synthetic-test-key',
+      fetch: async () => new Response(JSON.stringify({
+        id: 'resp_synthetic', model: 'm',
+        output: [{ type: 'function_call', id: 'fc1', call_id: 'call_1', name: 'WebSearch', arguments: JSON.stringify(raw) }],
+        usage: { input_tokens: 1, input_tokens_details: { cached_tokens: 0 }, output_tokens: 1, output_tokens_details: { reasoning_tokens: 0 } },
+      }), { status: 200, headers: { 'content-type': 'application/json' } }),
+    });
+    const params = translateRequest({
+      model: 'm', messages: [{ role: 'user', content: 'go' }],
+      tools: [{ name: 'WebSearch', description: 'Search the web',
+        input_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } }],
+    }, '@ai-sdk/openai');
+    const out = await generateAnthropicResponse(provider.responses('m'), params, 'm');
+    const toolUse = out.content.find((c: { type: string }) => c.type === 'tool_use') as { input: unknown } | undefined;
+    expect(toolUse?.input).toEqual(expected);
+  });
+
   it('preserves an intentional empty array for a schema-required property', async () => {
     const todoTools = translateTools([{
       name: 'TodoWrite',
