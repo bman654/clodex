@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.8.3](https://github.com/bman654/clodex/compare/v2.8.2...v2.8.3) (2026-08-27)
+
+
+### Bug Fixes
+
+* **openai:** let a garbled tool call be retried instead of run with invented arguments ([#156](https://github.com/bman654/clodex/issues/156)) ([0d96089](https://github.com/bman654/clodex/commit/0d960899321acf8d2fbb9ab0e451be2a7f3875db))
+* **openai:** prevent nested agents from being forced into worktrees ([#153](https://github.com/bman654/clodex/issues/153)) ([47f9ae5](https://github.com/bman654/clodex/commit/47f9ae57f26d6531e1001b062126ae830eb812ac))
+
 ## [2.8.2](https://github.com/bman654/clodex/compare/v2.8.1...v2.8.2) (2026-08-26)
 
 
