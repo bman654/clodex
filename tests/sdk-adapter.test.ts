@@ -1457,17 +1457,29 @@ describe('writeAnthropicStream', () => {
       description: 'Read a file',
       input_schema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
     }]);
-    const { events } = await collect([
+    const partialJson = async (parts: unknown[]) => {
+      const { events } = await collect(parts as never[], 'm', undefined, readTools);
+      return events
+        .filter(e => e.event === 'content_block_delta' && e.data.delta.type === 'input_json_delta')
+        .map(e => e.data.delta.partial_json)
+        .join('');
+    };
+    // Emitted after a tool-input-start, so the block is already open.
+    expect(JSON.parse(await partialJson([
       { type: 'start' },
       { type: 'tool-input-start', id: 'c1', toolName: 'Read' },
       { type: 'tool-call', toolCallId: 'c1', toolName: 'Read', input: bad },
       { type: 'finish', finishReason: 'tool-calls' },
-    ], 'm', undefined, readTools);
-    const json = events
-      .filter(e => e.event === 'content_block_delta' && e.data.delta.type === 'input_json_delta')
-      .map(e => e.data.delta.partial_json)
-      .join('');
-    expect(JSON.parse(json)).toEqual(bad);
+    ]))).toEqual(bad);
+    // A bare tool-call with no tool-input-start opens its own block instead, and
+    // has no buffered raw JSON to fall back on. @ai-sdk/openai emits this shape
+    // from response.output_item.done for file_search_call, image_generation_call,
+    // mcp_call, local_shell_call and shell_call.
+    expect(JSON.parse(await partialJson([
+      { type: 'start' },
+      { type: 'tool-call', toolCallId: 'c2', toolName: 'Read', input: bad },
+      { type: 'finish', finishReason: 'tool-calls' },
+    ]))).toEqual(bad);
   });
 
   it('preserves an intentional empty array for a schema-required property', async () => {
