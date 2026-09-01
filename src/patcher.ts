@@ -69,6 +69,10 @@ import {
   shimEntryModuleName,
 } from './bun-entry-module.js';
 import {
+  restoreBunCompiledPointer,
+  shimBunCompiledPointer,
+} from './bun-compiled-pointer.js';
+import {
   applyBundleWritePlan,
   planBundleWrite,
   readClaudeBundle,
@@ -915,11 +919,18 @@ export async function applyPatch(
         splitBundleSource(loaded.bundle, local.content),
         writable,
       );
+      // Claude Code 2.1.257 moved the global Bun reads its blob's address from off the 16 KiB
+      // boundary tweakcc's ELF repack scans, so the repack could not find it and threw on all
+      // four ELF builds. A no-op everywhere else. See `bun-compiled-pointer.ts`.
+      const bunPointerShim = shimBunCompiledPointer(candidatePath);
       await writeContent(loaded.installation, plan.content);
+      if (bunPointerShim) restoreBunCompiledPointer(candidatePath, bunPointerShim);
       applyBundleWritePlan(candidatePath, plan);
       publishedBlob = true;
     } else {
+      const bunPointerShim = shimBunCompiledPointer(candidatePath);
       await writeContent(loaded.installation, local.content);
+      if (bunPointerShim) restoreBunCompiledPointer(candidatePath, bunPointerShim);
     }
     if (writeShim) restoreEntryModuleName(candidatePath, writeShim, { resign: true });
     // The repack signs on its way out, so publishing the blob after it leaves an invalid signature.

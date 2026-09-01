@@ -16,12 +16,27 @@ const ENUM_AND_DESCRIPTION =
   '.enum(["sonnet","opus","haiku","fable"]).optional().describe(`Optional model override for this '
   + 'agent. Defaults to inherit.`+(hint()?" Prefer the session model.":""))';
 
+/**
+ * The context-window resolver PATCH 7 keys on, as Claude Code 2.1.252 minified it. Its two
+ * PARAMETER names are as minified — and as churn-prone — as every other identifier here:
+ * 2.1.257 spelled the very same function `(e,n)`, and an anchor that required `(e,t)` failed on
+ * all eight published builds at once. `contextResolver` re-spells it so a test can pin that.
+ */
+export const CONTEXT_RESOLVER =
+  'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}';
+
+/** The same resolver with the two parameters renamed, as a later build's minifier may spell it. */
+export function contextResolver(modelParam: string, windowParam: string): string {
+  return `function RS(${modelParam},${windowParam}){let r=FAc();if(r!==void 0)return r;`
+    + `if(EHi(${modelParam},${windowParam}))return Dve;return $Ac(${modelParam},${windowParam})}`;
+}
+
 export const CLAUDE_CORE_FIXTURE = [
   ENUM_AND_DESCRIPTION,
   'var KNOWN=["sonnet","opus","haiku","fable","opusplan"];',
   'function rz(x){switch(x){case"best":{return "opus"}default:return null}}',
   'function opts(e,t,r){let n=cur(),o=(n==="opus"||n==="sonnet")&&n!==r?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}',
-  'function RS(e,t){let r=FAc();if(r!==void 0)return r;if(EHi(e,t))return Dve;return $Ac(e,t)}',
+  CONTEXT_RESOLVER,
   'function cwdOf(){let p=process.env.PWD;return p}',
   'function childEnv(){let e=extra(),t=Object.keys(e).length>0,n=Object.keys(e).length>0,s=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};let o=[process.env.CLAUDE_CODE_OAUTH_TOKEN,process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE,process.env.CLAUDE_BG_PTY_AUTH,"OTEL_",process.env.CLAUDE_CODE_OTEL_DIAG_STDERR],u=["CLAUDE_CODE_OAUTH_TOKEN"];if(!t&&!n&&!o[0])return process.env;let v={...process.env,...e,...s};for(let k of u)delete v[k],delete v[`INPUT_${k}`];return v}function mcpAllow(){let e=process.env.CLAUDE_CODE_MCP_ALLOWLIST_ENV;return e}',
 ].join('\n');

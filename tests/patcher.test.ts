@@ -6,6 +6,8 @@ import {
   CLAUDE_PROXY_EFFORT_FIXTURE,
   CLAUDE_SPLIT_ENTRY_ID,
   CLAUDE_SPLIT_MODULES,
+  CONTEXT_RESOLVER,
+  contextResolver,
 } from './fixtures/claude-bundle.js';
 import {
   buildFakeNativeClaude,
@@ -582,8 +584,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 10,
-      digest: 'b7897568a924dfa98b828d6cf4f136638777e5d11216e38a8e7408b9b5639b16',
+      version: 11,
+      digest: '87fec3418582a3be6839917e63ae71ac4a6d3ed71aa4b86c7e220d310c2fa00c',
     });
   });
 });
@@ -1939,26 +1941,78 @@ describe('patch script identity naming', () => {
     expect(result.content).toContain('if(o[0]){delete v.CLAUDE_CODE_OAUTH_TOKEN;return e}');
   });
 
-  // Each literal is an independent statement about what the target function does.
-  // The anchor alone cannot tell the child-env builder from another function that
-  // merges process.env, so dropping any one of these must refuse rather than
-  // patch a lookalike.
-  it.each([
+  // The names the builder scrubs are a smell test, not the identity proof, and
+  // each one is only as durable as the line that happens to spell it. Claude Code
+  // 2.1.257 replaced a run of per-name `process.env.CLAUDE_BG_*!==void 0` reads
+  // with a set-membership test and stopped spelling those names at all — a
+  // refactor that changed nothing about what clodex rewrites. Requiring every
+  // name made `clodex patch` refuse that release on all eight published builds.
+  const SCRUBBED_ENV_NAMES: [string, string, string][] = [
     ['the OAuth credential it scrubs', 'CLAUDE_CODE_OAUTH_TOKEN', 'SOMETHING_ELSE_TOKEN'],
     ['the subscription type it scrubs', 'CLAUDE_CODE_SUBSCRIPTION_TYPE', 'SOMETHING_ELSE_TYPE'],
     ['the background PTY token it scrubs', 'CLAUDE_BG_PTY_AUTH', 'SOMETHING_ELSE_AUTH'],
     ['the OTEL prefix it strips', '"OTEL_"', '"UNRELATED_"'],
     ['the OTEL diagnostic flag it strips', 'CLAUDE_CODE_OTEL_DIAG_STDERR', 'SOMETHING_ELSE_DIAG'],
-  ])('refuses a child builder that no longer references %s', (_name, literal, replacement) => {
-    // Replace EVERY occurrence: the check is `body.includes(literal)`, so one
-    // surviving mention anywhere in the body keeps the guard satisfied and the
-    // test passes without testing anything.
-    const source = CLAUDE_FIXTURE_239.split(literal).join(replacement);
+  ];
+
+  /** Every occurrence, so one surviving mention cannot keep the guard satisfied. */
+  function withoutScrubbedNames(source: string, names: [string, string, string][]): string {
+    return names.reduce((acc, [, literal, replacement]) => acc.split(literal).join(replacement), source);
+  }
+
+  it.each(SCRUBBED_ENV_NAMES)(
+    'still patches a child builder that stopped spelling %s',
+    (_name, literal, replacement) => {
+      const source = withoutScrubbedNames(CLAUDE_FIXTURE_239, [['', literal, replacement]]);
+
+      expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE_239);
+      expect(source, 'no occurrence of the literal may survive').not.toContain(literal);
+
+      const result = applyClodexPatches(source, config);
+
+      expect(result.results.at(-1)).toEqual({
+        status: 'OK',
+        name: 'PATCH 10: child network environment',
+      });
+      expect(result.content).toContain('function childEnv(){/*ccpatch:child-network-env*/');
+    },
+  );
+
+  // The quorum still has to mean something: a body that scrubs almost none of
+  // them is not the child-env builder and must be refused, not rewritten.
+  it.each([
+    { left: 'one', drop: SCRUBBED_ENV_NAMES.slice(0, 4) },
+    { left: 'none', drop: SCRUBBED_ENV_NAMES },
+  ])('refuses a child builder that scrubs $left of the known names', ({ drop }) => {
+    const source = withoutScrubbedNames(CLAUDE_FIXTURE_239, drop);
 
     expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE_239);
-    expect(source, 'no occurrence of the literal may survive').not.toContain(literal);
+    for (const [, literal] of drop) expect(source).not.toContain(literal);
+
     expect(() => runPatchScript(config, source)).toThrow(
-      'clodex patch: child network environment target validation failed',
+      'clodex patch: child network environment target validation failed: '
+      + 'body scrubs only ' + (SCRUBBED_ENV_NAMES.length - drop.length)
+      + ' of the 5 known child-env names (expected at least 2)',
+    );
+  });
+
+  // Every refusal names the check that produced it. A bare "target validation
+  // failed" covers four unrelated conditions, and telling them apart from a
+  // canary report meant extracting a 32 MB bundle by hand.
+  it('says which check refused the target', () => {
+    const nested = CLAUDE_FIXTURE.replace(
+      's=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};let o=',
+      's=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};function nested(){}let o=',
+    );
+    expect(() => runPatchScript(config, nested)).toThrow(
+      'clodex patch: child network environment target validation failed: '
+      + 'body declares a nested function',
+    );
+
+    const noMerge = CLAUDE_FIXTURE.replace('let v={...process.env,...e,...s}', 'let v={...te,...e,...s}');
+    expect(() => runPatchScript(config, noMerge)).toThrow(
+      'clodex patch: child network environment target validation failed: '
+      + 'body does not contain {...process.env',
     );
   });
 
@@ -2494,6 +2548,94 @@ describe('patch script identity naming', () => {
     const parsed = JSON.parse(table!) as Record<string, number>;
     expect(parsed['clodex:openai:mystery']).toBe(131_072);
     expect(parsed['sol']).toBe(272_000);
+  });
+
+  // ---------------------------------------------------------------------------
+  // PATCH 7's anchor and the parameter names Claude Code's minifier picks.
+  //
+  // 2.1.252 minified the context-window resolver as `(e,t)` and 2.1.257 minified
+  // the same function as `(e,n)`. The anchor required the literal `(e,t)`, so the
+  // site reported "anchor not found" on all eight published 2.1.257 builds and
+  // `clodex patch` aborted — no context windows, no auto-compaction, on every
+  // platform at once. Nothing below is 2.1.257-specific: the resolver is spelled
+  // through a helper so a name the minifier has not chosen yet is covered too.
+  // ---------------------------------------------------------------------------
+  describe('PATCH 7 against a resolver whose parameters the minifier renamed', () => {
+    /** The patched resolver, pulled back out of the bundle so it can be RUN. */
+    function resolverFrom(patched: string): (model: unknown, opts?: unknown) => unknown {
+      const declaration = patched
+        .split('\n')
+        .find(line => line.startsWith('function RS(') && line.includes('/*ccpatch:ctx*/'));
+      expect(declaration).toBeDefined();
+      // The resolver's own callees are stubbed to the shape the real ones have:
+      // no env override, no 1M gate, and a native window for anything unbaked.
+      const make = new Function(
+        'FAc',
+        'EHi',
+        'Dve',
+        '$Ac',
+        `${declaration}; return RS;`,
+      ) as (
+        FAc: () => undefined,
+        EHi: () => boolean,
+        Dve: number,
+        $Ac: () => number,
+      ) => (model: unknown, opts?: unknown) => unknown;
+      return make(() => undefined, () => false, 200_000, () => 200_000);
+    }
+
+    it.each([
+      { spelling: '(e,t)', model: 'e', window: 't' },
+      { spelling: '(e,n)', model: 'e', window: 'n' },
+      { spelling: '(a,i)', model: 'a', window: 'i' },
+    ])('applies to a resolver minified as $spelling', ({ model, window }) => {
+      const source = CLAUDE_FIXTURE.replace(CONTEXT_RESOLVER, contextResolver(model, window));
+      // Guards the substitution itself: a fixture edit that stopped this from
+      // landing would leave every case below testing the same `(e,t)` spelling.
+      expect(source).toContain(contextResolver(model, window));
+
+      const patched = applyClodexPatches(source, config);
+
+      expect(patched.results).toContainEqual({ status: 'OK', name: 'PATCH 7: per-model context window' });
+      // The lookup has to read the parameter THIS build declares. Reading a name
+      // that is not in scope would either throw or silently pick up an unrelated
+      // binding from the module around it, and every model would fall through to
+      // the 200k clamp with nothing reported as failed.
+      expect(patched.content).toContain(`[String(${model}||"").trim().toLowerCase()]`);
+
+      const resolve = resolverFrom(patched.content);
+      expect(resolve('sol')).toBe(272_000);
+      expect(resolve('  SOL  ')).toBe(272_000);
+      expect(resolve('clodex:openai:mystery')).toBe(128_000);
+      expect(resolve('sonnet')).toBe(200_000);
+    });
+
+    it('keeps the build\'s own parameter name when a later run refreshes the table', () => {
+      const source = CLAUDE_FIXTURE.replace(CONTEXT_RESOLVER, contextResolver('a', 'i'));
+      const once = applyClodexPatches(source, config).content;
+
+      const updated = applyClodexPatches(once, {
+        ...config,
+        'clodex:openai:mystery': { context: 131_072, display: 'Mystery (OpenAI)' },
+      });
+
+      expect(updated.results).toContainEqual({
+        status: 'OK',
+        name: 'PATCH 7: per-model context window (refresh)',
+      });
+      // Scoped to the context snippet: the effort patches legitimately read `e`,
+      // because THEIR anchors are single-parameter functions of that name.
+      expect(updated.content).toMatch(
+        /\/\*ccpatch:ctx\*\/var _ccw=\(\{[^{}]*\}\)\[String\(a\|\|""\)\.trim\(\)\.toLowerCase\(\)\]/,
+      );
+      expect(updated.content).not.toMatch(
+        /\/\*ccpatch:ctx\*\/var _ccw=\(\{[^{}]*\}\)\[String\(e\|\|""\)/,
+      );
+
+      const resolve = resolverFrom(updated.content);
+      expect(resolve('clodex:openai:mystery')).toBe(131_072);
+      expect(resolve('sol')).toBe(272_000);
+    });
   });
 
   it('keeps identity and context patches when every effort anchor drifts', () => {

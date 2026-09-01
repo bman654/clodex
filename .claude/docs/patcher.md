@@ -171,6 +171,46 @@ So the blob is published, not rebuilt:
   emits four. Do NOT use `--version` or `--help` (byte-identical between the two) or the model id on
   the wire (passed through unvalidated by both).
 
+## The Bun blob-pointer stand-in (`bun-compiled-pointer.ts`)
+
+ELF only, and a no-op on every release where tweakcc works unaided.
+
+A Bun standalone ELF keeps the virtual address of its `.bun` section in an 8-byte little-endian
+global; Bun reads it at startup to find the blob. `repackELFSection` moves `.bun` to a fresh page
+past the end of the file, so it has to rewrite that global — and it finds it by scanning the first
+writable `PT_LOAD` for eight bytes equal to `.bun`'s current address, **only at addresses that are
+multiples of 16384**. tweakcc 4.3.0 and 4.3.3 both do this, so bumping the pin does not help.
+
+Through Claude Code 2.1.252 the global happened to land on a 16 KiB boundary on every ELF build
+(measured on 2.1.246 and 2.1.252, x64 and arm64, glibc and musl — all at `vaddr % 16384 == 0`).
+2.1.257 moved it off one on all four: `0x534f758` linux-x64, `0x4d9af08` linux-x64-musl,
+`0x5310758` linux-arm64, `0x4c46d10` linux-arm64-musl. The strided scan steps over it and
+`repackELFSection` throws `Could not find original BUN_COMPILED location in binary`. **Alignment is
+not something Bun promises; it was luck, and it ran out.**
+
+So clodex plants a copy of the value the scan is looking for at an address the scan does visit,
+remembers the eight bytes it displaced, and after the repack copies the address tweakcc wrote onto
+the global's real home and puts the displaced bytes back. The published binary differs from an
+unaided repack in exactly one place: the global, holding the value it was always meant to hold.
+
+- **It never runs where tweakcc already works.** The module reproduces tweakcc's own scan first and
+  returns null if that finds anything, so an older release — or a future one that goes back to
+  being aligned — takes the path it always took, byte for byte.
+- **The real global is identified, not guessed:** the ONE 8-byte occurrence of `.bun`'s address
+  inside the writable segment and outside `.bun`'s own payload. Occurrences inside the payload are
+  coincidences in compressed JavaScript (dozens on some builds) and are excluded by range. Anything
+  other than exactly one candidate is refused rather than patched, because publishing a binary whose
+  Bun global still points at the old blob is a `claude` that dies inside Bun before it prints
+  anything.
+- **The restore verifies rather than assumes:** the stand-in must have changed, must agree with
+  where `.bun` actually ended up, and both writes must read back.
+- Mach-O and PE never reach this code — they assign the section in place and rewrite no pointer.
+  That asymmetry is why the failure was ELF-only, and why the probe must be run per format.
+
+`tests/bun-compiled-pointer.test.ts` covers the rules on hand-built ELF64 files. Only
+`scripts/probe-patch-mechanism.mjs` and the canary's container leg cover a real 300 MB build, and
+only the container leg starts the result.
+
 ## The entry-module shim (`bun-entry-module.ts`)
 
 tweakcc finds the module holding the bundle **by name**, and Claude Code 2.1.229 renamed it from

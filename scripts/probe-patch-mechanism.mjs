@@ -66,6 +66,11 @@ import {
   restoreEntryModuleName,
   shimEntryModuleName,
 } from '../src/bun-entry-module.ts';
+// bun-compiled-pointer.ts imports nothing relative either, so a static import is safe here.
+import {
+  restoreBunCompiledPointer,
+  shimBunCompiledPointer,
+} from '../src/bun-compiled-pointer.ts';
 
 // `src/` spells its own imports the TypeScript way — `./model-aliases.js` for a file that is
 // really `./model-aliases.ts`. tsup and vitest both understand that; bare `node` does not, and
@@ -399,12 +404,19 @@ try {
     const writable = writableModuleIndex(scratch);
     if (writable === null) throw new Error('no module of this build carries a name tweakcc can write to');
     const plan = planBundleWrite(scratch, bundle, splitBundleSource(bundle, written), writable);
+    // Mirrors patcher.ts: without this the ELF repack cannot find the global Bun reads its blob's
+    // address from on Claude Code 2.1.257, and the probe reports a repack failure that has nothing
+    // to do with this build's anchors. See src/bun-compiled-pointer.ts.
+    const bunPointerShim = shimBunCompiledPointer(scratch);
     await writeContent(installation, plan.content);
+    if (bunPointerShim) restoreBunCompiledPointer(scratch, bunPointerShim);
     publishedPlan = plan;
     applyBundleWritePlan(scratch, plan);
     publishedBlob = true;
   } else {
+    const bunPointerShim = shimBunCompiledPointer(scratch);
     await writeContent(installation, written);
+    if (bunPointerShim) restoreBunCompiledPointer(scratch, bunPointerShim);
   }
   let restoreError = null;
   if (writeShim) {
