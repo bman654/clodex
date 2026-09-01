@@ -164,7 +164,12 @@ export async function startConfiguredHttpProxy(
   inferenceLogPath = getInferenceRequestLogPath(),
   debugLogPath?: string,
   webSocketDiagnosticsLogPath?: string,
-): Promise<{ handle: HttpProxyHandle; loaded: LoadedHttpProxyRoutes }> {
+): Promise<{
+  handle: HttpProxyHandle;
+  loaded: LoadedHttpProxyRoutes;
+  /** Set when an inherited NODE_EXTRA_CA_CERTS had to be dropped; caller reports it. */
+  caWarning?: string;
+}> {
   const loaded = await loadHttpProxyRoutes();
   const handle = await startHttpProxy(buildConfiguredHttpProxyOptions(
     loaded,
@@ -174,11 +179,13 @@ export async function startConfiguredHttpProxy(
     debugLogPath,
     webSocketDiagnosticsLogPath,
   ));
+  let caWarning: string | undefined;
   handle.caCertPath = ensureHttpProxyCaBundle(
     handle.caCertPath,
     process.env['NODE_EXTRA_CA_CERTS'],
+    message => { caWarning = message; },
   );
-  return { handle, loaded };
+  return { handle, loaded, ...(caWarning ? { caWarning } : {}) };
 }
 
 function waitForShutdown(): Promise<void> {
@@ -217,7 +224,7 @@ export async function runHttpProxyServerCommand(
     return 1;
   }
 
-  const { handle, loaded } = started;
+  const { handle, loaded, caWarning } = started;
   writeProxyLifecycleLog(inferenceLogPath, {
     event: 'proxy_started',
     pid: process.pid,
@@ -229,6 +236,10 @@ export async function runHttpProxyServerCommand(
   console.log(pc.bold(pc.green('clodex proxy-mode server running')));
   for (const line of formatHttpProxyEnvironmentLines(handle)) console.log(line);
   console.log(`  Request log: ${handle.inferenceLogPath}`);
+  if (caWarning) {
+    console.log('');
+    console.log(pc.yellow(`  clodex: ${caWarning}`));
+  }
   if (handle.webSocketDiagnosticsLogPath) {
     console.log(`  WebSocket diagnostics: ${handle.webSocketDiagnosticsLogPath}`);
     console.log(pc.yellow('  Diagnostic mode records request headers and metadata; credential headers are redacted.'));

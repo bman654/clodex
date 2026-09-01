@@ -129,17 +129,60 @@ export function ensureHttpProxyCertificates(): HttpProxyCertificates {
 export function ensureHttpProxyCaBundle(
   relayCaCertPath: string,
   additionalCaCertPath: string | undefined,
+  // A dropped CA is silent on every layer below this one: the merge used to
+  // swallow the failure, and Node prints only an opaque OpenSSL code for a
+  // NODE_EXTRA_CA_CERTS it cannot load. Someone has to say it out loud.
+  onWarning?: (message: string) => void,
 ): string {
   if (!additionalCaCertPath?.trim()) return relayCaCertPath;
+  const warn = (detail: string): string => {
+    // Say what the child actually gets. NODE_EXTRA_CA_CERTS is ADDITIVE to
+    // node's built-in roots, so a suffix claiming the child "trusts only" the
+    // clodex CA would be false and would send people hunting a second problem.
+    onWarning?.(
+      `${detail} The CA bundle handed to the child is ${relayCaCertPath}; `
+      + "node's built-in roots are unaffected.",
+    );
+    return relayCaCertPath;
+  };
+  let additionalCa: string;
   try {
     if (resolve(additionalCaCertPath) === resolve(relayCaCertPath)) return relayCaCertPath;
+    additionalCa = readFileSync(additionalCaCertPath, 'utf8').trim();
+  } catch (err) {
+    // Node warns for ENOENT/EACCES/ELOOP but is SILENT for EISDIR, and only
+    // once some process actually initializes its TLS roots -- so describe its
+    // warning conditionally, and never as something that always appears.
+    return warn(
+      `NODE_EXTRA_CA_CERTS=${additionalCaCertPath} cannot be read `
+      + `(${err instanceof Error ? err.message : String(err)}), so it is not part of the proxy `
+      + 'CA bundle. Where node reports this itself it says only "Ignoring extra certs ... load '
+      + 'failed", without naming the variable. Clear or correct it.',
+    );
+  }
+  // Deliberately NOT claimed as "carries no certificate": this tests emptiness,
+  // not PEM validity. A non-empty file of junk is merged verbatim and OpenSSL
+  // discards it a layer down, silently -- as it does without clodex. Node is
+  // silent for an empty file too, so its warning is not mentioned here.
+  if (!additionalCa) {
+    return warn(`NODE_EXTRA_CA_CERTS=${additionalCaCertPath} is empty, so it adds nothing.`);
+  }
+  try {
     const relayCa = readFileSync(relayCaCertPath, 'utf8').trimEnd();
-    const additionalCa = readFileSync(additionalCaCertPath, 'utf8').trim();
-    if (!additionalCa) return relayCaCertPath;
     const combinedPath = join(dirname(relayCaCertPath), 'combined-ca.pem');
     writePublic(combinedPath, `${relayCa}\n${additionalCa}\n`);
     return combinedPath;
-  } catch {
-    return relayCaCertPath;
+  } catch (err) {
+    // clodex's own fault -- an unwritable ~/.clodex/http-proxy, a vanished relay
+    // CA, ENOSPC. Do not tell the user to correct their setting. "build" rather
+    // than "write" because this catch also covers reading the relay CA, and
+    // "readable, non-empty" rather than "valid" because that is all that has
+    // actually been established about the configured file.
+    return warn(
+      `clodex could not build the combined CA bundle in ${dirname(relayCaCertPath)} `
+      + `(${err instanceof Error ? err.message : String(err)}), so the readable, non-empty `
+      + `NODE_EXTRA_CA_CERTS=${additionalCaCertPath} was left out of it. Fix the reported `
+      + 'error and restart clodex.',
+    );
   }
 }

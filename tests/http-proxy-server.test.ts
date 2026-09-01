@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as https from 'node:https';
@@ -271,6 +271,114 @@ describe('selective HTTP proxy', () => {
     expect(combinedPath).not.toBe(certificates.caCertPath);
     expect(combined).toContain(certificates.caCert.trim());
     expect(combined).toContain('corporate-test');
+  });
+
+  it('reports the CA it had to drop instead of silently trusting one less', () => {
+    // The old merge swallowed every failure here, so a NODE_EXTRA_CA_CERTS left
+    // over from a moved or deleted file disappeared from the bundle without a
+    // word — and Node's own complaint names an OpenSSL code, not the variable.
+    const certificates = ensureHttpProxyCertificates();
+    const missingPath = join(testHome, 'does-not-exist-ca.pem');
+    const warnings: string[] = [];
+
+    const result = ensureHttpProxyCaBundle(
+      certificates.caCertPath,
+      missingPath,
+      message => warnings.push(message),
+    );
+
+    expect(result).toBe(certificates.caCertPath);
+    expect(warnings).toHaveLength(1);
+    // Actionable means all three: which value is wrong, that it is dropped, and
+    // what the right one is.
+    expect(warnings[0]).toContain(`NODE_EXTRA_CA_CERTS=${missingPath}`);
+    expect(warnings[0]).toContain('not part of the proxy CA bundle');
+    expect(warnings[0]).toContain(certificates.caCertPath);
+    // Conditional, because node stays silent for EISDIR and for any process
+    // that never initializes its TLS roots.
+    expect(warnings[0]).toContain('Where node reports this itself');
+  });
+
+  it('does not promise a Node warning for a directory, which Node ignores silently', () => {
+    const certificates = ensureHttpProxyCertificates();
+    const dirPath = mkdtempSync(join(tmpdir(), 'clodex-ca-dir-'));
+    const warnings: string[] = [];
+    try {
+      expect(ensureHttpProxyCaBundle(certificates.caCertPath, dirPath, m => warnings.push(m)))
+        .toBe(certificates.caCertPath);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('cannot be read');
+      expect(warnings[0]).not.toContain('Ignoring extra certs ... load failed".');
+    } finally {
+      rmSync(dirPath, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a configured CA file that is empty', () => {
+    const certificates = ensureHttpProxyCertificates();
+    const emptyPath = join(testHome, 'empty-ca.pem');
+    writeFileSync(emptyPath, '   \n');
+    const warnings: string[] = [];
+
+    expect(ensureHttpProxyCaBundle(certificates.caCertPath, emptyPath, m => warnings.push(m)))
+      .toBe(certificates.caCertPath);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('is empty');
+    // NODE_EXTRA_CA_CERTS is additive, so no warning may imply the built-in
+    // roots went away -- that would send the reader after a second problem.
+    expect(warnings[0]).toContain("node's built-in roots are unaffected");
+    expect(warnings[0]).not.toContain('trust only');
+    // Node prints nothing at all for an empty file, so this branch must not
+    // claim it does. Only the unreadable branch may cite that warning.
+    expect(warnings[0]).not.toContain('Ignoring extra certs');
+  });
+
+  it('blames clodex, not the configured value, when clodex cannot write the bundle', () => {
+    // An unwritable ~/.clodex/http-proxy is a clodex-side fault. Telling the
+    // user to "clear or correct" a perfectly good NODE_EXTRA_CA_CERTS sends
+    // them to fix the one thing that is not broken.
+    const certificates = ensureHttpProxyCertificates();
+    // Readable and non-empty is all the code establishes, and all the message
+    // may claim -- this fixture is deliberately NOT a parseable certificate.
+    const readableCaPath = join(testHome, 'readable-corporate-ca.pem');
+    writeFileSync(readableCaPath, '-----BEGIN CERTIFICATE-----\nreadable\n-----END CERTIFICATE-----\n');
+    const unwritableDir = mkdtempSync(join(tmpdir(), 'clodex-unwritable-'));
+    const relayCaInUnwritableDir = join(unwritableDir, 'clodex-ca.pem');
+    writeFileSync(relayCaInUnwritableDir, certificates.caCert);
+    // Pre-create the destination as a DIRECTORY so the write fails as EISDIR.
+    mkdirSync(join(unwritableDir, 'combined-ca.pem'));
+    const warnings: string[] = [];
+
+    try {
+      expect(ensureHttpProxyCaBundle(relayCaInUnwritableDir, readableCaPath, m => warnings.push(m)))
+        .toBe(relayCaInUnwritableDir);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain('clodex could not build the combined CA bundle');
+      expect(warnings[0]).toContain('readable, non-empty');
+      expect(warnings[0]).not.toContain('Clear or correct it');
+      expect(warnings[0]).not.toContain('cannot be read');
+    } finally {
+      rmSync(unwritableDir, { recursive: true, force: true });
+    }
+  });
+
+  it('stays quiet when there is nothing wrong to report', () => {
+    const certificates = ensureHttpProxyCertificates();
+    const extraPath = join(testHome, 'quiet-corporate-ca.pem');
+    writeFileSync(extraPath, '-----BEGIN CERTIFICATE-----\nquiet-test\n-----END CERTIFICATE-----\n');
+    const warnings: string[] = [];
+
+    // A successful merge, an unset variable, and a variable already pointing at
+    // the clodex CA are all normal; none of them may produce a scary line.
+    expect(ensureHttpProxyCaBundle(certificates.caCertPath, extraPath, m => warnings.push(m)))
+      .not.toBe(certificates.caCertPath);
+    expect(ensureHttpProxyCaBundle(certificates.caCertPath, undefined, m => warnings.push(m)))
+      .toBe(certificates.caCertPath);
+    expect(ensureHttpProxyCaBundle(certificates.caCertPath, '  ', m => warnings.push(m)))
+      .toBe(certificates.caCertPath);
+    expect(ensureHttpProxyCaBundle(certificates.caCertPath, certificates.caCertPath, m => warnings.push(m)))
+      .toBe(certificates.caCertPath);
+    expect(warnings).toEqual([]);
   });
 
   it('intercepts only api.anthropic.com on port 443', () => {

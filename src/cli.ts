@@ -55,6 +55,7 @@ import {
 } from './favorites-picker.js';
 import { favoriteProviderDisplayName } from './favorite-provider-display.js';
 import { runProvidersCommand, providersHelpText } from './providers-command.js';
+import { emitParentNotice } from './parent-notice.js';
 import {
   getInferenceSessionLogPath,
   getSessionLogPath,
@@ -1165,7 +1166,13 @@ async function runClaudeHttpProxyCommand(
     return 1;
   }
 
-  const { handle, loaded } = started;
+  const { handle, loaded, caWarning } = started;
+  if (caWarning) {
+    // Background-agent runs hand stdout to the agent protocol, so the notice
+    // channel is the only way this reaches anyone there.
+    if (agentStdout) emitParentNotice(`clodex: ${caWarning}`);
+    else p.log.warn(caWarning);
+  }
   const inheritedProxyPort = (() => {
     const value = process.env['HTTPS_PROXY'] ?? process.env['HTTP_PROXY']
       ?? process.env['https_proxy'] ?? process.env['http_proxy'];

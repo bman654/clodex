@@ -89,6 +89,77 @@ describe('HTTP proxy startup model list', () => {
       rmSync(home, { recursive: true, force: true });
     }
   }, 20_000);
+  it('warns on the running server banner when NODE_EXTRA_CA_CERTS cannot be loaded', async () => {
+    // Drives the real command so the warning is proven to reach the banner the
+    // operator actually reads, not merely to exist in the merge helper.
+    const home = mkdtempSync(join(tmpdir(), 'clodex-proxy-ca-warning-'));
+    const previousHome = process.env['CLODEX_HOME'];
+    const previousExtraCa = process.env['NODE_EXTRA_CA_CERTS'];
+    process.env['CLODEX_HOME'] = home;
+    const missingCaPath = join(home, 'gone', 'clodex-ca.pem');
+    process.env['NODE_EXTRA_CA_CERTS'] = missingCaPath;
+    const printed: string[] = [];
+    const consoleLog = vi.spyOn(console, 'log')
+      .mockImplementation((...args: unknown[]) => { printed.push(args.map(String).join(' ')); });
+    let shutdownRequested = false;
+    const result = runHttpProxyServerCommand(false, false, 0, true);
+
+    try {
+      await vi.waitFor(() => {
+        expect(printed.join('\n')).toContain('clodex proxy-mode server running');
+      });
+      // Assert against the WARNING LINE, not the whole banner: the ordinary env
+      // block already prints the correct CA path, so a banner-wide assertion
+      // stays green even if the warning stops naming it.
+      const warningLine = printed.find(line => line.includes('NODE_EXTRA_CA_CERTS=' + missingCaPath));
+      expect(warningLine).toBeDefined();
+      expect(warningLine!).toContain('not part of the proxy CA bundle');
+      expect(warningLine!).toContain(join(home, 'http-proxy', 'clodex-ca.pem'));
+    } finally {
+      shutdownRequested = true;
+      process.emit('SIGTERM');
+      await result.catch(() => undefined);
+      if (!shutdownRequested) process.emit('SIGTERM');
+      consoleLog.mockRestore();
+      if (previousHome === undefined) delete process.env['CLODEX_HOME'];
+      else process.env['CLODEX_HOME'] = previousHome;
+      if (previousExtraCa === undefined) delete process.env['NODE_EXTRA_CA_CERTS'];
+      else process.env['NODE_EXTRA_CA_CERTS'] = previousExtraCa;
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('leaves the banner clean when no extra CA is configured', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'clodex-proxy-ca-quiet-'));
+    const previousHome = process.env['CLODEX_HOME'];
+    const previousExtraCa = process.env['NODE_EXTRA_CA_CERTS'];
+    process.env['CLODEX_HOME'] = home;
+    delete process.env['NODE_EXTRA_CA_CERTS'];
+    const printed: string[] = [];
+    const consoleLog = vi.spyOn(console, 'log')
+      .mockImplementation((...args: unknown[]) => { printed.push(args.map(String).join(' ')); });
+    const result = runHttpProxyServerCommand(false, false, 0, true);
+
+    try {
+      await vi.waitFor(() => {
+        expect(printed.join('\n')).toContain('clodex proxy-mode server running');
+      });
+      // Assert on the shared warning MARKER, not one branch's sentence. Keyed
+      // on a branch-specific phrase, this stayed green when a mutation emitted
+      // a different branch's warning unconditionally.
+      expect(printed.filter(line => line.includes('clodex: '))).toEqual([]);
+    } finally {
+      process.emit('SIGTERM');
+      await result.catch(() => undefined);
+      consoleLog.mockRestore();
+      if (previousHome === undefined) delete process.env['CLODEX_HOME'];
+      else process.env['CLODEX_HOME'] = previousHome;
+      if (previousExtraCa === undefined) delete process.env['NODE_EXTRA_CA_CERTS'];
+      else process.env['NODE_EXTRA_CA_CERTS'] = previousExtraCa;
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it('reserves canonical and exact stored names for inactive configured aliases', () => {
     const loaded: LoadedHttpProxyRoutes = {
       routes: [],
