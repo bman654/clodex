@@ -229,6 +229,7 @@ export type InferenceResponseLifecycleEvent =
   | 'response_progress'
   | 'response_completed'
   | 'response_failed'
+  | 'response_retried'
   | 'response_client_disconnected'
   | 'response_usage';
 
@@ -283,6 +284,10 @@ export interface InferenceResponseLifecycleLogEntry {
   errorSignature?: string;
   failureSource?: InferenceFailureSource;
   terminationSource?: InferenceTerminationSource;
+  /** 1-based upstream attempt this record describes. Absent when only one was made. */
+  attempt?: number;
+  /** Whether the failed attempt went out on a pooled keep-alive socket. */
+  reusedSocket?: boolean;
 }
 
 export type ProxyLifecycleEvent =
@@ -455,6 +460,7 @@ export function writeInferenceResponseLifecycleLog(
   const outputTokens = nonNegativeInteger(entry.outputTokens);
   const cacheCreationInputTokens = nonNegativeInteger(entry.cacheCreationInputTokens);
   const cacheReadInputTokens = nonNegativeInteger(entry.cacheReadInputTokens);
+  const attempt = nonNegativeInteger(entry.attempt);
   writeSecureLogLine(path, JSON.stringify({
     timestamp: new Date().toISOString(),
     event: entry.event,
@@ -486,6 +492,8 @@ export function writeInferenceResponseLifecycleLog(
     ...(entry.errorSignature ? { errorSignature: compactLogValue(entry.errorSignature, 100) } : {}),
     ...(entry.failureSource ? { failureSource: entry.failureSource } : {}),
     ...(entry.terminationSource ? { terminationSource: entry.terminationSource } : {}),
+    ...(attempt !== undefined ? { attempt } : {}),
+    ...(entry.reusedSocket !== undefined ? { reusedSocket: entry.reusedSocket } : {}),
   }));
 }
 

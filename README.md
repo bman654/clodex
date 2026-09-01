@@ -347,7 +347,14 @@ clodex --version    # version
   retry cannot complete before the translated streaming paths' 120-second
   no-data timeout. Unset, empty, or malformed values preserve the default. A
   stream that fails after output begins cannot be replayed safely and still
-  terminates the request.
+  terminates the request. The same setting covers requests passed straight
+  through to Anthropic, which replay once by default. Only a request that went
+  out on a pooled connection the far end had already closed, and that received
+  no part of a response, is replayed there; anything else is reported as it
+  happens. Setting Claude Code's own `CLAUDE_CODE_MAX_RETRIES=0` also disables
+  the passthrough replay, so telling the client never to resend a request is
+  not quietly undone one layer down. Recovered requests appear in the inference
+  log as `response_retried`.
 
 ## Known limitations
 

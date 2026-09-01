@@ -48,3 +48,34 @@ export function upstreamMaxRetries(
   }
   return value;
 }
+
+/**
+ * Claude Code's own retry budget. Read, never written: if the operator has told
+ * the client never to resend a request, clodex must not resend on its behalf.
+ */
+const CLIENT_MAX_RETRIES_ENV = 'CLAUDE_CODE_MAX_RETRIES';
+
+/**
+ * Retry budget for raw Anthropic passthrough requests. These are not SDK
+ * generations, but they share the knob so that turning retries off turns them
+ * off everywhere. One retry is enough for the failure this exists to absorb: a
+ * pooled keep-alive socket the far end closed while it sat idle, which the
+ * agent evicts as soon as it resets.
+ */
+export const DEFAULT_PASSTHROUGH_RETRIES = 1;
+
+export function passthroughUpstreamRetries(env: NodeJS.ProcessEnv = process.env): number {
+  const explicit = upstreamMaxRetries(env);
+  if (explicit !== undefined) return explicit;
+  // Replaying here is safe to default on because Claude Code already resends a
+  // 502 itself, so the ambiguous "upstream may have served it" window is one
+  // the client already accepts. `CLAUDE_CODE_MAX_RETRIES=0` withdraws exactly
+  // that, and reinstating it one layer down would be a duplicate send the
+  // operator explicitly opted out of.
+  const raw = env[CLIENT_MAX_RETRIES_ENV]?.trim();
+  if (raw !== undefined && raw !== '') {
+    const clientRetries = Number(raw);
+    if (Number.isFinite(clientRetries) && clientRetries === 0) return 0;
+  }
+  return DEFAULT_PASSTHROUGH_RETRIES;
+}

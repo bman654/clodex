@@ -11,7 +11,12 @@ import { PassThrough } from 'node:stream';
 import { gzipSync } from 'node:zlib';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { ensureHttpProxyCaBundle, ensureHttpProxyCertificates } from '../src/http-proxy/ca.js';
-import { shouldInterceptConnect, startHttpProxy } from '../src/http-proxy/server.js';
+import {
+  createPassthroughAgent,
+  shouldInterceptConnect,
+  startHttpProxy,
+  upstreamUnreachableDetail,
+} from '../src/http-proxy/server.js';
 
 const testHome = mkdtempSync(join(tmpdir(), 'clodex-http-proxy-'));
 const previousRelayHome = process.env['CLODEX_HOME'];
@@ -1945,6 +1950,501 @@ describe('selective HTTP proxy', () => {
       if (previous === undefined) delete process.env['CLODEX_SERVICE_TIER'];
       else process.env['CLODEX_SERVICE_TIER'] = previous;
     }
+  });
+
+
+  // A keep-alive pool can hand out a socket the far end closed while it was
+  // idle. Every request in this group drives that shape through the real MITM
+  // path against a real origin rather than by emitting a synthetic error.
+  describe('Anthropic passthrough retry', () => {
+    const ORIGIN_BODY = JSON.stringify({ type: 'message', content: [] });
+    const POST_HEADER_MARKER = 'event: message_start\n\n';
+    /**
+     * Origin that serves every connection normally except for the Nth request
+     * it sees on that same connection, which it kills without replying. With
+     * `killOnConnectionRequest: 2` a socket is only reset once it has been
+     * pooled and reused, which is the production failure; with `1` the reset
+     * lands on a freshly opened socket, which must never be replayed.
+     */
+    function resettingOrigin(killOnConnectionRequest: number): {
+      server: https.Server;
+      requestCount: () => number;
+    } {
+      const certificates = ensureHttpProxyCertificates();
+      let requests = 0;
+      const bodies: string[] = [];
+      const perConnection = new WeakMap<net.Socket, number>();
+      const server = https.createServer({
+        key: certificates.serverKey,
+        cert: certificates.serverCert,
+      }, (req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', (chunk: Buffer) => chunks.push(chunk));
+        req.once('end', () => bodies.push(Buffer.concat(chunks).toString()));
+        const seen = (perConnection.get(req.socket) ?? 0) + 1;
+        perConnection.set(req.socket, seen);
+        requests += 1;
+        if (seen === killOnConnectionRequest) {
+          req.socket.destroy();
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Content-Length': String(Buffer.byteLength(ORIGIN_BODY)),
+        });
+        res.end(ORIGIN_BODY);
+      });
+      return { server, requestCount: () => requests, bodies };
+    }
+
+    function messagesRequest(body: string): string {
+      return [
+        'POST /v1/messages HTTP/1.1',
+        'Host: api.anthropic.com',
+        'Content-Type: application/json',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        'Connection: keep-alive',
+        '',
+        '',
+      ].join('\r\n') + body;
+    }
+
+    /**
+     * Resolve once `count` responses have been fully DELIVERED, keyed on the
+     * origin's terminating body rather than the status line. Waiting on the
+     * status line only would let the next request go out while the upstream
+     * socket is still busy: it would then open a fresh socket, and the reuse
+     * these tests exist to exercise would silently never happen.
+     */
+    async function awaitResponses(
+      socket: tls.TLSSocket,
+      read: () => string,
+      count: number,
+      terminator = ORIGIN_BODY,
+    ): Promise<void> {
+      await awaitUntil(socket, () => read().split(terminator).length - 1 >= count,
+        () => `expected ${count} x ${JSON.stringify(terminator)}, got: ${read().slice(0, 400)}`);
+    }
+
+    /**
+     * Poll until `done`, then THROW on expiry. Silently returning on timeout
+     * let a test that could never see its terminator burn the full deadline and
+     * still pass. One `data` listener for the whole wait, not one per poll.
+     */
+    async function awaitUntil(
+      socket: tls.TLSSocket,
+      done: () => boolean,
+      describe: () => string,
+      timeoutMs = 10_000,
+    ): Promise<void> {
+      if (done()) return;
+      await new Promise<void>((resolve, reject) => {
+        const finish = (err?: Error): void => {
+          clearInterval(poll);
+          clearTimeout(timer);
+          socket.off('data', onData);
+          if (err) reject(err); else resolve();
+        };
+        const check = (): void => { if (done()) finish(); };
+        const onData = (): void => check();
+        const poll = setInterval(check, 25);
+        const timer = setTimeout(() => finish(new Error(`timed out: ${describe()}`)), timeoutMs);
+        socket.on('data', onData);
+        check();
+      });
+    }
+
+    /** Wait for a 502, which no ORIGIN_BODY terminator can ever match. */
+    async function awaitStatus502(socket: tls.TLSSocket, read: () => string): Promise<void> {
+      await awaitUntil(socket, () => read().includes('Anthropic upstream unreachable'),
+        () => `expected a 502 body, got: ${read().slice(0, 400)}`);
+    }
+
+    async function readLog(path: string): Promise<Record<string, unknown>[]> {
+      return readFileSync(path, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    }
+
+    /**
+     * Two keep-alive requests down one client connection. The second reuses the
+     * proxy's pooled upstream socket, which the origin then resets.
+     */
+    async function twoRequestsOverOneConnection(logName: string, secondIs502 = false): Promise<{
+      response: string;
+      entries: Record<string, unknown>[];
+      originRequests: number;
+      bodies: string[];
+    }> {
+      const certificates = ensureHttpProxyCertificates();
+      const inferenceLogPath = join(testHome, logName);
+      const { server, requestCount, bodies } = resettingOrigin(2);
+      const originPort = await listen(server);
+      const proxy = await startHttpProxy({
+        routes: [],
+        inferenceLogPath,
+        anthropicOrigin: `https://127.0.0.1:${originPort}`,
+        anthropicRejectUnauthorized: false,
+      });
+      try {
+        const secure = await connectMitm(proxy.port, certificates.caCert);
+        let response = '';
+        secure.on('data', chunk => { response += chunk.toString(); });
+
+        secure.write(messagesRequest(JSON.stringify({
+          model: 'claude-opus-4-8',
+          messages: [{ role: 'user', content: 'first' }],
+        })));
+        await awaitResponses(secure, () => response, 1);
+        expect(response).toContain('200 OK');
+
+        secure.write(messagesRequest(JSON.stringify({
+          model: 'claude-opus-4-8',
+          messages: [{ role: 'user', content: 'second' }],
+        })));
+        if (secondIs502) await awaitStatus502(secure, () => response);
+        else await awaitResponses(secure, () => response, 2);
+        secure.destroy();
+
+        return {
+          response,
+          entries: await readLog(inferenceLogPath),
+          originRequests: requestCount(),
+          bodies,
+        };
+      } finally {
+        await proxy.close();
+        await new Promise<void>(resolve => server.close(() => resolve()));
+      }
+    }
+
+    it('replays a request whose pooled upstream socket was reset before any reply', async () => {
+      const { response, entries, originRequests, bodies } = await twoRequestsOverOneConnection(
+        'passthrough-retry-reused.jsonl',
+      );
+
+      // Both client requests were answered; the reset never reached the client.
+      expect(response.split('HTTP/1.1 200 OK').length - 1).toBe(2);
+      expect(response).not.toContain('502');
+      expect(response).not.toContain('Anthropic upstream unreachable');
+      // First request, the reset second request, and its replay.
+      expect(originRequests).toBe(3);
+      // The replay must carry the ORIGINAL body byte for byte. Truncating or
+      // re-encoding it would still produce a 200 and leave every other
+      // assertion green, so pin it here.
+      const second = JSON.stringify({ model: 'claude-opus-4-8', messages: [{ role: 'user', content: 'second' }] });
+      expect(bodies).toHaveLength(3);
+      expect(bodies[2]).toBe(second);
+      expect(bodies[2]).toBe(bodies[1]);
+
+      const retried = entries.filter(entry => entry['event'] === 'response_retried');
+      expect(retried).toEqual([
+        expect.objectContaining({
+          event: 'response_retried',
+          route: 'passthrough',
+          phase: 'waiting_for_headers',
+          errorType: 'ECONNRESET',
+          terminationSource: 'upstream_failure',
+          attempt: 1,
+          reusedSocket: true,
+        }),
+      ]);
+      expect(entries.some(entry => entry['event'] === 'response_failed')).toBe(false);
+      // The replay's success is attributed to attempt 2, so a log reader can
+      // tell a recovered request from one that never needed recovering.
+      expect(entries).toContainEqual(expect.objectContaining({
+        event: 'response_completed',
+        requestId: retried[0]!['requestId'],
+        attempt: 2,
+      }));
+    }, 20_000);
+
+    it('does not replay a reset on a socket it opened itself', async () => {
+      const certificates = ensureHttpProxyCertificates();
+      const inferenceLogPath = join(testHome, 'passthrough-retry-fresh.jsonl');
+      const { server, requestCount } = resettingOrigin(1);
+      const originPort = await listen(server);
+      const proxy = await startHttpProxy({
+        routes: [],
+        inferenceLogPath,
+        anthropicOrigin: `https://127.0.0.1:${originPort}`,
+        anthropicRejectUnauthorized: false,
+      });
+      try {
+        const secure = await connectMitm(proxy.port, certificates.caCert);
+        let response = '';
+        secure.on('data', chunk => { response += chunk.toString(); });
+        secure.write(messagesRequest(JSON.stringify({
+          model: 'claude-opus-4-8',
+          messages: [{ role: 'user', content: 'fresh socket reset' }],
+        })));
+        await awaitStatus502(secure, () => response);
+        secure.destroy();
+
+        expect(response).toContain('502');
+        expect(response).toContain('Anthropic upstream unreachable');
+        // Exactly one upstream attempt: a fresh connection may have delivered
+        // the request before dying, so replaying it could duplicate the turn.
+        expect(requestCount()).toBe(1);
+
+        const entries = await readLog(inferenceLogPath);
+        expect(entries.some(entry => entry['event'] === 'response_retried')).toBe(false);
+        expect(entries).toContainEqual(expect.objectContaining({
+          event: 'response_failed',
+          route: 'passthrough',
+          statusCode: 502,
+          phase: 'waiting_for_headers',
+          errorType: 'ECONNRESET',
+          attempt: 1,
+          reusedSocket: false,
+        }));
+      } finally {
+        await proxy.close();
+        await new Promise<void>(resolve => server.close(() => resolve()));
+      }
+    }, 20_000);
+
+    it('does not replay a reused socket that already sent response headers', async () => {
+      // Pins the behaviour AND the guard. A clean `destroy()` here is reported
+      // on the response object, so the request-level retry decision is never
+      // consulted and the test proves nothing. Resetting the RAW TCP socket
+      // (the TLS socket cannot: resetAndDestroy throws ERR_INVALID_HANDLE_TYPE)
+      // delivers a genuine RST, which node reports on the REQUEST -- the one
+      // arrival point where a post-header replay could occur. Staged on a
+      // REUSED socket so the reuse gate cannot be what produces the result.
+      const certificates = ensureHttpProxyCertificates();
+      const inferenceLogPath = join(testHome, 'passthrough-retry-after-headers.jsonl');
+      let requests = 0;
+      const perConnection = new WeakMap<net.Socket, number>();
+      const rawByPort = new Map<number, net.Socket>();
+      const origin = https.createServer({
+        key: certificates.serverKey,
+        cert: certificates.serverCert,
+      }, (req, res) => {
+        req.resume();
+        const seen = (perConnection.get(req.socket) ?? 0) + 1;
+        perConnection.set(req.socket, seen);
+        requests += 1;
+        if (seen === 2) {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.write(POST_HEADER_MARKER);
+          const raw = rawByPort.get(req.socket.remotePort ?? -1);
+          setTimeout(() => raw?.resetAndDestroy(), 30);
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'application/json',
+          'Content-Length': String(Buffer.byteLength(ORIGIN_BODY)),
+        });
+        res.end(ORIGIN_BODY);
+      });
+      origin.on('connection', raw => {
+        const port = raw.remotePort;
+        if (port !== undefined) rawByPort.set(port, raw);
+      });
+      const originPort = await listen(origin);
+      const proxy = await startHttpProxy({
+        routes: [],
+        inferenceLogPath,
+        anthropicOrigin: `https://127.0.0.1:${originPort}`,
+        anthropicRejectUnauthorized: false,
+      });
+      try {
+        const secure = await connectMitm(proxy.port, certificates.caCert);
+        let response = '';
+        secure.on('data', chunk => { response += chunk.toString(); });
+
+        secure.write(messagesRequest(JSON.stringify({
+          model: 'claude-opus-4-8',
+          messages: [{ role: 'user', content: 'first' }],
+        })));
+        await awaitResponses(secure, () => response, 1);
+
+        secure.write(messagesRequest(JSON.stringify({
+          model: 'claude-opus-4-8',
+          messages: [{ role: 'user', content: 'reset after headers' }],
+          stream: true,
+        })));
+        await awaitUntil(secure, () => response.includes(POST_HEADER_MARKER),
+          () => `expected the partial stream, got: ${response.slice(0, 400)}`);
+        await new Promise(resolve => setTimeout(resolve, 250));
+        secure.destroy();
+
+        // The client really did receive part of a response before the reset.
+        expect(response).toContain(POST_HEADER_MARKER);
+        // Two client requests, two upstream attempts. A third would mean the
+        // half-delivered response was replayed.
+        expect(requests).toBe(2);
+        const entries = await readLog(inferenceLogPath);
+        expect(entries.some(entry => entry['event'] === 'response_retried')).toBe(false);
+      } finally {
+        await proxy.close();
+        await new Promise<void>(resolve => origin.close(() => resolve()));
+      }
+    }, 20_000);
+
+    it('identifies a failure whose error carries no message', () => {
+      // Observed live on this branch: ETIMEDOUT with an empty message rendered
+      // as "Anthropic upstream unreachable: ." and told the reader nothing.
+      expect(upstreamUnreachableDetail(Object.assign(new Error(''), { code: 'ETIMEDOUT' })))
+        .toBe('ETIMEDOUT');
+      // A real message still wins -- it says more than the code does.
+      expect(upstreamUnreachableDetail(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })))
+        .toBe('socket hang up');
+      // And something is always produced, however bare the error.
+      expect(upstreamUnreachableDetail(new Error(''))).toBe('Error');
+      expect(upstreamUnreachableDetail(Object.assign(new Error(''), { name: '' })))
+        .toBe('connection failed');
+    });
+
+    it('keeps the idle-eviction the global pool it replaces already had', () => {
+      // Expressed as parity, not a magic 5000: the invariant is "no worse than
+      // https.globalAgent at dropping idle sockets". Dropping `timeout` leaves
+      // dead sockets pooled forever and makes the stale reset MORE likely.
+      const agent = createPassthroughAgent();
+      try {
+        expect(agent.keepAlive).toBe(true);
+        expect(agent.options.timeout).toBeDefined();
+        expect(agent.options.timeout).toBe(https.globalAgent.options.timeout);
+      } finally {
+        agent.destroy();
+      }
+    });
+
+    it('pools passthrough connections in its own agent, not the process-wide one', async () => {
+      // Falling back to https.globalAgent shares a pool with every other https
+      // client in the process and survives close(). Reuse alone cannot detect
+      // that -- globalAgent is keep-alive too -- so assert the pool identity.
+      const certificates = ensureHttpProxyCertificates();
+      const { server } = resettingOrigin(0);
+      const originPort = await listen(server);
+      // Agent pool keys carry TLS options too, so match on the origin's port
+      // rather than reconstructing the whole key.
+      const globalPoolHasOrigin = (): boolean =>
+        [...Object.keys(https.globalAgent.freeSockets), ...Object.keys(https.globalAgent.sockets)]
+          .some(key => key.startsWith(`127.0.0.1:${originPort}:`));
+      expect(globalPoolHasOrigin()).toBe(false);
+      const proxy = await startHttpProxy({
+        routes: [],
+        anthropicOrigin: `https://127.0.0.1:${originPort}`,
+        anthropicRejectUnauthorized: false,
+      });
+      try {
+        const secure = await connectMitm(proxy.port, certificates.caCert);
+        let response = '';
+        secure.on('data', chunk => { response += chunk.toString(); });
+        secure.write(messagesRequest(JSON.stringify({
+          model: 'claude-opus-4-8',
+          messages: [{ role: 'user', content: 'pool identity' }],
+        })));
+        await awaitResponses(secure, () => response, 1);
+        secure.destroy();
+
+        expect(response).toContain('200 OK');
+        // The kept-alive upstream socket must be parked in the proxy's own pool.
+        expect(globalPoolHasOrigin()).toBe(false);
+      } finally {
+        await proxy.close();
+        await new Promise<void>(resolve => server.close(() => resolve()));
+      }
+    }, 20_000);
+
+    it('does not replay, or blame upstream, when the proxy itself is shutting down', async () => {
+      // close() destroys the passthrough pool, which surfaces on an in-flight
+      // request as a socket error indistinguishable from an upstream fault.
+      // Replaying then is pointless work against a dying proxy, and recording
+      // it as `upstream_failure` sends a log reader after Anthropic.
+      const certificates = ensureHttpProxyCertificates();
+      const inferenceLogPath = join(testHome, 'passthrough-retry-shutdown.jsonl');
+      let sawSecond: () => void = () => {};
+      const secondSeen = new Promise<void>(resolve => { sawSecond = resolve; });
+      let requests = 0;
+      const perConnection = new WeakMap<net.Socket, number>();
+      const origin = https.createServer({
+        key: certificates.serverKey,
+        cert: certificates.serverCert,
+      }, (req, res) => {
+        req.resume();
+        const seen = (perConnection.get(req.socket) ?? 0) + 1;
+        perConnection.set(req.socket, seen);
+        requests += 1;
+        // Answer the first so the upstream socket is POOLED, then hold the
+        // second open across the shutdown. Staged on a reused socket so the
+        // reuse gate is not what suppresses the replay.
+        if (seen === 1) {
+          res.writeHead(200, {
+            'Content-Type': 'application/json',
+            'Content-Length': String(Buffer.byteLength(ORIGIN_BODY)),
+          });
+          res.end(ORIGIN_BODY);
+          return;
+        }
+        req.once('end', () => sawSecond());
+      });
+      const originPort = await listen(origin);
+      const proxy = await startHttpProxy({
+        routes: [],
+        inferenceLogPath,
+        anthropicOrigin: `https://127.0.0.1:${originPort}`,
+        anthropicRejectUnauthorized: false,
+      });
+      let closed = false;
+      try {
+        const secure = await connectMitm(proxy.port, certificates.caCert);
+        let response = '';
+        secure.on('data', chunk => { response += chunk.toString(); });
+        secure.on('error', () => {});
+        secure.write(messagesRequest(JSON.stringify({
+          model: 'claude-opus-4-8',
+          messages: [{ role: 'user', content: 'first' }],
+        })));
+        await awaitResponses(secure, () => response, 1);
+        secure.write(messagesRequest(JSON.stringify({
+          model: 'claude-opus-4-8',
+          messages: [{ role: 'user', content: 'in flight at shutdown' }],
+        })));
+        await secondSeen;
+
+        await proxy.close();
+        closed = true;
+        secure.destroy();
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+        const entries = await readLog(inferenceLogPath);
+        expect(entries.some(entry => entry['event'] === 'response_retried')).toBe(false);
+        const upstreamBlamed = entries.filter(entry =>
+          entry['event'] === 'response_failed'
+          && entry['terminationSource'] === 'upstream_failure');
+        expect(upstreamBlamed).toEqual([]);
+        // A third upstream request would mean the dying proxy replayed.
+        expect(requests).toBe(2);
+      } finally {
+        if (!closed) await proxy.close();
+        await new Promise<void>(resolve => origin.close(() => resolve()));
+      }
+    }, 20_000);
+
+    it('honours CLODEX_UPSTREAM_MAX_RETRIES=0 by surfacing the reset', async () => {
+      const previous = process.env['CLODEX_UPSTREAM_MAX_RETRIES'];
+      process.env['CLODEX_UPSTREAM_MAX_RETRIES'] = '0';
+      try {
+        const { response, entries, originRequests } = await twoRequestsOverOneConnection(
+          'passthrough-retry-disabled.jsonl',
+          true,
+        );
+        expect(response).toContain('502');
+        expect(originRequests).toBe(2);
+        expect(entries.some(entry => entry['event'] === 'response_retried')).toBe(false);
+        expect(entries).toContainEqual(expect.objectContaining({
+          event: 'response_failed',
+          statusCode: 502,
+          errorType: 'ECONNRESET',
+          attempt: 1,
+          reusedSocket: true,
+        }));
+      } finally {
+        if (previous === undefined) delete process.env['CLODEX_UPSTREAM_MAX_RETRIES'];
+        else process.env['CLODEX_UPSTREAM_MAX_RETRIES'] = previous;
+      }
+    }, 20_000);
   });
 
 });

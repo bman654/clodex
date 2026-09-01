@@ -12,6 +12,7 @@ import { ensureHttpProxyCertificates } from './ca.js';
 import { normalizeRouteLookupId } from '../context-model-id.js';
 import { listenTcpServer } from '../listener-ready.js';
 import { routeUnavailableMessage } from '../route-unavailable.js';
+import { passthroughUpstreamRetries } from '../upstream-retry.js';
 import {
   outboundHttpProxyAgent,
   outboundProxyUrlForTarget,
@@ -37,6 +38,37 @@ const ANTHROPIC_HOST = 'api.anthropic.com';
 const MAX_BODY_BYTES = 50 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 const MAX_USAGE_SSE_BLOCK_BYTES = 64 * 1024;
+
+/**
+ * The reset a pooled socket produces when the peer closed it while it sat idle.
+ * EPIPE is arguably as safe to replay and is deliberately NOT included: no test
+ * here can stage one, and an untested replay path on a billable POST is not
+ * worth the reach. `errorType` on response_failed records it if it shows up.
+ */
+const RETRYABLE_PASSTHROUGH_CODE = 'ECONNRESET';
+
+/**
+ * The passthrough's own connection pool. `timeout` must not be dropped: it is
+ * what evicts an IDLE pooled socket, and https.globalAgent -- which this
+ * replaces -- carries one. Without it dead sockets accumulate in the pool and
+ * the stale-socket reset this module absorbs becomes MORE likely, not less.
+ */
+/**
+ * Identify an upstream failure for the 502 body. Observed live: an ETIMEDOUT
+ * whose `message` was empty, rendering as "Anthropic upstream unreachable: ."
+ * -- exactly the unactionable error this path exists to stop producing. Fall
+ * back to whatever does identify it.
+ */
+export function upstreamUnreachableDetail(err: Error): string {
+  return err.message || (err as NodeJS.ErrnoException).code || err.name || 'connection failed';
+}
+
+export function createPassthroughAgent(): https.Agent {
+  return new https.Agent({
+    keepAlive: true,
+    timeout: https.globalAgent.options.timeout ?? 5_000,
+  });
+}
 
 type ResponseUsage = {
   usageStage: 'message_start' | 'message_delta';
@@ -290,6 +322,7 @@ function forwardRawAnthropicRequest(
 ): Promise<void> {
   return new Promise(resolve => {
     const startedAt = Date.now();
+    const retryBudget = passthroughUpstreamRetries();
     let lastActivityAt = startedAt;
     let headersReceived = false;
     let firstByteAt: number | undefined;
@@ -344,42 +377,115 @@ function forwardRawAnthropicRequest(
       resolve();
     };
     const errorType = (err: Error): string => (err as NodeJS.ErrnoException).code ?? err.name;
-    const upstream = https.request({
-      protocol: 'https:',
-      hostname: origin.hostname,
-      port: origin.port || 443,
-      method: req.method,
-      path: req.url,
-      headers: requestHeadersWithoutProxyHeaders(req),
-      servername: net.isIP(origin.hostname) ? undefined : origin.hostname,
-      rejectUnauthorized,
-      agent,
-    }, upstreamRes => {
-      headersReceived = true;
-      statusCode = upstreamRes.statusCode ?? 502;
-      lastActivityAt = Date.now();
-      upstreamRes.on('data', (chunk: Buffer) => {
-        const now = Date.now();
-        if (firstByteAt === undefined) {
-          firstByteAt = now;
-          writeLifecycle('response_started', {
-            statusCode,
-            durationMs: now - startedAt,
-            timeToFirstByteMs: now - startedAt,
-          });
-        }
-        lastActivityAt = now;
-        bytes += chunk.length;
-        chunks += 1;
-      });
-      copyResponse(upstreamRes, res, onErrorResponse, onResponseUsage);
-      upstreamRes.once('end', () => {
-        responseEnded = true;
+    let upstream: http.ClientRequest | undefined;
+    let attempt = 0;
+
+    // A keep-alive pool hands out sockets the far end may already have closed
+    // while they sat idle; the write then fails with a reset before anything is
+    // read back. Retrying is safe precisely in that case and only in that case:
+    // the socket was reused, so this attempt never reached a fresh connection,
+    // and no response has arrived, so the request cannot have been served. A
+    // reset on a socket we opened ourselves is a real network fault and is
+    // reported as before.
+    //
+    // `!headersReceived` is load-bearing and reachable. A clean premature close
+    // is reported on the response object, but a genuine TCP RST is a socket
+    // ERROR, and node's socketErrorListener calls emitErrorEvent(req, err)
+    // WITHOUT checking `req.res` -- so it lands here even with half a response
+    // already written downstream. Without this term that half-delivered request
+    // is replayed into the same stream (pinned by the after-headers test, which
+    // resets the raw TCP socket to produce exactly that arrival).
+    const isRetryableUpstreamFailure = (err: Error, request: http.ClientRequest): boolean =>
+      attempt <= retryBudget
+      && !headersReceived
+      && !failed
+      && !clientDisconnected
+      && !isLocalShutdown()
+      && request.reusedSocket === true
+      && (err as NodeJS.ErrnoException).code === RETRYABLE_PASSTHROUGH_CODE;
+
+    const sendAttempt = (): void => {
+      attempt += 1;
+      const request = https.request({
+        protocol: 'https:',
+        hostname: origin.hostname,
+        port: origin.port || 443,
+        method: req.method,
+        path: req.url,
+        headers: requestHeadersWithoutProxyHeaders(req),
+        servername: net.isIP(origin.hostname) ? undefined : origin.hostname,
+        rejectUnauthorized,
+        agent,
+      }, upstreamRes => {
+        headersReceived = true;
+        statusCode = upstreamRes.statusCode ?? 502;
         lastActivityAt = Date.now();
-        done();
+        upstreamRes.on('data', (chunk: Buffer) => {
+          const now = Date.now();
+          if (firstByteAt === undefined) {
+            firstByteAt = now;
+            writeLifecycle('response_started', {
+              statusCode,
+              durationMs: now - startedAt,
+              timeToFirstByteMs: now - startedAt,
+              ...(attempt > 1 ? { attempt } : {}),
+            });
+          }
+          lastActivityAt = now;
+          bytes += chunk.length;
+          chunks += 1;
+        });
+        copyResponse(upstreamRes, res, onErrorResponse, onResponseUsage);
+        upstreamRes.once('end', () => {
+          responseEnded = true;
+          lastActivityAt = Date.now();
+          done();
+        });
+        upstreamRes.once('error', err => {
+          if (clientDisconnected || failed) {
+            done();
+            return;
+          }
+          failed = true;
+          stopProgress();
+          const now = Date.now();
+          writeLifecycle('response_failed', {
+            statusCode,
+            phase: responsePhase(),
+            durationMs: now - startedAt,
+            ...(firstByteAt !== undefined ? { timeToFirstByteMs: firstByteAt - startedAt } : {}),
+            idleMs: now - lastActivityAt,
+            bytes,
+            chunks,
+            errorType: errorType(err),
+            terminationSource: 'upstream_failure',
+            attempt,
+          });
+          done();
+        });
       });
-      upstreamRes.once('error', err => {
-        if (clientDisconnected || failed) {
+      upstream = request;
+      request.once('error', err => {
+        if (clientDisconnected) {
+          done();
+          return;
+        }
+        if (isRetryableUpstreamFailure(err, request)) {
+          const retriedAt = Date.now();
+          writeLifecycle('response_retried', {
+            phase: responsePhase(),
+            durationMs: retriedAt - startedAt,
+            idleMs: retriedAt - lastActivityAt,
+            errorType: errorType(err),
+            terminationSource: 'upstream_failure',
+            attempt,
+            reusedSocket: true,
+          });
+          lastActivityAt = retriedAt;
+          sendAttempt();
+          return;
+        }
+        if (failed) {
           done();
           return;
         }
@@ -387,19 +493,26 @@ function forwardRawAnthropicRequest(
         stopProgress();
         const now = Date.now();
         writeLifecycle('response_failed', {
-          statusCode,
+          statusCode: 502,
           phase: responsePhase(),
           durationMs: now - startedAt,
-          ...(firstByteAt !== undefined ? { timeToFirstByteMs: firstByteAt - startedAt } : {}),
           idleMs: now - lastActivityAt,
           bytes,
           chunks,
           errorType: errorType(err),
-          terminationSource: 'upstream_failure',
+          terminationSource: isLocalShutdown() ? 'local_shutdown' : 'upstream_failure',
+          attempt,
+          reusedSocket: request.reusedSocket === true,
         });
+        const detail = upstreamUnreachableDetail(err);
+        onErrorResponse?.(502, `Anthropic upstream unreachable: ${detail}`);
+        if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
+        res.end(`Anthropic upstream unreachable: ${detail}`);
         done();
       });
-    });
+      request.end(rawBody);
+    };
+
     res.once('finish', () => {
       stopProgress();
       if (failed || clientDisconnected) return;
@@ -410,6 +523,7 @@ function forwardRawAnthropicRequest(
         ...(firstByteAt !== undefined ? { timeToFirstByteMs: firstByteAt - startedAt } : {}),
         bytes,
         chunks,
+        ...(attempt > 1 ? { attempt } : {}),
       });
     });
     res.once('close', () => {
@@ -427,33 +541,11 @@ function forwardRawAnthropicRequest(
         chunks,
         terminationSource: isLocalShutdown() ? 'local_shutdown' : 'downstream_client',
       });
-      upstream.destroy(new Error('Client disconnected'));
+      upstream?.destroy(new Error('Client disconnected'));
       done();
     });
-    upstream.once('error', err => {
-      if (clientDisconnected) {
-        done();
-        return;
-      }
-      failed = true;
-      stopProgress();
-      const now = Date.now();
-      writeLifecycle('response_failed', {
-        statusCode: 502,
-        phase: responsePhase(),
-        durationMs: now - startedAt,
-        idleMs: now - lastActivityAt,
-        bytes,
-        chunks,
-        errorType: errorType(err),
-        terminationSource: 'upstream_failure',
-      });
-      onErrorResponse?.(502, `Anthropic upstream unreachable: ${err.message}`);
-      if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
-      res.end(`Anthropic upstream unreachable: ${err.message}`);
-      done();
-    });
-    upstream.end(rawBody);
+
+    sendAttempt();
   });
 }
 
@@ -733,7 +825,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   }
   const anthropicOrigin = new URL(options.anthropicOrigin ?? 'https://api.anthropic.com');
   const anthropicProxyUrl = outboundProxyUrlForTarget(anthropicOrigin.href);
-  let anthropicAgent: ReturnType<typeof outboundHttpProxyAgent>;
+  let anthropicAgent: https.Agent | undefined;
   let adapter: ProxyHandle | null = options.adapterHandle ?? null;
   if (options.routes.length > 0) {
     adapter ??= await startProxyCatalog(
@@ -1010,6 +1102,9 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   } else {
     anthropicAgent = outboundHttpProxyAgent(anthropicOrigin.href);
   }
+  // Without this the passthrough falls back to https.globalAgent, whose pool is
+  // shared with every other https client in the process and outlives close().
+  anthropicAgent ??= createPassthroughAgent();
 
   return {
     host: options.host ?? '127.0.0.1',
