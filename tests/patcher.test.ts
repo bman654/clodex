@@ -12,8 +12,8 @@ import {
 import {
   buildFakeElfClaude,
   buildFakeNativeClaude,
-  ELF_FIRST_SCANNED,
-  ELF_POINTER_VADDR,
+  ELF_POINTER_OFFSET,
+  ELF_STAND_IN_OFFSET,
   MACHO_MAGIC,
   parseBunBlob,
   rebuildFakeNativeClaude,
@@ -1398,14 +1398,94 @@ describe('applyPatch', () => {
       expect(outcome.ok ? 'ok' : outcome.message).toBe('ok');
 
       const published = readFileSync(binaryPath);
-      // The real global holds the relocated address...
-      expect(published.readBigUInt64LE(ELF_POINTER_VADDR)).toBe(BigInt(RELOCATED_BUN_ADDR));
+      // The real global holds the relocated address. Read at its FILE OFFSET, which the fixture
+      // keeps distinct from its virtual address — the two are 0x202000 apart on a real linux-x64.
+      expect(published.readBigUInt64LE(ELF_POINTER_OFFSET)).toBe(BigInt(RELOCATED_BUN_ADDR));
       // ...and the slot the stand-in borrowed holds what it held before, byte for byte.
-      expect(published.readBigUInt64LE(ELF_FIRST_SCANNED))
-        .toBe(pristine.readBigUInt64LE(ELF_FIRST_SCANNED));
+      expect(published.readBigUInt64LE(ELF_STAND_IN_OFFSET))
+        .toBe(pristine.readBigUInt64LE(ELF_STAND_IN_OFFSET));
       // The patch itself still landed, so this is not passing on a binary nothing was done to.
       expect(parseBunBlob(published).contents[0]).toContain('"extended"');
       expect(parseBunBlob(published).contents[6]).toContain('/*ccpatch:ctx*/');
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * The same thing on the OTHER write path. `applyPatch` falls back to tweakcc's single-module
+   * write whenever `readClaudeBundle` returns null — an npm `cli.js` install, or a blob whose
+   * modules do not round-trip. An npm install is not an ELF, so the stand-in is a no-op there and
+   * that call site could be deleted with everything else still green; this is the case where the
+   * fallback and a native ELF meet, which is what makes it a second call site rather than a
+   * decoration.
+   */
+  it('repoints the ELF blob pointer on the single-module write path too', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-elf-fallback-'));
+    const binaryPath = join(dir, 'claude');
+    const tweakccHome = join(dir, 'tweakcc-home');
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    // Loader 5 is a vendored asset, not JavaScript Bun executes, so `readClaudeBundle` finds no
+    // bundle at all and returns null — which is what selects the fallback write.
+    const modules = [{ name: '/$bunfs/root/src/entrypoints/cli.js', contents: CLAUDE_FIXTURE, loader: 5 }];
+    const pristine = buildFakeElfClaude(modules);
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    vi.mocked(execFileSync).mockReset();
+    vi.mocked(execFileSync).mockImplementation((() => '') as unknown as typeof execFileSync);
+    mkdirSync(tweakccHome, { recursive: true });
+    writeFileSync(binaryPath, pristine, { mode: 0o755 });
+    process.env.CLODEX_HOME = dir;
+    process.env.TWEAKCC_CONFIG_DIR = tweakccHome;
+
+    const RELOCATED_BUN_ADDR = 0x900000;
+
+    tweakccMocks.tryDetectInstallation.mockReset();
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+    tweakccMocks.tryDetectInstallation.mockImplementation(
+      async ({ path }: { path: string }) => ({ path, version: 'test-version', kind: 'native' }),
+    );
+    tweakccMocks.readContent.mockImplementation(
+      async ({ path }: { path: string }) => parseBunBlob(readFileSync(path)).contents[0]!,
+    );
+    tweakccMocks.writeContent.mockImplementation(
+      async ({ path }: { path: string }, content: string) => {
+        writeFileSync(
+          path,
+          repackFakeElfClaude(readFileSync(path), () => content, RELOCATED_BUN_ADDR),
+          { mode: 0o755 },
+        );
+      },
+    );
+
+    try {
+      const outcome = await applyPatch(
+        binaryPath,
+        'test-version',
+        {
+          config: { 'clodex:test:extended': { alias: 'extended', context: 272_000, display: 'Extended (test)' } },
+          unknownWindows: [],
+        },
+        'desired-config-hash',
+        { trace: false, manifest: null },
+      );
+
+      expect(outcome.ok ? 'ok' : outcome.message).toBe('ok');
+
+      const published = readFileSync(binaryPath);
+      expect(published.readBigUInt64LE(ELF_POINTER_OFFSET)).toBe(BigInt(RELOCATED_BUN_ADDR));
+      expect(published.readBigUInt64LE(ELF_STAND_IN_OFFSET))
+        .toBe(pristine.readBigUInt64LE(ELF_STAND_IN_OFFSET));
+      // Went through the fallback, and the patch landed in the one module tweakcc names.
+      expect(parseBunBlob(published).contents[0]).toContain('"extended"');
+      expect(parseBunBlob(published).contents[0]).toContain('/*ccpatch:ctx*/');
     } finally {
       Object.defineProperty(process, 'platform', platform);
       if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
@@ -2167,6 +2247,24 @@ describe('patch script identity naming', () => {
 
     expect(() => runPatchScript(config, source)).toThrow(
       'clodex patch: child network environment target validation failed',
+    );
+  });
+
+  // `CLAUDE_CODE_REMOTE` is not in the literal list, because the ANCHOR already requires it inside
+  // the captured body — that is why removing it from the list was safe. Nothing else pins the
+  // anchor's copy of it, so widen it to any environment variable and the site would silently stop
+  // proving it bound to the builder that consults the remote flag.
+  it('rejects a child builder whose head consults a different environment variable', () => {
+    const source = CLAUDE_FIXTURE.replace(
+      'flag(process.env.CLAUDE_CODE_REMOTE)?remote():{}',
+      'flag(process.env.CLAUDE_CODE_ELSEWHERE)?remote():{}',
+    );
+
+    expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE);
+    expect(source).not.toContain('CLAUDE_CODE_REMOTE');
+
+    expect(() => runPatchScript(config, source)).toThrow(
+      'clodex patch: required patch failed: PATCH 10: child network environment',
     );
   });
 

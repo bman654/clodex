@@ -289,13 +289,28 @@ export function rebuildFakeNativeClaude(
 // that cannot produce ELF bytes cannot see the production wiring get deleted.
 // ---------------------------------------------------------------------------------------------
 
-/** Where the writable PT_LOAD starts, at a deliberately un-16K-aligned address, as real builds do. */
+/** Where the writable PT_LOAD starts in the FILE, at a deliberately un-16K-aligned offset. */
 const ELF_SEG_OFFSET = 0x1000;
+/**
+ * How far the segment's virtual address runs ahead of its file offset — 0x202000 on the real
+ * linux-x64 build, 0x220000 on arm64. Never zero, and that matters: a fixture mapped at
+ * `vaddr === offset` cannot tell a virtual address from a file offset, so an implementation that
+ * confuses the two reads and writes the same wrong place, passes its own readback, and leaves Bun
+ * pointed at the old blob on every real Linux build.
+ */
+const ELF_LOAD_BIAS = 0x202000;
+const ELF_SEG_VADDR = ELF_SEG_OFFSET + ELF_LOAD_BIAS;
 /** The lowest address tweakcc's 16 KiB-strided scan visits inside that segment. */
-export const ELF_FIRST_SCANNED = 0x4000;
+const ELF_FIRST_SCANNED = Math.ceil(ELF_SEG_VADDR / 0x4000) * 0x4000;
 /** Where the Bun blob-pointer global sits — off the boundary, as on every 2.1.257 ELF build. */
-export const ELF_POINTER_VADDR = ELF_FIRST_SCANNED + 0x758;
-const ELF_BUN_AT = 0x8000;
+const ELF_POINTER_VADDR = ELF_FIRST_SCANNED + 0x758;
+const elfOffsetOf = (vaddr: number) => ELF_SEG_OFFSET + (vaddr - ELF_SEG_VADDR);
+/** File offset of the Bun blob-pointer global — what a test reads out of the published bytes. */
+export const ELF_POINTER_OFFSET = elfOffsetOf(ELF_POINTER_VADDR);
+/** File offset of the slot the stand-in borrows, which must come back byte-identical. */
+export const ELF_STAND_IN_OFFSET = elfOffsetOf(ELF_FIRST_SCANNED);
+const ELF_BUN_OFFSET = 0x8000;
+const ELF_BUN_VADDR = ELF_BUN_OFFSET + ELF_LOAD_BIAS;
 const ELF_SECTION_NAMES = ['', '.shstrtab', '.bun'];
 
 function elfSectionHeaders(bunAddr: number, bunOffset: number, bunSize: number, shoff: number): Buffer {
@@ -327,7 +342,7 @@ function elfSectionHeaders(bunAddr: number, bunOffset: number, bunSize: number, 
  */
 export function buildFakeElfClaude(modules: BunModuleFixture[], options: BunBlobOptions = {}): Buffer {
   const blob = buildBunBlob(modules, options);
-  const bunOffset = ELF_BUN_AT;
+  const bunOffset = ELF_BUN_OFFSET;
   const segmentSize = bunOffset - ELF_SEG_OFFSET + blob.length;
   const shoff = bunOffset + blob.length;
   const buf = Buffer.alloc(shoff + 3 * 64 + 64);
@@ -346,14 +361,14 @@ export function buildFakeElfClaude(modules: BunModuleFixture[], options: BunBlob
   buf.writeUInt32LE(1, 0x40); // PT_LOAD
   buf.writeUInt32LE(6, 0x44); // R|W
   buf.writeBigUInt64LE(BigInt(ELF_SEG_OFFSET), 0x48);
-  buf.writeBigUInt64LE(BigInt(ELF_SEG_OFFSET), 0x50); // vaddr == offset
+  buf.writeBigUInt64LE(BigInt(ELF_SEG_VADDR), 0x50);
   buf.writeBigUInt64LE(BigInt(segmentSize), 0x60);
 
   // Filler that can never be read as an address, then the global, then the blob.
   buf.fill(0xaa, ELF_SEG_OFFSET, bunOffset);
-  buf.writeBigUInt64LE(BigInt(ELF_BUN_AT), ELF_POINTER_VADDR);
+  buf.writeBigUInt64LE(BigInt(ELF_BUN_VADDR), ELF_POINTER_OFFSET);
   blob.copy(buf, bunOffset);
-  elfSectionHeaders(ELF_BUN_AT, bunOffset, blob.length, shoff).copy(buf, shoff);
+  elfSectionHeaders(ELF_BUN_VADDR, bunOffset, blob.length, shoff).copy(buf, shoff);
   return buf;
 }
 

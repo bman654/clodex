@@ -17,16 +17,24 @@ import {
 } from '../src/bun-compiled-pointer.js';
 
 const STRIDE = 16384;
-// The writable segment starts on an ODD address, as it does on every real build (0x532c490 on
-// linux-x64 2.1.257). A 16 KiB-aligned segment would make the first scanned address the segment's
-// own start and hide the arithmetic this module has to get right.
+// The writable segment starts on an ODD address, as it does on every real build (file offset
+// 0x512a490 at virtual address 0x532c490 on linux-x64 2.1.257). A 16 KiB-aligned segment would make
+// the first scanned address the segment's own start and hide the arithmetic this module has to get
+// right.
 const SEG_OFFSET = 0x10490;
-const SEG_VADDR = 0x10490;
+/**
+ * How far virtual addresses run ahead of file offsets: 0x202000 on the real linux-x64 build,
+ * 0x220000 on arm64. Never zero, and that is the point — mapped at `vaddr === offset`, an
+ * implementation that confuses the two reads and writes the same wrong place, passes its own
+ * readback, and leaves Bun pointed at the old blob on every real Linux build.
+ */
+const LOAD_BIAS = 0x202000;
+const SEG_VADDR = SEG_OFFSET + LOAD_BIAS;
 const SEG_SIZE = 0x20000;
 /** The lowest address tweakcc's scan visits inside that segment. */
-const FIRST_SCANNED = 0x14000;
+const FIRST_SCANNED = Math.ceil(SEG_VADDR / STRIDE) * STRIDE;
 const BUN_OFFSET = 0x20000;
-const BUN_VADDR = 0x20000;
+const BUN_VADDR = BUN_OFFSET + LOAD_BIAS;
 const BUN_SIZE = 0x8000;
 const SHOFF = SEG_OFFSET + SEG_SIZE;
 
@@ -181,7 +189,7 @@ describe('the Bun blob pointer stand-in', () => {
   // linux-arm64-musl — none of them a multiple of 16384.
   describe('when the pointer sits where tweakcc never looks', () => {
     const POINTER = FIRST_SCANNED + 0x758;
-    const NEW_BUN_VADDR = 0x90000;
+    const NEW_BUN_VADDR = 0x900000;
 
     beforeEach(() => writeFileSync(file, buildElf(POINTER)));
 
@@ -229,7 +237,7 @@ describe('the Bun blob pointer stand-in', () => {
       writeFileSync(file, buf);
 
       expect(() => restoreBunCompiledPointer(file, shim))
-        .toThrow(/pointed Bun at 0x90000 but put \.bun at 0x91000/);
+        .toThrow(/pointed Bun at 0x900000 but put \.bun at 0x901000/);
     });
   });
 
@@ -315,8 +323,12 @@ describe('the Bun blob pointer stand-in', () => {
   });
 
   it('ignores candidates inside the blob itself', () => {
-    // Two more occurrences, both inside `.bun`, exactly as a real bundle carries them.
-    writeFileSync(file, buildElf(FIRST_SCANNED + 0x758, [BUN_VADDR + 0x40, BUN_VADDR + 0x2000]));
+    // Two more occurrences, both inside `.bun`, exactly as a real bundle carries them (5 of them on
+    // linux-arm64 2.1.257). Neither may land on a 16 KiB boundary, or tweakcc's own scan finds one
+    // and this stops testing the exclusion at all.
+    const inBlob = [BUN_VADDR + 0x40, BUN_VADDR + 0x2100];
+    for (const vaddr of inBlob) expect(vaddr % STRIDE, 'decoy must be off the scan stride').not.toBe(0);
+    writeFileSync(file, buildElf(FIRST_SCANNED + 0x758, inBlob));
 
     const shim = shimBunCompiledPointer(file);
 
