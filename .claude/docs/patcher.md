@@ -176,8 +176,8 @@ So the blob is published, not rebuilt:
 ELF only, and a no-op on every release where tweakcc works unaided.
 
 A Bun standalone ELF keeps the virtual address of its `.bun` section in an 8-byte little-endian
-global; Bun reads it at startup to find the blob. `repackELFSection` moves `.bun` to a fresh page
-past the end of the file, so it has to rewrite that global — and it finds it by scanning the first
+global. `repackELFSection` moves `.bun` to a fresh page past the end of the file and rewrites that
+global to match — and it finds it by scanning the first
 writable `PT_LOAD` for eight bytes equal to `.bun`'s current address, **only at addresses that are
 multiples of 16384**. tweakcc 4.3.0 and 4.3.3 both do this, so bumping the pin does not help.
 
@@ -193,17 +193,29 @@ remembers the eight bytes it displaced, and after the repack copies the address 
 the global's real home and puts the displaced bytes back. The published binary differs from an
 unaided repack in exactly one place: the global, holding the value it was always meant to hold.
 
-- **It never runs where tweakcc already works.** The module reproduces tweakcc's own scan first and
-  returns null if that finds anything, so an older release — or a future one that goes back to
-  being aligned — takes the path it always took, byte for byte.
 - **The real global is identified, not guessed:** the ONE 8-byte occurrence of `.bun`'s address
   inside the writable segment and outside `.bun`'s own payload. Occurrences inside the payload are
-  coincidences in compressed JavaScript (dozens on some builds) and are excluded by range. Anything
-  other than exactly one candidate is refused rather than patched, because publishing a binary whose
-  Bun global still points at the old blob is a `claude` that dies inside Bun before it prints
-  anything.
+  coincidences in compressed JavaScript — up to five on the arm64 builds measured (0, 0, 5 and 3
+  across the four 2.1.257 ELF builds) — and are excluded by range. Anything other than exactly one
+  candidate is refused rather than patched.
+- **It never runs where tweakcc already lands on that same address**, so an older release — or a
+  future one that goes back to being aligned — takes the path it always took, byte for byte. The
+  order matters: the census above runs **first** and the no-op check defers to it. Reversed, a
+  build carrying a coincidental copy of the blob address at a 16384-aligned offset would make
+  clodex stand aside while the repack rewrote that copy, and `clodex patch` would report success.
+  No shipped build does — on all four 2.1.257 ELF builds every occurrence is unaligned, and on
+  2.1.252 the single aligned hit *is* the global — and the ordering is what keeps that a measured
+  fact rather than an assumption.
 - **The restore verifies rather than assumes:** the stand-in must have changed, must agree with
   where `.bun` actually ended up, and both writes must read back.
+
+**What a wrong answer actually costs.** Not a binary that fails to start. That was this section's
+original claim and it is wrong: on published 2.1.257 linux-x64 and linux-x64-musl, reverting *only*
+the global to its pre-repack value still yields a `claude` that starts and prints its version, so
+Bun locates the blob another way — the end-of-file trailer scan described above. The cost is eight
+bytes of **live data** rewritten and never put back. Nothing in range is spare: the stand-in slot
+lands in `.data` on the glibc builds and in `.tdata`, the TLS initialisation image, on the musl
+ones. Refusing beats guessing for that reason, not the other one.
 - Mach-O and PE never reach this code — they assign the section in place and rewrite no pointer.
   That asymmetry is why the failure was ELF-only, and why the probe must be run per format.
 

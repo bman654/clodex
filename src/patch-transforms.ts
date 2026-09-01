@@ -733,10 +733,19 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     // OTEL pair, so "at least two" can be satisfied from a single category and
     // buys little over one.
     //
-    // So the floor is ONE. It still refuses a body that scrubs nothing — which is
-    // the only case where these names say something the anchor does not — while
-    // taking four independent refactors, not one, to produce a false refusal.
-    // 2.1.252 matches five and 2.1.257 matches four.
+    // So the floor is ONE. It still refuses a body that spells none of them —
+    // which is the only case where these names say something the anchor does not.
+    // 2.1.252 spells five and 2.1.257 spells four. Note what the floor does NOT
+    // buy: one refactor can still take it to zero, because "extract the remaining
+    // literals into a shared table" is a single ordinary move and is exactly what
+    // 2.1.257 already did to one of the five. The floor is cheap insurance
+    // against a body that spells none of these names, not a durable identity signal.
+    //
+    // These are matched as SUBSTRINGS of the body. A builder that scrubs the same
+    // names through a table declared elsewhere spells none of them here and is
+    // refused; that is the conservative direction, and the message below says
+    // "spells" rather than "scrubs" so the next reader is not sent looking for
+    // deletion logic that is not there.
     const scrubbedEnvNames = [
       'CLAUDE_CODE_OAUTH_TOKEN',
       'CLAUDE_CODE_SUBSCRIPTION_TYPE',
@@ -859,7 +868,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         const why = missingLiteral !== undefined
           ? 'body does not contain ' + missingLiteral
           : scrubbedSeen.length < MIN_SCRUBBED_ENV_NAMES
-            ? 'body scrubs only ' + scrubbedSeen.length + ' of the '
+            ? 'body spells only ' + scrubbedSeen.length + ' of the '
               + scrubbedEnvNames.length + ' known child-env names (expected at least '
               + MIN_SCRUBBED_ENV_NAMES + ')'
             : /\bfunction\s*[\w$]*\(/.test(body!)
@@ -867,7 +876,15 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
               : braceScanFailed
                 ? "the brace walk never reached the function's closing brace"
                 : bound !== 0
-                  ? 'match ends ' + bound + ' characters from the function it started in'
+                  // Say which way it went. `bound` is the function's closing brace minus the
+                  // match's last character, so a positive value means the match stopped SHORT
+                  // (a nested `return <copy>}` ended it early, leaving live `process.env` reads
+                  // unrewritten) and a negative one means it RAN PAST the function into a
+                  // neighbour. Those are different bugs; a signed number in front of the word
+                  // "from" reads as neither.
+                  ? 'match ends ' + Math.abs(bound) + ' characters '
+                    + (bound > 0 ? 'before' : 'after')
+                    + ' the end of the function it started in'
                   : undefined;
         if (why !== undefined) {
           log('FAIL', patchName, 'target validation failed: ' + why);

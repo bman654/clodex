@@ -1,5 +1,5 @@
-// The stand-in that keeps tweakcc's ELF repack able to find the global Bun reads its blob's
-// address from. Claude Code 2.1.257 moved that global off the 16 KiB boundary tweakcc scans, and
+// The stand-in that keeps tweakcc's ELF repack able to find the global holding the address of
+// Bun's blob. Claude Code 2.1.257 moved that global off the 16 KiB boundary tweakcc scans, and
 // `clodex patch` failed on all four ELF builds with "Could not find original BUN_COMPILED
 // location in binary". See src/bun-compiled-pointer.ts.
 //
@@ -7,8 +7,27 @@
 // this module applies is about ELF structure, which a small hand-built ELF64 carries exactly.
 // The real builds are covered by scripts/probe-patch-mechanism.mjs and the canary's container leg.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, openSync, readSync, closeSync } from 'node:fs';
+
+/**
+ * The restore's two readbacks exist to catch a write that was issued and did not land. Nothing in
+ * the production path can produce that, and substituting an impossible shim does not test it: a
+ * mutant that inspects the impossible field instead of reading the file passes such a test. So the
+ * write itself is faulted — `writeSync` reports success for one position and writes nothing — with
+ * an ordinary shim from `shimBunCompiledPointer` and an ordinary repack either side of it.
+ */
+const droppedWrite: { atPosition: number | null } = { atPosition: null };
+vi.mock('node:fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    writeSync: (fd: number, buffer: never, offset: number, length: number, position: number) =>
+      (droppedWrite.atPosition !== null && position === droppedWrite.atPosition
+        ? length
+        : actual.writeSync(fd, buffer, offset, length, position)),
+  };
+});
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -26,7 +45,7 @@ const SEG_OFFSET = 0x10490;
  * How far virtual addresses run ahead of file offsets: 0x202000 on the real linux-x64 build,
  * 0x220000 on arm64. Never zero, and that is the point — mapped at `vaddr === offset`, an
  * implementation that confuses the two reads and writes the same wrong place, passes its own
- * readback, and leaves Bun pointed at the old blob on every real Linux build.
+ * readback, and rewrites eight bytes that are not the global on every real Linux build.
  */
 const LOAD_BIAS = 0x202000;
 const SEG_VADDR = SEG_OFFSET + LOAD_BIAS;
@@ -48,13 +67,18 @@ function buildElf(
   pointerVaddr: number,
   extraPointerVaddrs: number[] = [],
   bun: { offset: number; size: number } = { offset: BUN_OFFSET, size: BUN_SIZE },
-  { segSize = SEG_SIZE, decoySegment = false, phnum = 1 }: {
+  { segSize = SEG_SIZE, decoySegment = false, phnum = 1, trailingWritableSegment = false }: {
     /** Grow the writable segment past one `SCAN_CHUNK`, so the sweep's chunking loop runs twice. */
     segSize?: number;
     /** Add an earlier PT_LOAD whose vaddr range also covers the pointer but not the stand-in. */
     decoySegment?: boolean;
     /** `e_phnum`. 0xffff is PN_XNUM, which says the real count lives in the section table. */
     phnum?: number;
+    /**
+     * Add a LATER writable PT_LOAD holding none of the pointer occurrences. tweakcc takes the
+     * FIRST writable `PT_LOAD`; a mirror that took the last would scan this one instead.
+     */
+    trailingWritableSegment?: boolean;
   } = {},
 ): Buffer {
   const shstrtab = Buffer.from(SECTION_NAMES.join('\0') + '\0', 'utf8');
@@ -96,6 +120,17 @@ function buildElf(
     buf.writeBigUInt64LE(BigInt(SEG_OFFSET), 0x80);
     buf.writeBigUInt64LE(BigInt(SEG_VADDR), 0x88);
     buf.writeBigUInt64LE(BigInt(FIRST_SCANNED - SEG_VADDR + 0x1000), 0x98);
+  }
+
+  if (trailingWritableSegment) {
+    // Mapped past everything else, and left as filler, so it carries no occurrence of `.bun`'s
+    // address. Picking it instead of the real one makes the census come up empty.
+    buf.writeUInt16LE(2, 0x38);
+    buf.writeUInt32LE(1, 0x78);
+    buf.writeUInt32LE(6, 0x7c);
+    buf.writeBigUInt64LE(BigInt(SEG_OFFSET), 0x80);
+    buf.writeBigUInt64LE(BigInt(SEG_VADDR + segSize + 0x100000), 0x88);
+    buf.writeBigUInt64LE(BigInt(0x1000), 0x98);
   }
 
   const section = (index: number, name: string, addr: number, offset: number, size: number) => {
@@ -160,7 +195,10 @@ describe('the Bun blob pointer stand-in', () => {
     dir = mkdtempSync(path.join(tmpdir(), 'clodex-bun-pointer-'));
     file = path.join(dir, 'claude');
   });
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  afterEach(() => {
+    droppedWrite.atPosition = null;
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   // The releases through 2.1.252 that tweakcc repacks unaided. Planting anything there would be a
   // change to a path that works, on every ELF build, for no reason.
@@ -218,8 +256,8 @@ describe('the Bun blob pointer stand-in', () => {
       expect(before, 'the stand-in really did displace something').toBe(BigInt(BUN_VADDR));
     });
 
-    // A repack that silently did not use the stand-in would leave Bun pointed at a blob that is no
-    // longer there — a claude that dies before it prints anything. Refuse instead of publishing.
+    // A repack that silently did not use the stand-in means the address clodex is about to copy
+    // over the real global was never written. Refuse instead of publishing a guess.
     it('refuses when the repack never rewrote the stand-in', () => {
       const shim = shimBunCompiledPointer(file)!;
 
@@ -248,6 +286,47 @@ describe('the Bun blob pointer stand-in', () => {
 
     expect(() => shimBunCompiledPointer(file))
       .toThrow("cannot locate Bun's blob pointer: 2 candidates");
+  });
+
+  // The "exactly one candidate" rule has to govern the NO-OP path too, and for a while it did not:
+  // the module ran tweakcc's scan first and returned null the moment it found anything. So a build
+  // carrying a coincidental copy of `.bun`'s address at an address the scan visits made clodex
+  // stand aside while the repack rewrote that copy — eight bytes of live `.data`/`.tdata` that
+  // nothing then restores — and `clodex patch` reported success. Both shapes below took that path.
+  //
+  // No shipped build reaches either (every occurrence on the four 2.1.257 ELF builds is unaligned,
+  // and on 2.1.252 the single aligned hit IS the global), which is exactly why it needs a test:
+  // there is no real binary that would notice the regression.
+  describe('when tweakcc would settle on something that is not the real pointer', () => {
+    it('refuses when the aligned decoy is inside the blob, where the census cannot see it', () => {
+      // Inside `.bun`, so the census excludes it by range and still finds exactly one candidate —
+      // and on a 16 KiB boundary, so tweakcc's scan stops there instead. This is the realistic
+      // shape: the coincidental copies a real build carries live in the compressed payload.
+      const decoy = Math.ceil(BUN_VADDR / STRIDE) * STRIDE;
+      expect(decoy, 'decoy must be inside the blob').toBeLessThan(BUN_VADDR + BUN_SIZE);
+      const pointer = FIRST_SCANNED + 0x758;
+      writeFileSync(file, buildElf(pointer, [decoy]));
+
+      expect(tweakccScan(file, BigInt(BUN_VADDR)), 'tweakcc must land on the decoy, or this proves nothing')
+        .toBe(decoy);
+
+      const before = readFileSync(file);
+      expect(() => shimBunCompiledPointer(file)).toThrow(
+        `tweakcc's ELF repack would rewrite 0x${decoy.toString(16)}, which is not Bun's blob pointer `
+        + `at 0x${pointer.toString(16)}`,
+      );
+      expect(readFileSync(file).equals(before), 'a refusal must not have written anything').toBe(true);
+    });
+
+    it('refuses when the aligned decoy is outside the blob, as a second candidate', () => {
+      // Same failure, caught one check earlier: two candidates outside the payload is ambiguous
+      // before tweakcc's preference between them matters.
+      writeFileSync(file, buildElf(FIRST_SCANNED + 0x758, [FIRST_SCANNED]));
+
+      expect(tweakccScan(file, BigInt(BUN_VADDR))).toBe(FIRST_SCANNED);
+      expect(() => shimBunCompiledPointer(file))
+        .toThrow("cannot locate Bun's blob pointer: 2 candidates");
+    });
   });
 
   // The remaining refusal: nowhere the scan visits is usable, because the blob covers every one of
@@ -308,6 +387,56 @@ describe('the Bun blob pointer stand-in', () => {
 
   // PN_XNUM says the real program-header count lives in the section table. Reading 0xffff headers
   // of arbitrary file bytes as segments is how a stand-in gets planted at a garbage offset.
+  // Every length below is read out of the file's own header, so the reads are sized against the
+  // file before allocating. Each fixture is the shape that makes ONE of the three call sites throw
+  // a raw RangeError without its guard — verified by deleting that guard alone. The distinction
+  // matters: `e_shoff` and `e_shnum * e_shentsize` both land on the section-table read, so they
+  // cannot stand in for the program-header one.
+  describe('refuses a header that claims more than the file holds', () => {
+    // `Buffer.alloc(0xfffe * 0xffff)` is ~4.3 GB, the shape the code comment cites. Unguarded this
+    // is `RangeError: The value of "length" is out of range ... Received -196606` — readSync
+    // coerces the length to int32.
+    it('when the section table would run past the end', () => {
+      const buf = buildElf(FIRST_SCANNED + 0x758);
+      buf.writeUInt16LE(0xfffe, 0x3c); // e_shnum
+      buf.writeUInt16LE(0xffff, 0x3a); // e_shentsize
+      writeFileSync(file, buf);
+
+      expect(shimBunCompiledPointer(file)).toBeNull();
+    });
+
+    // The other half of `fits`: a position past 2^53 converts to a double that cannot address a
+    // byte. Unguarded, `RangeError: The value of "position" is out of range`.
+    it('when a table offset is not a safe integer', () => {
+      const buf = buildElf(FIRST_SCANNED + 0x758);
+      buf.writeBigUInt64LE(BigInt(Number.MAX_SAFE_INTEGER) + 8n, 0x28); // e_shoff
+      writeFileSync(file, buf);
+
+      expect(shimBunCompiledPointer(file)).toBeNull();
+    });
+
+    // The program-header read has its own guard and its own fixture; neither of the two above
+    // reaches it, because both are refused at the section table first.
+    it('when the program-header table would run past the end', () => {
+      const buf = buildElf(FIRST_SCANNED + 0x758);
+      buf.writeBigUInt64LE(BigInt(Number.MAX_SAFE_INTEGER) + 8n, 0x20); // e_phoff
+      writeFileSync(file, buf);
+
+      expect(shimBunCompiledPointer(file)).toBeNull();
+    });
+
+    // 2^53 exactly, NOT 2^40: unguarded, a 1 TB `Buffer.alloc` succeeds lazily and the function
+    // still returns null, so a smaller fixture would pass with the guard deleted and prove nothing.
+    it('when the section-name table claims an impossible size', () => {
+      const buf = buildElf(FIRST_SCANNED + 0x758);
+      const shoff = SEG_OFFSET + SEG_SIZE;
+      buf.writeBigUInt64LE(2n ** 53n, shoff + 1 * 64 + 32); // .shstrtab sh_size
+      writeFileSync(file, buf);
+
+      expect(shimBunCompiledPointer(file)).toBeNull();
+    });
+  });
+
   it('leaves an ELF alone when its program-header count is PN_XNUM', () => {
     // Big enough that 0xffff * 56 bytes of "program headers" can actually be read out of it —
     // otherwise the short read rejects the file anyway and this passes without testing the guard.
@@ -320,6 +449,108 @@ describe('the Bun blob pointer stand-in', () => {
 
     expect(shimBunCompiledPointer(file)).toBeNull();
     expect(readFileSync(file).equals(before)).toBe(true);
+  });
+
+  // The restore advertises that both of its writes are read back before it reports success. The
+  // production path cannot make a write fail, so these drive `restoreBunCompiledPointer` with a
+  // hand-built shim — the only way to reach either branch. Without them both `if (!readAt(...))`
+  // blocks can be deleted with the whole file green, and `bun-compiled-pointer.ts` is not covered
+  // by the transform source digest either, so nothing at all would notice.
+  describe('the restore refuses when a write did not land', () => {
+    const POINTER = FIRST_SCANNED + 0x758;
+    const NEW_BUN_VADDR = 0x900000;
+
+    it('refuses when the blob pointer does not read back', () => {
+      writeFileSync(file, buildElf(POINTER));
+      const shim = shimBunCompiledPointer(file)!;
+      simulateRepack(file, Number(shim.standInVaddr), NEW_BUN_VADDR);
+
+      // Drop only the write to the real global. Everything else — the shim, the repack, the
+      // displaced-bytes write — is exactly what production does.
+      droppedWrite.atPosition = SEG_OFFSET + (POINTER - SEG_VADDR);
+
+      expect(() => restoreBunCompiledPointer(file, shim))
+        .toThrow("Bun's blob pointer did not take the repacked address");
+    });
+
+    // `readAt` returns a SHORT buffer instead of throwing, and the stand-in readback is the one
+    // consumer that indexes into it. Unguarded it raises `RangeError: Attempt to access memory
+    // outside buffer bounds`, which names neither the binary nor the check.
+    it('names the binary when the repacked file ends before the stand-in', () => {
+      writeFileSync(file, buildElf(POINTER));
+      const shim = shimBunCompiledPointer(file)!;
+      simulateRepack(file, Number(shim.standInVaddr), NEW_BUN_VADDR);
+
+      // Only NOW inflate `p_filesz`, so the census above ran against a sane file: the segment
+      // claims bytes the file does not have, which is what a truncated binary looks like.
+      const poked = readFileSync(file);
+      poked.writeBigUInt64LE(BigInt(SEG_SIZE + 0x10000), 0x60);
+      writeFileSync(file, poked);
+
+      const beyond = BigInt(SEG_VADDR + SEG_SIZE + 0x8000);
+      expect(() => restoreBunCompiledPointer(file, { ...shim, standInVaddr: beyond }))
+        .toThrow("the repacked binary ends before the stand-in for Bun's blob pointer");
+    });
+
+    it('refuses when the displaced bytes do not read back', () => {
+      writeFileSync(file, buildElf(POINTER));
+      const shim = shimBunCompiledPointer(file)!;
+      simulateRepack(file, Number(shim.standInVaddr), NEW_BUN_VADDR);
+
+      // Drop only the write that puts the borrowed bytes back. The pointer write lands, so this
+      // cannot pass by tripping the first guard instead.
+      droppedWrite.atPosition = SEG_OFFSET + (Number(shim.standInVaddr) - SEG_VADDR);
+
+      expect(() => restoreBunCompiledPointer(file, shim))
+        .toThrow('the bytes the stand-in displaced were not restored');
+    });
+  });
+
+  // Three details that are pure MIRROR FIDELITY: they make no difference on any build published so
+  // far, so nothing real would notice them drifting away from what tweakcc actually does. Drifting
+  // away from what tweakcc actually does is the whole reason `clodex patch` broke on 2.1.257, which
+  // is why they are pinned here rather than left to a comment.
+  describe('mirrors tweakcc exactly, in ways no shipped build exercises', () => {
+    it('scans the FIRST writable PT_LOAD, as tweakcc does', () => {
+      // A later writable segment carrying no occurrence of the address. tweakcc takes the first
+      // one; taking the last would sweep an empty range and refuse with "0 candidates".
+      const pointer = FIRST_SCANNED + 0x758;
+      writeFileSync(file, buildElf(pointer, [], undefined, { trailingWritableSegment: true }));
+
+      const shim = shimBunCompiledPointer(file);
+
+      expect(shim).not.toBeNull();
+      expect(shim!.pointerVaddr).toBe(BigInt(pointer));
+    });
+
+    it('visits the last address tweakcc visits, not one short of it', () => {
+      // tweakcc's loop is `for (e = m; e <= h; e += 16384)` with `h = vaddr + len - 8`. Sized so
+      // that `h` lands exactly ON the stride, which is the only geometry where `<` and `<=`
+      // disagree — and where `<` would make clodex plant a stand-in tweakcc did not need.
+      const segSize = 0x21b78;
+      const last = SEG_VADDR + segSize - 8;
+      expect(last % STRIDE, 'the fixture must put the final slot exactly on the stride').toBe(0);
+      expect(last, 'the final slot must be outside .bun').toBeGreaterThan(BUN_VADDR + BUN_SIZE);
+
+      writeFileSync(file, buildElf(last, [], undefined, { segSize }));
+      const before = readFileSync(file);
+
+      expect(shimBunCompiledPointer(file), 'tweakcc can reach this one unaided').toBeNull();
+      expect(readFileSync(file).equals(before)).toBe(true);
+    });
+
+    it('does not borrow a slot that overlaps the real pointer', () => {
+      // The global 4 bytes past a boundary: the first slot the stand-in would pick overlaps it, so
+      // planting there would corrupt the very address the restore then reads.
+      const pointer = FIRST_SCANNED + 4;
+      writeFileSync(file, buildElf(pointer));
+
+      const shim = shimBunCompiledPointer(file)!;
+
+      expect(shim.standInVaddr).not.toBe(BigInt(FIRST_SCANNED));
+      expect(shim.standInVaddr).toBe(BigInt(FIRST_SCANNED + STRIDE));
+      expect(read8(file, pointer), 'the real pointer must survive planting').toBe(BigInt(BUN_VADDR));
+    });
   });
 
   it('ignores candidates inside the blob itself', () => {

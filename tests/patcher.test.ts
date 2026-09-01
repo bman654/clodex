@@ -589,7 +589,7 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
       version: 11,
-      digest: 'de2d7eed932eccae7f6a59b4334c95f15ea580e540f41e166efb2120a2b9556e',
+      digest: '347109442fbf14a785671325aad7e1ac120be496019d832c013f3dab502f7036',
     });
   });
 });
@@ -2004,8 +2004,11 @@ describe('patch script identity naming', () => {
     expect(source, 'the neighbour must not be introduced by `function`, or the anchor guard hides the case')
       .toContain('};var zzNext=()=>{');
 
+    // Pin the DIRECTION, not just the refusal. Overrunning and truncating are
+    // different bugs with different fixes, and the message is the only place a
+    // canary report says which one happened.
     expect(() => runPatchScript(config, source)).toThrow(
-      'clodex patch: child network environment target validation failed',
+      /target validation failed: match ends \d+ characters after the end of the function it started in/,
     );
   });
 
@@ -2073,8 +2076,10 @@ describe('patch script identity naming', () => {
     );
     expect([...truncated].reduce((d, c) => d + (c === '{' ? 1 : c === '}' ? -1 : 0), 0)).toBe(0);
 
+    // The mirror of the overrun case above: this one stops SHORT, and the message
+    // has to say so.
     expect(() => runPatchScript(config, source)).toThrow(
-      'clodex patch: child network environment target validation failed',
+      /target validation failed: match ends \d+ characters before the end of the function it started in/,
     );
   });
 
@@ -2175,9 +2180,14 @@ describe('patch script identity naming', () => {
     expect(result.content).toContain('function childEnv(){/*ccpatch:child-network-env*/');
   });
 
-  // The floor still has to mean something: a body that scrubs none of them is not
+  // The floor still has to mean something: a body that spells none of them is not
   // the child-env builder and must be refused, not rewritten.
-  it('refuses a child builder that scrubs none of the known names', () => {
+  //
+  // "spells", not "scrubs": the check is a substring test over the matched body,
+  // so a builder that scrubs the same names through a table declared elsewhere
+  // reads as zero here. Saying "scrubs" sent the next reader looking for deletion
+  // logic the check never inspects.
+  it('refuses a child builder that spells none of the known names', () => {
     const source = withoutScrubbedNames(CLAUDE_FIXTURE_239, SCRUBBED_ENV_NAMES);
 
     expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE_239);
@@ -2185,7 +2195,7 @@ describe('patch script identity naming', () => {
 
     expect(() => runPatchScript(config, source)).toThrow(
       'clodex patch: child network environment target validation failed: '
-      + 'body scrubs only 0 of the 5 known child-env names (expected at least 1)',
+      + 'body spells only 0 of the 5 known child-env names (expected at least 1)',
     );
   });
 

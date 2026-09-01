@@ -295,8 +295,8 @@ const ELF_SEG_OFFSET = 0x1000;
  * How far the segment's virtual address runs ahead of its file offset — 0x202000 on the real
  * linux-x64 build, 0x220000 on arm64. Never zero, and that matters: a fixture mapped at
  * `vaddr === offset` cannot tell a virtual address from a file offset, so an implementation that
- * confuses the two reads and writes the same wrong place, passes its own readback, and leaves Bun
- * pointed at the old blob on every real Linux build.
+ * confuses the two reads and writes the same wrong place, passes its own readback, and rewrites
+ * eight bytes that are not the global on every real Linux build.
  */
 const ELF_LOAD_BIAS = 0x202000;
 const ELF_SEG_VADDR = ELF_SEG_OFFSET + ELF_LOAD_BIAS;

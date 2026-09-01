@@ -1,4 +1,5 @@
-// Keeps tweakcc's ELF repack able to find the pointer Bun uses to locate its embedded blob.
+// Keeps tweakcc's ELF repack able to find the address it expects to rewrite when it moves Bun's
+// embedded blob.
 //
 // Read `.claude/docs/patcher.md` first. This file exists for the same reason `bun-entry-module.ts`
 // does: tweakcc identifies something in the binary by a rule that a Claude Code release quietly
@@ -6,8 +7,10 @@
 // the repack rather than a fork of tweakcc.
 //
 // THE RULE. A Bun standalone ELF stores the virtual address of its `.bun` section in an 8-byte
-// little-endian global — Bun reads it at startup to find the blob. `repackELFSection` moves `.bun`
-// to a fresh page past the end of the file, so it has to rewrite that global. It finds it by
+// little-endian global. `repackELFSection` moves `.bun` to a fresh page past the end of the file
+// and rewrites that global to match. (It is tweakcc that insists on finding it — startup itself
+// still locates the blob from the end-of-file trailer, which is why a stale value is wrong
+// rather than fatal. See WHAT A WRONG ANSWER COSTS below.) It finds it by
 // scanning the first writable `PT_LOAD` segment for 8 bytes equal to `.bun`'s CURRENT virtual
 // address — but only at addresses that are multiples of 16384. tweakcc 4.3.0 and 4.3.3 both do
 // this; bumping the pin does not help.
@@ -27,17 +30,26 @@
 // pristine repack in exactly one place: the global, holding the value it was always meant to hold.
 //
 // Two things make that safe rather than clever, and both are checked rather than assumed:
-//   * it is a NO-OP wherever tweakcc already works. `bunCompiledPointerScan` runs tweakcc's own
-//     scan first; if that finds anything, this module returns null and stays out of the way. So an
-//     older release, and any future release that goes back to being aligned, takes the path it
-//     always took.
 //   * the real global is identified, not guessed: the ONE 8-byte occurrence of `.bun`'s address
 //     inside the writable segment and outside `.bun`'s own payload. Matches inside the payload are
-//     coincidences in compressed JavaScript (there are dozens on some builds) and are excluded by
-//     range. Anything other than exactly one candidate is refused, loudly, instead of patched.
+//     coincidences in compressed JavaScript — up to five on the arm64 builds measured — and are
+//     excluded by range. Anything other than exactly one candidate is refused, loudly, instead of
+//     patched.
+//   * it is a NO-OP wherever tweakcc already lands on that same address. So an older release, and
+//     any future release that goes back to being aligned, takes the path it always took. Note the
+//     order: the census above runs FIRST and the no-op defers to it, so tweakcc settling on some
+//     OTHER aligned copy is refused rather than waved through.
 // The restore reads back both addresses and refuses a binary where either did not take.
+//
+// WHAT A WRONG ANSWER COSTS. Not a binary that fails to start — that was this file's original
+// claim and it is wrong. Measured on published 2.1.257 linux-x64 and linux-x64-musl: revert only
+// the global to its pre-repack value and `claude --version` still works, so Bun locates the blob
+// another way (the end-of-file trailer `bun-bundle.ts` describes). What a wrong answer costs is
+// eight bytes of live data rewritten and never restored. The addresses in play are not spare: the
+// stand-in slot lands in `.data` on the glibc builds and in `.tdata`, the TLS initialisation
+// image, on the musl ones. That is why this refuses instead of guessing.
 
-import { closeSync, openSync, readSync, writeSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readSync, writeSync } from 'node:fs';
 
 /** tweakcc's `repackELFSection` only inspects addresses at this stride. Mirrored, not chosen. */
 const TWEAKCC_SCAN_STRIDE = 16384n;
@@ -118,6 +130,15 @@ function readElfLayout(fd: number): ElfLayout | null {
   if (shnum === 0 || phnum === 0xffff) return null;
   if (shstrndx >= shnum || shentsize < 64 || phentsize < 56) return null;
 
+  // Every length below comes out of the file's own header, so size the reads against the file
+  // before allocating rather than after. `shnum * shentsize` alone reaches ~4.3 GB from a file that
+  // carries nothing but the ELF magic, and `sh_size` is a full u64. A real build is checked, not
+  // trusted: this is the same posture as the SHN_XINDEX/PN_XNUM refusal above.
+  const fileSize = fstatSync(fd).size;
+  const fits = (offset: number, length: number) =>
+    Number.isSafeInteger(offset) && offset >= 0 && length >= 0 && offset + length <= fileSize;
+
+  if (!fits(Number(shoff), shnum * shentsize)) return null;
   const shTable = readAt(fd, shnum * shentsize, Number(shoff));
   if (shTable.length !== shnum * shentsize) return null;
   const raw = [];
@@ -131,6 +152,7 @@ function readElfLayout(fd: number): ElfLayout | null {
     });
   }
   const strtab = raw[shstrndx]!;
+  if (!fits(Number(strtab.offset), Number(strtab.size))) return null;
   const names = readAt(fd, Number(strtab.size), Number(strtab.offset));
   const sections: ElfSection[] = raw.map(section => {
     const start = section.nameOffset;
@@ -144,6 +166,7 @@ function readElfLayout(fd: number): ElfLayout | null {
     };
   });
 
+  if (!fits(Number(phoff), phnum * phentsize)) return null;
   const phTable = readAt(fd, phnum * phentsize, Number(phoff));
   if (phTable.length !== phnum * phentsize) return null;
   const segments: ElfSegment[] = [];
@@ -173,7 +196,8 @@ function writableLoad(layout: ElfLayout): ElfSegment | undefined {
  * File offset of `vaddr`, or null when no loaded segment's file image holds it — or when MORE than
  * one does. Taking the first match would be a silent wrong answer rather than a safe one: the
  * restore's readback reads the offset it just wrote, so it proves the write landed, not that the
- * offset was right, and Bun would be left pointed at the old blob. No real build has overlapping
+ * offset was right — the eight bytes would go somewhere other than the global, leaving that stale
+ * and overwriting whatever was really there. No real build has overlapping
  * PT_LOADs (checked on all eight 2.1.257/2.1.252/2.1.246 builds and on a repacked one), so this
  * refuses a shape that does not occur rather than resolving one that does.
  */
@@ -236,9 +260,15 @@ function scanForNeedle(
  *
  * Null covers every case this does not apply to: a Mach-O or PE binary, a non-native install, a
  * binary with no `.bun` section or no writable segment, and — the important one — any ELF where
- * tweakcc's own scan already finds the pointer. Throws only when the binary IS one that needs help
- * and the pointer cannot be identified unambiguously, because publishing a binary whose Bun global
- * still points at the old blob would produce a `claude` that does not start.
+ * tweakcc's own scan already lands on the real global.
+ *
+ * Throws when the binary IS an ELF carrying a blob and the global cannot be identified
+ * unambiguously. Not because a stale global is known to be fatal — measured on 2.1.257 linux-x64
+ * and linux-x64-musl, a published binary whose global was reverted to the pre-repack address still
+ * starts and prints its version, so Bun finds the blob another way. It throws because the
+ * alternative is guessing WHICH eight bytes to rewrite, and every address in range is live data:
+ * the stand-in slot alone lands in `.data` on the glibc builds and in `.tdata`, the TLS
+ * initialisation image, on the musl ones.
  */
 export function shimBunCompiledPointer(path: string): BunCompiledPointerShim | null {
   const fd = openSync(path, 'r+');
@@ -252,12 +282,19 @@ export function shimBunCompiledPointer(path: string): BunCompiledPointerShim | n
 
     const needle = Buffer.alloc(8);
     needle.writeBigUInt64LE(bun.addr);
-    if (tweakccWouldFind(fd, segment, needle) !== null) return null;
 
     const segmentStart = Number(segment.offset);
     const segmentEnd = Number(segment.offset + segment.filesz);
     const bunStart = Number(bun.offset);
     const bunEnd = Number(bun.offset + bun.size);
+    // The census runs BEFORE the no-op check, so the "exactly one candidate" rule governs both
+    // paths. Ordering it the other way let tweakcc's strided scan settle on any aligned 8 bytes
+    // that happened to equal `.bun`'s address: clodex would stand aside, the repack would rewrite
+    // that coincidence — live `.data`/`.tdata` bytes nothing then restores — and `clodex patch`
+    // would report success. No shipped build reaches it (every occurrence on the four 2.1.257 ELF
+    // builds is unaligned; on 2.1.252 the one aligned hit IS the global, which is why standing
+    // aside was right there), and this is what keeps that a measured fact rather than an
+    // assumption.
     const candidates = scanForNeedle(fd, segmentStart, segmentEnd, needle, bunStart, bunEnd);
     if (candidates.length !== 1) {
       throw new Error(
@@ -267,6 +304,18 @@ export function shimBunCompiledPointer(path: string): BunCompiledPointerShim | n
     }
     const pointerOffset = candidates[0]!;
     const pointerVaddr = segment.vaddr + BigInt(pointerOffset) - segment.offset;
+
+    const wouldFind = tweakccWouldFind(fd, segment, needle);
+    if (wouldFind !== null) {
+      if (wouldFind !== pointerVaddr) {
+        throw new Error(
+          `tweakcc's ELF repack would rewrite 0x${wouldFind.toString(16)}, which is not Bun's blob `
+          + `pointer at 0x${pointerVaddr.toString(16)}. Refusing to repack a binary whose Bun global `
+          + 'would be left stale.',
+        );
+      }
+      return null;
+    }
 
     // The slot tweakcc will land on: the lowest address its scan visits that overlaps neither the
     // blob it is about to move nor the global we are about to correct. Its previous contents are
@@ -299,9 +348,10 @@ export function shimBunCompiledPointer(path: string): BunCompiledPointerShim | n
  * Move the address tweakcc wrote into the stand-in over to the real Bun global, and put the
  * displaced bytes back. Throws if either address no longer resolves to exactly one place in the
  * repacked image, if the repack did not rewrite the stand-in, or if it disagrees with where `.bun`
- * actually ended up — all of which would leave a `claude` that fails inside Bun before it prints
- * anything. (The readbacks below confirm the writes landed. They read the offsets they just wrote,
- * so they cannot vouch for the offsets themselves; `fileOffsetOf` is what does that.)
+ * actually ended up — each of which means the eight bytes about to be written are not the eight
+ * this run identified, and the displaced live data would not go back where it came from. (The
+ * readbacks below confirm the writes landed. They read the offsets they just wrote, so they cannot
+ * vouch for the offsets themselves; `fileOffsetOf` is what does that.)
  */
 export function restoreBunCompiledPointer(path: string, shim: BunCompiledPointerShim): void {
   const fd = openSync(path, 'r+');
@@ -318,7 +368,15 @@ export function restoreBunCompiledPointer(path: string, shim: BunCompiledPointer
         "the repack left Bun's blob pointer outside the loaded image, or in more than one segment of it",
       );
     }
-    const written = readAt(fd, 8, standInOffset).readBigUInt64LE(0);
+    // `readAt` hands back a SHORT buffer rather than throwing, and this is the one consumer that
+    // would then index past its end — a raw `RangeError: Attempt to access memory outside buffer
+    // bounds` in place of a diagnostic naming the binary. Every other caller length-checks or
+    // compares with `.equals`, which is false on a short buffer and lands on the right message.
+    const standIn = readAt(fd, 8, standInOffset);
+    if (standIn.length !== 8) {
+      throw new Error('the repacked binary ends before the stand-in for Bun\'s blob pointer');
+    }
+    const written = standIn.readBigUInt64LE(0);
     if (written === shim.bunVaddr) {
       throw new Error("the repack did not rewrite Bun's blob pointer — the stand-in was not used");
     }
