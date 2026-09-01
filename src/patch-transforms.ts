@@ -709,28 +709,34 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     const marker = '/*ccpatch:child-network-env*/';
     const contractVar = q(NETWORK_ENV_CONTRACT_VAR);
     const networkVars = JSON.stringify(CHILD_NETWORK_ENV_VARS);
-    // What the REWRITE depends on. `{...process.env` is the merged copy every
-    // `process.env` read is redirected away from; the CLAUDE_CODE_REMOTE ternary
-    // is the head the anchor bound to. Both are structural, not incidental.
-    const requiredBodyLiterals = [
-      '{...process.env',
-      'CLAUDE_CODE_REMOTE',
-    ];
-    // A smell test, NOT the identity proof — identity is the whole-bundle count
-    // of the passthrough early-out below, plus the brace walk proving the match
-    // spans exactly the function it started in.
+    // What the REWRITE depends on: `{...process.env` is the merged copy every
+    // `process.env` read is redirected away from. (The `CLAUDE_CODE_REMOTE`
+    // ternary is load-bearing too, but the anchor already requires it inside the
+    // captured body, so restating it here could never fail.)
+    const requiredBodyLiterals = ['{...process.env'];
+    // A smell test, NOT the identity proof. Identity is the whole-bundle count of
+    // the passthrough early-out below, the head's CLAUDE_CODE_REMOTE ternary, and
+    // the brace walk proving the match spans exactly the function it started in.
+    // Measured on both real bundles: with these names ignored entirely, the full
+    // anchor still has exactly ONE candidate. They never choose among candidates,
+    // so all they can do is reject one already identified.
     //
-    // These are names Claude Code scrubs out of a child's environment, and each
-    // one is only as durable as the line that happens to spell it. 2.1.252 wrote
-    // `process.env.CLAUDE_BG_PTY_AUTH!==void 0` inline; 2.1.257 replaced that
+    // Which is what makes an aggressive threshold the wrong trade. These are names
+    // Claude Code happens to scrub out of a child's environment, each only as
+    // durable as the line that spells it: 2.1.252 wrote
+    // `process.env.CLAUDE_BG_PTY_AUTH!==void 0` inline, and 2.1.257 replaced that
     // whole run of per-name reads with a set-membership test and stopped spelling
-    // the name at all. Requiring EVERY name turned that refactor — which changed
-    // nothing about what clodex patches — into `clodex patch` refusing 2.1.257 on
-    // all eight published builds. So require a quorum instead: a body that still
-    // scrubs at least two of them is the builder, and a body that scrubs none is
-    // something else and must not be rewritten. Both real bundles clear it with
-    // room (2.1.252 matches 5, 2.1.257 matches 4), which is the margin one more
-    // refactor of this kind is supposed to land in.
+    // the name anywhere. Requiring EVERY name turned that refactor — which changed
+    // nothing about what clodex rewrites — into `clodex patch` refusing 2.1.257 on
+    // all eight published builds at once, and the same move on any other group
+    // would do it again. Nor is a higher floor worth much: two of the five are the
+    // OTEL pair, so "at least two" can be satisfied from a single category and
+    // buys little over one.
+    //
+    // So the floor is ONE. It still refuses a body that scrubs nothing — which is
+    // the only case where these names say something the anchor does not — while
+    // taking four independent refactors, not one, to produce a false refusal.
+    // 2.1.252 matches five and 2.1.257 matches four.
     const scrubbedEnvNames = [
       'CLAUDE_CODE_OAUTH_TOKEN',
       'CLAUDE_CODE_SUBSCRIPTION_TYPE',
@@ -738,7 +744,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       '"OTEL_"',
       'CLAUDE_CODE_OTEL_DIAG_STDERR',
     ];
-    const MIN_SCRUBBED_ENV_NAMES = 2;
+    const MIN_SCRUBBED_ENV_NAMES = 1;
     /**
      * Index of the `}` closing the block opened at `open`, or -1 if the scan runs
      * off the end. Braces inside strings, template literals and comments do not
@@ -838,9 +844,13 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         // Walking the real block from the function's own `{` rules out both:
         // the anchor's end must BE the function's end.
         const at = js.indexOf(match);
-        const bound = at < 0
-          ? -1
-          : blockEndIndex(js, at + head!.length - 1) - at - (match.length - 1);
+        const closingBrace = at < 0 ? -1 : blockEndIndex(js, at + head!.length - 1);
+        // Distinct from "ended in the wrong place": -1 means the walk ran off the
+        // end of the source without ever closing the block. Folding it into the
+        // arithmetic below reports it as a bundle-sized negative distance, which
+        // names nothing.
+        const braceScanFailed = at < 0 || closingBrace < 0;
+        const bound = braceScanFailed ? 0 : closingBrace - at - (match.length - 1);
         // Name the check that rejected it. "target validation failed" alone sends
         // the next person triaging a canary failure off to extract a 32 MB bundle
         // by hand to learn which of four unrelated conditions was the one.
@@ -854,9 +864,11 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
               + MIN_SCRUBBED_ENV_NAMES + ')'
             : /\bfunction\s*[\w$]*\(/.test(body!)
               ? 'body declares a nested function'
-              : bound !== 0
-                ? 'match ends ' + bound + ' characters from the function it started in'
-                : undefined;
+              : braceScanFailed
+                ? "the brace walk never reached the function's closing brace"
+                : bound !== 0
+                  ? 'match ends ' + bound + ' characters from the function it started in'
+                  : undefined;
         if (why !== undefined) {
           log('FAIL', patchName, 'target validation failed: ' + why);
           fail('clodex patch: child network environment target validation failed: ' + why);
