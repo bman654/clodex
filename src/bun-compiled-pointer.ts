@@ -111,7 +111,12 @@ function readElfLayout(fd: number): ElfLayout | null {
   const shentsize = ident.readUInt16LE(0x3a);
   const shnum = ident.readUInt16LE(0x3c);
   const shstrndx = ident.readUInt16LE(0x3e);
-  if (shnum === 0 || shstrndx >= shnum || shentsize < 64 || phentsize < 56) return null;
+  // `e_shnum === 0` is SHN_XINDEX and `e_phnum === 0xffff` is PN_XNUM: both say the real count
+  // lives elsewhere. Neither occurs on any Claude Code build (measured: 10 program headers, 38-42
+  // sections on all eight), and reading 0xffff headers of arbitrary file bytes as segments is how
+  // a stand-in gets planted at a garbage offset.
+  if (shnum === 0 || phnum === 0xffff) return null;
+  if (shstrndx >= shnum || shentsize < 64 || phentsize < 56) return null;
 
   const shTable = readAt(fd, shnum * shentsize, Number(shoff));
   if (shTable.length !== shnum * shentsize) return null;
@@ -164,15 +169,24 @@ function writableLoad(layout: ElfLayout): ElfSegment | undefined {
   return layout.segments.find(segment => segment.type === PT_LOAD && (segment.flags & PF_W) !== 0);
 }
 
-/** File offset of `vaddr`, or null when it falls in no loaded segment's file image. */
+/**
+ * File offset of `vaddr`, or null when no loaded segment's file image holds it — or when MORE than
+ * one does. Taking the first match would be a silent wrong answer rather than a safe one: the
+ * restore's readback reads the offset it just wrote, so it proves the write landed, not that the
+ * offset was right, and Bun would be left pointed at the old blob. No real build has overlapping
+ * PT_LOADs (checked on all eight 2.1.257/2.1.252/2.1.246 builds and on a repacked one), so this
+ * refuses a shape that does not occur rather than resolving one that does.
+ */
 function fileOffsetOf(layout: ElfLayout, vaddr: bigint, length: bigint): number | null {
+  let found: number | null = null;
   for (const segment of layout.segments) {
     if (segment.type !== PT_LOAD) continue;
     if (vaddr < segment.vaddr) continue;
     if (vaddr + length > segment.vaddr + segment.filesz) continue;
-    return Number(segment.offset + (vaddr - segment.vaddr));
+    if (found !== null) return null;
+    found = Number(segment.offset + (vaddr - segment.vaddr));
   }
-  return null;
+  return found;
 }
 
 /**
@@ -208,7 +222,7 @@ function scanForNeedle(
     let at = 0;
     for (;;) {
       const found = chunk.indexOf(needle, at);
-      if (found < 0 || found + 8 > chunk.length) break;
+      if (found < 0) break;
       const offset = start + found;
       if (offset < skipFrom || offset >= skipTo) hits.push(offset);
       at = found + 1;
@@ -283,9 +297,11 @@ export function shimBunCompiledPointer(path: string): BunCompiledPointerShim | n
 
 /**
  * Move the address tweakcc wrote into the stand-in over to the real Bun global, and put the
- * displaced bytes back. Throws if the repack did not rewrite the stand-in, if it disagrees with
- * where `.bun` actually ended up, or if either write does not read back — all of which would leave
- * a `claude` that fails inside Bun before it prints anything.
+ * displaced bytes back. Throws if either address no longer resolves to exactly one place in the
+ * repacked image, if the repack did not rewrite the stand-in, or if it disagrees with where `.bun`
+ * actually ended up — all of which would leave a `claude` that fails inside Bun before it prints
+ * anything. (The readbacks below confirm the writes landed. They read the offsets they just wrote,
+ * so they cannot vouch for the offsets themselves; `fileOffsetOf` is what does that.)
  */
 export function restoreBunCompiledPointer(path: string, shim: BunCompiledPointerShim): void {
   const fd = openSync(path, 'r+');
@@ -298,7 +314,9 @@ export function restoreBunCompiledPointer(path: string, shim: BunCompiledPointer
     const standInOffset = fileOffsetOf(layout, shim.standInVaddr, 8n);
     const pointerOffset = fileOffsetOf(layout, shim.pointerVaddr, 8n);
     if (standInOffset === null || pointerOffset === null) {
-      throw new Error("the repack moved Bun's blob pointer out of the loaded image");
+      throw new Error(
+        "the repack left Bun's blob pointer outside the loaded image, or in more than one segment of it",
+      );
     }
     const written = readAt(fd, 8, standInOffset).readBigUInt64LE(0);
     if (written === shim.bunVaddr) {

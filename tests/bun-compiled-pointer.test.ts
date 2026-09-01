@@ -40,6 +40,14 @@ function buildElf(
   pointerVaddr: number,
   extraPointerVaddrs: number[] = [],
   bun: { offset: number; size: number } = { offset: BUN_OFFSET, size: BUN_SIZE },
+  { segSize = SEG_SIZE, decoySegment = false, phnum = 1 }: {
+    /** Grow the writable segment past one `SCAN_CHUNK`, so the sweep's chunking loop runs twice. */
+    segSize?: number;
+    /** Add an earlier PT_LOAD whose vaddr range also covers the pointer but not the stand-in. */
+    decoySegment?: boolean;
+    /** `e_phnum`. 0xffff is PN_XNUM, which says the real count lives in the section table. */
+    phnum?: number;
+  } = {},
 ): Buffer {
   const shstrtab = Buffer.from(SECTION_NAMES.join('\0') + '\0', 'utf8');
   const nameOffsets = new Map<string, number>();
@@ -48,16 +56,17 @@ function buildElf(
     nameOffsets.set(name, at);
     at += name.length + 1;
   }
-  const shstrOffset = SHOFF + 4 * 64;
+  const shoff = SEG_OFFSET + segSize;
+  const shstrOffset = shoff + 4 * 64;
   const buf = Buffer.alloc(shstrOffset + shstrtab.length, 0);
 
   buf.writeUInt32LE(0x464c457f, 0);
   buf[4] = 2; // ELFCLASS64
   buf[5] = 1; // ELFDATA2LSB
   buf.writeBigUInt64LE(BigInt(0x40), 0x20); // e_phoff
-  buf.writeBigUInt64LE(BigInt(SHOFF), 0x28); // e_shoff
+  buf.writeBigUInt64LE(BigInt(shoff), 0x28); // e_shoff
   buf.writeUInt16LE(56, 0x36); // e_phentsize
-  buf.writeUInt16LE(1, 0x38); // e_phnum
+  buf.writeUInt16LE(phnum, 0x38); // e_phnum
   buf.writeUInt16LE(64, 0x3a); // e_shentsize
   buf.writeUInt16LE(4, 0x3c); // e_shnum
   buf.writeUInt16LE(1, 0x3e); // e_shstrndx
@@ -67,22 +76,34 @@ function buildElf(
   buf.writeUInt32LE(6, 0x44); // p_flags = R|W
   buf.writeBigUInt64LE(BigInt(SEG_OFFSET), 0x48);
   buf.writeBigUInt64LE(BigInt(SEG_VADDR), 0x50);
-  buf.writeBigUInt64LE(BigInt(SEG_SIZE), 0x60); // p_filesz
+  buf.writeBigUInt64LE(BigInt(segSize), 0x60); // p_filesz
+
+  if (decoySegment) {
+    // A second PT_LOAD, EARLIER in the table, mapping the same file bytes at the same address but
+    // stopping short of the stand-in. Nothing real does this; the point is that resolving an
+    // address through "the first segment that contains it" would be a silent wrong answer.
+    buf.writeUInt16LE(2, 0x38);
+    buf.writeUInt32LE(1, 0x78);
+    buf.writeUInt32LE(6, 0x7c);
+    buf.writeBigUInt64LE(BigInt(SEG_OFFSET), 0x80);
+    buf.writeBigUInt64LE(BigInt(SEG_VADDR), 0x88);
+    buf.writeBigUInt64LE(BigInt(FIRST_SCANNED - SEG_VADDR + 0x1000), 0x98);
+  }
 
   const section = (index: number, name: string, addr: number, offset: number, size: number) => {
-    const base = SHOFF + index * 64;
+    const base = shoff + index * 64;
     buf.writeUInt32LE(nameOffsets.get(name)!, base);
     buf.writeBigUInt64LE(BigInt(addr), base + 16);
     buf.writeBigUInt64LE(BigInt(offset), base + 24);
     buf.writeBigUInt64LE(BigInt(size), base + 32);
   };
   section(1, '.shstrtab', 0, shstrOffset, shstrtab.length);
-  section(2, '.data', SEG_VADDR, SEG_OFFSET, BUN_OFFSET - SEG_OFFSET);
+  section(2, '.data', SEG_VADDR, SEG_OFFSET, bun.offset - SEG_OFFSET);
   section(3, '.bun', SEG_VADDR + (bun.offset - SEG_OFFSET), bun.offset, bun.size);
   shstrtab.copy(buf, shstrOffset);
 
   // A filler that can never be mistaken for an address.
-  buf.fill(0xaa, SEG_OFFSET, SEG_OFFSET + SEG_SIZE);
+  buf.fill(0xaa, SEG_OFFSET, SEG_OFFSET + segSize);
   const bunVaddr = SEG_VADDR + (bun.offset - SEG_OFFSET);
   for (const vaddr of [pointerVaddr, ...extraPointerVaddrs]) {
     buf.writeBigUInt64LE(BigInt(bunVaddr), SEG_OFFSET + (vaddr - SEG_VADDR));
@@ -234,6 +255,63 @@ describe('the Bun blob pointer stand-in', () => {
 
     expect(() => shimBunCompiledPointer(file))
       .toThrow("no address tweakcc's ELF repack scans is usable");
+  });
+
+  // Mirrors SCAN_CHUNK in src/bun-compiled-pointer.ts. The other fixtures here are smaller than one
+  // chunk, so the sweep's loop body runs once and the overlap that stitches chunks together is
+  // unobservable — a pointer that straddles a boundary would be missed, or found twice and refused
+  // as ambiguous, with every other test still green.
+  const SCAN_CHUNK = 1 << 20;
+  const BIG_SEG = 3 * SCAN_CHUNK;
+
+  it.each([
+    { where: 'wholly inside the first chunk', delta: SCAN_CHUNK - 8 },
+    { where: 'straddling the first boundary', delta: SCAN_CHUNK - 4 },
+    { where: 'first byte past the first boundary', delta: SCAN_CHUNK - 7 },
+    { where: 'straddling the second boundary', delta: 2 * (SCAN_CHUNK - 7) - 3 },
+    { where: 'in the last chunk', delta: 2 * SCAN_CHUNK + 0x40 },
+  ])('finds a pointer $where of the segment sweep', ({ delta }) => {
+    const pointer = SEG_VADDR + delta;
+    const bun = { offset: SEG_OFFSET + BIG_SEG - 0x8000, size: 0x8000 };
+    writeFileSync(file, buildElf(pointer, [], bun, { segSize: BIG_SEG }));
+
+    const shim = shimBunCompiledPointer(file);
+
+    // Found once: a miss throws "0 candidates", a double-report throws "2 candidates".
+    expect(shim).not.toBeNull();
+    expect(shim!.pointerVaddr).toBe(BigInt(pointer));
+  });
+
+  // `fileOffsetOf` resolves the two addresses in the REPACKED image. Taking the first PT_LOAD that
+  // contains an address would put the repacked value at the wrong file offset, and every check in
+  // the restore would still pass, because the readback reads the offset it just wrote.
+  it('refuses to resolve an address that more than one segment claims', () => {
+    const pointer = FIRST_SCANNED + 0x758;
+    writeFileSync(file, buildElf(pointer, [], { offset: BUN_OFFSET, size: BUN_SIZE }));
+    const shim = shimBunCompiledPointer(file)!;
+    // Re-lay the same bytes with the overlapping decoy segment, keeping the stand-in tweakcc wrote.
+    const withDecoy = buildElf(pointer, [], { offset: BUN_OFFSET, size: BUN_SIZE }, { decoySegment: true });
+    withDecoy.writeBigUInt64LE(BigInt(0x90000), SEG_OFFSET + (Number(shim.standInVaddr) - SEG_VADDR));
+    withDecoy.writeBigUInt64LE(BigInt(0x90000), SHOFF + 3 * 64 + 16);
+    writeFileSync(file, withDecoy);
+
+    expect(() => restoreBunCompiledPointer(file, shim)).toThrow('in more than one segment');
+  });
+
+  // PN_XNUM says the real program-header count lives in the section table. Reading 0xffff headers
+  // of arbitrary file bytes as segments is how a stand-in gets planted at a garbage offset.
+  it('leaves an ELF alone when its program-header count is PN_XNUM', () => {
+    // Big enough that 0xffff * 56 bytes of "program headers" can actually be read out of it —
+    // otherwise the short read rejects the file anyway and this passes without testing the guard.
+    const bun = { offset: SEG_OFFSET + 4 * SCAN_CHUNK - 0x8000, size: 0x8000 };
+    writeFileSync(
+      file,
+      buildElf(FIRST_SCANNED + 0x758, [], bun, { segSize: 4 * SCAN_CHUNK, phnum: 0xffff }),
+    );
+    const before = readFileSync(file);
+
+    expect(shimBunCompiledPointer(file)).toBeNull();
+    expect(readFileSync(file).equals(before)).toBe(true);
   });
 
   it('ignores candidates inside the blob itself', () => {
