@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.8.4](https://github.com/bman654/clodex/compare/v2.8.3...v2.8.4) (2026-09-01)
+
+
+### Bug Fixes
+
+* **patch:** restore Claude Code patching on 2.1.257, broken on every platform ([#159](https://github.com/bman654/clodex/issues/159)) ([d3c4873](https://github.com/bman654/clodex/commit/d3c4873c1d00bf77ff321de9a872b1dc8d31e467))
+* **proxy:** report a broken NODE_EXTRA_CA_CERTS instead of silently ignoring it ([#160](https://github.com/bman654/clodex/issues/160)) ([70c4580](https://github.com/bman654/clodex/commit/70c45804a2fa77a43af6fa1d4233103b3464c8cb))
+* **proxy:** retry a dropped Anthropic connection instead of failing the request ([#161](https://github.com/bman654/clodex/issues/161)) ([c3dd0bb](https://github.com/bman654/clodex/commit/c3dd0bb0685ee79f77264a4055a5b067a9673d25))
+
 ## [2.8.3](https://github.com/bman654/clodex/compare/v2.8.2...v2.8.3) (2026-08-27)
 
 
