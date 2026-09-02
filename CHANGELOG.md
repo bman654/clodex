@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.8.5](https://github.com/bman654/clodex/compare/v2.8.4...v2.8.5) (2026-09-02)
+
+
+### Bug Fixes
+
+* **patch:** refuse an unfamiliar Claude Code build instead of rewriting the wrong bytes ([#164](https://github.com/bman654/clodex/issues/164)) ([33c00d5](https://github.com/bman654/clodex/commit/33c00d5056eaf68e7b0e1774c76e0adc6cee0d57))
+
 ## [2.8.4](https://github.com/bman654/clodex/compare/v2.8.3...v2.8.4) (2026-09-01)
 
 
