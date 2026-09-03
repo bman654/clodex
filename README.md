@@ -339,22 +339,51 @@ clodex --version    # version
   SDK reports that it omitted the tier for a model, clodex warns once and the
   backend default remains in use.
 - **Outbound proxy:** when `HTTP_PROXY`/`HTTPS_PROXY` (and optionally `NO_PROXY`) are set in clodex's environment, all clodex-originated network calls honor them — OAuth sign-in and token refresh, model-list and models.dev refreshes, upstream OpenAI API calls, and the ChatGPT/Codex OAuth WebSocket transport (tunneled via HTTP CONNECT).
-- **Upstream retries:** set `CLODEX_UPSTREAM_MAX_RETRIES` to an integer from
-  `0` through `5` to override the SDK's default of two retries for retryable
-  provider failures. `0` disables retries. The SDK honors valid
-  `retry-after`/`retry-after-ms` headers and otherwise uses exponential
-  backoff. Larger integers clamp to `5` with a one-time warning because a sixth
-  retry cannot complete before the translated streaming paths' 120-second
-  no-data timeout. Unset, empty, or malformed values preserve the default. A
-  stream that fails after output begins cannot be replayed safely and still
-  terminates the request. The same setting covers requests passed straight
-  through to Anthropic, which replay once by default. Only a request that went
-  out on a pooled connection the far end had already closed, and that received
-  no part of a response, is replayed there; anything else is reported as it
-  happens. Setting Claude Code's own `CLAUDE_CODE_MAX_RETRIES=0` also disables
-  the passthrough replay, so telling the client never to resend a request is
-  not quietly undone one layer down. Recovered requests appear in the inference
-  log as `response_retried`.
+- **Provider timeouts:** `CLODEX_UPSTREAM_IDLE_TIMEOUT_MS` controls how long an
+  SDK-backed translated stream may produce no event (default `120000`; range
+  `10000`–`3600000` ms). `CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS` limits each call
+  clodex makes to a configured provider, including non-streaming calls (default
+  `600000`; range `60000`–`21600000` ms). An authentication refresh can start a
+  new call with a fresh timer, so this is not an end-to-end route deadline. Set
+  both variables on the process serving the request: the embedded server
+  started by `clodex claude`, or a standalone `clodex server`. `clodex-claude`
+  only connects to an existing server, so setting them on that wrapper does not
+  reconfigure the server. Empty values use the defaults, malformed values are
+  ignored, and integers outside the supported ranges clamp to the nearest
+  bound. Clodex warns once for each malformed, clamped, or inconsistent setting
+  when a request first resolves it; `clodex claude` displays that parent notice
+  after Claude Code exits. The total timeout can never be shorter than the idle
+  timeout: increasing only the idle timeout raises the default total to match,
+  while an explicit shorter total lowers the idle timeout. The 10s/1m floors
+  avoid near-immediate termination; the 1h/6h ceilings allow deliberately long
+  calls without leaving stalls attached indefinitely. These are server-side
+  limits, and callers may stop sooner. Claude Code currently defaults to about
+  180s of downstream byte silence in proxy mode and 300s in endpoint mode, with
+  a 30m byte-watchdog ceiling. In Claude Code's environment, `API_TIMEOUT_MS`
+  controls the pre-header deadline; `CLAUDE_STREAM_IDLE_TIMEOUT_MS` and
+  `CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS` control stream silence. Waits beyond 30m
+  also require `CLAUDE_ENABLE_BYTE_WATCHDOG=false`. With a standalone server,
+  set those client variables on the Claude Code process, not the server.
+- **Upstream retries:** set `CLODEX_UPSTREAM_MAX_RETRIES` to a non-negative
+  integer to override the SDK's default of two retries for retryable provider
+  failures. `0` disables retries. Clodex estimates the configuration ceiling
+  from the resolved idle timeout and the SDK's fallback 2s, 4s, 8s, … backoff:
+  the ceiling is `5` at the default timeout and can rise to `10` at the maximum.
+  Larger integers clamp with a one-time warning that names the active idle
+  timeout. Provider `retry-after` hints and time spent in failed attempts can
+  mean fewer retries start before a streaming idle deadline; the shared abort
+  signal still interrupts backoff when that deadline fires. Unset, empty, or
+  malformed values preserve the SDK default. A stream that fails after output
+  begins cannot be replayed safely and still terminates the request. The same
+  retry setting covers requests passed straight through to Anthropic, which
+  replay once by default and retain an independent ceiling of `5`; the timeout
+  settings neither add timers nor change retry limits on that raw relay. Only a
+  request sent on a pooled connection the far end had already closed, with no
+  response received, is replayed there;
+  anything else is reported as it happens. Setting Claude Code's own
+  `CLAUDE_CODE_MAX_RETRIES=0` also disables the passthrough replay, so telling
+  the client never to resend a request is not quietly undone one layer down.
+  Recovered requests appear in the inference log as `response_retried`.
 
 ## Known limitations
 

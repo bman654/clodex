@@ -26,7 +26,7 @@ export const DEFAULT_RETRY_AFTER_SECONDS = 5;
 /**
  * Upper bound for any retry-after hint clodex produces or forwards. Keeps the
  * AI SDK's bounded backoff (default maxRetries=2) and downstream clients well
- * clear of clodex's 120s no-event stream abort.
+ * clear of clodex's default 120s no-event stream abort.
  */
 export const MAX_RETRY_AFTER_SECONDS = 60;
 

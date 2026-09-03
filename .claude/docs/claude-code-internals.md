@@ -258,6 +258,20 @@ Background pty hosts are started `detached: true` and resized via
 `process.kill(-process.pid, 'SIGWINCH')` to the process group — which is why the wrapper must `exec`
 rather than spawn.
 
+## Client-side stream deadlines (verified against 2.1.259)
+
+Claude Code applies its own deadlines independently of any server-side clodex timeout. Before
+response headers, proxy-mode requests default to the smaller of roughly 180s plus 1s per 32 KiB of
+request body and the Anthropic SDK's roughly 599s deadline. A foreign `ANTHROPIC_BASE_URL` does not
+use that custom first-byte watchdog, but the SDK still defaults to 600s.
+
+After headers, the byte-idle fallback is 180s for the first-party URL used in proxy mode and 300s
+for a foreign base URL used in endpoint mode. `CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS` and
+`CLAUDE_STREAM_FIRST_BYTE_TIMEOUT_MS` are bounded to 10s–30m. The separate event watchdog defaults
+to 300s and `CLAUDE_STREAM_IDLE_TIMEOUT_MS` can raise it beyond 30m, but the byte watchdog remains
+the effective ceiling unless `CLAUDE_ENABLE_BYTE_WATCHDOG=false`. `API_TIMEOUT_MS` controls the SDK
+request deadline. Raising a clodex server timeout alone never raises any of these client limits.
+
 ## Things that looked like clodex bugs and were not (not version-specific)
 
 - **"Concurrent subagents died at turn 2" was not unknown-model classification.** The agents' first

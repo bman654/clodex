@@ -17,7 +17,7 @@ describe('PR82: idle abort vs SDK retry budget', () => {
       '@ai-sdk/provider-utils'
     ) as any;
 
-    const IDLE_MS = 120_000; // SDK_STREAM_IDLE_TIMEOUT_MS in src/sdk-adapter.ts
+    const IDLE_MS = 120_000; // DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS in src/upstream-retry.ts
     const controller = new AbortController();
     // Armed BEFORE streamText, exactly as src/sdk-adapter.ts:866 does, and
     // never reset because a failing attempt yields no stream part.

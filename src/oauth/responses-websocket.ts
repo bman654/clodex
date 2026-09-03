@@ -1645,8 +1645,8 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   if (errorStatus !== undefined) {
     // The AI SDK strips unknown frame fields, so a backoff hint survives only
     // baked into the message text — same reason the connection-limit branch
-    // above spells it out. Clamped, so a hostile hint cannot park a client past
-    // the 120s no-event stream abort.
+    // above spells it out. Clamped, so a hostile hint cannot park a client
+    // indefinitely.
     // Only when upstream actually gave one. `clampRetryAfterSeconds` supplies a
     // 5s DEFAULT for a missing hint, so clamping unconditionally would have
     // every 429 assert a backoff upstream never stated — and that value becomes

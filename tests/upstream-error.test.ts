@@ -298,8 +298,7 @@ describe('provider stream error frames', () => {
     });
     expect(sdkUpstreamErrorDetails(frame('throttled; retry after 7s')))
       .toMatchObject({ statusCode: 429, isRetryable: true, retryAfterSeconds: 7 });
-    // Clamped so a hostile or absurd hint cannot park a client past the
-    // 120s no-event stream abort.
+    // Clamp an hour-scale hint to the documented 60-second cap.
     expect(sdkUpstreamErrorDetails(frame('throttled; retry after 3600s'))?.retryAfterSeconds).toBe(60);
   });
 

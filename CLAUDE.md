@@ -171,10 +171,10 @@ These bite from outside the subsystem that owns them, so they live here rather t
 - **`node-gyp-build` is a deliberate direct dependency that no clodex source imports.** Routine
   "remove the unused dependency" cleanup breaks fresh installs. Reason in
   `.claude/docs/patcher.md`.
-- **Every SDK generation entry point must resolve `CLODEX_UPSTREAM_MAX_RETRIES` through
-  `src/upstream-retry.ts`.** Adding a new streaming or non-streaming path without wiring it leaves
-  that path on a different retry policy than the rest. Details in
-  `.claude/docs/oauth-continuation.md`.
+- **Every AI SDK generation entry point must resolve its timeout and retry budget through
+  `src/upstream-retry.ts`.** Anthropic- and OpenAI-format `streamText` consumers enforce idle and
+  total deadlines; `generateText` consumers enforce total only. Raw Anthropic passthrough is not an
+  SDK generation and uses no shared timeout. Details in `.claude/docs/oauth-continuation.md`.
 
 ## Tests
 

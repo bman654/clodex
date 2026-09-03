@@ -21,7 +21,7 @@ import { resolveUpstreamTools } from './tool-search.js';
 import { sanitizeToolInput } from './tool-input-sanitize.js';
 import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-types.js';
 import { anthropicErrorType, upstreamHttpStatus } from './upstream-error.js';
-import { upstreamMaxRetries } from './upstream-retry.js';
+import { upstreamRequestBudget } from './upstream-retry.js';
 import { emitParentNotice } from './parent-notice.js';
 import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
 
@@ -708,9 +708,6 @@ export interface AnthropicStreamObserver {
   idleTimeoutMs?: number;
 }
 
-const SDK_STREAM_IDLE_TIMEOUT_MS = 120_000;
-const SDK_TOTAL_TIMEOUT_MS = 10 * 60_000;
-
 function streamAbortError(signal?: AbortSignal): Error {
   if (signal?.reason instanceof Error) return signal.reason;
   const error = new Error(
@@ -966,7 +963,9 @@ export async function streamAnthropicResponse(
   log?: LogFn,
   observer?: AnthropicStreamObserver,
 ): Promise<void> {
-  const idleTimeoutMs = observer?.idleTimeoutMs ?? SDK_STREAM_IDLE_TIMEOUT_MS;
+  const { idleTimeoutMs, totalTimeoutMs, maxRetries } = upstreamRequestBudget({
+    idleTimeoutMs: observer?.idleTimeoutMs,
+  });
   const idleAbort = new AbortController();
   const stopForwardingAbort = forwardAbortSignal(observer?.abortSignal, idleAbort);
   const abortSignal = idleAbort.signal;
@@ -975,8 +974,8 @@ export async function streamAnthropicResponse(
     idleTimeoutMs,
   );
   const totalTimer = setTimeout(
-    () => idleAbort.abort(new Error(`provider stream exceeded ${Math.round(SDK_TOTAL_TIMEOUT_MS / 1000)}s`)),
-    SDK_TOTAL_TIMEOUT_MS,
+    () => idleAbort.abort(new Error(`provider stream exceeded ${Math.round(totalTimeoutMs / 1000)}s`)),
+    totalTimeoutMs,
   );
   // Do not combine streamText's total/chunk timeout signals here. In AI SDK
   // 7.0.22 that composition retains completed StreamTextResult graphs. Relay
@@ -984,7 +983,7 @@ export async function streamAnthropicResponse(
   const result = streamText({
     model,
     ...params,
-    maxRetries: upstreamMaxRetries(),
+    maxRetries,
     abortSignal,
     onError: () => {},
     onStepFinish: step => reportUnsupportedServiceTier(params, step.warnings),
@@ -1035,6 +1034,9 @@ export async function generateAnthropicResponse(
   let finishReason: string;
   let usage: SdkUsage | undefined;
   let warnings: unknown;
+  const { idleTimeoutMs, totalTimeoutMs, maxRetries } = upstreamRequestBudget({
+    idleTimeoutMs: options?.forceStream ? options.idleTimeoutMs : undefined,
+  });
 
   if (options?.forceStream) {
     // Some upstreams (e.g. ChatGPT's Codex backend) reject non-streaming requests
@@ -1043,21 +1045,20 @@ export async function generateAnthropicResponse(
     const forceAbort = new AbortController();
     const stopForwardingAbort = forwardAbortSignal(options.abortSignal, forceAbort);
     const abortSignal = forceAbort.signal;
-    const idleTimeoutMs = options.idleTimeoutMs ?? SDK_STREAM_IDLE_TIMEOUT_MS;
     let idleTimer = setTimeout(
       () => forceAbort.abort(new Error(`no data received from provider for ${Math.round(idleTimeoutMs / 1000)}s`)),
       idleTimeoutMs,
     );
     const totalTimer = setTimeout(
-      () => forceAbort.abort(new Error(`provider stream exceeded ${Math.round(SDK_TOTAL_TIMEOUT_MS / 1000)}s`)),
-      SDK_TOTAL_TIMEOUT_MS,
+      () => forceAbort.abort(new Error(`provider stream exceeded ${Math.round(totalTimeoutMs / 1000)}s`)),
+      totalTimeoutMs,
     );
     // See the streaming path above: Relay owns these timers and explicitly
     // settles its controller when the stream has been fully reduced.
     const r = streamText({
       model,
       ...params,
-      maxRetries: upstreamMaxRetries(),
+      maxRetries,
       abortSignal,
       onError: () => {},
       onStepFinish: step => reportUnsupportedServiceTier(params, step.warnings),
@@ -1108,17 +1109,19 @@ export async function generateAnthropicResponse(
     finishReason = streamedFinishReason;
     usage = streamedUsage;
   } else {
+    // generateText exposes no intermediate events that could reset an idle
+    // timer, so only the total provider-call deadline applies on this path.
     const generateAbort = new AbortController();
     const stopForwardingAbort = forwardAbortSignal(options?.abortSignal, generateAbort);
     const totalTimer = setTimeout(
-      () => generateAbort.abort(new Error(`provider request exceeded ${Math.round(SDK_TOTAL_TIMEOUT_MS / 1000)}s`)),
-      SDK_TOTAL_TIMEOUT_MS,
+      () => generateAbort.abort(new Error(`provider request exceeded ${Math.round(totalTimeoutMs / 1000)}s`)),
+      totalTimeoutMs,
     );
     try {
       const r = await generateText({
         model,
         ...params,
-        maxRetries: upstreamMaxRetries(),
+        maxRetries,
         abortSignal: generateAbort.signal,
       } as Parameters<typeof generateText>[0]);
       ({ text, toolCalls, finishReason, usage, warnings } = r);

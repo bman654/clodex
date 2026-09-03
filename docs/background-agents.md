@@ -14,6 +14,10 @@ This page explains how to bridge **every** Claude Code process on your machine â
 - For your own terminal sessions, run **`clodex-claude`** instead of `claude` â€” same auto-discovery, no port or CA path to hardcode anywhere.
 - Set **`CLODEX_REQUIRE_SERVER=1`** in an isolated routed profile when bypassing Clodex must be impossible. `clodex-claude` then exits with an error if no advertised server passes its process and TCP checks. The default remains fail-open for ordinary installations.
 - A live standalone server has already snapshotted its credentials and account selection. If a wrapper launch sets `CLODEX_OAUTH_ACCOUNT` or a nonblank `CLODEX_KEY_*`, `clodex-claude` warns that the variable is ignored and still launches through that server. Restart the server with the selector, or save the provider credential and refresh its models, before launching without the process-only variable. With no live server these variables pass through unchanged.
+- Provider timeout and retry variables are also server-owned. Set
+  `CLODEX_UPSTREAM_IDLE_TIMEOUT_MS`, `CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS`, and
+  `CLODEX_UPSTREAM_MAX_RETRIES` when starting `clodex server`; setting them only on a later
+  `clodex-claude` invocation does not reconfigure the running server.
 - Proxy-mode wrapper launches remove Anthropic entries from the union of `NO_PROXY` and `no_proxy`, while preserving unrelated bypasses. The manual server output prints the same adjusted values for users who export the proxy settings themselves.
 
 ## Setup steps
