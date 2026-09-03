@@ -471,27 +471,45 @@ const COMPACT_TEXT_ONLY_START = 'CRITICAL: Respond with TEXT ONLY. Do NOT call a
 const COMPACT_TEXT_ONLY_END = 'REMINDER: Do NOT call any tools. Respond with plain text only';
 
 /**
- * Claude Code's structured-output agents inherit the terminal StructuredOutput
- * tool when they fork a reactive compaction turn, even though the compact prompt
- * requires plain text and rejects every tool call. OpenAI-family models tend to
- * call that highly salient tool, leaving Claude Code with an empty summary.
+ * Claude Code forks its reactive-compaction turn with the SAME tool definitions
+ * as an ordinary turn and relies on the prompt alone — "Respond with TEXT ONLY"
+ * — to stop the model calling them. OpenAI-family models ignore that and answer
+ * with whichever tool the conversation made salient: StructuredOutput in a
+ * schema-mode agent, but Bash after a shell-heavy session, and in principle any
+ * tool at all. The fork denies tool EXECUTION and allows one turn, so a call it
+ * emits buys nothing: it burns the turn and returns no summary text. The
+ * reactive path has no second chance at all; the manual path retries once
+ * outside the fork with a reduced tool set, and then gives up too. Claude
+ * Code discards the attempt, and three consecutive failures open a circuit
+ * breaker that short-circuits every later AUTOMATIC compaction — with no API
+ * call — until the counter is reset by a successful compaction or a fresh query
+ * invocation. A headless or subagent run is a single invocation, so there it
+ * never resets: the conversation grows until it dies on Claude Code's own
+ * "Prompt is too long" guard.
  *
- * Detect only the observed compact envelope. If Claude Code changes it, this
+ * So key on the compact envelope only — the marker text is what identifies this
+ * turn, never the tool list, which is why the earlier StructuredOutput
+ * precondition was too narrow. If Claude Code changes the envelope, this
  * deliberately fails open rather than stripping tools from an ordinary request.
+ *
+ * The envelope must OPEN a text block, not merely appear in one. Every builder
+ * puts the header first and appends the reminder to the same string, so an
+ * anchored match costs nothing; an unanchored one fires on any turn that merely
+ * quotes the envelope — a pasted prompt, a subagent's report, a read of this
+ * very file — and silently takes tools away from a turn that needed them.
  */
-function isClaudeCodeStructuredOutputCompactRequest(body: AnthropicRequest): boolean {
+function isClaudeCodeCompactRequest(body: AnthropicRequest): boolean {
   if (body.diagnostics !== undefined) return false;
-  if (!body.tools?.some(candidate => candidate.name === 'StructuredOutput')) return false;
 
   const finalMessage = body.messages.at(-1);
   if (!finalMessage || finalMessage.role !== 'user') return false;
-  const text = typeof finalMessage.content === 'string'
-    ? finalMessage.content
+  const texts = typeof finalMessage.content === 'string'
+    ? [finalMessage.content]
     : finalMessage.content
       .filter(block => block.type === 'text')
-      .map(block => block.text ?? '')
-      .join('\n');
-  return text.includes(COMPACT_TEXT_ONLY_START) && text.includes(COMPACT_TEXT_ONLY_END);
+      .map(block => block.text ?? '');
+  return texts.some(text =>
+    text.startsWith(COMPACT_TEXT_ONLY_START) && text.includes(COMPACT_TEXT_ONLY_END));
 }
 
 export function translateRequest(
@@ -519,7 +537,7 @@ export function translateRequest(
   // minimal request shapes, so cast at this boundary. Keep compact-request tool
   // definitions intact for prompt-cache prefix reuse; toolChoice='none' below
   // makes them unavailable at the provider API rather than by prompt compliance.
-  const compactRequest = isClaudeCodeStructuredOutputCompactRequest(body);
+  const compactRequest = isClaudeCodeCompactRequest(body);
   let upstreamTools = resolveUpstreamTools(
     body.tools as unknown as AnthropicToolDefinition[] | undefined,
     messages as unknown as AnthropicRequestMessage[],
