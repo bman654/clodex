@@ -30,24 +30,30 @@ is too small.
 ### Upstream timeouts and retries
 
 Every AI SDK generation entry point, for both Anthropic- and OpenAI-format routes, resolves one
-budget through `src/upstream-retry.ts`. `streamText` consumers enforce the idle and total deadlines;
-true `generateText` consumers enforce only the total because they expose no stream event that could
-reset an idle clock. The idle default is 120s (range 10s–1h), and the total default is 10m (range
-1m–6h). Each provider call gets a fresh total timer, including a new call after an OAuth 401 refresh;
-it is not an end-to-end route deadline. An explicit total wins when the pair conflicts, lowering the
-idle value; when only an idle value exceeds the default total, the total rises to match. Malformed
-values fall back safely, out-of-range values clamp, and each problem emits one parent-terminal
-notice. Raw Anthropic passthrough is not an SDK generation and receives neither timeout.
+budget through `src/upstream-retry.ts`. `streamText` consumers abort their SDK controller at the idle
+and total deadlines; true `generateText` consumers abort at the total deadline only because they
+expose no stream event that could reset an idle clock. Cancellation is cooperative, so a provider
+transport that ignores the signal can settle later. The idle default is 120s (range 10s–1h), and the
+total default is 10m (range 1m–6h). Each provider call gets a fresh total timer, including a new call
+after an OAuth 401 refresh; it is not an end-to-end route deadline. An explicit total wins when the
+pair conflicts, lowering the idle value; when only an idle value exceeds the default total, the total
+rises to match. Malformed values fall back safely, out-of-range values clamp, and each problem emits
+one parent-terminal notice. Raw relays are not SDK generations and receive neither timeout.
 
-SDK generation entry points also resolve `CLODEX_UPSTREAM_MAX_RETRIES` through that budget. Unset or
-malformed values leave the SDK's two-retry default in control; valid non-negative integers are
-bounded using the resolved idle timeout. The default timeout yields a ceiling of five and the
-configured range permits at most ten, estimated from the SDK's fallback exponential backoff.
-Provider-supplied retry hints and failed-attempt time can mean fewer retries begin before a streaming
-idle deadline; that stream's shared abort signal enforces the actual deadline. Raw Anthropic
-passthrough shares the retry setting but retains its independent ceiling of five. **This policy can
-recover only before output begins**; replay after partial output could duplicate content or tool
-calls.
+SDK generation entry points retry transient provider failures up to five times by default and resolve
+`CLODEX_UPSTREAM_MAX_RETRIES` through the same budget. Valid non-negative integers override the
+default; unset or malformed values preserve it. The default and ceiling fall with a shorter idle
+timeout. At the default timeout the ceiling is five, and the configured range permits at most ten,
+estimated from the SDK's fallback exponential backoff. Five retries can add roughly 62s of fallback
+backoff on a dead provider, versus roughly 6s for the SDK's former two-retry default. Provider retry
+hints and failed-attempt time can mean fewer retries begin before a streaming idle deadline; the
+stream's shared signal requests cancellation when that deadline expires. A deadline during retry
+backoff preserves the provider failure that prompted the retry, while a deadline during a silent
+active provider call remains a timeout. Proxy mode's raw HTTP MITM path shares the retry setting but
+retains its independent ceiling of five and one-retry default; other direct raw relays add no
+transport-failure replay, although an OAuth 401 refresh can still start a new authenticated call.
+**This policy can recover only while no model output has been exposed downstream**; replay after
+partial output could duplicate content or tool calls.
 
 ### Mismatch diagnostics
 

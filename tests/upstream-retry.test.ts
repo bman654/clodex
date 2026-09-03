@@ -10,13 +10,22 @@ import {
 } from '../src/upstream-retry.js';
 import { installParentNoticeSink } from '../src/parent-notice.js';
 
-function resolvedRetries(env: NodeJS.ProcessEnv, warn?: (message: string) => void): number | undefined {
+function resolvedRetries(env: NodeJS.ProcessEnv, warn?: (message: string) => void): number {
   return upstreamRequestBudget({ env, ...(warn ? { warn } : {}) }).maxRetries;
 }
 
 describe('upstream retry budget', () => {
-  it('leaves the SDK default in control when the setting is absent', () => {
-    expect(resolvedRetries({})).toBeUndefined();
+  it('retries transient provider failures five times by default', () => {
+    expect(resolvedRetries({})).toBe(5);
+  });
+
+  it('lowers the default retry count with a shorter idle timeout', () => {
+    expect(upstreamRequestBudget({
+      env: {
+        CLODEX_UPSTREAM_IDLE_TIMEOUT_MS: '30000',
+        CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS: '60000',
+      },
+    }).maxRetries).toBe(3);
   });
 
   it.each([
@@ -30,16 +39,16 @@ describe('upstream retry budget', () => {
   it.each(['lots', '1.5', '-1'])('ignores and reports invalid value %s', raw => {
     const log = vi.fn();
 
-    expect(resolvedRetries({ [UPSTREAM_MAX_RETRIES_ENV]: raw }, log)).toBeUndefined();
+    expect(resolvedRetries({ [UPSTREAM_MAX_RETRIES_ENV]: raw }, log)).toBe(5);
     expect(log).toHaveBeenCalledWith(
       `ignoring ${UPSTREAM_MAX_RETRIES_ENV}=${raw} (expected a non-negative integer)`,
     );
   });
 
-  it('leaves the SDK default in control for whitespace-only input', () => {
+  it('uses the clodex default for whitespace-only input', () => {
     const log = vi.fn();
 
-    expect(resolvedRetries({ [UPSTREAM_MAX_RETRIES_ENV]: '   ' }, log)).toBeUndefined();
+    expect(resolvedRetries({ [UPSTREAM_MAX_RETRIES_ENV]: '   ' }, log)).toBe(5);
     expect(log).not.toHaveBeenCalled();
   });
 
@@ -112,7 +121,7 @@ describe('upstreamRequestBudget', () => {
     expect(upstreamRequestBudget({ env: {}, warn })).toEqual({
       idleTimeoutMs: 120_000,
       totalTimeoutMs: 600_000,
-      maxRetries: undefined,
+      maxRetries: 5,
     });
     expect(MAX_UPSTREAM_MAX_RETRIES).toBe(5);
     expect(warn).not.toHaveBeenCalled();
@@ -146,7 +155,7 @@ describe('upstreamRequestBudget', () => {
     })).toEqual({
       idleTimeoutMs: 120_000,
       totalTimeoutMs: 600_000,
-      maxRetries: undefined,
+      maxRetries: 5,
     });
     expect(warn).toHaveBeenCalledTimes(2);
   });
@@ -301,7 +310,7 @@ describe('upstreamRequestBudget', () => {
       env: { CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS: '60000' },
       idleTimeoutMs: 70_000,
       warn: vi.fn(),
-    })).toMatchObject({ idleTimeoutMs: 60_000, totalTimeoutMs: 60_000, maxRetries: undefined });
+    })).toMatchObject({ idleTimeoutMs: 60_000, totalTimeoutMs: 60_000, maxRetries: 4 });
   });
 
   it('uses the parent notice channel for timeout warnings by default', () => {
@@ -442,111 +451,20 @@ function setRequestBudgetEnv(values: Partial<Record<typeof REQUEST_BUDGET_ENV_KE
 }
 
 describe('upstream request budget adapter wiring', () => {
-  it.each([
-    {
-      name: 'non-streaming generation',
-      route: 'generate',
-      idle: '60000',
-      total: '61000',
-      retries: '4',
-      expectedDelays: [61_000],
-      expectedRetries: 4,
-    },
-    {
-      name: 'collected streaming generation',
-      route: 'forceStream',
-      idle: '127000',
-      total: '130000',
-      retries: '5',
-      expectedDelays: [127_000, 130_000],
-      expectedRetries: 5,
-    },
-    {
-      name: 'forwarded streaming generation',
-      route: 'stream',
-      idle: '127000',
-      total: '130000',
-      retries: '5',
-      expectedDelays: [127_000, 130_000],
-      expectedRetries: 5,
-    },
-  ])('passes the resolved values to $name', async ({
-    route,
-    idle,
-    total,
-    retries,
-    expectedDelays,
-    expectedRetries,
-  }) => {
-    vi.resetModules();
-    const restoreEnv = setRequestBudgetEnv({
-      CLODEX_UPSTREAM_MAX_RETRIES: retries,
-      CLODEX_UPSTREAM_IDLE_TIMEOUT_MS: idle,
-      CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS: total,
-    });
-    async function* stream() {
-      yield { type: 'start' };
-      yield { type: 'finish', finishReason: 'stop' };
-    }
-    const streamText = vi.fn(() => ({ stream: stream() }));
-    const generateText = vi.fn(async () => ({
-      text: 'done',
-      toolCalls: [],
-      finishReason: 'stop',
-      usage: { inputTokens: 1, outputTokens: 1 },
-    }));
-    vi.doMock('ai', () => ({
-      generateText,
-      streamText,
-      tool: vi.fn((spec: unknown) => spec),
-      jsonSchema: vi.fn((schema: unknown) => schema),
-    }));
-    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout');
-
-    try {
-      const adapter = await import('../src/sdk-adapter.js');
-      if (route === 'generate') {
-        await adapter.generateAnthropicResponse({} as never, { messages: [] }, 'test-model');
-      } else if (route === 'forceStream') {
-        await adapter.generateAnthropicResponse(
-          {} as never,
-          { messages: [] },
-          'test-model',
-          { forceStream: true },
-        );
-      } else {
-        await adapter.streamAnthropicResponse(
-          {} as never,
-          { messages: [] },
-          'test-model',
-          () => {},
-        );
-      }
-
-      const sdkCall = route === 'generate' ? generateText : streamText;
-      expect(sdkCall.mock.calls[0]![0].maxRetries).toBe(expectedRetries);
-      for (const delay of expectedDelays) {
-        expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), delay);
-      }
-    } finally {
-      timeoutSpy.mockRestore();
-      restoreEnv();
-      vi.doUnmock('ai');
-      vi.resetModules();
-    }
-  });
-
   it('aborts a stalled stream at the configured idle timeout', async () => {
     vi.useFakeTimers();
     vi.resetModules();
     const restoreEnv = setRequestBudgetEnv({
+      CLODEX_UPSTREAM_MAX_RETRIES: '0',
       CLODEX_UPSTREAM_IDLE_TIMEOUT_MS: '10000',
       CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS: '60000',
     });
     const callerAbort = new AbortController();
     let sdkSignal: AbortSignal | undefined;
-    const streamText = vi.fn((options: { abortSignal: AbortSignal }) => {
+    let sdkMaxRetries: number | undefined;
+    const streamText = vi.fn((options: { abortSignal: AbortSignal; maxRetries: number }) => {
       sdkSignal = options.abortSignal;
+      sdkMaxRetries = options.maxRetries;
       async function* stream() {
         await new Promise<never>((_resolve, reject) => {
           options.abortSignal.addEventListener(
@@ -558,7 +476,8 @@ describe('upstream request budget adapter wiring', () => {
       }
       return { stream: stream() };
     });
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText: vi.fn(),
       streamText,
       tool: vi.fn((spec: unknown) => spec),
@@ -578,6 +497,7 @@ describe('upstream request budget adapter wiring', () => {
       );
       const rejection = request.catch((error: unknown) => error);
 
+      expect(sdkMaxRetries).toBe(0);
       await vi.advanceTimersByTimeAsync(9_999);
       expect(sdkSignal?.aborted).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
@@ -599,15 +519,18 @@ describe('upstream request budget adapter wiring', () => {
     vi.useFakeTimers();
     vi.resetModules();
     const restoreEnv = setRequestBudgetEnv({
+      CLODEX_UPSTREAM_MAX_RETRIES: '0',
       CLODEX_UPSTREAM_IDLE_TIMEOUT_MS: '10000',
       CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS: '60000',
     });
     const callerAbort = new AbortController();
     let sdkSignal: AbortSignal | undefined;
+    let sdkMaxRetries: number | undefined;
     let releaseFirstPart: () => void = () => {};
     const firstPart = new Promise<void>(resolve => { releaseFirstPart = resolve; });
-    const streamText = vi.fn((options: { abortSignal: AbortSignal }) => {
+    const streamText = vi.fn((options: { abortSignal: AbortSignal; maxRetries: number }) => {
       sdkSignal = options.abortSignal;
+      sdkMaxRetries = options.maxRetries;
       async function* stream() {
         await firstPart;
         yield { type: 'text-delta', text: 'started' };
@@ -621,7 +544,8 @@ describe('upstream request budget adapter wiring', () => {
       }
       return { stream: stream() };
     });
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText: vi.fn(),
       streamText,
       tool: vi.fn((spec: unknown) => spec),
@@ -639,6 +563,7 @@ describe('upstream request budget adapter wiring', () => {
       );
       const rejection = request.catch((error: unknown) => error);
 
+      expect(sdkMaxRetries).toBe(0);
       await vi.advanceTimersByTimeAsync(9_999);
       expect(sdkSignal?.aborted).toBe(false);
       releaseFirstPart();
@@ -671,17 +596,24 @@ describe('upstream request budget adapter wiring', () => {
     });
     const callerAbort = new AbortController();
     let sdkSignal: AbortSignal | undefined;
+    let finishForCleanup: () => void = () => {};
+    const cleanup = new Promise<void>(resolve => { finishForCleanup = resolve; });
     const streamText = vi.fn((options: { abortSignal: AbortSignal }) => {
       sdkSignal = options.abortSignal;
       async function* stream() {
         while (true) {
-          await new Promise(resolve => setTimeout(resolve, 5_000));
+          const shouldStop = await Promise.race([
+            new Promise<false>(resolve => setTimeout(() => resolve(false), 5_000)),
+            cleanup.then(() => true),
+          ]);
+          if (shouldStop) return;
           yield { type: 'text-delta', text: 'active' };
         }
       }
       return { stream: stream() };
     });
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText: vi.fn(),
       streamText,
       tool: vi.fn((spec: unknown) => spec),
@@ -708,6 +640,8 @@ describe('upstream request budget adapter wiring', () => {
       });
     } finally {
       callerAbort.abort(new Error('test cleanup'));
+      finishForCleanup();
+      await vi.advanceTimersByTimeAsync(0);
       await Promise.allSettled(request ? [request] : []);
       vi.useRealTimers();
       restoreEnv();
@@ -720,13 +654,16 @@ describe('upstream request budget adapter wiring', () => {
     vi.useFakeTimers();
     vi.resetModules();
     const restoreEnv = setRequestBudgetEnv({
+      CLODEX_UPSTREAM_MAX_RETRIES: '0',
       CLODEX_UPSTREAM_IDLE_TIMEOUT_MS: '10000',
       CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS: '60000',
     });
     const callerAbort = new AbortController();
     let sdkSignal: AbortSignal | undefined;
-    const generateText = vi.fn((options: { abortSignal: AbortSignal }) => {
+    let sdkMaxRetries: number | undefined;
+    const generateText = vi.fn((options: { abortSignal: AbortSignal; maxRetries: number }) => {
       sdkSignal = options.abortSignal;
+      sdkMaxRetries = options.maxRetries;
       return new Promise<never>((_resolve, reject) => {
         options.abortSignal.addEventListener(
           'abort',
@@ -735,7 +672,8 @@ describe('upstream request budget adapter wiring', () => {
         );
       });
     });
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText,
       streamText: vi.fn(),
       tool: vi.fn((spec: unknown) => spec),
@@ -753,6 +691,7 @@ describe('upstream request budget adapter wiring', () => {
       );
       const rejection = request.catch((error: unknown) => error);
 
+      expect(sdkMaxRetries).toBe(0);
       await vi.advanceTimersByTimeAsync(10_000);
       expect(sdkSignal?.aborted).toBe(false);
       await vi.advanceTimersByTimeAsync(49_999);
@@ -768,6 +707,40 @@ describe('upstream request budget adapter wiring', () => {
       vi.useRealTimers();
       restoreEnv();
       vi.doUnmock('ai');
+      vi.resetModules();
+    }
+  });
+
+  it('clears Anthropic timers when SDK stream setup rejects synchronously', async () => {
+    vi.useFakeTimers();
+    vi.resetModules();
+    const restoreEnv = setRequestBudgetEnv({
+      CLODEX_UPSTREAM_IDLE_TIMEOUT_MS: '10000',
+      CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS: '60000',
+    });
+    try {
+      const { MockLanguageModelV4 } = await import('ai/test');
+      const { generateAnthropicResponse, streamAnthropicResponse } =
+        await import('../src/sdk-adapter.js');
+      const model = new MockLanguageModelV4();
+      const params = {
+        messages: [{ role: 'user' as const, content: 'test' }],
+        maxOutputTokens: 0,
+      };
+
+      await expect(streamAnthropicResponse(model, params, 'test-model', () => {}))
+        .rejects.toThrow('maxOutputTokens must be >= 1');
+      expect(vi.getTimerCount()).toBe(0);
+      await expect(generateAnthropicResponse(
+        model,
+        params,
+        'test-model',
+        { forceStream: true },
+      )).rejects.toThrow('maxOutputTokens must be >= 1');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+      restoreEnv();
       vi.resetModules();
     }
   });

@@ -4,6 +4,7 @@ import { parseToolArguments } from './proxy-shared.js';
 import type { SdkCallParams } from './sdk-adapter.js';
 import { oauthServiceTier, reportUnsupportedServiceTier } from './sdk-adapter.js';
 import { upstreamRequestBudget } from './upstream-retry.js';
+import { trackUpstreamAttempts } from './upstream-attempts.js';
 
 // ── OpenAI request shapes ───────────────────────────────────────────────────
 
@@ -195,29 +196,32 @@ export async function collectOpenAiStream(stream: AsyncIterable<unknown>): Promi
 }
 
 interface ActiveUpstreamBudget {
-  maxRetries: number | undefined;
+  model: LanguageModel;
+  maxRetries: number;
   abortSignal: AbortSignal;
   onStreamPart: () => void;
   close: () => void;
 }
 
-function startUpstreamBudget(streaming: boolean): ActiveUpstreamBudget {
+function startUpstreamBudget(model: LanguageModel, streaming: boolean): ActiveUpstreamBudget {
   const { idleTimeoutMs, totalTimeoutMs, maxRetries } = upstreamRequestBudget();
+  const attempts = trackUpstreamAttempts(model);
   const abort = new AbortController();
-  const idleError = () => new Error(
+  const idleError = () => attempts.deadlineError(new Error(
     `no data received from provider for ${Math.round(idleTimeoutMs / 1000)}s`,
-  );
+  ));
   let idleTimer = streaming
     ? setTimeout(() => abort.abort(idleError()), idleTimeoutMs)
     : undefined;
   const totalTimer = setTimeout(
-    () => abort.abort(new Error(
+    () => abort.abort(attempts.deadlineError(new Error(
       `provider ${streaming ? 'stream' : 'request'} exceeded ${Math.round(totalTimeoutMs / 1000)}s`,
-    )),
+    ))),
     totalTimeoutMs,
   );
 
   return {
+    model: attempts.model,
     maxRetries,
     abortSignal: abort.signal,
     onStreamPart: () => {
@@ -261,14 +265,14 @@ export async function generateOpenAiResponse(
 ) {
   let result: { text: string; toolCalls?: CollectedOpenAiStream['toolCalls']; finishReason?: string; usage?: CollectedOpenAiStream['usage']; warnings?: unknown };
   const streaming = options?.forceStream === true;
-  const budget = startUpstreamBudget(streaming);
+  const budget = startUpstreamBudget(model, streaming);
   try {
     if (streaming) {
       // Some upstreams (e.g. ChatGPT's Codex OAuth backend) only ever answer as a
       // stream. Request a real stream from the SDK and collect it into one
       // response instead of issuing a non-streaming request upstream.
       const { stream } = streamText({
-        model,
+        model: budget.model,
         ...(params as any),
         maxRetries: budget.maxRetries,
         abortSignal: budget.abortSignal,
@@ -277,12 +281,19 @@ export async function generateOpenAiResponse(
       });
       result = await collectOpenAiStream(watchOpenAiStream(stream, budget));
     } else {
-      result = (await generateText({
-        model,
-        ...(params as any),
-        maxRetries: budget.maxRetries,
-        abortSignal: budget.abortSignal,
-      })) as any;
+      try {
+        result = (await generateText({
+          model: budget.model,
+          ...(params as any),
+          maxRetries: budget.maxRetries,
+          abortSignal: budget.abortSignal,
+        })) as any;
+      } catch (error) {
+        if (budget.abortSignal.aborted && budget.abortSignal.reason instanceof Error) {
+          throw budget.abortSignal.reason;
+        }
+        throw error;
+      }
     }
   } finally {
     budget.close();
@@ -318,10 +329,10 @@ export async function streamOpenAiResponse(
   responseModelId: string,
   onChunk: (chunk: string) => void,
 ): Promise<void> {
-  const budget = startUpstreamBudget(true);
+  const budget = startUpstreamBudget(model, true);
   try {
     const { stream } = streamText({
-      model,
+      model: budget.model,
       ...(params as any),
       maxRetries: budget.maxRetries,
       abortSignal: budget.abortSignal,

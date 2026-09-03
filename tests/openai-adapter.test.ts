@@ -28,7 +28,8 @@ function setTimeoutEnv(values: Record<typeof TIMEOUT_ENV_KEYS[number], string>):
   };
 }
 
-vi.mock('ai', () => ({
+vi.mock('ai', async () => ({
+  ...(await vi.importActual<typeof import('ai')>('ai')),
   streamText: vi.fn(),
   generateText: vi.fn(),
   tool: vi.fn((spec: unknown) => spec),
@@ -171,6 +172,71 @@ describe('configured upstream timeouts', () => {
     }
   });
 
+  it.each([
+    ['forwarded OpenAI stream', 'stream'],
+    ['collected OpenAI stream', 'forceStream'],
+  ] as const)('rejects a %s when abort closes the SDK iterator without an error', async (_name, route) => {
+    vi.useFakeTimers();
+    const restoreEnv = setTimeoutEnv({
+      CLODEX_UPSTREAM_IDLE_TIMEOUT_MS: '10000',
+      CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS: '60000',
+    });
+    let sdkSignal: AbortSignal | undefined;
+    let output = '';
+    let finishForCleanup: () => void = () => {};
+    const cleanup = new Promise<void>(resolve => { finishForCleanup = resolve; });
+    vi.mocked(streamText).mockImplementation((options) => {
+      sdkSignal = options.abortSignal;
+      async function* stream() {
+        yield { type: 'text-delta', text: 'partial' };
+        await Promise.race([
+          cleanup,
+          new Promise<void>(resolve => {
+            if (options.abortSignal?.aborted) resolve();
+            else options.abortSignal?.addEventListener('abort', () => resolve(), { once: true });
+          }),
+        ]);
+      }
+      return { stream: stream() } as never;
+    });
+
+    let request: Promise<unknown> | undefined;
+    try {
+      request = route === 'stream'
+        ? streamOpenAiResponse(
+          {} as never,
+          { messages: [] },
+          'test-model',
+          chunk => { output += chunk; },
+        )
+        : generateOpenAiResponse(
+          {} as never,
+          { messages: [] },
+          'test-model',
+          { forceStream: true },
+        );
+      const rejection = request.catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(sdkSignal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(sdkSignal?.aborted).toBe(true);
+      await expect(rejection).resolves.toMatchObject({
+        message: 'no data received from provider for 10s',
+      });
+      if (route === 'stream') expect(output).toContain('partial');
+      expect(output).not.toContain('[DONE]');
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      finishForCleanup();
+      await vi.advanceTimersByTimeAsync(0);
+      await Promise.allSettled(request ? [request] : []);
+      restoreEnv();
+      vi.mocked(streamText).mockReset();
+      vi.useRealTimers();
+    }
+  });
+
   it('clears timeout timers after successful OpenAI generations', async () => {
     vi.useFakeTimers();
     const restoreEnv = setTimeoutEnv({
@@ -207,11 +273,17 @@ describe('configured upstream timeouts', () => {
       CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS: '60000',
     });
     let sdkSignal: AbortSignal | undefined;
+    let finishForCleanup: () => void = () => {};
+    const cleanup = new Promise<void>(resolve => { finishForCleanup = resolve; });
     vi.mocked(streamText).mockImplementation((options) => {
       sdkSignal = options.abortSignal;
       async function* stream() {
         while (true) {
-          await new Promise(resolve => setTimeout(resolve, 5_000));
+          const shouldStop = await Promise.race([
+            new Promise<false>(resolve => setTimeout(() => resolve(false), 5_000)),
+            cleanup.then(() => true),
+          ]);
+          if (shouldStop) return;
           yield { type: 'text-delta', text: 'active' };
         }
       }
@@ -232,6 +304,8 @@ describe('configured upstream timeouts', () => {
       });
       expect(vi.getTimerCount()).toBe(0);
     } finally {
+      finishForCleanup();
+      await vi.advanceTimersByTimeAsync(0);
       await Promise.allSettled(request ? [request] : []);
       restoreEnv();
       vi.mocked(streamText).mockReset();

@@ -172,9 +172,10 @@ These bite from outside the subsystem that owns them, so they live here rather t
   "remove the unused dependency" cleanup breaks fresh installs. Reason in
   `.claude/docs/patcher.md`.
 - **Every AI SDK generation entry point must resolve its timeout and retry budget through
-  `src/upstream-retry.ts`.** Anthropic- and OpenAI-format `streamText` consumers enforce idle and
-  total deadlines; `generateText` consumers enforce total only. Raw Anthropic passthrough is not an
-  SDK generation and uses no shared timeout. Details in `.claude/docs/oauth-continuation.md`.
+  `src/upstream-retry.ts`.** Anthropic- and OpenAI-format `streamText` consumers abort at idle and
+  total deadlines; `generateText` consumers abort at total only. Cancellation remains cooperative
+  with the provider transport. Raw relays are not SDK generations and use no shared timeout. Details
+  in `.claude/docs/oauth-continuation.md`.
 
 ## Tests
 

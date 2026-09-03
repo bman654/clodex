@@ -11,7 +11,6 @@ export const MAX_UPSTREAM_IDLE_TIMEOUT_MS = 60 * 60_000;
 export const MIN_UPSTREAM_TOTAL_TIMEOUT_MS = 60_000;
 export const MAX_UPSTREAM_TOTAL_TIMEOUT_MS = 6 * 60 * 60_000;
 
-const SDK_DEFAULT_MAX_RETRIES = 2;
 const SDK_INITIAL_RETRY_DELAY_MS = 2_000;
 const reportedValues = new Set<string>();
 type Warn = (message: string) => void;
@@ -70,7 +69,8 @@ function timeoutSetting(
 /**
  * Largest retry count whose cumulative AI SDK fallback backoff is shorter
  * than the resolved idle window. Provider retry hints and failed-attempt time
- * can consume the window sooner; the shared abort signal enforces the deadline.
+ * can consume the window sooner; the shared signal requests cancellation at
+ * the deadline.
  */
 function maxRetriesForIdleTimeout(idleTimeoutMs: number): number {
   let retries = 0;
@@ -88,6 +88,9 @@ function maxRetriesForIdleTimeout(idleTimeoutMs: number): number {
 export const MAX_UPSTREAM_MAX_RETRIES = maxRetriesForIdleTimeout(
   DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS,
 );
+
+/** Default retry count, derived from the default idle window rather than duplicated. */
+const DEFAULT_UPSTREAM_MAX_RETRIES = MAX_UPSTREAM_MAX_RETRIES;
 
 function configuredUpstreamMaxRetries(
   env: NodeJS.ProcessEnv,
@@ -112,11 +115,11 @@ function resolveUpstreamMaxRetries(
   env: NodeJS.ProcessEnv,
   warn: Warn,
   idleTimeoutMs: number,
-): number | undefined {
+): number {
   const ceiling = maxRetriesForIdleTimeout(idleTimeoutMs);
-  const sdkDefault = ceiling < SDK_DEFAULT_MAX_RETRIES ? ceiling : undefined;
+  const defaultRetries = Math.min(DEFAULT_UPSTREAM_MAX_RETRIES, ceiling);
   const value = configuredUpstreamMaxRetries(env, warn);
-  if (value === undefined) return sdkDefault;
+  if (value === undefined) return defaultRetries;
 
   if (value > ceiling) {
     reportOnce(
@@ -134,7 +137,7 @@ function resolveUpstreamMaxRetries(
 export interface UpstreamRequestBudget {
   idleTimeoutMs: number;
   totalTimeoutMs: number;
-  maxRetries: number | undefined;
+  maxRetries: number;
 }
 
 /** Resolve the timeout pair and retry ceiling as one coherent request budget. */
@@ -206,11 +209,11 @@ export function upstreamRequestBudget(options: {
 const CLIENT_MAX_RETRIES_ENV = 'CLAUDE_CODE_MAX_RETRIES';
 
 /**
- * Retry budget for raw Anthropic passthrough requests. These are not SDK
- * generations, but they share the knob so that turning retries off turns them
- * off everywhere. One retry is enough for the failure this exists to absorb: a
- * pooled keep-alive socket the far end closed while it sat idle, which the
- * agent evicts as soon as it resets.
+ * Retry budget for proxy mode's raw Anthropic HTTP MITM path. Other direct raw
+ * relays do not use this transport replay. This path shares the SDK retry knob
+ * so turning retries off turns it off too. One retry is enough for the failure
+ * this exists to absorb: a pooled keep-alive socket the far end closed while
+ * it sat idle, which the agent evicts as soon as it resets.
  */
 export const DEFAULT_PASSTHROUGH_RETRIES = 1;
 
@@ -224,7 +227,7 @@ export function passthroughUpstreamRetries(
     reportOnce(
       `${UPSTREAM_MAX_RETRIES_ENV}=${explicit}:passthrough`,
       `clamping ${UPSTREAM_MAX_RETRIES_ENV}=${explicit} to ${MAX_UPSTREAM_MAX_RETRIES} `
-      + '(Anthropic passthrough supports at most this many replays)',
+      + '(the raw HTTP MITM path supports at most this many replays)',
       warn,
     );
     return MAX_UPSTREAM_MAX_RETRIES;
