@@ -1311,7 +1311,8 @@ describe('generateAnthropicResponse', () => {
       finishReason: 'stop',
       usage: { inputTokens: 1, outputTokens: 1 },
     }));
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText,
       streamText: vi.fn(),
       tool: vi.fn((spec: unknown) => spec),
@@ -1340,7 +1341,8 @@ describe('generateAnthropicResponse', () => {
       yield { type: 'finish', finishReason: 'stop' };
     }
     const streamText = vi.fn(() => ({ stream: stream() }));
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText: vi.fn(),
       streamText,
       tool: vi.fn((spec: unknown) => spec),
@@ -1380,7 +1382,8 @@ describe('generateAnthropicResponse', () => {
         inputTokenDetails: { cacheReadTokens: 280_000, cacheWriteTokens: 1_000 },
       },
     }));
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText,
       streamText: vi.fn(),
       tool: vi.fn((spec: unknown) => spec),
@@ -1415,7 +1418,8 @@ describe('generateAnthropicResponse', () => {
       finishReason: 'stop',
       usage: undefined,
     }));
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText,
       streamText: vi.fn(),
       tool: vi.fn((spec: unknown) => spec),
@@ -1445,7 +1449,8 @@ describe('generateAnthropicResponse', () => {
         totalUsage: { inputTokens: 300_000, outputTokens: 5 },
       };
     }
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText: vi.fn(),
       streamText: vi.fn(() => ({ stream: stream() })),
       tool: vi.fn((spec: unknown) => spec),
@@ -1479,7 +1484,8 @@ describe('generateAnthropicResponse', () => {
       finishReason: 'tool-calls',
       usage: { inputTokens: 1, outputTokens: 2 },
     }));
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText,
       streamText: vi.fn(),
       tool: vi.fn((spec: unknown) => spec),
@@ -1512,7 +1518,8 @@ describe('generateAnthropicResponse', () => {
       });
     }
     const streamText = vi.fn(() => result);
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText,
       streamText,
       tool: vi.fn((spec: unknown) => spec),
@@ -1560,7 +1567,8 @@ describe('generateAnthropicResponse', () => {
       yield { type: 'error', error: upstreamError };
     }
     const streamText = vi.fn(() => ({ stream: stream() }));
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText: vi.fn(),
       streamText,
       tool: vi.fn((spec: unknown) => spec),
@@ -1596,7 +1604,8 @@ describe('generateAnthropicResponse', () => {
       usage: Promise.resolve({ inputTokens: 0, outputTokens: 0 }),
       stream: stream(),
     }));
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText: vi.fn(),
       streamText,
       tool: vi.fn((spec: unknown) => spec),
@@ -1626,7 +1635,8 @@ describe('streamAnthropicResponse idle timeout', () => {
       yield { type: 'finish', finishReason: 'stop' };
     }
     const streamText = vi.fn(() => ({ stream: stream() }));
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText: vi.fn(),
       streamText,
       tool: vi.fn((spec: unknown) => spec),
@@ -1656,7 +1666,8 @@ describe('streamAnthropicResponse idle timeout', () => {
       options.onStepFinish?.({ warnings: [{ type: 'unsupported', feature: 'serviceTier' }] });
       return { stream: stream() };
     });
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText: vi.fn(),
       streamText,
       tool: vi.fn((spec: unknown) => spec),
@@ -1700,7 +1711,8 @@ describe('streamAnthropicResponse idle timeout', () => {
       });
     }
     const streamText = vi.fn(() => result);
-    vi.doMock('ai', () => ({
+    vi.doMock('ai', async () => ({
+      ...(await vi.importActual<typeof import('ai')>('ai')),
       generateText: vi.fn(),
       streamText,
       tool: vi.fn((spec: unknown) => spec),

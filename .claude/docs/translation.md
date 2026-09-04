@@ -27,8 +27,8 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   relies only on the prompt to stop the model calling them, while denying tool *execution* and
   allowing one turn. So an emitted call buys nothing: it burns the turn and returns no summary. The
   reactive path gets no retry; the manual path retries once outside the fork with a reduced tool
-  set, then gives up as well. Three
-  consecutive failures open a circuit breaker that skips later automatic compaction with no API
+  set, then gives up as well. Three consecutive failures open a circuit breaker that skips later
+  automatic compaction with no API
   call, until a successful compaction or a fresh query invocation resets it — which never happens
   inside one headless or subagent run, so the context grows until "Prompt is too long".
   `isClaudeCodeCompactRequest` keys on the envelope text and nothing else. Two rules it must keep:
@@ -48,7 +48,10 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   strings present. A warning is diagnostic only: tools stay enabled and compaction can still fail
   until clodex updates its markers. Terminal notices are capped at three `cc_version` signatures per
   process (plus one suppression line), while every sighting remains in the trace log.
-- `streamAnthropicResponse` maps SDK events to Anthropic SSE, aborting after 120s without an event.
+- Anthropic- and OpenAI-format `streamText` calls abort after the configured idle window without an
+  event (120s by default) or the configured total provider-call window (10m by default). True
+  `generateText` calls enforce only the total window because they expose no event that can reset an
+  idle clock.
 - `modelPrefersResponsesApi()` selects `provider.responses(id)` for models requiring the Responses
   API (GPT-5.4+, GPT-5.5, `*-codex`, o-series); `provider.chat(id)` otherwise. Originator string is
   `clodex`.

@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.9.0](https://github.com/bman654/clodex/compare/v2.8.5...v2.9.0) (2026-09-04)
+
+
+### Features
+
+* **timeouts:** let you raise the 10-minute limit so long agent runs can finish ([#171](https://github.com/bman654/clodex/issues/171)) ([369930a](https://github.com/bman654/clodex/commit/369930a579932a89f85511b68e10596975297bf1))
+
+
+### Bug Fixes
+
+* **patch:** restore Claude Code patching on 2.1.260, broken on every platform ([#175](https://github.com/bman654/clodex/issues/175)) ([00f793a](https://github.com/bman654/clodex/commit/00f793af94dcfba1fdec6554581ead58a2147e16))
+
 ## [2.8.5](https://github.com/bman654/clodex/compare/v2.8.4...v2.8.5) (2026-09-02)
 
 

@@ -94,6 +94,11 @@ doc: `docs/background-agents.md` (shipped via the `docs` entry in package.json `
   `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY`/`ANTHROPIC_MODEL` **for the child only**. Claude Code may
   persist the model to `~/.claude/settings.json` itself; that is outside clodex's control (reset
   with `claude --model sonnet`).
+- `CLODEX_UPSTREAM_IDLE_TIMEOUT_MS` and `CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS` are resolved by the
+  process serving provider requests. `clodex claude` owns that server in-process. With a standalone
+  `clodex server`, restart that server with the variables set; putting them only on a
+  `clodex-claude` wrapper cannot reconfigure it. Request-time notices are immediate on standalone
+  server stderr, while `clodex claude` queues them as described below.
 
 ## Parent diagnostics while Claude Code runs
 

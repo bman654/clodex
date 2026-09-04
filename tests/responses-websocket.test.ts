@@ -1065,7 +1065,7 @@ describe('createResponsesWebSocketFetch', () => {
       status: 429,
     })));
 
-    // Bounded so a hostile hint cannot park a client past the 120s stream abort.
+    // Bound a hostile day-long hint to the documented 60-second cap.
     expect(await readAll(res)).toContain('retry after 60s');
   });
 
@@ -1292,8 +1292,7 @@ describe('createResponsesWebSocketFetch', () => {
         error: { type: 'usage_limit_reached', message: 'weekly limit reached', retry_after_seconds: 1800 },
       },
     });
-    // Clamped to MAX_RETRY_AFTER_SECONDS: a hint of hours must not park the
-    // client past the 120s no-event stream abort.
+    // Clamped to MAX_RETRY_AFTER_SECONDS so an hour-scale hint cannot park the client.
     expect(body).toContain('retry after 60s');
     expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429, retryAfterSeconds: 60 });
   });

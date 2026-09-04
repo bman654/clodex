@@ -9,8 +9,8 @@ import { writeSync } from 'node:fs';
  * terminal and a stray parent write corrupts its TUI. clodex's gateway/MITM,
  * however, runs in that same process and handles every translated request while
  * the child is alive — so the few warnings that are documented as reaching
- * stderr (the reasoning- and tool-argument normalization canaries, the retry
- * clamp notice) were written straight into the mute and were never seen.
+ * stderr (the reasoning- and tool-argument normalization canaries, retry and
+ * timeout configuration notices) were written straight into the mute and were never seen.
  *
  * This channel is deliberately OPT-IN and enumerable: a caller must import
  * `emitParentNotice` to reach the terminal. There is no prefix sniffing or other

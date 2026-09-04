@@ -588,8 +588,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 11,
-      digest: '347109442fbf14a785671325aad7e1ac120be496019d832c013f3dab502f7036',
+      version: 12,
+      digest: 'd9dff2594fc60dcae83fb34846c681ee75fb3b0d7f49e5c26cb1c3c415cbcc4c',
     });
   });
 });
@@ -1516,16 +1516,22 @@ function executeChildEnv(
     'extra',
     'flag',
     'remote',
-    // Only the 2.1.228- and 2.1.239-shaped fixtures read this; the base fixture
-    // ignores it. `getExtra` stands in for the optional call 2.1.239 introduced.
+    // Only the 2.1.228-, 2.1.239- and 2.1.260-shaped fixtures read this; the base
+    // fixture ignores it. `getExtra` is the fixture's stand-in for the optional
+    // registry call; `getAgentProxyEnv` is the real property name every measured
+    // builder from 2.1.246 on spells inline, and what the anchor's head pins on.
     'settings',
+    // The typed env accessor 2.1.260 reads the remote-mode flag from instead of
+    // `process.env`. Empty, so remote mode is off exactly as `flag` reports.
+    'accessor',
     `${declaration};return childEnv;`,
   )(
     { env },
     () => extraEnv,
     () => false,
     () => ({}),
-    { settingsColorEnv: {}, getExtra: () => extraEnv },
+    { settingsColorEnv: {}, getExtra: () => extraEnv, getAgentProxyEnv: () => extraEnv },
+    {},
   ) as () => NodeJS.ProcessEnv;
   return childEnv();
 }
@@ -1837,6 +1843,62 @@ describe('patch script identity naming', () => {
     )
     .replace('delete v[k],delete v[`INPUT_${k}`];return v}', 'delete v[k];return v}');
 
+  // Claude Code 2.1.260 rewrote the remote-mode check the head anchor ended on.
+  // Through 2.1.259 it was a call wrapping a `process.env` read whose result fed a
+  // ternary — `<fn>(process.env.CLAUDE_CODE_REMOTE)?` — and the anchor spelled that
+  // shape out. 2.1.260 reads the flag off the typed env accessor and compares it
+  // inline (`i=a.CLAUDE_CODE_REMOTE===!0`), keeping neither the call nor the
+  // `process.env.` prefix, so the anchor found nothing and `clodex patch` refused
+  // all eight published builds. Other child-filtering behaviour changed in 2.1.260
+  // too; this fixture models only the head shape that caused the failure.
+  // The head can now reach `getAgentProxyEnv` instead — the agent-proxy env this
+  // builder folds into the child's environment, an unminified property name in
+  // every bundle measured so far, though that is an observation and not a promise
+  // about future builds — so this fixture must spell the real name, not a stand-in.
+  const CLAUDE_FIXTURE_260 = CLAUDE_FIXTURE
+    .replace(
+      'let e=extra(),t=Object.keys(e).length>0,n=Object.keys(e).length>0,'
+      + 's=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};',
+      'let h=settings,e=h.getAgentProxyEnv?.()??{},t=Object.keys(e).length>0,'
+      + '{settingsColorEnv:c}=h,n=Object.keys(c).length>0,'
+      + 'g=accessor.CLAUDE_CODE_REMOTE===!0,s=g?remote():{};',
+    )
+    .replace('delete v[k],delete v[`INPUT_${k}`];return v}', 'delete v[k];return v}');
+
+  // Two shapes the head must survive, because upstream has already made this exact move
+  // once: 2.1.239 turned the settings-colour env — the SIBLING property on the same
+  // registry entry the head now pins on — into a destructuring declarator. If
+  // `getAgentProxyEnv` follows it, the pin sits inside a `{...}` group, and a run that can
+  // only consume a group WHOLE can never stop there. `let{` is the same move again with the
+  // pattern first, where the minifier drops the space (each measured Darwin 2.1.260 bundle
+  // carries 4784 `let{` occurrences and opens 84 named zero-arg functions `function X(){let{`).
+  // Neither shape occurs in the 27 measured bundles; both refuse without the tolerances, and
+  // adding them changes nothing on those 27.
+  const CLAUDE_FIXTURE_260_DESTRUCTURED = CLAUDE_FIXTURE_260.replace(
+    'let h=settings,e=h.getAgentProxyEnv?.()??{},t=Object.keys(e).length>0,'
+    + '{settingsColorEnv:c}=h,n=Object.keys(c).length>0,',
+    'let h=settings,{getAgentProxyEnv:x,settingsColorEnv:c}=h,e=x?.()??{},'
+    + 't=Object.keys(e).length>0,n=Object.keys(c).length>0,',
+  );
+
+  const CLAUDE_FIXTURE_260_LET_PATTERN = CLAUDE_FIXTURE_260.replace(
+    'let h=settings,e=h.getAgentProxyEnv?.()??{},t=Object.keys(e).length>0,'
+    + '{settingsColorEnv:c}=h,n=Object.keys(c).length>0,',
+    'let{getAgentProxyEnv:x,settingsColorEnv:c}=settings,e=x?.()??{},'
+    + 't=Object.keys(e).length>0,n=Object.keys(c).length>0,',
+  );
+
+  // An ARRAY pattern gets the same treatment for the same reason — a minifier drops the
+  // space before either kind. Leaving `let[` out would have left the stated rationale
+  // half-applied, and every measured 2.1.260 build already opens 17 named zero-arg
+  // functions with it.
+  const CLAUDE_FIXTURE_260_LET_ARRAY = CLAUDE_FIXTURE_260.replace(
+    'let h=settings,e=h.getAgentProxyEnv?.()??{},t=Object.keys(e).length>0,'
+    + '{settingsColorEnv:c}=h,n=Object.keys(c).length>0,',
+    'let[h]=[settings],{settingsColorEnv:c}=h,e=h.getAgentProxyEnv?.()??{},'
+    + 't=Object.keys(e).length>0,n=Object.keys(c).length>0,',
+  );
+
   // The tolerated run admits `[^;{}]` characters or one balanced `{...}` group,
   // so it cannot reach out of the `let` statement it starts in — consuming the
   // enclosing function's closing brace would need an UNMATCHED one. Widen it to
@@ -1927,6 +1989,54 @@ describe('patch script identity naming', () => {
     // The rewritten head survives verbatim and the body reads the local copy.
     expect(result.content).toContain('let h=settings,e=h.getExtra?.()??{}');
     expect(result.content).toContain('let v={..._clodexChildEnv,...e,...s}');
+  });
+
+  it('patches a child builder that reads the remote flag off the typed env accessor', () => {
+    expect(CLAUDE_FIXTURE_260, 'fixture drifted from the shape this test mutates')
+      .not.toBe(CLAUDE_FIXTURE);
+    expect(CLAUDE_FIXTURE_260, 'the 2.1.260 head must spell the real agent-proxy accessor')
+      .toContain('e=h.getAgentProxyEnv?.()??{}');
+    expect(CLAUDE_FIXTURE_260, 'no `<fn>(process.env.CLAUDE_CODE_REMOTE)?` ternary may survive')
+      .not.toContain('(process.env.CLAUDE_CODE_REMOTE)?');
+
+    const result = applyClodexPatches(CLAUDE_FIXTURE_260, config);
+
+    expect(result.results.at(-1)).toEqual({
+      status: 'OK',
+      name: 'PATCH 10: child network environment',
+    });
+    expect(result.content.match(/\/\*ccpatch:child-network-env\*\//g)).toHaveLength(1);
+    expect(result.content).toContain('function childEnv(){/*ccpatch:child-network-env*/');
+    // The accessor read is left alone — it is not a `process.env` read, and
+    // CLAUDE_CODE_REMOTE is not one of the network variables clodex reverts.
+    expect(result.content).toContain('g=accessor.CLAUDE_CODE_REMOTE===!0');
+    expect(result.content).toContain('let v={..._clodexChildEnv,...e,...s}');
+  });
+
+  it('restores the original network environment through the typed-accessor builder', () => {
+    const env = executeChildEnv(runPatchScript(config, CLAUDE_FIXTURE_260), {
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://127.0.0.1:3457',
+      NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
+      [NETWORK_ENV_CONTRACT_VAR]: JSON.stringify({
+        version: 1,
+        original: {
+          HTTPS_PROXY: 'http://corp-proxy.example:8080',
+          NODE_EXTRA_CA_CERTS: null,
+        },
+        injected: {
+          HTTPS_PROXY: 'http://127.0.0.1:3457',
+          NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
+        },
+      }),
+    });
+
+    expect(env).toMatchObject({
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://corp-proxy.example:8080',
+    });
+    expect(env['NODE_EXTRA_CA_CERTS']).toBeUndefined();
+    expect(env[NETWORK_ENV_CONTRACT_VAR]).toBeUndefined();
   });
 
   it('restores the original network environment through the destructuring builder', () => {
@@ -2260,11 +2370,12 @@ describe('patch script identity naming', () => {
     );
   });
 
-  // `CLAUDE_CODE_REMOTE` is not in the literal list, because the ANCHOR already requires it inside
-  // the captured body — that is why removing it from the list was safe. Nothing else pins the
-  // anchor's copy of it, so widen it to any environment variable and the site would silently stop
-  // proving it bound to the builder that consults the remote flag.
-  it('rejects a child builder whose head consults a different environment variable', () => {
+  // The head pins on one of two names, so each has to be shown to carry its own weight:
+  // widen either to something the builder does not mean and the site must refuse rather
+  // than bind to whatever function happens to be nearby. `CLAUDE_CODE_REMOTE` is the
+  // pre-2.1.239 alternative and is not in the required-literal list, because the anchor
+  // is what requires it; on the base fixture nothing else pins it.
+  it('rejects a pre-2.1.239 child builder whose head consults a different environment variable', () => {
     const source = CLAUDE_FIXTURE.replace(
       'flag(process.env.CLAUDE_CODE_REMOTE)?remote():{}',
       'flag(process.env.CLAUDE_CODE_ELSEWHERE)?remote():{}',
@@ -2272,6 +2383,69 @@ describe('patch script identity naming', () => {
 
     expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE);
     expect(source).not.toContain('CLAUDE_CODE_REMOTE');
+    expect(source, 'the other alternative must not rescue this mutation')
+      .not.toContain('getAgentProxyEnv');
+
+    expect(() => runPatchScript(config, source)).toThrow(
+      'clodex patch: required patch failed: PATCH 10: child network environment',
+    );
+  });
+
+  it.each([
+    ['destructures the agent-proxy property beside the settings-colour one',
+      () => CLAUDE_FIXTURE_260_DESTRUCTURED],
+    ['destructures the agent-proxy property in an opening `let{` pattern',
+      () => CLAUDE_FIXTURE_260_LET_PATTERN],
+    ['reads the agent-proxy property after an opening `let[` pattern',
+      () => CLAUDE_FIXTURE_260_LET_ARRAY],
+  ])('patches a child builder that %s', (_label, build) => {
+    const source = build();
+    expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE_260);
+    expect(source, 'the other alternative must not rescue this shape')
+      .not.toContain('(process.env.CLAUDE_CODE_REMOTE)?');
+
+    const result = applyClodexPatches(source, config);
+
+    expect(result.results.at(-1)).toEqual({
+      status: 'OK',
+      name: 'PATCH 10: child network environment',
+    });
+    expect(result.content.match(/\/\*ccpatch:child-network-env\*\//g)).toHaveLength(1);
+    expect(result.content).toContain('function childEnv(){/*ccpatch:child-network-env*/');
+    expect(result.content).toContain('let v={..._clodexChildEnv,...e,...s}');
+
+    // A patched builder is not the same claim as a correct one: run it.
+    const env = executeChildEnv(result.content, {
+      PATH: '/usr/bin',
+      HTTPS_PROXY: 'http://127.0.0.1:3457',
+      NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
+      [NETWORK_ENV_CONTRACT_VAR]: JSON.stringify({
+        version: 1,
+        original: {
+          HTTPS_PROXY: 'http://corp-proxy.example:8080',
+          NODE_EXTRA_CA_CERTS: null,
+        },
+        injected: {
+          HTTPS_PROXY: 'http://127.0.0.1:3457',
+          NODE_EXTRA_CA_CERTS: '/tmp/local-ca.pem',
+        },
+      }),
+    });
+    expect(env).toMatchObject({ PATH: '/usr/bin', HTTPS_PROXY: 'http://corp-proxy.example:8080' });
+    expect(env['NODE_EXTRA_CA_CERTS']).toBeUndefined();
+    expect(env[NETWORK_ENV_CONTRACT_VAR]).toBeUndefined();
+  });
+
+  it('rejects a 2.1.260-shaped child builder that folds in some other env', () => {
+    const source = CLAUDE_FIXTURE_260.replace(
+      'e=h.getAgentProxyEnv?.()??{}',
+      'e=h.getSomeOtherEnv?.()??{}',
+    );
+
+    expect(source, 'fixture drifted from the shape this test mutates').not.toBe(CLAUDE_FIXTURE_260);
+    expect(source).not.toContain('getAgentProxyEnv');
+    expect(source, 'the other alternative must not rescue this mutation')
+      .not.toContain('(process.env.CLAUDE_CODE_REMOTE)?');
 
     expect(() => runPatchScript(config, source)).toThrow(
       'clodex patch: required patch failed: PATCH 10: child network environment',
@@ -2432,52 +2606,76 @@ describe('patch script identity naming', () => {
     });
   });
 
+  // Every malformed case carries a SECOND, well-formed `HTTP_PROXY` pair that would be
+  // reverted if the contract were accepted piecemeal. Without it these cases pass for the
+  // wrong reason — a missing or wrongly-typed injected value can never equal the live one,
+  // so nothing is restored whether the guard rejects the contract or not, and deleting the
+  // rejection left the sha256 transform-source pin as the only red. The valid pair makes
+  // partial acceptance observable: the host reader rejects the whole contract, so the patch
+  // must too.
+  const WELL_FORMED_PAIR = {
+    original: { HTTP_PROXY: 'http://corp.example.test:3128' },
+    injected: { HTTP_PROXY: 'http://127.0.0.1:3457' },
+  };
+  const alsoValid = (contract: {
+    version: number;
+    original: Record<string, unknown>;
+    injected: Record<string, unknown>;
+  }) => ({
+    version: contract.version,
+    original: { ...contract.original, ...WELL_FORMED_PAIR.original },
+    injected: { ...contract.injected, ...WELL_FORMED_PAIR.injected },
+  });
+
   it.each([
     ['valid pair', {
       version: 1,
       original: { HTTPS_PROXY: 'http://proxy.example.test:8080' },
       injected: { HTTPS_PROXY: 'http://127.0.0.1:3457' },
     }],
-    ['missing injected key', {
+    ['missing injected key', alsoValid({
       version: 1,
       original: { HTTPS_PROXY: null },
       injected: {},
-    }],
-    ['missing original key', {
+    })],
+    ['missing original key', alsoValid({
       version: 1,
       original: {},
       injected: { HTTPS_PROXY: 'http://127.0.0.1:3457' },
-    }],
-    ['unknown original key', {
+    })],
+    ['unknown original key', alsoValid({
       version: 1,
       original: { HTTPS_PROXY: null, EXTRA_PROXY: null },
       injected: { HTTPS_PROXY: 'http://127.0.0.1:3457', EXTRA_PROXY: null },
-    }],
-    ['unknown injected key', {
+    })],
+    ['unknown injected key', alsoValid({
       version: 1,
       original: { EXTRA_PROXY: null },
       injected: { EXTRA_PROXY: 'http://127.0.0.1:3457' },
-    }],
-    ['invalid original value', {
+    })],
+    ['invalid original value', alsoValid({
       version: 1,
       original: { HTTPS_PROXY: 42 },
       injected: { HTTPS_PROXY: 'http://127.0.0.1:3457' },
-    }],
-    ['invalid injected value', {
+    })],
+    ['invalid injected value', alsoValid({
       version: 1,
       original: { HTTPS_PROXY: null },
       injected: { HTTPS_PROXY: false },
-    }],
-    ['invalid version', {
+    })],
+    ['invalid version', alsoValid({
       version: 2,
       original: { HTTPS_PROXY: null },
       injected: { HTTPS_PROXY: 'http://127.0.0.1:3457' },
-    }],
+    })],
   ])('matches the host contract reader for %s', (_name, contract) => {
     const out = runPatchScript(config);
     const baseEnv = {
       PATH: '/usr/bin',
       HTTPS_PROXY: 'http://127.0.0.1:3457',
+      // Live value of the well-formed second pair, so a contract accepted piecemeal
+      // would visibly revert it to the corporate proxy above.
+      HTTP_PROXY: 'http://127.0.0.1:3457',
       [NETWORK_ENV_CONTRACT_VAR]: JSON.stringify(contract),
     };
 
