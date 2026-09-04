@@ -58,6 +58,18 @@ export const CHATGPT_CODEX_UNSUPPORTED_MODELS = new Set<string>([
 // model spec and varies by plan, so discovery overrides these whenever it answers.
 // A model with no ceiling here has none above its default window.
 const OPENAI_OAUTH_MODEL_SEEDS: OAuthModelSeed[] = [
+  // GPT-6 family. The window and ceiling are what the live Codex catalog returned on
+  // 2026-09-04 and are deliberately NOT the published API numbers: the model card
+  // lists a 1,050,000 context window, but the Codex client is served a smaller one,
+  // and this path is Codex-only. Output limit and the pricing band come from the
+  // card (https://developers.openai.com/api/docs/models/gpt-6-astra), which states
+  // "Prompts with more than 272K input tokens are priced at 2x input and cache rates
+  // and 1.5x output for the full request" — the same boundary the GPT-5.6 family has.
+  { id: 'gpt-6-astra',          name: 'GPT-6 Astra',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
+  // "An alias for our flagship general-purpose models, with safeguards calibrated
+  // for defensive cybersecurity work" — access is gated on a separate opt-in
+  // program, so most installs will never see this id in their catalog.
+  { id: 'gpt-daybreak-blue-latest', name: 'GPT Daybreak Blue', contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
   // GPT-5.6 family (Sol / Terra / Luna)
   { id: 'gpt-5.6-sol',          name: 'GPT-5.6 Sol',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true },
   { id: 'gpt-5.6-terra',        name: 'GPT-5.6 Terra',     contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true },
@@ -78,7 +90,24 @@ const OPENAI_OAUTH_MODEL_SEEDS: OAuthModelSeed[] = [
 ];
 
 /** Models priced with a higher-rate band above a documented input size. */
-const PRICING_BOUNDARY_FAMILIES = /^gpt-5\.[56]/;
+/**
+ * Families that price the whole request at a higher rate above a documented input
+ * size. Read the family version rather than listing ids, so a later family is
+ * covered the day it ships: a boundary asserted where there is none costs the user
+ * one notice, while a missing boundary means they cross into the higher rate with
+ * no warning at all (see reportPricingBoundaryCrossing). gpt-5.4 and earlier are
+ * deliberately excluded — no published boundary.
+ */
+function hasPricingBoundary(id: string): boolean {
+  const version = /^gpt-(\d+)(?:\.(\d+))?(?:-|$)/i.exec(id);
+  if (version) {
+    const major = Number(version[1]);
+    const minor = version[2] ? Number(version[2]) : 0;
+    if (major > 5 || (major === 5 && minor >= 5)) return true;
+  }
+  // Codenamed aliases carry no version to read; they track the current flagship.
+  return /^gpt-daybreak(?:-|$)/i.test(id);
+}
 
 /**
  * Pricing-band metadata for a Codex model id, applied to discovered models too so a
@@ -87,7 +116,7 @@ const PRICING_BOUNDARY_FAMILIES = /^gpt-5\.[56]/;
 export function openAiPricingMetadata(
   id: string,
 ): { pricingBoundary?: number; pricingBoundaryNote?: string } {
-  if (!PRICING_BOUNDARY_FAMILIES.test(id)) return {};
+  if (!hasPricingBoundary(id)) return {};
   return {
     pricingBoundary: GPT_5_6_PRICING_BOUNDARY,
     pricingBoundaryNote: GPT_5_6_PRICING_NOTE,
@@ -98,6 +127,15 @@ export function openAiPricingMetadata(
  * Fill context metadata that a catalog cached before these fields existed is missing.
  * Only absent fields are filled, so live discovery always wins; without this a stale
  * cache reports a raw window with no headroom and no reachable ceiling.
+ *
+ * `reasoning` is the one field a seed OVERRIDES rather than merely fills. The Codex
+ * catalog has never reported it: a cached value was written by whatever id guess the
+ * installed clodex made at refresh time, so a stale `false` is a stale guess, not
+ * user data or a provider answer. Leaving it authoritative meant a user who had
+ * refreshed under an older clodex kept the old verdict for a model this table now
+ * knows — the effort selector stayed hidden until they happened to re-run
+ * `clodex providers refresh-models`. Only seeded ids are affected; anything absent
+ * from the seed keeps its cached value.
  */
 export function applyOAuthSeedContextMetadata(models: CachedModel[]): CachedModel[] {
   const seedById = new Map(buildOpenAiOAuthModels().map(model => [model.id, model]));
@@ -115,6 +153,7 @@ export function applyOAuthSeedContextMetadata(models: CachedModel[]): CachedMode
         ?? seed?.pricingBoundaryNote
         ?? pricing.pricingBoundaryNote,
       maxOutputTokens: model.maxOutputTokens ?? seed?.maxOutputTokens,
+      reasoning: seed?.reasoning ?? model.reasoning,
     };
   });
 }

@@ -241,10 +241,11 @@ Manage favorite models (max 20) and short aliases. Favorites feed the endpoint-m
 
 #### Context stops and the pricing boundary
 
-A context window is a cost dial as much as a capacity number. OpenAI prices GPT-5.6
-prompts above **272,000 input tokens at 2x input and 1.5x output for the full
-request**, which is why the Codex catalog reports a 272,000 window rather than the
-model's ceiling. Clodex follows that: the default `standard` stop stays under the
+A context window is a cost dial as much as a capacity number. OpenAI prices GPT-5.5
+and later prompts above **272,000 input tokens at 2x input and 1.5x output for the
+full request**, which is why the Codex catalog reports a 272,000 window rather than
+the model's ceiling. Newer families inherit the same boundary, so a model released
+after this was written is covered without a clodex update. Clodex follows that: the default `standard` stop stays under the
 line, and a larger window is something you ask for.
 
 ```sh
