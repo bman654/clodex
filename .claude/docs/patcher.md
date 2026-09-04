@@ -403,20 +403,23 @@ tweakcc's own repack reads back as an ordinary module name.
   published builds refused to patch at all. Neither end was load-bearing for the replacement: what
   the transform needs is the function's opening brace, its body, and its closing brace. Describe
   each end by what the builder MEANS and let back-references tie the repeats:
-  * the head runs from `function X(){let ` to the `CLAUDE_CODE_REMOTE` ternary over `[^;{}]`
-    characters **or one balanced `{...}` group** — that admits the destructuring and the `??{}`
-    while still making it impossible to consume the enclosing function's closing brace, which
-    would need an *unmatched* one;
+  * the head runs from `function X(){` + `let`/`let{`/`let[` to a pinned name over `[^;{}]`
+    characters **or balanced `{...}` groups**, plus one optional trailing **unclosed** `{…` so the
+    pin may sit inside a destructuring pattern — that admits the destructuring and the `??{}` while
+    still making it impossible to consume the enclosing function's closing brace, which would need
+    an *unmatched closing* one;
   * the tail is `return <copy>}` where `<copy>` is **back-referenced** from the merged copy the
-    builder declares (`let <copy>={...process.env,...}`), so it moves with any upstream rename and
-    steps over a nested return of some *other* variable. It does NOT prove the match stopped on
+    builder declares (`let <copy>={...process.env,...}`), so it survives a rename of that copy and
+    steps over a nested return of some *other* variable. It is rename-resistant, not
+    refactor-proof. It does NOT prove the match stopped on
     the function's own brace — the walk below does that.
   Identity is carried by the passthrough early-out — `)return process.env;let <copy>={` —
   counted across the WHOLE bundle before the anchor runs, the same discipline PATCH 5 uses. Over
   29 real bundles (2.1.208 through all eight 2.1.239 builds) it occurs exactly once and exactly one
-  `<fn>(process.env.CLAUDE_CODE_REMOTE)?` ternary precedes it; on the 21 pre-2.1.239 bundles the
-  widened anchor's matched span is **byte-identical** to the one it replaces, which is what shows
-  this is a widening and not a rebinding. The last line is a postcondition: walk the real block
+  head candidate precedes it; on the 21 pre-2.1.239 bundles the widened anchor's matched span is
+  **byte-identical** to the one it replaces, which is what shows this is a widening and not a
+  rebinding.
+  The last line is a postcondition: walk the real block
   from the function's own `{` and require that it ends exactly where the anchor ended. A lazily
   found tail can stop in the wrong place in **either** direction and both are silent without it.
   Short: a nested `return <copy>}` ends the match inside the function, so only part of it is
@@ -435,13 +438,60 @@ tweakcc's own repack reads back as an ordinary module name.
   built `…if(x){var re=/}/;return <copy>}…;return <copy>}`, where the unbalanced `}` inside the
   regex literal moves the walk's zero-crossing onto the nested return: the truncated match agrees
   with it and PATCH 10 reports `OK` with a live `process.env` read stranded past the rewritten
-  span. Left as-is deliberately — zero instances across the 29 real bundles, it needs a regex
-  literal no minifier emits here, and closing it means parsing JavaScript. Calibrate it the way
-  this file calibrates PATCH 5's surviving hole: every wrong bind reachable from a shape a real
-  build could emit fails loud.
+  span. Left as-is deliberately, because closing it means parsing JavaScript. **But the reason it
+  is unreachable is not the one that used to be written here.** "Zero instances; a regex literal no
+  minifier emits" is measurably false: the walk reads `/` as division, so an unescaped `{` or `}`
+  inside a regex literal mis-tallies it, and that is ordinary — each 2.1.260 build holds 90 such
+  literals, and the walk disagrees with a real parser on 3-4 of the named `function X(){` bodies
+  this anchor can open, per bundle, in all 27. A review built a silent wrong
+  bind from it (a decoy carrying `/[{]/`, an arrow-function builder carrying `/[}]/`, phantom braces
+  cancelling so `bound` lands on 0) that emits a builder reading `_clodexChildEnv` without declaring
+  it — every child command would throw. It reproduces on the pre-2.1.260 anchor too, so it belongs
+  to the walk, not to any one head. What makes it unreachable is that a mis-tallied function must
+  still REACH the passthrough, and in all 27 bundles the builder is immediately preceded by
+  `}function ` — a 0-byte window the body run will not cross. Watch that window, not the literal
+  count.
   Count the discriminator against the **original source**, not the partly-patched buffer: PATCH 4
   and PATCH 5 splice user-supplied model display text into the bundle, so counting afterwards lets
   a model label that happens to contain the signal refuse a patch that would otherwise succeed.
+- **The same lesson again, on the value the head ends at.** Claude Code 2.1.260 left every other anchor
+  landmark in the child-env builder intact and rewrote how it asks whether it is running remote: in
+  every measured pre-2.1.260 builder that was a call wrapping a `process.env` read whose result fed a ternary
+  (`<fn>(process.env.CLAUDE_CODE_REMOTE)?`), and 2.1.260 reads the flag off the typed env accessor
+  and compares it inline (`i=a.CLAUDE_CODE_REMOTE===!0`). (It was not the only change — 2.1.260 also
+  added `CLAUDE_CODE_QUESTION_EXTENDED` handling and a remote `BUN_JSC_` scrub, growing the builder
+  1942 → 2104 bytes — but it is the change that invalidated the head.) Neither the call nor the
+  `process.env.` prefix survives, PATCH 10 is required, and `clodex patch` refused all eight
+  published builds — the same failure as 2.1.239, one release after the anchor had already been
+  widened once. **A value the builder happens to COMPUTE is only as durable as the expression that
+  computes it.** The head now ends at either that ternary or **`getAgentProxyEnv`**, the agent-proxy
+  env this builder folds into the child's environment — the thing PATCH 10 exists to correct, rather
+  than a flag check that can be rewritten again. `getAgentProxyEnv` is a cross-module property and
+  export name and stayed unminified, spelled identically, in all 27 measured bundles; that is an
+  observation, not a guarantee, and **rename-proof is not the same as spelled in the builder**.
+  Keep BOTH alternatives for exactly that reason: the name is not new — it occurs 6 times in the
+  real 2.1.238 bundle, including its own `__export` map entry — but that builder reaches the env
+  through a helper, `function JP(){let e=NDt(),…` where `NDt` is
+  `return <mod>.getAgentProxyEnv?.()??{}`, so the builder spells it nowhere. Every measured builder
+  from 2.1.246 on spells it inline. Dropping the ternary would have refused 2.1.238 (measured on its
+  darwin-arm64 build, the only one on disk) and presumably everything older, which is not measured.
+  The head run also tolerates the pin sitting inside a destructuring pattern, and an opening `let{`
+  or `let[` with no space — 2.1.239 already made that move on the sibling property of the same
+  registry entry, a minifier drops the space for a pattern of either kind (4784 `let{` and 2246
+  `let[` in each measured Darwin 2.1.260 bundle; the Linux and Windows builds are within a few
+  dozen), and a run that can only consume a `{...}` group WHOLE could never
+  stop inside one. Measured over
+  27 real bundles (2.1.238, 2.1.246, 2.1.252, 2.1.257, 2.1.259 and all eight 2.1.260 builds) the
+  head matches exactly once per bundle, as does the whole anchor; on the 19 predating 2.1.260 the
+  **whole anchor's** matched span — not the head prefix, which ends earlier on 18 of the 19;
+  2.1.238 has no inline `getAgentProxyEnv`, so its head is unchanged — and the whole
+  `applyClodexPatches` output are byte-identical to what the old anchor produced. Relaxing to a bare
+  `CLAUDE_CODE_REMOTE` instead was measured and rejected: four head candidates on 2.1.238, five on
+  each 2.1.246 build, six from 2.1.252 on, leaving identity resting entirely on the passthrough
+  count. **A patched builder is not the same claim as a correct one** —
+  `.claude/harnesses/cc260-patch10-execute-real-builder` extracts the patched builder from each of
+  the eight bundles, checks that their first-occurrence identifier-token skeletons are identical,
+  and executes each one; copy it when a release moves the builder again.
 - **Calibrate a patch-anchor weakness by corpus reachability and by which direction it fails, not
   by whether an attack can be constructed** — one always can, against every site we ship.
   PATCH 5's surviving hole needs upstream to make two coordinated changes at once (respell its own

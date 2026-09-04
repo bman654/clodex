@@ -180,7 +180,7 @@ startup notice (`if (n !== "unknown-model") return null`) and the auto-compact s
 labels the source and seeds its initial value differently. Both are **cosmetic**, so `KJe` remains the
 only behavioural gate — but the bundle already renders `model-default` as a first-class label.
 
-## The shared child-environment builder (verified 2.1.221, re-verified 2.1.239)
+## The shared child-environment builder (verified 2.1.221, re-verified 2.1.239 and 2.1.260)
 
 The shared child-env builder — `pH()` in 2.1.221, with 14 call sites there and 16 in every 2.1.239
 build. The split that matters for bridge isolation:
@@ -193,11 +193,16 @@ env into its own binding (`r=<mod>.settingsColorEnv`) inside the opening `let`,
 builds of 2.1.239, which moved the agent-proxy env behind a registry lookup
 (`sUn.of(lr().host)`), turned the settings-colour binding into a **destructuring** declarator
 (`{settingsColorEnv:n}=e`), added a second computed deny list, and **deleted** the GitHub-Actions
-`INPUT_${…}` scrub from the tail entirely. That is why PATCH 10's anchor identifies the function
-by landmarks inside its body that survive all of that — the `CLAUDE_CODE_REMOTE` ternary, the
-passthrough early-out `)return process.env;let <copy>={` (counted across the whole bundle), the
-back-referenced `return <copy>}` tail, and the required-literal, nested-function and brace-balance
-checks — rather than by counting bindings or by naming a statement upstream is free to delete.
+`INPUT_${…}` scrub from the tail entirely, and `Ai()`/`wi()`/`Es()`/`Rs()`/`Ti()` across the builds
+of 2.1.260, which stopped asking `process.env` whether it is running remote and reads the flag off
+the typed env accessor instead (`i=a.CLAUDE_CODE_REMOTE===!0`). That is why PATCH 10's anchor
+identifies the function by landmarks inside its body that survive all of that — the agent-proxy env
+it folds in (`getAgentProxyEnv`, spelled inline by every measured builder from 2.1.246 on, with the
+`CLAUDE_CODE_REMOTE` ternary the measured 2.1.238 builder uses still accepted as the alternative),
+the passthrough early-out `)return process.env;let <copy>={` (counted across the
+whole bundle), the back-referenced `return <copy>}` tail, and the required-literal, nested-function
+and brace-balance checks — rather than by counting bindings or by naming a statement upstream is
+free to delete.
 
 **Two paths overlay the child env AFTER PATCH 10's restore, and neither is inside the builder.**
 The merge is `{...<restored>,...<settingsColour>,...<agentProxy>,...<remote>}`, so the agent-proxy
