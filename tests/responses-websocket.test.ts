@@ -148,7 +148,7 @@ describe('createResponsesWebSocketFetch', () => {
         Authorization: 'Bearer tok',
         'ChatGPT-Account-Id': 'acct-123',
         originator: 'clodex',
-        version: '0.144.1',
+        version: 'test-client-version',
         'x-openai-internal-codex-responses-lite': 'true',
       },
       body: JSON.stringify({ model: 'gpt-5.6-luna', input: [] }),
@@ -158,7 +158,7 @@ describe('createResponsesWebSocketFetch', () => {
     expect(lastSocket().url).toBe(WS_URL);
     expect(headers['Authorization']).toBe('Bearer tok');
     expect(headers['ChatGPT-Account-Id']).toBe('acct-123');
-    expect(headers['version']).toBe('0.144.1');
+    expect(headers['version']).toBe('test-client-version');
     expect(headers['x-openai-internal-codex-responses-lite']).toBe('true');
     expect(headers['OpenAI-Beta']).toContain('responses_websockets');
   });

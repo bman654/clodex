@@ -77,6 +77,82 @@ describe('registry/refresh-models', () => {
       expect(models?.[0]?.id).toBe('gpt-4');
     });
 
+    // A model id the seed table has never heard of must still arrive as a reasoning
+    // model. Deriving this from the id is what silently shipped gpt-6-astra and
+    // gpt-daybreak-blue-latest as non-reasoning: the effort the user picked was
+    // dropped, and the patched client offered no effort selector for them at all.
+    // Only an id ABSENT from the seed table reaches the changed default; a seeded id
+    // takes the seed branch instead. Keep this case on unseeded ids so it keeps
+    // testing the default rather than the seed.
+    it('treats an unrecognised Codex model as a reasoning model', async () => {
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI (ChatGPT)',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          models: [
+            { slug: 'gpt-something-not-invented-yet', title: 'future' },
+            { slug: 'gpt-8-codename', title: 'another' },
+            { slug: 'some-unversioned-codename', title: 'third' },
+          ],
+        }),
+      } as Response);
+
+      await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
+
+      const savedRegistry = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+      const models = savedRegistry.providers[0]?.modelsCache?.models ?? [];
+      expect(models).toHaveLength(3);
+      for (const model of models) {
+        expect(model.reasoning, `${model.id} should reason`).toBe(true);
+      }
+    });
+
+    // Scope guard for the default above. Tier 2 is the general ChatGPT catalog — the
+    // web model picker — which carries plainly non-reasoning models, so the
+    // "only agentic models" premise that justifies the default does not hold there.
+    it('does not assume reasoning for the general ChatGPT catalog', async () => {
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI (ChatGPT)',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+      // Tier 1 returns nothing, so discovery falls through to Tier 2.
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ models: [] }),
+      } as Response);
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ models: [{ slug: 'gpt-4o', title: 'GPT-4o' }] }),
+      } as Response);
+
+      await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
+
+      const savedRegistry = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+      const models = savedRegistry.providers[0]?.modelsCache?.models ?? [];
+      expect(models.find(m => m.id === 'gpt-4o')?.reasoning).toBe(false);
+    });
+
     it('Tier 2: falls back to general endpoint and filters unsupported if Codex fails', async () => {
       const mockRegistry: ProviderRegistry = {
         version: 1,
@@ -385,6 +461,20 @@ describe('registry/refresh-models', () => {
       expect(luna?.contextWindow).toBe(272_000);
       expect(luna?.useResponsesLite).toBe(true);
       expect(luna?.preferWebSockets).toBe(true);
+
+      // The same guarantee for the newer families. useResponsesLite is what decides
+      // whether the pinned Codex client version is sent at all, and without that
+      // header gpt-6-astra is refused outright — so a seed that loses the flag
+      // silently disconnects the model from the fix that makes it work.
+      for (const id of ['gpt-6-astra', 'gpt-daybreak-blue-latest']) {
+        const model = savedRegistry.providers[0]?.modelsCache?.models.find(m => m.id === id);
+        expect(model, `${id} missing from the seed`).toBeDefined();
+        expect(model?.useResponsesLite, id).toBe(true);
+        expect(model?.preferWebSockets, id).toBe(true);
+        expect(model?.contextWindow, id).toBe(272_000);
+        expect(model?.maxContextWindow, id).toBe(872_000);
+        expect(model?.reasoning, id).toBe(true);
+      }
     });
 
     it('returns error if OAuth token is missing', async () => {

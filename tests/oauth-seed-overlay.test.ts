@@ -96,6 +96,72 @@ describe('legacy OAuth cache overlay', () => {
     expect(model?.maxContextWindow).toBeUndefined();
   });
 
+  // The upgrade path that the fix would otherwise miss entirely. A user who
+  // refreshed their catalog under an older clodex has `reasoning: false` written for
+  // these ids — a stale ID GUESS, since the Codex catalog never reported the field.
+  // Left authoritative it survives the upgrade, getPatchReasoningCapabilities
+  // early-returns on it, and the effort selector stays missing until the user
+  // happens to re-run `clodex providers refresh-models`.
+  it('overrides a stale reasoning verdict for a model the seed now knows', () => {
+    const provider = providerWithLegacyCache();
+    provider.modelsCache?.models.push({
+      id: 'gpt-6-astra',
+      name: 'gpt-6-astra',
+      upstreamModelId: 'gpt-6-astra',
+      contextWindow: 272_000,
+      modelFormat: 'openai',
+      reasoning: false,
+    });
+    const model = projectProviderCachedModels(provider).find(m => m.id === 'gpt-6-astra');
+    expect(model?.reasoning).toBe(true);
+  });
+
+  // Under-scope guard: the override reaches only ids the seed actually carries, so a
+  // model discovered in the wild keeps whatever discovery decided about it.
+  it('leaves the reasoning verdict alone for a model the seed does not know', () => {
+    const provider = providerWithLegacyCache();
+    provider.modelsCache?.models.push({
+      id: 'gpt-not-in-the-seed-table',
+      name: 'unknown',
+      upstreamModelId: 'gpt-not-in-the-seed-table',
+      contextWindow: 272_000,
+      modelFormat: 'openai',
+      reasoning: false,
+    });
+    const model = projectProviderCachedModels(provider)
+      .find(m => m.id === 'gpt-not-in-the-seed-table');
+    expect(model?.reasoning).toBe(false);
+  });
+
+  // The boundary is derived from the family version, so it needs the same
+  // over/under-scope pair the effort predicate has. gpt-5.5 is a real seeded model
+  // with a live 272k band; gpt-5.4 has no published one. An off-by-one that silently
+  // drops gpt-5.5's high-rate warning is a money bug, not a cosmetic one.
+  it.each([
+    ['gpt-5.5-unreleased', 272_000],
+    ['gpt-6-unreleased', 272_000],
+    ['gpt-daybreak-unreleased', 272_000],
+  ])('applies the pricing boundary to %s', (id, boundary) => {
+    const provider = providerWithLegacyCache();
+    provider.modelsCache?.models.push({
+      id, name: id, upstreamModelId: id, contextWindow: 272_000, modelFormat: 'openai',
+    });
+    expect(projectProviderCachedModels(provider).find(m => m.id === id)?.pricingBoundary)
+      .toBe(boundary);
+  });
+
+  it.each(['gpt-5.4-unreleased', 'gpt-4o-unreleased'])(
+    'applies no pricing boundary to %s',
+    id => {
+      const provider = providerWithLegacyCache();
+      provider.modelsCache?.models.push({
+        id, name: id, upstreamModelId: id, contextWindow: 272_000, modelFormat: 'openai',
+      });
+      expect(projectProviderCachedModels(provider).find(m => m.id === id)?.pricingBoundary)
+        .toBeUndefined();
+    },
+  );
+
   // Only the ChatGPT OAuth provider uses the Codex effective-window convention.
   // Applying it to an API-key provider would shrink every other model by 5%.
   it('does not touch a non-OAuth provider', () => {

@@ -186,6 +186,53 @@ describe('getReasoningCapabilities', () => {
     expect(caps.defaultLevel).toBe('medium');
   });
 
+  // What `clodex patch` bakes into the binary as the effort menu. The wire tests
+  // below cover what a chosen effort DOES; this covers what the user is offered in
+  // the first place, which is the other half of the feature and was previously
+  // unpinned — the menu could silently narrow to the gpt-5.6 set with every other
+  // test still green. astra omits 'none' because the backend rejects it.
+  it.each([
+    ['gpt-6-astra', ['low', 'medium', 'high', 'xhigh', 'max']],
+    ['gpt-daybreak-blue-latest', ['none', 'low', 'medium', 'high', 'xhigh', 'max']],
+    ['gpt-7-example', ['low', 'medium', 'high', 'xhigh', 'max']],
+    ['gpt-5.6-sol', ['none', 'low', 'medium', 'high', 'xhigh', 'max']],
+  ])('offers the patched-client effort menu for %s', (modelId, levels) => {
+    expect(getPatchReasoningCapabilities('@ai-sdk/openai', modelId, { reasoning: true }).levels)
+      .toEqual(levels);
+  });
+
+  // The effort MENU and the effort actually SENT must agree on every route. Off the
+  // Codex route nothing vouches for a gpt-6 model — models.dev has no entry — so a
+  // capability gate that waits for metadata leaves an API-key user with an empty
+  // menu while an explicitly chosen effort still reaches the wire.
+  it.each(['gpt-6-astra', 'gpt-daybreak-blue-latest', 'gpt-7-example'])(
+    'reports effort capability for %s with no metadata to vouch for it',
+    modelId => {
+      const caps = getReasoningCapabilities('@ai-sdk/openai', modelId);
+      expect(caps.mode).toBe('controllable');
+      expect(caps.levels).toContain('max');
+    },
+  );
+
+  // getPatchReasoningCapabilities re-filters through effortProviderOptions, so it
+  // would hide a wrong answer here. Assert the capability reporter directly: it is
+  // the general description of the model, and 'none' is the one level whose
+  // availability differs WITHIN the extended-range families.
+  it.each([
+    ['gpt-6-astra', false],
+    ['gpt-daybreak-blue-latest', true],
+    ['gpt-5.6-sol', true],
+  ])('reports whether %s offers a none effort', (modelId, offersNone) => {
+    const levels = getReasoningCapabilities('@ai-sdk/openai', modelId, { reasoning: true }).levels;
+    expect(levels.includes('none')).toBe(offersNone);
+    expect(levels).toContain('max');
+  });
+
+  // Unchanged by the gpt-6 work, and deliberately so: widening admission by FAMILY
+  // rather than by metadata.reasoning leaves these two exactly where they were.
+  // This is also the live coverage of the provider-option filter — the capabilities
+  // side admits them on metadata while effortProviderOptions refuses, and the filter
+  // is what reconciles the two.
   it.each(['gpt-5', 'o1'])(
     'does not advertise effort when %s emits no provider option',
     modelId => {
@@ -400,14 +447,14 @@ describe('effortProviderOptions + deepMergeProviderOptions', () => {
     'preserves GPT-5.6 %s effort on the OpenAI wire',
     (effort) => {
       expect(effortProviderOptions('@ai-sdk/openai', effort, 'gpt-5.6-sol')).toEqual({
-        openai: { reasoningEffort: effort },
+        openai: { reasoningEffort: effort, forceReasoning: true },
       });
     },
   );
 
   it('keeps GPT-5.5 outside the GPT-5.6 wire-effort scope', () => {
     expect(effortProviderOptions('@ai-sdk/openai', 'xhigh', 'gpt-5.5')).toEqual({
-      openai: { reasoningEffort: 'high' },
+      openai: { reasoningEffort: 'high', forceReasoning: true },
     });
   });
 
@@ -420,6 +467,7 @@ describe('effortProviderOptions + deepMergeProviderOptions', () => {
         .toEqual({
           openai: {
             reasoningEffort: effort === 'xhigh' ? 'high' : effort,
+            forceReasoning: true,
             reasoningSummary: null,
           },
         });
@@ -428,9 +476,111 @@ describe('effortProviderOptions + deepMergeProviderOptions', () => {
 
   it('leaves the reasoning summary untouched for other Codex models', () => {
     expect(effortProviderOptions('@ai-sdk/openai', 'high', 'gpt-5.1-codex-max')).toEqual({
-      openai: { reasoningEffort: 'high' },
+      openai: { reasoningEffort: 'high', forceReasoning: true },
     });
   });
+
+  // The bug: a Codex model whose id the pattern list had never seen got NO effort on
+  // the wire at all, however the user set it. Both ids below are real models that
+  // reach this path via the ChatGPT OAuth catalog.
+  it.each(['gpt-6-astra', 'gpt-daybreak-blue-latest'])(
+    'sends the chosen effort for %s instead of dropping it',
+    modelId => {
+      expect(effortProviderOptions('@ai-sdk/openai', 'high', modelId, { reasoning: true }))
+        .toEqual({ openai: { reasoningEffort: 'high', forceReasoning: true } });
+    },
+  );
+
+  // Verified against the live Codex backend on 2026-09-04: both accept 'max', so it
+  // must survive rather than being folded down to 'high' or dropped.
+  it.each(['gpt-6-astra', 'gpt-daybreak-blue-latest'])(
+    'preserves the extended max effort for %s',
+    modelId => {
+      expect(effortProviderOptions('@ai-sdk/openai', 'max', modelId, { reasoning: true }))
+        .toEqual({ openai: { reasoningEffort: 'max', forceReasoning: true } });
+    },
+  );
+
+  // gpt-6-astra 400s on 'none' ("Supported values are: 'low', 'medium', 'high',
+  // 'xhigh', and 'max'") while gpt-daybreak-blue-latest accepts it, so 'none' cannot
+  // ride along with the extended range. Guessing it wrong is a hard error, not a
+  // downgrade — this pair is the reason the two capabilities are separate rules.
+  it('drops a none effort that gpt-6-astra would reject', () => {
+    expect(effortProviderOptions('@ai-sdk/openai', 'none', 'gpt-6-astra', { reasoning: true }))
+      .toBeUndefined();
+  });
+
+  it('keeps the none effort that gpt-daybreak-blue-latest accepts', () => {
+    expect(effortProviderOptions('@ai-sdk/openai', 'none', 'gpt-daybreak-blue-latest', { reasoning: true }))
+      .toEqual({ openai: { reasoningEffort: 'none', forceReasoning: true } });
+  });
+
+  // The maintenance property: the extended range is read off the version, so a
+  // family that does not exist yet is already covered.
+  it('extends the effort range to an unreleased later family', () => {
+    expect(effortProviderOptions('@ai-sdk/openai', 'max', 'gpt-7-example', { reasoning: true }))
+      .toEqual({ openai: { reasoningEffort: 'max', forceReasoning: true } });
+  });
+
+  // Under-scope negative: earlier families must NOT gain the extended range.
+  it.each(['gpt-5.5', 'gpt-5.4', 'gpt-5'])(
+    'does not extend the effort range to %s',
+    modelId => {
+      expect(effortProviderOptions('@ai-sdk/openai', 'max', modelId, { reasoning: true }))
+        .toBeUndefined();
+    },
+  );
+
+  // Over-scope negative: nothing here may admit a model that no metadata vouches for.
+  it('still sends no effort for an unvouched OpenAI model', () => {
+    expect(effortProviderOptions('@ai-sdk/openai', 'high', 'gpt-4o')).toBeUndefined();
+  });
+
+  // models.dev marks the -chat-latest variants as reasoning models, meaning "emits
+  // reasoning tokens" — not "accepts reasoning.effort". OpenAI 400s the parameter for
+  // them and the AI SDK carves `gpt-5-chat*` out of its own reasoning check, so
+  // admitting them here (and then overriding the SDK with forceReasoning) would break
+  // a supported API-key configuration on every request in server mode, where an
+  // effort is filled in by default.
+  it.each(['gpt-5-chat-latest', 'gpt-5.2-chat-latest', 'gpt-6-chat-latest'])(
+    'refuses to send effort to %s even when metadata claims it reasons',
+    modelId => {
+      expect(effortProviderOptions('@ai-sdk/openai', 'high', modelId, { reasoning: true }))
+        .toBeUndefined();
+    },
+  );
+
+  // The -chat carve-out must apply to the whole decision, not to one branch of it:
+  // gpt-5.6-chat-latest is admitted by the id pattern list, so a carve-out that only
+  // guards the family branch would be walked straight around.
+  it.each(['gpt-5.6-chat-latest', 'gpt-6-chat', 'gpt-5-chat-latest'])(
+    'refuses effort for the chat variant %s whichever rule would admit it',
+    modelId => {
+      expect(effortProviderOptions('@ai-sdk/openai', 'high', modelId, { reasoning: true }))
+        .toBeUndefined();
+    },
+  );
+
+  // 'none' was confirmed on blue specifically. By the same rule that keeps it off
+  // astra — a wrong 'none' is a hard 400, not a downgrade — it must not spread to
+  // every daybreak colour on the strength of the prefix alone.
+  it('does not extend the none effort to an unverified daybreak colour', () => {
+    expect(effortProviderOptions('@ai-sdk/openai', 'none', 'gpt-daybreak-red-latest', { reasoning: true }))
+      .toBeUndefined();
+    // The extended range is still granted — only 'none' is held back.
+    expect(effortProviderOptions('@ai-sdk/openai', 'max', 'gpt-daybreak-red-latest', { reasoning: true }))
+      .toEqual({ openai: { reasoningEffort: 'max', forceReasoning: true } });
+  });
+
+  // The admission rule must not be reachable through metadata alone. If this starts
+  // returning options, the family gate has been widened into a metadata gate again.
+  it.each(['gpt-4o', 'gpt-3.5-turbo', 'o1-mini'])(
+    'does not let reasoning metadata alone admit %s',
+    modelId => {
+      expect(effortProviderOptions('@ai-sdk/openai', 'high', modelId, { reasoning: true }))
+        .toBeUndefined();
+    },
+  );
 
   it('merges OpenAI thinking + effort without dropping store/include', () => {
     const merged = deepMergeProviderOptions(
@@ -493,6 +643,56 @@ describe('createLanguageModel', () => {
       },
     });
     expect(responses).toHaveBeenCalledWith('gpt-5.5');
+    vi.doUnmock('@ai-sdk/openai');
+  });
+
+  // The Codex backend gates newer models on this header: gpt-6-astra answered
+  // "requires a newer version of Codex. Please upgrade to the latest app or CLI"
+  // (HTTP 400) while it was pinned at 0.144.1. Nothing tied the header to the
+  // constant before, so a stale pin was invisible until a model stopped working.
+  it('sends the pinned Codex client version on a Responses-Lite request', async () => {
+    vi.resetModules();
+    const responses = vi.fn((modelId: string) => ({ modelId, provider: 'openai-responses' }));
+    const chat = vi.fn((modelId: string) => ({ modelId, provider: 'openai-chat' }));
+    const createOpenAI = vi.fn(() => ({ responses, chat }));
+    vi.doMock('@ai-sdk/openai', () => ({ createOpenAI }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    const { CODEX_RESPONSES_LITE_VERSION } = await import('../src/constants.js');
+    await create({
+      npm: '@ai-sdk/openai',
+      modelId: 'gpt-6-astra',
+      apiKey: 'tok',
+      authType: 'oauth',
+      oauthAccountId: 'acct-1',
+      useResponsesLite: true,
+    });
+
+    const headers = createOpenAI.mock.calls[0]?.[0]?.headers ?? {};
+    expect(headers.version).toBe(CODEX_RESPONSES_LITE_VERSION);
+    expect(headers['x-openai-internal-codex-responses-lite']).toBe('true');
+    vi.doUnmock('@ai-sdk/openai');
+  });
+
+  // Under-scope guard: a model the backend did not flag must not carry the header.
+  it('omits the Codex client version for a model that is not Responses-Lite', async () => {
+    vi.resetModules();
+    const responses = vi.fn((modelId: string) => ({ modelId, provider: 'openai-responses' }));
+    const chat = vi.fn((modelId: string) => ({ modelId, provider: 'openai-chat' }));
+    const createOpenAI = vi.fn(() => ({ responses, chat }));
+    vi.doMock('@ai-sdk/openai', () => ({ createOpenAI }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai',
+      modelId: 'gpt-5.5',
+      apiKey: 'tok',
+      authType: 'oauth',
+      oauthAccountId: 'acct-1',
+    });
+
+    const headers = createOpenAI.mock.calls[0]?.[0]?.headers ?? {};
+    expect(headers.version).toBeUndefined();
     vi.doUnmock('@ai-sdk/openai');
   });
 

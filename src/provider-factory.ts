@@ -326,7 +326,8 @@ export interface ReasoningCapabilities {
 
 const ANTHROPIC_EFFORT_LEVELS = ['low', 'medium', 'high'] as const;
 const OPENAI_EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
-const GPT_56_EFFORT_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+/** Full Codex effort range. gpt-5.6 introduced it; later families inherit it. */
+const CODEX_EXTENDED_EFFORT_LEVELS = ['none', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 const GEMINI_EFFORT_LEVELS = ['low', 'medium', 'high'] as const;
 const MISTRAL_EFFORT_LEVELS = ['high', 'off'] as const;
 const XAI_EFFORT_LEVELS = ['none', 'low', 'medium', 'high'] as const;
@@ -556,8 +557,68 @@ function mapCodexEffortToAnthropic(effort: string): string | undefined {
   }
 }
 
-function isGpt56Model(modelId: string): boolean {
-  return /^gpt-5\.6(?:-|$)/i.test(modelId);
+/**
+ * Families clodex is willing to send `reasoning.effort` to on the OpenAI wire,
+ * beyond the ids modelPrefersResponsesApi already names.
+ *
+ * This deliberately does NOT trust `metadata.reasoning`. That flag comes from
+ * models.dev on the API-key path, where it means "this model emits reasoning
+ * tokens" — not "this model accepts reasoning.effort". The two sets differ:
+ * models.dev marks gpt-5-chat-latest as reasoning, the AI SDK explicitly carves
+ * `gpt-5-chat*` out of its own reasoning check, and OpenAI 400s the parameter.
+ * Reading the family version keeps a later numbered family working with no code
+ * change while admitting nothing that has not earned it.
+ */
+function isCodexReasoningFamily(modelId: string): boolean {
+  return !isChatVariant(modelId) && supportsExtendedCodexEffort(modelId);
+}
+
+/**
+ * The non-reasoning sibling of a reasoning family. The AI SDK carves these out of
+ * its own reasoning check because OpenAI rejects reasoning parameters for them.
+ * Applied to the whole effort decision rather than to one branch of it, so the
+ * carve-out cannot be walked around by an id that some other rule already admits.
+ */
+function isChatVariant(modelId: string): boolean {
+  return /-chat(?:-|$)/i.test(modelId);
+}
+
+/**
+ * Codex families whose reasoning effort accepts the extended range ('xhigh',
+ * 'max') on top of low/medium/high. gpt-5.6 introduced it and every later family
+ * has kept it, so this reads the version rather than listing ids: a gpt-7 that
+ * ships tomorrow gets the full range with no code change. Verified against the
+ * live Codex backend on 2026-09-04 — gpt-6-astra and gpt-daybreak-blue-latest
+ * both accept 'xhigh' and 'max'.
+ *
+ * A model that predates the range (gpt-5.5 and earlier) still has 'xhigh'
+ * folded down to 'high' and 'max' dropped by the caller.
+ */
+function supportsExtendedCodexEffort(modelId: string): boolean {
+  const version = /^gpt-(\d+)(?:\.(\d+))?(?:-|$)/i.exec(modelId);
+  if (version) {
+    const major = Number(version[1]);
+    const minor = version[2] ? Number(version[2]) : 0;
+    if (major > 5 || (major === 5 && minor >= 6)) return true;
+  }
+  // Codenamed aliases carry no version to read; they track the current flagship.
+  return /^gpt-daybreak(?:-|$)/i.test(modelId);
+}
+
+/**
+ * 'none' is the one effort value that must NOT be assumed from the family. It is
+ * a request to skip reasoning entirely, which a model that always reasons
+ * rejects outright — gpt-6-astra answers:
+ *   400 Unsupported value: 'none' is not supported with the 'gpt-6-astra' model.
+ *   Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'.
+ * So it stays an explicit per-family opt-in instead of riding along with the
+ * extended range above. Both entries below were confirmed to accept it on
+ * 2026-09-04; guessing wrong here is a hard 400, not a downgrade.
+ */
+function supportsNoneEffort(modelId: string): boolean {
+  // Deliberately narrower than the extended-range rule above: only the colours
+  // actually confirmed to accept it, not every gpt-daybreak-* alias.
+  return /^gpt-5\.6(?:-|$)/i.test(modelId) || /^gpt-daybreak-blue(?:-|$)/i.test(modelId);
 }
 
 // gpt-5.3-codex-spark rejects `reasoning.summary` outright:
@@ -572,10 +633,13 @@ function isReasoningSummaryUnsupportedModel(modelId: string): boolean {
 }
 
 function mapCodexEffortToOpenAI(effort: string, modelId?: string): string | undefined {
+  if (effort === 'none') {
+    return modelId && supportsNoneEffort(modelId) ? 'none' : undefined;
+  }
   if (
     modelId
-    && isGpt56Model(modelId)
-    && GPT_56_EFFORT_LEVELS.includes(effort as typeof GPT_56_EFFORT_LEVELS[number])
+    && supportsExtendedCodexEffort(modelId)
+    && CODEX_EXTENDED_EFFORT_LEVELS.includes(effort as typeof CODEX_EXTENDED_EFFORT_LEVELS[number])
   ) {
     return effort;
   }
@@ -756,9 +820,15 @@ export function getReasoningCapabilities(
 
   if (npm === '@ai-sdk/openai' || npm === '@ai-sdk/azure') {
     const prefersResponses = modelPrefersResponsesApi(modelId);
-    if (prefersResponses || metadata?.reasoning) {
+    // isCodexReasoningFamily mirrors what effortProviderOptions will actually send.
+    // Without it the two disagree off the Codex route: an API-key user of a gpt-6
+    // model has no models.dev entry to vouch for it, so the effort menu stays empty
+    // while an explicitly chosen effort still goes on the wire.
+    if (prefersResponses || isCodexReasoningFamily(modelId) || metadata?.reasoning) {
       return {
-        levels: isGpt56Model(modelId) ? [...GPT_56_EFFORT_LEVELS] : [...OPENAI_EFFORT_LEVELS],
+        levels: supportsExtendedCodexEffort(modelId)
+          ? CODEX_EXTENDED_EFFORT_LEVELS.filter(level => level !== 'none' || supportsNoneEffort(modelId))
+          : [...OPENAI_EFFORT_LEVELS],
         defaultLevel: 'medium',
         supportsSummaries: true,
         mode: 'controllable',
@@ -979,12 +1049,26 @@ export function effortProviderOptions(
   }
 
   if (npm === '@ai-sdk/openai' || npm === '@ai-sdk/azure') {
-    if (!modelId || !modelPrefersResponsesApi(modelId)) return undefined;
+    // The id pattern list predates gpt-6 and the codenamed aliases, so on its own it
+    // silently dropped the user's effort for both. Widen it by FAMILY rather than by
+    // trusting metadata.reasoning — see isCodexReasoningFamily for why that flag is
+    // the wrong question to ask here.
+    if (!modelId || isChatVariant(modelId)) return undefined;
+    if (!(modelPrefersResponsesApi(modelId) || isCodexReasoningFamily(modelId))) {
+      return undefined;
+    }
     const reasoningEffort = mapCodexEffortToOpenAI(effort, modelId);
     if (!reasoningEffort) return undefined;
+    // The AI SDK re-derives "is this a reasoning model" from its OWN id list
+    // (o1/o3/o4-mini/gpt-5*) and drops reasoningEffort with an "unsupported"
+    // warning for anything it does not recognise. clodex has already decided the
+    // question above, so state the answer rather than letting the SDK re-guess a
+    // narrower one. This also selects the developer-role system message and lets
+    // the SDK strip temperature/top_p, which reasoning models reject.
+    const openaiOptions = { reasoningEffort, forceReasoning: true };
     return isReasoningSummaryUnsupportedModel(modelId)
-      ? { openai: { reasoningEffort, reasoningSummary: null } }
-      : { openai: { reasoningEffort } };
+      ? { openai: { ...openaiOptions, reasoningSummary: null } }
+      : { openai: openaiOptions };
   }
 
   if (npm === '@ai-sdk/xai') {
