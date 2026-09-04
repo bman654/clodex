@@ -27,6 +27,95 @@ explicit programmatic option outranks the environment so tests are never perturb
 `evictions` array on every `ws_head_decision` diagnostic — sustained `*_lru_cap` counts mean a cap
 is too small.
 
+### Pacing new connections
+
+`src/oauth/ws-upgrade-pacer.ts`. OpenAI's edge rejects a WebSocket upgrade with HTTP 403, and in the
+traffic sampled below those rejections clustered in the minutes that opened the most new
+connections. The rejection is handled (see below) but the rate was previously unlimited. That the
+rate is what the edge reacts to is this module's working assumption, not a demonstrated cause. A process-wide token bucket now gates **primary connection creation** — a request that
+reuses an established or nursery head never consults it, so pacing can never add latency to a
+continuation, and the two replacement paths below are exempt by design.
+
+Defaults: 60 new connections per minute sustained, burst 10. Override the rate with
+`CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN` (integer 1-600; `0` disables pacing, values above 600 clamp,
+malformed values are reported once and ignored). The bucket is shared process-wide for the same
+reason the pools are: the throttle is the account's, and the server holds a separate transport per
+model.
+
+**Overflow is refused, not delayed indefinitely.** A request the rate cannot serve within the wait
+bound gets the same retryable 429 frame shape the upgrade 403 produces — `code: '429'` plus the
+load-bearing `retry after Ns` prose — and the AI SDK backs off and retries it. Admitting anyway past
+the bound was tried first and does not work: with the bound doubling as the debt floor, sustained
+output settles at exactly the offered rate delayed by the bound, so an 82/min fan-out still went out
+at 82/min. Refusing sheds the overflow instead, so the rate of *admissions* is capped. It is not
+free: the refused request returns through the SDK's retry ladder, and that backoff runs *inside* the
+same no-data deadline a queue wait spends — which is why the bound below budgets the whole ladder
+rather than one wait.
+
+**With `CLODEX_UPSTREAM_MAX_RETRIES=0` the pacer cannot refuse** — the SDK rethrows before consulting
+`shouldRetry`, so a refusal would be an immediate hard failure. In that mode it shapes the opening
+burst (`burst + bound x refill`, 25 connections at the defaults) and then stops delaying anything at
+all. **That is not a safety guarantee, it is limiting switched off past the floor**: sustained
+traffic is unshaped, exactly as it would be with pacing disabled. Delaying every request by the
+bound instead was measured to shape nothing — sustained output simply equals sustained input,
+late — so it taxes the user for no benefit. The burst is kept because the burst is the part that
+correlates with rejection.
+
+**What pacing costs.** One new connection per second is an aggregate ceiling, not a per-request
+delay. By Little's law, N agents that each need a new connection per turn settle at roughly N
+seconds per turn once the burst is spent: about 20s per turn at 20 agents against ~3s unpaced. The
+trade is throughput for not tripping the throttle, and it is the point of the feature rather than a
+side effect.
+
+**A refusal debits nothing.** That is what makes the retry ladder safe — a refused request opens no
+connection and will be retried, so charging it a token would let each retry deepen the deficit that
+caused the refusal. Because only an admitted request debits, and only within the bound, `tokens`
+cannot fall below `-bound x refill`: the queue is bounded by construction and admissions in any
+window stay within `burst + bound x refill + rate x T + cancellations` however many retries arrive.
+
+**That bounds admissions, not sockets.** Both replacement paths — a transport retry and a
+`previous_response_not_found` retry — build their connection through `createReplacement`, which does
+not consult the pacer, so connections opened can exceed admissions granted. A cancellation likewise
+refunds its token without rescheduling the reservations queued behind it, so each one permits one
+extra admission at that instant.
+
+**The wait bound is derived, not chosen.** Every attempt of one request shares ONE no-data deadline
+(the timer starts before the SDK call and only a stream part resets it), so the whole ladder must
+fit: `(maxRetries + 1) x bound + totalBackoff < idleTimeout`. At a 120s deadline and five retries
+the backoff ladder alone is 62s and the bound works out at ~4.8s; a flat 15s would instead let six
+attempts plus backoff reach 152s against 120s. `maxRetries` is **read** through `upstreamMaxRetries`
+rather than assumed, so the bound is correct whatever clodex's retry default is — assuming it would
+make this feature's correctness depend on the merge order of any change to that default.
+`idleTimeoutMs` is still assumed at 120s, because the translated streaming paths do not expose the
+value; it is an option on the pacer and is the seam to wire a resolved budget into. When the
+arithmetic leaves no room to queue at all the pacer disables itself, since refusing everything past
+the burst would be worse than not pacing.
+
+Because the head scan runs before the wait, an admitted request re-reads the clock, reaps whatever
+expired while it was queued, and demotes itself to `parallel_isolated` if a same-partition request
+went in flight meanwhile — otherwise two requests would each register a persistent nursery head for
+one key and a fan-out would evict other conversations' heads.
+
+Diagnostics: a `ws_new_connection_paced` event (`outcome` of `admitted`, `refused`, or `aborted`,
+with `waitedMs` / `requiredWaitMs` / `retryAfterSeconds`) and `pacingWaitedMs` on the same request's
+`ws_head_decision`. Requests admitted on arrival record nothing. A request cancelled while queued
+returns its reservation and opens no connection.
+
+The numbers come from re-reading one machine's `ws_head_decision` log (103,698 records over about a
+day and a half), bucketing records that carry a `createdConnectionId` by wall-clock minute. Every
+upgrade 403 fell in three minutes, and 39 of the 40 fell in two minutes that each opened 82 new
+connections; across the 1,158 minutes that opened any connection the median was 6, the 90th
+percentile 22 and the 99th 48, and four exceeded 60.
+
+**Scope of that measurement**, so it is not over-read: one account on one machine, one contiguous
+window of roughly a day and a half, counted by the `ws_head_decision` predicate
+`createdConnectionId != null`, which counts PRIMARY connections only — replacements never emit a
+head decision, so they are absent from every figure above. It is a correlation, not a published
+limit and not a demonstrated cause, which is why the default is conservative and tunable. The replacement connections
+are deliberately **not** paced — both the transport retry and the `previous_response_not_found`
+retry: each recovers a request that was already admitted, each is capped at one per request, and
+both are built inside socket callbacks where an await would restructure the retry path.
+
 ### Upstream timeouts and retries
 
 Every AI SDK generation entry point, for both Anthropic- and OpenAI-format routes, resolves one
