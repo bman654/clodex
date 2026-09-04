@@ -7,7 +7,9 @@ import {
   WS_NEW_CONNECTION_BURST,
   WS_NEW_CONNECTION_MAX_WAIT_CEILING_MS,
   resetWsUpgradePacerForTests,
+  canRefuseAtRate,
   pacedRetryAfterSeconds,
+  refusalScheduleMs,
   resolvedPacingBudget,
   wsNewConnectionMaxWaitMs,
   wsNewConnectionsPerMinute,
@@ -219,7 +221,13 @@ describe('the wait bound against the resolved request budget', () => {
       // rather than taking the larger, so the real per-gap delay is the pacer's
       // capped hint wherever that exceeds the rung. Budgeting only the ladder
       // is what let a 30s hint overrun a 10s deadline.
-      const hintCapMs = pacedRetryAfterSeconds(Number.POSITIVE_INFINITY, bound) * 1_000;
+      // Derived here, NOT by calling the function under test. The first version
+      // of this line called `pacedRetryAfterSeconds(Number.POSITIVE_INFINITY,
+      // bound)` — and the helper maps every non-finite deficit to one second,
+      // so the oracle read 1000ms for EVERY bound and the matrix silently
+      // tested one degenerate value. A mutation that removed the cap above a 2s
+      // bound survived all 131 tests under it.
+      const hintCapMs = Math.max(1_000, Math.floor(bound / 1_000) * 1_000);
       let worstGapsMs = 0;
       for (let retry = 0; retry < budget.maxRetries; retry += 1) {
         worstGapsMs += Math.max(hintCapMs, 2_000 * 2 ** retry);
@@ -228,6 +236,33 @@ describe('the wait bound against the resolved request budget', () => {
         .toBeLessThan(budget.idleTimeoutMs);
     },
   );
+
+  it.each([
+    // [bound, deficit, expected hint seconds]
+    [666, 30_000, 1],        // sub-second bound: the floor, not the deficit
+    [2_000, 30_000, 2],
+    [4_833, 30_000, 4],      // the shipped default bound
+    [15_000, 30_000, 15],    // the ceiling
+    [15_000, 3_000, 3],      // a deficit UNDER the cap is passed through
+    [4_833, 1_200, 2],       // rounded up, still under the cap
+  ])('caps a refusal hint at bound=%ims (deficit %ims) to %is', (bound, deficit, expected) => {
+    // Direct cases at the two bounds production actually uses. The matrix above
+    // could not see these: it derived its own expectation, so a cap that only
+    // applied below 2s passed it.
+    expect(pacedRetryAfterSeconds(deficit, bound)).toBe(expected);
+    // Never longer than the bound, except where whole seconds cannot express
+    // it, and never zero.
+    expect(pacedRetryAfterSeconds(deficit, bound) * 1_000)
+      .toBeLessThanOrEqual(Math.max(1_000, bound));
+    expect(pacedRetryAfterSeconds(deficit, bound)).toBeGreaterThanOrEqual(1);
+  });
+
+  it('is total on a degenerate deficit or bound', () => {
+    expect(pacedRetryAfterSeconds(Number.NaN, 15_000)).toBe(1);
+    expect(pacedRetryAfterSeconds(Number.POSITIVE_INFINITY, 15_000)).toBe(1);
+    expect(pacedRetryAfterSeconds(30_000, Number.NaN)).toBe(1);
+    expect(pacedRetryAfterSeconds(-5, 15_000)).toBe(1);
+  });
 
   it('holds when a short total timeout drags the idle timeout down with it', () => {
     // #171's pair rule: an explicit total below the idle lowers the idle. The
@@ -287,28 +322,25 @@ describe('the wait bound against the resolved request budget', () => {
   it('never asks the client to wait longer than the deadline funds', async () => {
     // REGRESSION. The bound budgets the SDK's 2s/4s/8s ladder, but a refusal
     // carries its own `retry-after`, and `getRetryDelayInMs` (ai@7.0.22,
-    // util/retry-with-exponential-backoff.ts) RETURNS that hint in place of the
+    // util/retry-with-exponential-backoff.ts) SUBSTITUTES that hint for the
     // rung whenever it is under 60s. So the hint, not the ladder, is what the
-    // request actually spends between attempts — and an uncapped hint derived
-    // from the token deficit silently replaces the term the bound was derived
-    // against.
+    // request spends between attempts — and an uncapped hint taken from the
+    // token deficit silently replaced the term the bound was derived against.
     //
-    // At 2/minute the deficit is 30s while the deadline funds a 666ms bound.
-    // Before the cap this refusal asked for 30s inside a 10s deadline: the
-    // request died at the deadline having made ONE attempt, with the two
-    // retries its budget had paid for never running.
+    // 6/minute puts a token 10s away, so the third arrival needs 20s against a
+    // 15s bound. Before the cap it asked for 20s. The bound is deliberately the
+    // 15s ceiling here: a cap that only bit below 2s passed every other test.
     const clock = new TestClock();
     const pacer = new WsUpgradePacer({
-      ratePerMinute: 2,
+      ratePerMinute: 6,
       burst: 1,
-      idleTimeoutMs: 10_000,
-      maxRetries: 2,
+      ...boundedBy(15_000),
       now: clock.now,
       schedule: clock.schedule,
     });
-    expect(pacer.maxWaitMs).toBe(666);
+    expect(pacer.maxWaitMs).toBe(15_000);
 
-    const admissions = Array.from({ length: 11 }, () => track(clock, pacer.admit()));
+    const admissions = Array.from({ length: 4 }, () => track(clock, pacer.admit()));
     await flush();
 
     const refusals = admissions
@@ -320,15 +352,79 @@ describe('the wait bound against the resolved request budget', () => {
     for (const refusal of refusals) {
       // The deficit is still reported honestly; only the hint is capped.
       expect(refusal.requiredWaitMs).toBeGreaterThan(pacer.maxWaitMs);
-      // A whole-second hint cannot go below 1s, and 1s is under the SDK's
-      // smallest rung, so it stays inside the term the bound already budgets.
-      expect(refusal.retryAfterSeconds * 1_000)
-        .toBeLessThanOrEqual(Math.max(1_000, pacer.maxWaitMs));
-      // ...and never reaches zero. `retry-after: 0` means retry immediately,
-      // which would burn the whole retry budget in milliseconds. A sub-second
-      // bound (666ms here) is exactly where flooring would produce it.
-      expect(refusal.retryAfterSeconds).toBeGreaterThanOrEqual(1);
+      expect(refusal.retryAfterSeconds).toBe(15);
     }
+  });
+
+  it('never asks for zero seconds when the bound is under a second', async () => {
+    // A sub-second bound is where flooring to whole seconds would produce
+    // `retry-after: 0` — retry immediately, burning the retry budget in
+    // milliseconds. 10s deadline funds a 666ms bound.
+    const clock = new TestClock();
+    const pacer = new WsUpgradePacer({
+      ratePerMinute: 60,
+      burst: 1,
+      idleTimeoutMs: 10_000,
+      maxRetries: 2,
+      now: clock.now,
+      schedule: clock.schedule,
+    });
+    expect(pacer.maxWaitMs).toBe(666);
+
+    const admissions = Array.from({ length: 6 }, () => track(clock, pacer.admit()));
+    await flush();
+    const refusals = admissions
+      .map(entry => entry.admission())
+      .filter((value): value is Extract<UpgradeAdmission, { kind: 'refused' }> =>
+        value?.kind === 'refused');
+
+    expect(refusals.length).toBeGreaterThan(0);
+    for (const refusal of refusals) {
+      expect(refusal.retryAfterSeconds).toBe(1);
+    }
+  });
+
+  it.each([1, 2])(
+    'admits late instead of failing fast at %i new connections per minute',
+    async ratePerMinute => {
+      // REGRESSION for the second failure the cap introduced. At 1/minute the
+      // first token is 60s away, but six attempts four seconds apart are all
+      // spent inside 20s — so every refused request exhausted its retries
+      // before a token could exist and died as a rate-limit error, which is the
+      // exact failure this feature exists to reduce. Measured against the real
+      // SDK: 10 of 10 terminal at both rates.
+      //
+      // Both rates are documented as supported (README: 1-600).
+      const clock = new TestClock();
+      const pacer = new WsUpgradePacer({
+        ratePerMinute,
+        now: clock.now,
+        schedule: clock.schedule,
+      });
+      expect(pacer.maxWaitMs).toBeGreaterThan(0);
+
+      const admissions = Array.from({ length: 20 }, () => track(clock, pacer.admit()));
+      await flush();
+      await clock.advance(pacer.maxWaitMs);
+
+      // Nothing is refused, because a refusal here could not be retried into
+      // an admission before the request's deadline.
+      expect(admissions.some(entry => entry.state() === 'refused')).toBe(false);
+      expect(admissions.every(entry => entry.state() === 'admitted')).toBe(true);
+      expect(clock.pending).toBe(0);
+    },
+  );
+
+  it('still refuses at the shipped rate, where a retry can outlast a refill', () => {
+    // The guard above must not disable refusals at the default. One token per
+    // second is well inside a 5-retry schedule ~4s apart.
+    expect(canRefuseAtRate(4_833, 5, DEFAULT_WS_NEW_CONNECTIONS_PER_MIN)).toBe(true);
+    expect(refusalScheduleMs(4_833, 5)).toBe(20_000);
+    // ...and must disable them where it cannot.
+    expect(canRefuseAtRate(4_833, 5, 1)).toBe(false);
+    expect(canRefuseAtRate(4_833, 5, 2)).toBe(false);
+    // Retries off means nothing would retry a refusal at any rate.
+    expect(canRefuseAtRate(4_833, 0, 60)).toBe(false);
   });
 
   it('does not let a rate notice suppress the notice that pacing turned itself off', () => {

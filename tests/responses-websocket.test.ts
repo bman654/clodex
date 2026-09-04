@@ -4291,7 +4291,11 @@ describe('new-connection pacing', () => {
   it('uses the shared bucket and its env var when no pacer is injected', async () => {
     // Nothing here injects a pacer, so this fails if production stops
     // consulting the shared one — or stops reading the environment.
-    process.env.CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN = '1';
+    // 3/minute, not 1: three is the lowest rate at which refusing can still
+    // reach a refill inside a request's retry schedule at the default
+    // timeouts, and it is far from the default of 60, so this still proves the
+    // environment is read. Rate 1 is covered by the test below.
+    process.env.CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN = '3';
     try {
       resetResponsesWebSocketConnectionsForTests();
       const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
@@ -4316,8 +4320,9 @@ describe('new-connection pacing', () => {
         return readAll(response);
       };
 
-      // At one new connection per minute the burst of ten is free; the
-      // eleventh needs a minute, far past the wait bound, so it is refused.
+      // At three new connections per minute the burst of ten is free; the
+      // eleventh needs twenty seconds, far past the wait bound, so it is
+      // refused.
       for (let index = 0; index < 10; index += 1) await open(`burst-${index}`);
       expect(fakeSockets).toHaveLength(10);
 
@@ -4336,6 +4341,54 @@ describe('new-connection pacing', () => {
       resetResponsesWebSocketConnectionsForTests();
     }
   });
+
+  it('admits late instead of refusing at a rate a retry cannot outlast', async () => {
+    // REGRESSION, end to end through the production singleton. Capping the
+    // refusal hint at the wait bound stopped requests overrunning their
+    // deadline, but at 1/minute the first free slot is 60s away while the whole
+    // retry schedule is spent inside 20s — so every refused request used up its
+    // retries and died as a rate-limit error, manufactured by the feature meant
+    // to reduce them. Nothing may be refused here.
+    process.env.CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN = '1';
+    try {
+      resetResponsesWebSocketConnectionsForTests();
+      const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-pacing-lowrate',
+        onDiagnostic: event => diagnostics.push(event),
+      });
+      const open = async (text: string) => {
+        const response = await wsFetch('https://x', {
+          method: 'POST',
+          headers: {},
+          body: JSON.stringify(sessionPayload(
+            [{ role: 'user', content: [{ type: 'input_text', text }] }],
+            { prompt_cache_key: `relay-session-${text}` },
+          )),
+        });
+        const socket = fakeSockets[fakeSockets.length - 1];
+        if (socket && socket.listenerCount('open') > 0) {
+          socket.emit('open');
+          emitTextResponse(socket, `resp_${text}`, 'ok');
+        }
+        return readAll(response);
+      };
+
+      for (let index = 0; index < 12; index += 1) await open(`low-${index}`);
+
+      // Every one of them opened a connection; none was turned away.
+      expect(fakeSockets).toHaveLength(12);
+      expect(diagnostics).not.toContainEqual(expect.objectContaining({
+        event: 'ws_new_connection_paced',
+        outcome: 'refused',
+      }));
+    } finally {
+      delete process.env.CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN;
+      resetResponsesWebSocketConnectionsForTests();
+    }
+    // Deliberately at the SHIPPED timeouts, which is where the failure was
+    // measured, so one request really does wait out the ~4.8s bound.
+  }, 20_000);
 
   it('opens no connection for a request cancelled while it was queued', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];

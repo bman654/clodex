@@ -426,7 +426,12 @@ clodex --version    # version
   once and ignored. If you have turned retries off with
   `CLODEX_UPSTREAM_MAX_RETRIES=0`, pacing never refuses a request — but it also
   stops limiting once its initial allowance is used up, because there would be
-  nothing left to retry a refused request.
+  nothing left to retry a refused request. The same applies at very low rates:
+  if clodex cannot retry a turned-away request for long enough to reach the
+  next free connection slot — which is the case around 1 or 2 connections a
+  minute at the default timeouts — it admits the excess late rather than
+  failing it, and says so once. Turning a rate that low into hard failures
+  would manufacture the errors this feature exists to reduce.
 
 ## Known limitations
 

@@ -107,6 +107,31 @@ backoff ladder, e.g. `CLODEX_UPSTREAM_IDLE_TIMEOUT_MS=14001` — the bound floor
 pacer disables itself with a notice, since refusing everything past the burst would be worse than
 not pacing. It degrades to less pacing, never to a request pushed past its deadline.
 
+**The backoff ladder is NOT an upper bound on the pacing case.** `getRetryDelayInMs` SUBSTITUTES a
+supplied `retry-after` for its own rung rather than taking the larger of the two, and a refusal
+carries one. So the gap between paced attempts is the hint, and since the hint is capped at the
+bound — which can exceed an early rung, 15s against a 2s first rung — a paced gap can be longer
+than the rung it replaced. The conservative term is the per-gap maximum:
+
+    (maxRetries + 1) x bound + SUM_i max(cappedHint, rung_i) < idleTimeout
+
+That is the property the tests assert across the resolvable space. `wsNewConnectionMaxWaitMs`
+budgets the ladder alone; the halving is the slack that keeps the stronger inequality true, and
+that is measured rather than argued.
+
+**An uncapped hint was a real defect, and capping it created a second one.** The hint used to be
+the raw token deficit, so a 30s hint could be spent inside a 10s deadline: the request died having
+made one attempt, with its remaining retries never run. Capping the hint at the bound fixed that
+and broke low rates in the other direction — at 1/minute the first token is 60s away while six
+attempts ~4s apart are all spent inside 20s, so every refused request exhausted its retries before
+a token could exist. Measured at 1/min and 2/min: 10 of 10 refused requests terminal.
+
+No hint strategy fixes that, because serving a 60s deficit needs a 60s wait and a 120s deadline
+covering six attempts cannot fund one. So **the pacer refuses only when its retry schedule can
+outlast the wait for a refill** (`canRefuseAtRate`); below that it shapes what it can and admits
+the rest late, with a notice. That is the same rule the zero-bound case already used: admitted late
+beats failed.
+
 Because the head scan runs before the wait, an admitted request re-reads the clock, reaps whatever
 expired while it was queued, and demotes itself to `parallel_isolated` if a same-partition request
 went in flight meanwhile — otherwise two requests would each register a persistent nursery head for

@@ -136,13 +136,23 @@ const SDK_INITIAL_BACKOFF_MS = 2_000;
  * than its own ladder — the shareable term floors to zero and the bound with
  * it, which the constructor reads as "do not pace".
  *
- * `totalBackoffMs` is the SDK's own exponential ladder, which is what it uses
- * when a failure carries no `Retry-After`. A refusal from this module DOES carry
- * one, and `getRetryDelayInMs` prefers the header whenever it is under a minute
- * — so the real delay between paced attempts is the header value, not this
- * ladder. The exponential figure is therefore the conservative term: it is an
- * upper bound on the pacing case and the exact term for every other retryable
- * failure sharing the same deadline.
+ * `totalBackoffMs` is the SDK's own exponential ladder, used when a failure
+ * carries no `Retry-After`. A refusal from this module DOES carry one, and
+ * `getRetryDelayInMs` SUBSTITUTES it for the rung rather than taking the larger
+ * of the two, so the real gap between paced attempts is the hint.
+ *
+ * The ladder is therefore NOT an upper bound on the pacing case — do not read
+ * it as one. `pacedRetryAfterSeconds` caps the hint at this bound, and this
+ * bound can exceed an early rung (a 15s cap against a 2s first rung), so a
+ * paced gap can be longer than the rung it replaced. The conservative term is
+ * the per-gap maximum:
+ *
+ *     (maxRetries + 1) x bound + SUM_i max(cappedHint, rung_i) < idleTimeout
+ *
+ * which is what the tests assert across the resolvable configuration space.
+ * This function budgets the ladder alone; the halving above is the slack that
+ * keeps the stronger inequality true as well, and it is measured rather than
+ * assumed.
  *
  * Both `idleTimeoutMs` and `maxRetries` are read from the resolved request
  * budget rather than assumed; see `resolvedPacingBudget`.
@@ -199,6 +209,46 @@ export function pacedRetryAfterSeconds(requiredWaitMs: number, maxWaitMs: number
     ? Math.max(1, Math.ceil(requiredWaitMs / 1_000))
     : 1;
   return Math.min(wantSeconds, capSeconds);
+}
+
+/**
+ * How long a refused request's retry schedule can span, in milliseconds.
+ *
+ * A refusal only helps if the request can come back after a token exists. Every
+ * gap in that schedule is the capped hint — a refused request's deficit exceeds
+ * the bound by definition, so the cap, not the deficit, is what it waits — and
+ * there are `maxRetries` gaps. Zero when nothing would retry.
+ */
+export function refusalScheduleMs(maxWaitMs: number, maxRetries: number): number {
+  if (!Number.isFinite(maxRetries) || maxRetries <= 0) return 0;
+  return maxRetries * pacedRetryAfterSeconds(Number.MAX_SAFE_INTEGER, maxWaitMs) * 1_000;
+}
+
+/**
+ * Whether refusing can actually make progress at this rate.
+ *
+ * Capping the hint at the bound fixed requests overrunning their deadline, but
+ * it created the opposite failure at low rates: at 1/minute the first token is
+ * 60s away while six attempts four seconds apart are all spent inside 20s, so
+ * every refused request exhausted its retries before a token could exist and
+ * died as a rate-limit error — manufactured by the very thing meant to avoid
+ * them. Measured at 1/min and 2/min: 10 of 10 refused requests terminal.
+ *
+ * No hint strategy fixes that. Serving a 60s deficit needs a 60s wait, and a
+ * 120s deadline covering six attempts cannot fund one; that is the same
+ * arithmetic that forced the cap. So when the schedule cannot reach a refill,
+ * the pacer stops refusing and shapes what it can instead — the identical rule
+ * it already applies to a zero bound, where refusing everything past the burst
+ * is worse than not pacing. Admitted late beats failed.
+ */
+export function canRefuseAtRate(
+  maxWaitMs: number,
+  maxRetries: number,
+  ratePerMinute: number,
+): boolean {
+  if (!Number.isFinite(ratePerMinute) || ratePerMinute <= 0) return false;
+  const refillIntervalMs = 60_000 / ratePerMinute;
+  return refusalScheduleMs(maxWaitMs, maxRetries) >= refillIntervalMs;
 }
 
 /** Outcome of asking the pacer for permission to open a new connection. */
@@ -365,11 +415,25 @@ export class WsUpgradePacer implements ConnectionPacer {
         message => emitParentNotice(`clodex: ${message}`),
       );
     }
-    // A refusal is only safe when something will retry it. With retries turned
-    // off the SDK rethrows before it ever consults `shouldRetry`, so a refusal
-    // would become an immediate hard failure — the opposite of the point. Wait
-    // out the bound and open the connection instead.
-    this.canRefuse = maxRetries > 0;
+    // A refusal is only safe when something will retry it, AND only useful when
+    // that retry can outlast the wait for a token. With retries turned off the
+    // SDK rethrows before it ever consults `shouldRetry`, so a refusal would be
+    // an immediate hard failure; at a rate whose refill the retry schedule
+    // cannot reach, it is a slower hard failure. Both admit instead.
+    this.canRefuse = maxRetries > 0
+      && canRefuseAtRate(this.maxWaitMs, maxRetries, ratePerMinute);
+    if (this.enabled && maxRetries > 0 && !this.canRefuse) {
+      // The user asked for a hard ceiling and is not getting one. Never silent.
+      reportOnce(
+        `norefuse:${ratePerMinute}:${maxRetries}:${this.maxWaitMs}`,
+        `pacing new OpenAI connections at ${ratePerMinute}/minute without refusing overflow: a `
+        + `${maxRetries}-retry schedule spans only `
+        + `${refusalScheduleMs(this.maxWaitMs, maxRetries)}ms, which cannot outlast the `
+        + `${Math.round(60_000 / ratePerMinute)}ms wait for a free connection slot, so excess `
+        + 'connections are admitted late rather than failed',
+        message => emitParentNotice(`clodex: ${message}`),
+      );
+    }
     this.refillPerMs = this.enabled ? ratePerMinute / 60_000 : 0;
     this.capacity = Number.isFinite(burst) ? Math.max(1, burst) : WS_NEW_CONNECTION_BURST;
     this.maxDebt = this.maxWaitMs * this.refillPerMs;
