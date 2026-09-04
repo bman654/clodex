@@ -246,11 +246,16 @@ export function refusalScheduleMs(maxWaitMs: number, maxRetries: number): number
  * simultaneous overflow requests need ten minutes of capacity, so a longer hint
  * rescues one of them and still fails the other nine.
  *
- * Given that, shaping is chosen over refusing because it spends the shortfall
- * on latency the user configured rather than on errors, and because it keeps
- * one hint rule instead of two. A separately budgeted hint is a reasonable
- * follow-up, not a correction. This is the same rule already applied to a zero
- * bound, where refusing everything past the burst is worse than not pacing.
+ * Given that, shaping is chosen over refusing because it avoids guaranteed
+ * local failures while retaining bounded opening-burst shaping, at the cost of
+ * RELAXING THE CONFIGURED CEILING. Be exact about what is spent: the user
+ * configured a connection rate, not a latency, and this fallback mostly does
+ * not add latency — at 1/minute with 20 simultaneous requests, 19 are admitted
+ * immediately, one waits out the bound and none is refused. What gives way is
+ * the ceiling itself. It also keeps one hint rule instead of two. A separately
+ * budgeted hint is a reasonable follow-up, not a correction. This is the same
+ * rule already applied to a zero bound, where refusing everything past the
+ * burst is worse than not pacing.
  */
 export function canRefuseAtRate(
   maxWaitMs: number,

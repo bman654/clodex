@@ -136,8 +136,11 @@ capacity.
 
 So **the pacer refuses only when its retry schedule can outlast the wait for a refill**
 (`canRefuseAtRate`); below that it shapes the opening burst and then admits the remaining overflow
-rather than failing it, with a notice. That is the same rule the zero-bound case already used, and
-it is chosen because it spends the shortfall on latency the user configured rather than on errors.
+rather than failing it, with a notice. That is the same rule the zero-bound case already used. It
+avoids guaranteed local failures while retaining bounded opening-burst shaping, **at the cost of
+relaxing the configured ceiling** — which is what is actually given up here. The user configured a
+connection rate, not a latency, and the fallback mostly adds no latency: at 1/minute with 20
+simultaneous requests, 19 are admitted immediately, one waits out the bound and none is refused.
 A separately budgeted hint would be a reasonable follow-up.
 
 Because the head scan runs before the wait, an admitted request re-reads the clock, reaps whatever
