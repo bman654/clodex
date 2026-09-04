@@ -588,14 +588,15 @@ write_repro_script() {
     printf '# TWEAKCC_CONFIG_DIR and TWEAKCC_CC_INSTALLATION_PATH, so it cannot touch the installed\n'
     printf '# Claude Code, ~/.clodex or ~/.tweakcc.\n'
     printf '#\n'
-    printf '#   %s/repro.sh                              # this Mac, clodex origin/main\n' "$WORK"
-    printf '#   %s/repro.sh linux-arm64                  # that leg, exactly as the canary ran it\n' "$WORK"
-    printf '#   %s/repro.sh linux-arm64 <your-worktree>  # the same leg against your fix\n' "$WORK"
+    printf '#   %s/repro.sh                              # this Mac execution tier, origin/main\n' "$WORK"
+    printf '#   %s/repro.sh linux-arm64                  # strongest execution tier for that platform\n' "$WORK"
+    printf '#   MODE=probe %s/repro.sh linux-arm64       # the universal bundle/marker probe tier\n' "$WORK"
+    printf '#   %s/repro.sh linux-arm64 <your-worktree>  # the execution tier against your fix\n' "$WORK"
     printf '#\n'
-    printf '# The leg matches the platform: the host runs the real `clodex patch`; linux-arm64 and\n'
-    printf '# linux-arm64-musl run it inside a container; the rest run the bundle-patch probe,\n'
-    printf '# scripts/probe-patch-mechanism.mjs. Your worktree does NOT need to be built first —\n'
-    printf '# the host leg builds it if dist is missing and the container legs always rebuild.\n'
+    printf '# The canary attempted the probe for every downloaded build. The default reruns its execution tier:\n'
+    printf '# the host runs the real `clodex patch`; linux-arm64 and linux-arm64-musl run it inside a\n'
+    printf '# container; other platforms already default to the probe. Your worktree does NOT need to be\n'
+    printf '# built first — the host builds it if dist is missing and containers always rebuild.\n'
     printf '#\n'
     printf 'set -Eeuo pipefail\n'
     printf 'CANARY_WORK=%q\n' "$WORK"
@@ -613,8 +614,8 @@ ENTRY="$(jq -s -c --arg p "$PLATFORM" 'map(select(.platform == $p)) | last // em
   jq -s -r 'map("  \(.platform) [\(.mode)] \(.status)")[]' "$CANARY_WORK/matrix.jsonl" >&2
   exit 1
 }
-# The leg this platform actually got. MODE=container overrides it: if the canary ran without
-# Docker, the recorded leg is a probe, and a probe never starts the binary it patched.
+# The leg this platform actually got. MODE may select probe or container explicitly; for example,
+# MODE=container adds execution when Docker was unavailable to the scheduled run.
 MODE="${MODE:-$(printf '%s' "$ENTRY" | jq -r '.mode')}"
 TARBALL="$(printf '%s' "$ENTRY" | jq -r '.tarball')"
 MEMBER=claude
@@ -628,10 +629,12 @@ done
 SB="$(mktemp -d "$CANARY_WORK/repro.XXXXXX")"
 mkdir -p "$SB/install" "$SB/clodex-home" "$SB/tweakcc" "$SB/home" "$SB/out"
 
-# The canary keeps a failing leg's binary but deletes a passing one's, and the host leg's pristine
-# backup is the most trustworthy source of all — it is the bytes clodex itself snapshotted.
+# The canary keeps a failing leg's binary but deletes a passing one's. Prefer a pristine backup
+# from either real patch tier — those are the release bytes clodex itself snapshotted.
 if [ -f "$CANARY_WORK/tweakcc/native-binary.backup" ] && [ "$PLATFORM" = "$CANARY_HOST_PLATFORM" ]; then
   cp "$CANARY_WORK/tweakcc/native-binary.backup" "$SB/install/$MEMBER"
+elif [ -f "$CANARY_WORK/$PLATFORM/tweakcc/native-binary.backup" ]; then
+  cp "$CANARY_WORK/$PLATFORM/tweakcc/native-binary.backup" "$SB/install/$MEMBER"
 elif [ -f "$CANARY_WORK/$PLATFORM/install/$MEMBER" ]; then
   cp "$CANARY_WORK/$PLATFORM/install/$MEMBER" "$SB/install/$MEMBER"
 elif [ -f "$CANARY_WORK/$PLATFORM/$MEMBER" ]; then
@@ -685,8 +688,13 @@ case "$MODE" in
     # the probe runs from source.
     [ -d "$REPO/node_modules/tweakcc" ] || ( cd "$REPO" && corepack pnpm install --frozen-lockfile )
     cd "$REPO"
-    exec node "$REPO/scripts/probe-patch-mechanism.mjs" "$SB/install/$MEMBER" \
-      --label "$PLATFORM" --expect-version "$CANARY_VERSION" --scratch "$SB/probe"
+    exec env -u CLODEX_TRACE -u FORCE_COLOR -u CLICOLOR_FORCE \
+      HOME="$SB/home" \
+      CLODEX_HOME="$SB/clodex-home" \
+      TWEAKCC_CONFIG_DIR="$SB/tweakcc" \
+      TWEAKCC_CC_INSTALLATION_PATH="$SB/install/$MEMBER" \
+      node "$REPO/scripts/probe-patch-mechanism.mjs" "$SB/install/$MEMBER" \
+        --label "$PLATFORM" --expect-version "$CANARY_VERSION" --scratch "$SB/probe"
     ;;
   container)
     IMAGE="$(printf '%s' "$ENTRY" | jq -r '.detail.image // ""')"
@@ -728,35 +736,42 @@ REPRO_BODY
 investigation_prompt() {
   local version="$1" reasons="$2" logfile="$3"
   cat <<EOF
-You are triaging an automated canary failure. Be rigorous: this ends in a pull request that changes
-how every clodex user's Claude Code binary gets patched.
+You are triaging an automated canary failure. Be rigorous: this may end in a pull request that
+changes binary patching or updates clodex's exact knowledge of Claude Code.
 
 WHAT HAPPENED
-Claude Code $version was published. An automated canary downloaded it for EVERY published platform
-into a throwaway sandbox and tested \`clodex patch\` against each one, built from a freshly fetched
-origin/main ($MAIN_SHA — $MAIN_SUBJECT). It did not come out clean:
+Claude Code $version was published. An automated canary attempted every published platform package.
+It probed each build it downloaded and ran the real \`clodex patch\` wherever that binary could be
+executed. It used freshly fetched origin/main ($MAIN_SHA — $MAIN_SUBJECT) and did not come out clean:
 
 $reasons
 
 THE PLATFORM MATRIX
 $(jq -s -r 'map("  \(.platform)\t[\(.mode)]\t\(.status)")[]' "$MATRIX")
 
-Three kinds of leg, and they prove different things — read this before concluding anything about
-scope:
+Every matrix row whose mode is not \`none\` first ran scripts/probe-patch-mechanism.mjs. It checks
+exact compaction-prompt markers, applies every clodex patch site to that build's extracted bundle,
+and runs the shim/read/repack/restore cycle without executing the result. A \`none\` row downloaded
+nothing and ran no check. The other matrix modes name the strongest additional tier available:
   host       the real \`clodex patch\` on this Mac, all patch sites end to end.
   container  the real \`clodex patch\` inside a native-arch Linux container. \`clodex patch\`
              resolves the version by EXECUTING the binary, so a foreign binary can only go through
              the real command this way.
-  probe      scripts/probe-patch-mechanism.mjs — it applies every clodex patch site to the
-             bundle extracted from that build, repacks the result, and runs the same
-             shim/read/repack/restore cycle src/patcher.ts runs, all without executing the
-             binary. It covers the anchors AND the executable format; it never starts the
-             patched binary.
+  probe      no execution tier was available; the universal probe is the whole result.
 A failure confined to one executable format (ELF, Mach-O, PE) points at src/bun-entry-module.ts or
-tweakcc's repack, not at the patch anchors. A failure on every platform at once points at the
-anchors in src/patch-transforms.ts. If instead the reasons say a check that passed on an earlier
-release now SKIPs, the release is patchable and an ANCHOR DRIFTED: diff the two bundles with
-scripts/extract-cc-bundles.mjs (last clean release: $BASE_VERSION) before touching anything.
+tweakcc's repack, not at the patch anchors. A patch-site failure on every checked platform points at
+the anchors in src/patch-transforms.ts.
+
+A \`compact-prompt-markers\` failure is NOT a patch failure: no patch site is broken. On a complete
+bundle extraction it means Claude Code reworded its compaction prompt, so clodex's text-only guard
+stops firing, auto-compaction fails on OpenAI models, and long sessions die with "Prompt is too
+long". First confirm the extracted source still contains both compaction builders; a bundle-reader
+omission has the same symptom. Then read the new wording and update only the corresponding marker(s)
+in src/claude-code-compact-prompt.ts before rerunning the probe.
+
+If instead the reasons say a check that passed on an earlier release now SKIPs, the release is
+patchable and an ANCHOR DRIFTED: diff the two bundles with scripts/extract-cc-bundles.mjs (last
+clean release: $BASE_VERSION) before changing it.
 
 Two limits on what a green leg proves, so you do not report a fix as verified when it is not:
 - A leg recorded as \`probe\` never STARTS the binary it patched. It proves the anchors matched and
@@ -782,19 +797,23 @@ EVIDENCE (read these first)
     $WORK/tweakcc          the pristine backup the host leg made
 - The clodex build under test: $REPO_DIR (detached at origin/main)
 
-REPRODUCE — ONE COMMAND, USE THIS ONE
-  $WORK/repro.sh <platform>                    # exactly what the canary ran for that platform
-  $WORK/repro.sh <platform> <your-worktree>    # the same leg, against your fix
-It picks the right leg for the platform, seeds a fresh sandbox, and redirects HOME, CLODEX_HOME,
-TWEAKCC_CONFIG_DIR and TWEAKCC_CC_INSTALLATION_PATH for you. With no arguments it runs this Mac's
-leg against origin/main. Your worktree does not need to be built first. Read it before you run it;
-if you need a variant, copy it and edit the copy.
+REPRODUCE — USE THE TIER THAT REPORTED THE FAILURE
+  MODE=probe $WORK/repro.sh <platform>          # universal bundle/marker probe
+  $WORK/repro.sh <platform>                    # strongest recorded execution tier
+  $WORK/repro.sh <platform> <your-worktree>    # that execution tier against your fix
+The default command picks the matrix mode; on host/container platforms it does not repeat the probe
+that ran before that tier. Each command seeds a fresh sandbox and redirects HOME, CLODEX_HOME,
+TWEAKCC_CONFIG_DIR and TWEAKCC_CC_INSTALLATION_PATH. With no arguments it runs this Mac's execution
+tier against origin/main. Your worktree does not need to be built first. Read the script before you
+run it; if you need a variant, copy it and edit the copy.
 
 Fix the ROOT CAUSE once. Several platforms failing together is almost always one defect — the
 last time this happened, all four ELF builds broke on a single line in the restore sweep. Do not
-open four PRs, and do not fix one platform in a way that only works for that platform. Verify the
-fix by re-running the repro for EVERY platform in the matrix above, failing and passing alike:
-a change to the binary handling can break a format that was fine.
+open four PRs, and do not fix one platform in a way that only works for that platform. Verify a
+probe or prompt-marker fix with \`MODE=probe\` for every downloaded row in the matrix (mode other
+than \`none\`), failing and passing alike. Also rerun each platform's default tier when binary
+handling or real patch execution changed;
+a format that was fine can still regress.
 
 HARD CONSTRAINTS
 - **Never run a bare \`clodex patch\` or \`node dist/cli.js patch\`.** With no
@@ -819,9 +838,10 @@ WHAT TO DO
 3. Fix it, following CLAUDE.md and .claude/skills/pr-verification/SKILL.md in full — including
    bumping PATCH_TRANSFORMS_VERSION if the transform set changed materially, and a test that fails
    before the fix and passes after.
-4. Verify: \`pnpm typecheck && pnpm test && pnpm build\`, then re-run every platform in the matrix —
-   \`for p in $(jq -s -r 'map(.platform) | join(" ")' "$MATRIX"); do $WORK/repro.sh \$p <your-worktree>; done\` —
-   and confirm each one comes out clean on a pristine $version copy.
+4. Verify: \`pnpm typecheck && pnpm test && pnpm build\`, then re-run every downloaded row in the
+   matrix — \`for p in $(jq -s -r 'map(select(.mode != "none") | .platform) | join(" ")' "$MATRIX");
+   do $WORK/repro.sh \$p <your-worktree>; done\` — and confirm each one comes out clean on a pristine
+   $version copy.
 5. Run an adversarial review panel over your own change before pushing, per the pr-verification
    skill. Fix what it finds; re-review after changes.
 6. Open a PR against main with \`gh pr create\`. Write the summary line for a user who has never read
@@ -838,9 +858,24 @@ Do not finish without sending the concluding message.
 EOF
 }
 
+only_compact_prompt_drift_failed() {
+  [ -z "${EXTRA_REASONS:-}" ] && matrix_failures_are_compact_prompt_drift_only
+}
+
+compact_prompt_drift_headline() { # compact_prompt_drift_headline <version> <failed> <total>
+  printf ':warning: *Claude Code %s changed its compaction prompt* on %s of %s builds' "$1" "$2" "$3"
+}
+
+compact_prompt_drift_impact() {
+  printf '%s' '*This does not mean `clodex patch` is broken* — no patch site failed, and this finding '
+  printf '%s' 'does not call for a patch rollback. Claude Code reworded its plain-text compaction '
+  printf '%s' "request, so clodex's guard no longer forces text-only responses on OpenAI models and "
+  printf '%s' 'long sessions can die with "Prompt is too long". clodex needs updated prompt markers.'
+}
+
 launch_investigation() {
   local version="$1" reasons="$2" logfile="$3"
-  local session_name prompt out session_id
+  local session_name prompt out session_id finding
   session_name="clodex-patch-canary $version $(date +%Y%m%d%H%M)"
   SESSION_NAME="$session_name"
   SESSION_ID=""
@@ -855,7 +890,11 @@ launch_investigation() {
   # starting a second one alongside a session that is still tracked.
   if [ "$(state_read | jq -r '.inflight // "null"')" != "null" ]; then
     log "WARN: an investigation is already tracked — not launching a second one"
-    slack ":warning: clodex patch canary found that Claude Code $version breaks \`clodex patch\`, but an investigation of $(state_read | jq -r '.inflight.version') is already running, so no second session was started. Details: $logfile" || true
+    finding="breaks \`clodex patch\`"
+    if [ "${COMPACT_PROMPT_DRIFT_ONLY:-0}" -eq 1 ]; then
+      finding="changed the compaction prompt clodex recognizes"
+    fi
+    slack ":warning: clodex patch canary found that Claude Code $version $finding, but an investigation of $(state_read | jq -r '.inflight.version') is already running, so no second session was started. Details: $logfile" || true
     return 1
   fi
   if [ ! -x "$CLAUDE_BIN" ]; then
@@ -1183,9 +1222,9 @@ if [ "$BASE_PLATFORMS" != "{}" ]; then
       add_soft "your favourites/aliases changed since the $BASE_VERSION baseline, so $PLATFORM's checks were not compared; its baseline is re-taken from $VERSION"
       continue
     fi
-    # A leg's checks are named per mode — patch sites for host/container, probe check names for a
-    # probe. Comparing across modes reports every name in the other set as a lost site, so a single
-    # Docker outage would produce a page of invented regressions on the run after it.
+    # A host/container result now carries the probe checks plus the real command's patch report; a
+    # probe-only result carries no execution report. Comparing across modes still reports names from
+    # the extra tier as lost, so a single Docker outage would invent regressions on the next run.
     # An entry recorded before this field existed carries no mode, so its names cannot be placed in
     # either set. Comparing it anyway does the exact damage the mode check exists to prevent — it
     # reported all 16 probe names as dropped on two consecutive container runs — so an entry with no
@@ -1264,6 +1303,8 @@ REASONS="$EXTRA_REASONS$(matrix_reason_groups)"
 [ -n "$(matrix_reason_groups)" ] && REASONS="$REASONS
 "
 [ -n "$FAILED_PLATFORMS" ] || [ -n "$EXTRA_REASONS" ] || REASONS=""
+COMPACT_PROMPT_DRIFT_ONLY=0
+only_compact_prompt_drift_failed && COMPACT_PROMPT_DRIFT_ONLY=1
 
 ERROR_COUNT="$(matrix_count error)"
 DOWNGRADED="$(jq -s -r 'map(select(.downgraded == true) | .platform) | join(", ")' "$MATRIX")"
@@ -1319,9 +1360,9 @@ if [ -z "$REASONS" ]; then
   else
     UPDATE_LINE="You are on $INSTALLED_VERSION, so the update is yours to take whenever you like. Re-run \`clodex patch\` afterwards to re-apply your aliases."
   fi
-  # What was actually established, in the words of what was actually run. A probe leg exercises no
-  # patch site and never starts the binary, so it may not be described as "clodex patch applies
-  # cleanly" — that phrase is only true of the host and container legs.
+  # What was actually established, in the words of what was actually run. The probe applies every
+  # patch transform to extracted JavaScript but never runs the real `clodex patch` command or starts
+  # its result, so "clodex patch applies cleanly" is still true only of host and container legs.
   FULL_LEGS="$(jq -s -r 'map(select(.status == "pass" and (.mode == "host" or .mode == "container")) | .platform) | join(", ")' "$MATRIX")"
   FULL_COUNT="$(jq -s -r 'map(select(.status == "pass" and (.mode == "host" or .mode == "container"))) | length' "$MATRIX")"
   PROBE_COUNT="$(jq -s -r 'map(select(.status == "pass" and .mode == "probe")) | length' "$MATRIX")"
@@ -1357,7 +1398,11 @@ The real \`clodex patch\` ran on $FULL_COUNT of $TOTAL_COUNT builds ($FULL_LEGS)
 Tested against clodex origin/main \`${MAIN_SHA:0:8}\` (not the published $(node -p "require('$REPO_DIR/package.json').version" 2>/dev/null || echo release)), so this is a verdict on main.
 $UPDATE_LINE$( [ -n "$SOFT_NOTES" ] && printf '\n\n:information_source: Worth knowing:\n%s' "$SOFT_NOTES" )$( [ "$COVERAGE_COMPLETE" -eq 1 ] || printf '\n\n%s' "$COVERAGE" )" || true
 else
-  log "FAIL: Claude Code $VERSION did not patch cleanly:"
+  if [ "$COMPACT_PROMPT_DRIFT_ONLY" -eq 1 ]; then
+    log "FAIL: Claude Code $VERSION changed the compaction prompt clodex recognizes:"
+  else
+    log "FAIL: Claude Code $VERSION did not patch cleanly:"
+  fi
   printf '%s' "$REASONS"
   KEEP_WORK=1   # the investigation needs the sandbox
   write_repro_script
@@ -1407,7 +1452,10 @@ else
   LAST_GOOD=""
   [ -z "$LAST_COMPLETE" ] || LAST_GOOD="
 Last release that came out clean on every build: *$LAST_COMPLETE*."
-  if [ "$HOST_STATUS" = "fail" ] && [ "$INSTALLED_VERSION" = "$VERSION" ]; then
+  if [ "$COMPACT_PROMPT_DRIFT_ONLY" -eq 1 ]; then
+    HEADLINE="$(compact_prompt_drift_headline "$VERSION" "$(matrix_count fail)" "$TOTAL_COUNT")"
+    IMPACT="$(compact_prompt_drift_impact)$LAST_GOOD"
+  elif [ "$HOST_STATUS" = "fail" ] && [ "$INSTALLED_VERSION" = "$VERSION" ]; then
     IMPACT="*You are already ON $VERSION and it cannot be patched* — your aliases and effort settings are off until this is fixed. Roll back, or wait for the fix.$LAST_GOOD"
   elif [ "$HOST_STATUS" = "fail" ]; then
     IMPACT="*Do not update Claude Code yet* — you are on $INSTALLED_VERSION and patching $VERSION fails on this Mac. Your current patched install keeps working; the risk is only at update time.$LAST_GOOD"

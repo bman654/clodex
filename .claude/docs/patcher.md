@@ -340,25 +340,33 @@ tweakcc's own repack reads back as an ordinary module name.
   back carrying what was written.
 
   **It also applies every patch site to that build's own bundle** (`scripts/probe-patch-sites.mjs`,
-  which calls the real `applyClodexPatches` with a synthetic config that activates all of them),
-  fails on any `FAIL`, `SKIP`, missing or duplicated site, and publishes **what the transforms
-  produced** rather than the pristine bytes — so the byte-for-byte readback also proves clodex's own
-  emitted patch survives the PE/ELF/Mach-O round trip. Read that precisely: since the write stopped
-  rebuilding the blob, the patched bytes never enter tweakcc's repack, so what the readback proves
-  is that the container RESIZE works on this format and that clodex's own publish round-trips. What
-  pins the sizing arithmetic against the real repack is the probe's `blob-sized-as-planned` check. Anchors were assumed platform-independent
-  until Claude Code 2.1.238, where `PATCH 5: model picker options` matched five builds and missed
-  `linux-arm64`, `linux-arm64-musl` and `win32-arm64`.
+  which calls the real `applyClodexPatches` with a synthetic config that activates all of them), and
+  checks that the exact Claude Code compaction markers used by the runtime text-only guard still
+  occur in that platform's extracted JavaScript. Both consumers import the same marker module. The
+  hourly canary runs this probe against every downloaded platform build before any stronger host or
+  container execution check. The probe fails on a missing marker or any `FAIL`, `SKIP`, missing or
+  duplicated patch site, and publishes **what the transforms produced** rather than the pristine
+  bytes — so the byte-for-byte readback also proves clodex's own emitted patch survives the
+  PE/ELF/Mach-O round trip. Read that precisely: since the write stopped rebuilding the blob, the
+  patched bytes never enter tweakcc's repack, so what the readback proves is that the container
+  RESIZE works on this format and that clodex's own publish round-trips. The
+  `blob-sized-as-planned` check pins the sizing arithmetic against the real repack. Anchors were
+  assumed platform-independent until Claude Code 2.1.238, where `PATCH 5: model picker options`
+  matched five builds and missed `linux-arm64`, `linux-arm64-musl` and `win32-arm64`.
 
   Two things it still cannot tell you: **that the patched binary runs**, and **that an anchor bound
   to the function it was aimed at** rather than a lookalike that also emits valid JavaScript. Only a
   host or containerised `clodex patch` answers the first. `clodex patch` resolves the version by
   executing the binary (`getClaudeVersionForBinary`), which is exactly why a foreign binary can go
-  through the probe and not through the real command.
+  through the probe and not through the real command. A `compact-prompt-markers` failure is not a
+  broken patch site. On a complete extraction it means Claude Code changed the prompt wording and
+  the text-only guard stopped matching; first confirm the bundle reader still exposes both builders,
+  then update `src/claude-code-compact-prompt.ts` from their extracted wording. Presence catches
+  removal or in-place rewording of today's strings, not a new builder that leaves both old strings.
 
   `tests/probe-patch-sites.test.ts` pins the probe's synthetic config and its expected-site list
   against the real transform set — so a new or renamed `PATCH` site reddens `pnpm test` rather than
-  failing five platforms in the hourly canary. Revisit it whenever you bump
+  failing the hourly canary on every downloaded platform build. Revisit it whenever you bump
   `PATCH_TRANSFORMS_VERSION`.
 
 ## Patcher invariants
@@ -391,10 +399,10 @@ tweakcc's own repack reads back as an ordinary module name.
   because the twin was inserted into exactly that gap. Note what the replacement does and does not
   prove: it validates the appender the builder loops through, so a different caller of the genuine
   appender would inherit that evidence; it rejects the realistic impostor, which brings its own.
-  Verify with the real-bundle
-  harness over **every platform's** bundle (`scripts/extract-cc-bundles.mjs` reads a foreign binary
-  fine), not just this Mac's: the canary's probe legs exercise zero patch sites, so win32-arm64
-  recorded a `pass` for the release this broke.
+  Verify with the real-bundle harness over **every downloaded platform's** bundle
+  (`scripts/extract-cc-bundles.mjs` reads a foreign binary fine), not just this Mac's. This is why the
+  canary now applies the patch sites to every bundle it downloads: before that check existed,
+  win32-arm64 recorded a `pass` for the release this broke.
 - **An anchor that spells out a statement upstream can delete is a required patch waiting to fail.**
   Claude Code 2.1.239 moved BOTH ends of PATCH 10's child-env builder in a single release — the
   opening `let` gained an optional call and a *destructuring* declarator (`{settingsColorEnv:n}=e`,

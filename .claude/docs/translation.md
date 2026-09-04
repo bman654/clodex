@@ -22,6 +22,32 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   tokenizes at ~1.5 chars/token — 200k+ tokens per screenshot, killing agents with "Prompt is too
   long" while the local bytes/4 estimate showed half the real count.
   `estimateAnthropicInputTokens` likewise counts each image block at a flat vision estimate.
+- **A compaction turn is forced to plain text with `toolChoice: 'none'`.** Claude Code forks that
+  turn — automatic and manual `/compact` alike — with the forking session's full tool list and
+  relies only on the prompt to stop the model calling them, while denying tool *execution* and
+  allowing one turn. So an emitted call buys nothing: it burns the turn and returns no summary. The
+  reactive path gets no retry; the manual path retries once outside the fork with a reduced tool
+  set, then gives up as well. Three consecutive failures open a circuit breaker that skips later
+  automatic compaction with no API
+  call, until a successful compaction or a fresh query invocation resets it — which never happens
+  inside one headless or subagent run, so the context grows until "Prompt is too long".
+  `isClaudeCodeCompactRequest` keys on the envelope text and nothing else. Two rules it must keep:
+  **do not re-narrow it to a particular tool** (`StructuredOutput` was the old precondition and
+  missed every session without a schema — 15 of 173 real translated compact requests in the local
+  ledgers), and **keep the header match anchored to the start of a text block**, because clodex's
+  own sources, agent reports and pasted prompts quote the envelope and an unanchored match strips
+  their tools. Tool *definitions* stay in the request so the cached prompt prefix still matches.
+  If the strict header changes, a deliberately bounded warning-only recognizer can report one
+  subset of drift without changing tool choice: after an optional known severity label, the new
+  header must still start with `respond`, `return`, `answer`, `output`, `write`, or `provide`, then
+  say text only and prohibit tools on one short line; the rejected-tool/only-turn anchor must remain
+  at line start. It is not a general drift detector. The reverse shape — strict header
+  intact, reminder changed — is deliberately invisible at runtime because it is indistinguishable
+  from a pasted header. The per-build probe checks both strict markers in every extracted bundle;
+  that catches their removal or in-place rewording, not a new third builder that leaves both old
+  strings present. A warning is diagnostic only: tools stay enabled and compaction can still fail
+  until clodex updates its markers. Terminal notices are capped at three `cc_version` signatures per
+  process (plus one suppression line), while every sighting remains in the trace log.
 - Anthropic- and OpenAI-format `streamText` calls abort after the configured idle window without an
   event (120s by default) or the configured total provider-call window (10m by default). True
   `generateText` calls enforce only the total window because they expose no event that can reset an

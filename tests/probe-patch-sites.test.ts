@@ -1,8 +1,8 @@
 // The patch-site half of the release canary's probe (scripts/probe-patch-sites.mjs).
 //
-// The canary runs that probe against a real Claude Code build for every platform that has no
-// container image — win32-x64, win32-arm64, linux-x64, linux-x64-musl, darwin-x64. It used to
-// check executable-format handling only, so it reported win32-arm64 as a clean pass on Claude
+// The scheduled canary targets all eight published platforms and runs this probe against each
+// build it successfully downloads, before host and container builds receive execution checks. It
+// used to check executable-format handling only, so it reported win32-arm64 as a clean pass on Claude
 // Code 2.1.238 while `PATCH 5: model picker options` no longer matched that build's bundle at
 // all. It now applies the real transforms, which means two new ways for it to be wrong:
 //
@@ -21,13 +21,14 @@ import {
 } from '../scripts/probe-patch-sites.mjs';
 import { applyClodexPatches } from '../src/patch-transforms.js';
 import { CLAUDE_FIXTURE } from './fixtures/claude-bundle.js';
+import { checkClaudeCodeCompactPromptMarkers } from '../src/claude-code-compact-prompt.js';
 
 describe('the canary probe against a healthy bundle', () => {
   it('exercises every patch site the transform set has, and no other', () => {
     const { sites, failures } = checkPatchSites(CLAUDE_FIXTURE);
 
-    // Exact list, in order. A site the probe does not know about is a site nothing vouches for on
-    // five of the eight published builds, and a name drifting is as invisible as a name removed.
+    // Exact list, in order. A site the probe does not know about is unchecked on the five
+    // probe-only platform builds, and a name drifting is as invisible as a name removed there.
     expect(sites.map((s) => s.name)).toEqual([...EXPECTED_PATCH_SITES]);
     expect(failures).toEqual([]);
   });
@@ -127,5 +128,40 @@ describe('the canary probe against a bundle whose anchors drifted', () => {
     expect(failures[2]).toContain('were never attempted');
     // And the wording sends the reader at clodex, not at a night of diffing Claude Code bundles.
     expect(failures[2]).toContain("clodex's transform set");
+  });
+});
+
+describe('the canary probe against Claude Code compact prompt drift', () => {
+  it('names either missing production marker and fails when both have drifted', () => {
+    // Independent oracle copied from an extracted 2.1.260 bundle. Importing the production marker
+    // values here would let a bad edit change both the implementation and its expected fixture.
+    const start = 'CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.';
+    const end = 'REMINDER: Do NOT call any tools. Respond with plain text only';
+    const healthy = ['bundle prefix', start, 'summary instructions', end, 'bundle suffix'].join('\n');
+
+    expect(checkClaudeCodeCompactPromptMarkers(healthy)).toEqual({
+      ok: true,
+      missing: [],
+      detail: 'both strict compaction prompt markers are present',
+    });
+    expect(checkClaudeCodeCompactPromptMarkers(
+      healthy.replace(start, 'REWORDED COMPACT START'),
+    )).toEqual({
+      ok: false,
+      missing: ['start'],
+      detail: 'missing strict compaction prompt marker(s): start',
+    });
+    expect(checkClaudeCodeCompactPromptMarkers(
+      healthy.replace(end, 'REWORDED COMPACT END'),
+    )).toEqual({
+      ok: false,
+      missing: ['end'],
+      detail: 'missing strict compaction prompt marker(s): end',
+    });
+    expect(checkClaudeCodeCompactPromptMarkers('both prompt markers were reworded')).toEqual({
+      ok: false,
+      missing: ['start', 'end'],
+      detail: 'missing strict compaction prompt marker(s): start, end',
+    });
   });
 });

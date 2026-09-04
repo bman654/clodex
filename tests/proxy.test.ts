@@ -9,6 +9,8 @@ import { makeRouteResolver, resolveCatalogModelAliases } from '../src/catalog.js
 import { getProxyDebugLogPath } from '../src/trace-log.js';
 import { anthropicMessagesEndpoint, estimateAnthropicInputTokens } from '../src/anthropic-endpoints.js';
 import type { LocalProvider, ModelAlias } from '../src/types.js';
+import { resetCompactPromptDriftWarningsForTests } from '../src/sdk-adapter.js';
+import { installParentNoticeSink } from '../src/parent-notice.js';
 
 /** POST JSON to a local proxy via node:http (avoids vi.stubGlobal('fetch') interception). */
 function postToProxy(
@@ -877,6 +879,58 @@ describe('translated request cancellation', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 20_000);
+});
+
+describe('compact-prompt drift trace logging', () => {
+  it('records every sighting on the default proxy translation route', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-compact-drift-proxy-'));
+    const debugLogPath = join(dir, 'debug.log');
+    const notices: string[] = [];
+    const releaseNotices = installParentNoticeSink(line => notices.push(line));
+    resetCompactPromptDriftWarningsForTests();
+    const route: ProxyRoute = {
+      aliasId: 'clodex:test:translated-model',
+      realModelId: 'translated-model',
+      displayName: 'Translated Model',
+      upstreamUrl: '',
+      apiKey: 'provider-key',
+      modelFormat: 'openai',
+      npm: 'missing-sdk-provider-for-test',
+      providerId: 'test-provider',
+    };
+    const handle = await startProxyCatalog(
+      [route],
+      route.aliasId,
+      true,
+      undefined,
+      debugLogPath,
+    );
+
+    try {
+      const response = await postToProxy(handle.port, handle.token, {
+        model: route.aliasId,
+        max_tokens: 100,
+        messages: [{
+          role: 'user',
+          content: [
+            'Return only plain text. Never invoke any tools.',
+            '- Tool calls will be REJECTED and will waste your only turn — you will fail the task.',
+          ].join('\n'),
+        }],
+        stream: false,
+      });
+
+      expect(response.status).toBe(502);
+      expect(readFileSync(debugLogPath, 'utf8'))
+        .toContain('possible Claude Code compact prompt drift: unknown-version');
+      expect(notices).toHaveLength(1);
+    } finally {
+      handle.close();
+      resetCompactPromptDriftWarningsForTests();
+      releaseNotices();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('SDK translated error logging', () => {

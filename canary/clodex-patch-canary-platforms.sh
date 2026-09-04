@@ -22,21 +22,25 @@
 #                    across two clodex releases while macOS stayed green, because the canary only
 #                    ever tested the host. An outside contributor reported it, not us.
 #
-# So every published platform is now tested, by the strongest means available for it:
+# So every downloaded platform build now runs the cross-platform probe, plus the strongest
+# execution check available for it:
 #
-#   host       the real `clodex patch` on this Mac — the authoritative "is it safe for me to
-#              update" answer, and the only leg that patches AND then starts the binary here.
-#   container  the real `clodex patch` inside a native-architecture Linux container. `clodex
-#              patch` resolves the version by EXECUTING the binary, so a foreign binary cannot go
-#              through the real command on the host — a container is the only way to run the whole
-#              thing against ELF.
 #   probe      scripts/probe-patch-mechanism.mjs from the clodex checkout under test: it applies
-#              every clodex patch site to the bundle it extracts from THAT build, repacks what
-#              those transforms produced, and runs the same shim/read/repack/restore cycle the
-#              patcher runs. It never executes the binary, so it works from macOS against every
-#              format, and it is the only coverage win32 and linux-x64 can have cheaply.
-#              What it cannot show: that the patched binary starts, and that an anchor bound to
-#              the function it was meant to bind to rather than a lookalike that also parses.
+#              every clodex patch site to the bundle it extracts from THAT build, checks the exact
+#              compaction-prompt markers, repacks what those transforms produced, and runs the same
+#              shim/read/repack/restore cycle the patcher runs. It never executes the binary, so it
+#              works from macOS against every format.
+#   host       the real `clodex patch` on this Mac, after the probe — the authoritative "is it safe
+#              for me to update" answer, and the only leg that patches AND then starts the binary
+#              here.
+#   container  the real `clodex patch` inside a native-architecture Linux container, after the
+#              probe. `clodex patch` resolves the version by EXECUTING the binary, so a foreign
+#              binary cannot go through the real command on the host — a container is the only way
+#              to run the whole thing against ELF.
+#
+# On probe-only platforms, what remains unproved is that the patched binary starts. On every
+# platform, matching an anchor cannot prove it bound to the intended function rather than a
+# lookalike that also parses.
 #
 # A leg that cannot RUN (no Docker, a platform package that has not published yet, a container
 # that could not install its dependencies) is an `error`, never a `fail`. Only evidence that the
@@ -147,7 +151,7 @@ docker_ready() {
   [ "$DOCKER_READY" = "yes" ]
 }
 
-# The strongest leg this run can actually run for a platform.
+# The matrix mode: strongest execution tier, or `probe` when none can run.
 platform_mode() { # platform_mode <name>
   if [ "$1" = "$(host_platform)" ]; then printf 'host'; return 0; fi
   if [ -n "$(platform_image "$1")" ] && docker_ready; then printf 'container'; return 0; fi
@@ -213,10 +217,10 @@ fetch_platform_binary() { # fetch_platform_binary <platform> <version>
 
 # --------------------------------------------------------------------- the legs
 #
-# Every leg leaves the same four globals behind, so one evaluator serves all three:
+# Every leg leaves the same globals behind, so matrix assembly is shared across all modes:
 #   LEG_STATUS   pass | fail | error
 #   LEG_REASONS  why it failed, one "- " line each (empty on pass)
-#   LEG_SITES    per-site OK/SKIP/FAIL map as JSON ({} when the leg does not run patch sites)
+#   LEG_SITES    named probe checks plus patch-site OK/SKIP/FAIL results as JSON
 #   LEG_MARKERS  ccpatch: markers found in the published binary, as JSON ([] likewise)
 # plus LEG_DETAIL, a JSON object of whatever else is worth recording for that leg.
 
@@ -460,23 +464,23 @@ run_leg_probe() { # run_leg_probe <platform> <version>
 "
     return 0
   fi
-  # Fenced like the other two legs. The probe redirects TWEAKCC_CONFIG_DIR itself only when it is
-  # UNSET, so an operator with it exported in their shell would otherwise have the probe write
-  # into their real ~/.tweakcc — the one thing every leg here promises never to touch.
-  mkdir -p "$WORK/$platform/tweakcc"
+  # Fenced like the other two legs. Keep its tweakcc state separate from a later container patch:
+  # the probe does not write there today, but sharing makes a future tweakcc cache or backup alter
+  # the supposedly fresh execution tier. An exported operator value must never reach ~/.tweakcc.
+  mkdir -p "$WORK/$platform/probe-tweakcc"
   set +e
   ( cd "$REPO_DIR" && with_timeout "$CANARY_PATCH_TIMEOUT" \
       env -u CLODEX_TRACE -u FORCE_COLOR -u CLICOLOR_FORCE \
         HOME="$WORK/home" \
         CLODEX_HOME="$WORK/clodex-home" \
-        TWEAKCC_CONFIG_DIR="$WORK/$platform/tweakcc" \
+        TWEAKCC_CONFIG_DIR="$WORK/$platform/probe-tweakcc" \
         "$NODE_BIN_DIR/node" "$REPO_DIR/scripts/probe-patch-mechanism.mjs" "$PLATFORM_BINARY" \
           --label "$platform" --expect-version "$version" --json \
           --scratch "$WORK/$platform/probe-scratch" ) \
     > "$json" 2> "$WORK/$platform/probe.stderr"
   rc=$?
   set -e
-  rm -rf "$WORK/$platform/probe-scratch"
+  rm -rf "$WORK/$platform/probe-scratch" "$WORK/$platform/probe-tweakcc"
 
   evaluate_probe_leg "$platform" "$json" "$rc" "$WORK/$platform/probe.stderr"
   return 0
@@ -513,6 +517,17 @@ evaluate_probe_leg() { # evaluate_probe_leg <platform> <probe.json> <exit-code> 
     return 0
   fi
 
+  # Host and container execution says whether the patcher runs; it cannot notice that Claude Code
+  # reworded the compaction prompt and silently disabled the runtime's exact text-only guard. Every
+  # platform therefore needs this probe check even when a stronger execution leg follows it.
+  if ! jq -e 'any(.checks[]; .name == "compact-prompt-markers" and (.ok | type) == "boolean")' \
+       "$json" >/dev/null 2>&1; then
+    LEG_STATUS=error
+    LEG_REASONS="- the $platform probe reported no compact-prompt-markers result, so prompt drift was not checked — the clodex build under test (${MAIN_SHA:-unknown} on $CANARY_BRANCH) predates compaction-marker checking
+"
+    return 0
+  fi
+
   LEG_DETAIL="$(jq -c '{format, entryState, shimUsed, pristineSize, publishedSize, growth,
                         detectedVersion, sourceBytes, durationMs, patchSites: (.patchSiteSummary // null)}' "$json")"
   # Both sets of names, in one map, because both are checks that must keep holding: the mechanism
@@ -532,8 +547,76 @@ evaluate_probe_leg() { # evaluate_probe_leg <platform> <probe.json> <exit-code> 
 "
   fi
   failed_sites="$(jq -r '[(.patchSites // [])[] | select(.status == "FAIL") | .name] | join("; ")' "$json")"
-  log "$platform probe: $(jq -r '.verdict' "$json") ($(jq -r '(.durationMs/1000|floor)' "$json")s, $(jq -r '.format' "$json"), $(jq -r '.patchSiteSummary.applied // 0') patch sites applied${failed_sites:+, FAILED: $failed_sites})"
+  log "$platform probe: $(jq -r '.verdict' "$json") ($(jq -r '(.durationMs/1000|floor)' "$json")s, $(jq -r '.format' "$json"), $(jq -r '.patchSiteSummary.applied // 0' "$json") patch sites applied${failed_sites:+, FAILED: $failed_sites})"
   return 0
+}
+
+# Keep an infrastructure failure identifiable when a release failure from the other tier decides
+# the merged row's status. matrix_reason_groups must not present that line as release evidence.
+append_merged_leg_reasons() { # append_merged_leg_reasons <status> <reasons>
+  local status="$1" reasons="$2" line
+  [ "$status" != "pass" ] || return 0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [ "$status" = "error" ]; then
+      LEG_REASONS="${LEG_REASONS}- CANARY INFRASTRUCTURE: ${line#- }"$'\n'
+    else
+      LEG_REASONS="${LEG_REASONS}${line}"$'\n'
+    fi
+  done <<< "$reasons"
+}
+
+# Fold the mandatory cross-platform probe into a host/container execution result. A real release
+# failure decides the status ahead of an infrastructure error, while both tiers' reasons survive.
+merge_probe_with_execution() { # merge_probe_with_execution <status> <reasons> <sites> <markers> <detail>
+  local probe_status="$1" probe_reasons="$2" probe_sites="$3" probe_markers="$4" probe_detail="$5"
+  local execution_status="$LEG_STATUS" execution_reasons="$LEG_REASONS"
+
+  # Both tiers report PATCH names. Preserve each answer rather than letting a successful real patch
+  # overwrite a synthetic all-sites failure (or vice versa); mechanism checks have no collision.
+  LEG_SITES="$(jq -n -c --argjson probe "$probe_sites" --argjson execution "$LEG_SITES" '
+    ($probe | with_entries(if (.key | startswith("PATCH "))
+                           then .key = ("probe:" + .key) else . end)) + $execution')"
+  LEG_MARKERS="$(jq -n -c --argjson probe "$probe_markers" --argjson execution "$LEG_MARKERS" \
+    '$probe + $execution | unique')"
+  LEG_DETAIL="$(jq -n -c --argjson probe "$probe_detail" --argjson execution "$LEG_DETAIL" \
+    '$execution + {probe: $probe}')"
+
+  if [ "$probe_status" = "fail" ] || [ "$execution_status" = "fail" ]; then
+    LEG_STATUS=fail
+  elif [ "$probe_status" = "error" ] || [ "$execution_status" = "error" ]; then
+    LEG_STATUS=error
+  else
+    LEG_STATUS=pass
+  fi
+  LEG_REASONS=""
+  append_merged_leg_reasons "$probe_status" "$probe_reasons"
+  append_merged_leg_reasons "$execution_status" "$execution_reasons"
+}
+
+# Probe every downloaded build before a host/container leg mutates it. On platforms that cannot be
+# executed here, the probe remains the whole leg. An unknown execution mode dies here rather than
+# bypassing the per-build prompt-marker check quietly.
+run_platform_leg() { # run_platform_leg <platform> <version> <mode>
+  local platform="$1" version="$2" mode="$3"
+  local probe_status probe_reasons probe_sites probe_markers probe_detail
+
+  run_leg_probe "$platform" "$version"
+  [ "$mode" != "probe" ] || return 0
+
+  probe_status="$LEG_STATUS"
+  probe_reasons="$LEG_REASONS"
+  probe_sites="$LEG_SITES"
+  probe_markers="$LEG_MARKERS"
+  probe_detail="$LEG_DETAIL"
+
+  case "$mode" in
+    host) run_leg_host "$platform" "$version" ;;
+    container) run_leg_container "$platform" "$version" ;;
+    *) die "unknown platform mode: $mode" ;;
+  esac
+  merge_probe_with_execution \
+    "$probe_status" "$probe_reasons" "$probe_sites" "$probe_markers" "$probe_detail"
 }
 
 # --------------------------------------------------------------- the whole matrix
@@ -585,11 +668,7 @@ run_platform_matrix() { # run_platform_matrix <version> <first-seen-epoch>
 "
       mode=none
     else
-      case "$mode" in
-        host)      run_leg_host      "$platform" "$version" ;;
-        container) run_leg_container "$platform" "$version" ;;
-        *)         run_leg_probe     "$platform" "$version" ;;
-      esac
+      run_platform_leg "$platform" "$version" "$mode"
     fi
 
     # A platform that should have had a full containerised patch but got the probe instead was
@@ -641,18 +720,43 @@ matrix_status_of() { # matrix_status_of <platform>
 matrix_reason_groups() {
   jq -r -s '
     map(select(.status == "fail"))
-    | map({platform, reasons: (.reasons | split("\n") | map(select(length > 0)))})
+    | map({platform, reasons: (.reasons | split("\n")
+      | map(select(length > 0))
+      | map(select(startswith("- CANARY INFRASTRUCTURE: ") | not)))})
     | map(.reasons[] as $r | {platform, r: $r})
     | group_by(.r)
     | map("\(.[0].r) [\(map(.platform) | join(", "))]")
     | join("\n")' "$MATRIX"
 }
 
-# The same, for legs that could not be run at all.
+# A prompt-marker miss breaks long OpenAI sessions, but it is not evidence that binary patching
+# broke. Keep that category distinct only when every release-origin failure is the marker check;
+# tagged infrastructure failures may coexist without changing the diagnosis.
+matrix_failures_are_compact_prompt_drift_only() {
+  jq -e -s '
+    [ .[] | select(.status == "fail") ] as $failed
+    | ($failed | length) > 0
+      and all($failed[];
+        ((.sites // {})["compact-prompt-markers"] == "FAIL")
+        and ([((.sites // {}) | to_entries[])
+              | select(.value == "FAIL" and .key != "compact-prompt-markers")] | length) == 0
+        and ([.reasons | split("\n")[]
+              | select(length > 0)
+              | select(startswith("- CANARY INFRASTRUCTURE: ") | not)
+              | select(startswith("- Compaction-prompt drift is not a patch failure:") | not)]
+             | length) == 0)
+  ' "$MATRIX" >/dev/null
+}
+
+# Infrastructure reasons from an `error` row, plus tagged infrastructure reasons retained in a
+# `fail` row whose other tier found a release defect.
 matrix_error_notes() {
   jq -r -s '
-    map(select(.status == "error"))
-    | map(.reasons | split("\n") | map(select(length > 0))[])
+    map(. as $row
+      | ($row.reasons | split("\n") | map(select(length > 0))[])
+      | select($row.status == "error" or startswith("- CANARY INFRASTRUCTURE: "))
+      | sub("^- CANARY INFRASTRUCTURE: "; "- "))
+    | unique
     | join("\n")' "$MATRIX"
 }
 
@@ -674,9 +778,17 @@ matrix_coverage_line() {
     def sym: if .status == "pass" and .downgraded then ":warning:"
              elif .status == "pass" then ":white_check_mark:"
              elif .status == "fail" then ":x:" else ":grey_question:" end;
+    def marker_failed:
+      .status == "fail" and ((.sites // {})["compact-prompt-markers"] == "FAIL");
     def how: if .status != "pass" and .status != "fail" then "NOT TESTED"
-             elif .mode == "host" then "full patch, this Mac"
-             elif .mode == "container" then "full patch in \(.detail.image // "a container")"
+             elif marker_failed and .mode == "host" then
+               "compaction prompt marker check failed; full patch also ran on this Mac"
+             elif marker_failed and .mode == "container" then
+               "compaction prompt marker check failed; full patch also ran in \(.detail.image // "a container")"
+             elif marker_failed and .mode == "probe" then
+               "compaction prompt marker check failed; native execution not checked"
+             elif .mode == "host" then "bundle probe + full patch, this Mac"
+             elif .mode == "container" then "bundle probe + full patch in \(.detail.image // "a container")"
              elif .mode == "probe" and .downgraded then
                "bundle patch + binary handling — no container, so the patched binary was never started here"
              elif .mode == "probe" then
@@ -690,8 +802,16 @@ matrix_coverage_line() {
 matrix_coverage_brief() {
   jq -r -s '
     def sym: if .status == "fail" then ":x:" else ":grey_question:" end;
-    def how: if .mode == "host" then "full patch, this Mac"
-             elif .mode == "container" then "full patch in \(.detail.image // "a container")"
+    def marker_failed:
+      .status == "fail" and ((.sites // {})["compact-prompt-markers"] == "FAIL");
+    def how: if marker_failed and .mode == "host" then
+               "compaction prompt marker check failed; full patch also ran on this Mac"
+             elif marker_failed and .mode == "container" then
+               "compaction prompt marker check failed; full patch also ran in \(.detail.image // "a container")"
+             elif marker_failed and .mode == "probe" then
+               "compaction prompt marker check failed; native execution not checked"
+             elif .mode == "host" then "bundle probe + full patch, this Mac"
+             elif .mode == "container" then "bundle probe + full patch in \(.detail.image // "a container")"
              elif .mode == "probe" then "bundle patch + binary handling"
              else "not tested" end;
     (map(select(.status != "pass")) | map("\(sym) *\(.platform)* — \(how)")) as $bad
@@ -727,8 +847,10 @@ matrix_mode_of() { # matrix_mode_of <platform>
 matrix_applied_sites() { # matrix_applied_sites <platform>
   jq -r -s --arg p "$1" \
     'map(select(.platform == $p) | .sites) | last // {}
-     | [to_entries[] | select(.value == "OK")] | length' "$MATRIX"
+     | [to_entries[] | select(.key | startswith("PATCH ")) | select(.value == "OK")] | length' "$MATRIX"
 }
 matrix_total_sites() { # matrix_total_sites <platform>
-  jq -r -s --arg p "$1" 'map(select(.platform == $p) | .sites | length) | last // 0' "$MATRIX"
+  jq -r -s --arg p "$1" \
+    'map(select(.platform == $p) | .sites) | last // {}
+     | [to_entries[] | select(.key | startswith("PATCH "))] | length' "$MATRIX"
 }
