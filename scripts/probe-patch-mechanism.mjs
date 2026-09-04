@@ -71,6 +71,7 @@ import {
   restoreBunCompiledPointer,
   shimBunCompiledPointer,
 } from '../src/bun-compiled-pointer.ts';
+import { checkClaudeCodeCompactPromptMarkers } from '../src/claude-code-compact-prompt.ts';
 
 // `src/` spells its own imports the TypeScript way — `./model-aliases.js` for a file that is
 // really `./model-aliases.ts`. tsup and vitest both understand that; bare `node` does not, and
@@ -362,6 +363,26 @@ try {
   info.sourceBytes = source.length;
   info.bundleModules = bundle ? bundle.modules.length : null;
   info.readMs = Date.now() - started;
+
+  // The runtime text-only guard intentionally keys on Claude Code's exact prompt. Check those same
+  // bytes in each platform's own extracted bundle so upstream wording drift fails the release
+  // canary instead of silently disabling the guard in production.
+  const compactPromptMarkers = checkClaudeCodeCompactPromptMarkers(source);
+  info.compactPromptMarkers = { missing: compactPromptMarkers.missing };
+  record(
+    'compact-prompt-markers',
+    compactPromptMarkers.ok,
+    compactPromptMarkers.detail,
+    compactPromptMarkers.ok ? undefined : [
+      'Compaction-prompt drift is not a patch failure: patching itself is fine for this finding, '
+        + 'and no patch site is broken. On a complete bundle extraction, Claude Code reworded its '
+        + "compaction prompt, which stops clodex's text-only guard from firing; auto-compaction "
+        + 'then fails on OpenAI models and long sessions die with "Prompt is too long". First '
+        + 'confirm the extracted source still contains both compaction builders, because a '
+        + 'bundle-reader omission has the same symptom. Then update the markers in '
+        + 'src/claude-code-compact-prompt.ts to the new wording from this bundle.',
+    ],
+  );
 
   if (readShim) restoreEntryModuleName(scratch, readShim, { resign: false });
   record(

@@ -37,6 +37,17 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   ledgers), and **keep the header match anchored to the start of a text block**, because clodex's
   own sources, agent reports and pasted prompts quote the envelope and an unanchored match strips
   their tools. Tool *definitions* stay in the request so the cached prompt prefix still matches.
+  If the strict header changes, a deliberately bounded warning-only recognizer can report one
+  subset of drift without changing tool choice: after an optional known severity label, the new
+  header must still start with `respond`, `return`, `answer`, `output`, `write`, or `provide`, then
+  say text only and prohibit tools on one short line; the rejected-tool/only-turn anchor must remain
+  at line start. It is not a general drift detector. The reverse shape — strict header
+  intact, reminder changed — is deliberately invisible at runtime because it is indistinguishable
+  from a pasted header. The per-build probe checks both strict markers in every extracted bundle;
+  that catches their removal or in-place rewording, not a new third builder that leaves both old
+  strings present. A warning is diagnostic only: tools stay enabled and compaction can still fail
+  until clodex updates its markers. Terminal notices are capped at three `cc_version` signatures per
+  process (plus one suppression line), while every sighting remains in the trace log.
 - `streamAnthropicResponse` maps SDK events to Anthropic SSE, aborting after 120s without an event.
 - `modelPrefersResponsesApi()` selects `provider.responses(id)` for models requiring the Responses
   API (GPT-5.4+, GPT-5.5, `*-codex`, o-series); `provider.chat(id)` otherwise. Originator string is

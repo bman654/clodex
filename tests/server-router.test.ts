@@ -7,7 +7,12 @@ import { join } from 'node:path';
 import { createGatewayModelCatalog, type ServerModelInfo } from '../src/server/models.js';
 import { startServer, type ServerHandle } from '../src/server/router.js';
 import { createLanguageModel } from '../src/provider-factory.js';
-import { generateAnthropicResponse, streamAnthropicResponse } from '../src/sdk-adapter.js';
+import {
+  generateAnthropicResponse,
+  resetCompactPromptDriftWarningsForTests,
+  streamAnthropicResponse,
+} from '../src/sdk-adapter.js';
+import { installParentNoticeSink } from '../src/parent-notice.js';
 import { generateOpenAiResponse, streamOpenAiResponse } from '../src/openai-adapter.js';
 import { resolveProviderCredential } from '../src/env.js';
 
@@ -204,6 +209,53 @@ afterEach(async () => {
 });
 
 describe('server router', () => {
+  it('records compact-prompt drift on the endpoint translation route', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-compact-drift-server-'));
+    const debugLogPath = join(dir, 'debug.log');
+    const notices: string[] = [];
+    const releaseNotices = installParentNoticeSink(line => notices.push(line));
+    resetCompactPromptDriftWarningsForTests();
+    const catalog = createGatewayModelCatalog([{
+      id: 'drift-model',
+      name: 'Drift Model',
+      isFree: false,
+      brand: 'OpenAI',
+      providerId: 'openai',
+      sourceBackend: 'openai',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      apiKey: 'synthetic-api-key',
+    }]);
+
+    try {
+      const server = await startTestServer({ catalog, debugLogPath });
+      const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'drift-model',
+          max_tokens: 100,
+          messages: [{
+            role: 'user',
+            content: [
+              'Return only plain text. Never invoke any tools.',
+              '- Tool calls will be REJECTED and will waste your only turn — you will fail the task.',
+            ].join('\n'),
+          }],
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(readFileSync(debugLogPath, 'utf8'))
+        .toContain('possible Claude Code compact prompt drift: unknown-version');
+      expect(notices).toHaveLength(1);
+    } finally {
+      resetCompactPromptDriftWarningsForTests();
+      releaseNotices();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('logs inference routing metadata without request content', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-server-audit-'));
     const inferenceLogPath = join(dir, 'requests.jsonl');

@@ -15,6 +15,7 @@ import {
   claudeSessionPromptCacheKey,
   sdkTranslationErrorSignature,
   resetServiceTierWarningForTests,
+  resetCompactPromptDriftWarningsForTests,
   silenceSdkWarnings,
 } from '../src/sdk-adapter.js';
 import { installParentNoticeSink } from '../src/parent-notice.js';
@@ -707,6 +708,354 @@ describe('translateRequest', () => {
     { name: 'Read', input_schema: { type: 'object' } },
     { name: 'Grep', input_schema: { type: 'object' } },
   ];
+
+  const driftedCompactPrompt = (opening = 'IMPORTANT: Return only plain text. Never invoke any tools.') => [
+    opening,
+    '',
+    '- Do not use Read, Bash, or any other tool.',
+    '- You already have all the context you need in the conversation above.',
+    '- Tool calls will be REJECTED and will waste your only turn — you will fail the task.',
+    '- Put your summary in plain text.',
+    '',
+    'Create a detailed summary of the conversation so far.',
+    '',
+    'FINAL NOTE: Return plain text without invoking tools.',
+  ].join('\n');
+
+  it('warns once for a reworded compact prompt and logs every duplicate sighting', () => {
+    const notices: string[] = [];
+    const traces: string[] = [];
+    const releaseNotices = installParentNoticeSink(line => notices.push(line));
+    resetCompactPromptDriftWarningsForTests();
+    try {
+      const body = {
+        model: 'gpt-5.6-sol',
+        system: [{
+          text: 'x-anthropic-billing-header: cc_version=2.1.261.a1b; cc_entrypoint=cli;',
+        }],
+        messages: [{
+          role: 'user' as const,
+          content: driftedCompactPrompt('Respond with plain text only. Do not call any tools.'),
+        }],
+        tools: shellSessionTools,
+        tool_choice: { type: 'auto' as const },
+      };
+
+      const first = translateRequest(body, '@ai-sdk/openai', { openAiOAuth: true, log: m => traces.push(m) });
+      const duplicate = translateRequest(body, '@ai-sdk/openai', { openAiOAuth: true, log: m => traces.push(m) });
+
+      // The loose tier diagnoses only. The strict tier still owns behavior and
+      // deliberately leaves tools available when its exact markers are absent.
+      expect(first.toolChoice).toBe('auto');
+      expect(duplicate.toolChoice).toBe('auto');
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain('Claude Code 2.1.261.a1b');
+      expect(notices[0]).toContain("no longer matches clodex's text-only guard");
+      expect(notices[0]).toContain('https://github.com/bman654/clodex/issues');
+      // Trace logging happens before terminal dedupe, preserving both sightings.
+      expect(traces).toEqual([
+        'possible Claude Code compact prompt drift: 2.1.261.a1b',
+        'possible Claude Code compact prompt drift: 2.1.261.a1b',
+      ]);
+    } finally {
+      resetCompactPromptDriftWarningsForTests();
+      releaseNotices();
+    }
+  });
+
+  it('warns on a block-array compact turn when the header changes but its reminder remains', () => {
+    const notices: string[] = [];
+    const traces: string[] = [];
+    const releaseNotices = installParentNoticeSink(line => notices.push(line));
+    resetCompactPromptDriftWarningsForTests();
+    try {
+      const result = translateRequest({
+        model: 'gpt-5.6-sol',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'call_1', content: 'shell output' },
+            { type: 'text', text: `${driftedCompactPrompt()}${CC_COMPACT_TAIL}` },
+          ],
+        }],
+        tools: shellSessionTools,
+        tool_choice: { type: 'auto' },
+      }, '@ai-sdk/openai', { openAiOAuth: true, log: message => traces.push(message) });
+
+      expect(result.toolChoice).toBe('auto');
+      expect(notices).toHaveLength(1);
+      expect(traces).toEqual(['possible Claude Code compact prompt drift: unknown-version']);
+    } finally {
+      resetCompactPromptDriftWarningsForTests();
+      releaseNotices();
+    }
+  });
+
+  it('caps compact-prompt drift notices while continuing to trace later sightings', () => {
+    const notices: string[] = [];
+    const traces: string[] = [];
+    const releaseNotices = installParentNoticeSink(line => notices.push(line));
+    resetCompactPromptDriftWarningsForTests();
+    try {
+      for (const version of ['2.1.261.0', '2.1.262.0', '2.1.263.0', '2.1.264.0']) {
+        translateRequest({
+          model: 'gpt-5.6-sol',
+          system: `x-anthropic-billing-header: cc_version=${version}; cc_entrypoint=cli;`,
+          messages: [{ role: 'user', content: driftedCompactPrompt() }],
+          tools: shellSessionTools,
+          tool_choice: { type: 'auto' },
+        }, '@ai-sdk/openai', { openAiOAuth: true, log: m => traces.push(m) });
+      }
+
+      expect(notices.filter(line => line.includes('looks like a compaction turn'))).toHaveLength(3);
+      expect(notices.at(-1)).toContain('further compact-prompt drift warnings suppressed');
+      expect(notices).toHaveLength(4);
+      expect(traces).toHaveLength(4);
+      expect(traces.at(-1)).toBe('possible Claude Code compact prompt drift: 2.1.264.0');
+    } finally {
+      resetCompactPromptDriftWarningsForTests();
+      releaseNotices();
+    }
+  });
+
+  it('uses only a bounded version from a real billing-header system block', () => {
+    const cases = [
+      `quoted metadata: x-anthropic-billing-header: cc_version=2.1.999; cc_entrypoint=cli;`,
+      `x-anthropic-billing-header: cc_version=${'a'.repeat(65)}; cc_entrypoint=cli;`,
+    ];
+
+    for (const system of cases) {
+      const notices: string[] = [];
+      const traces: string[] = [];
+      const releaseNotices = installParentNoticeSink(line => notices.push(line));
+      resetCompactPromptDriftWarningsForTests();
+      try {
+        translateRequest({
+          model: 'gpt-5.6-sol',
+          system,
+          messages: [{ role: 'user', content: driftedCompactPrompt() }],
+          tools: shellSessionTools,
+        }, '@ai-sdk/openai', { openAiOAuth: true, log: message => traces.push(message) });
+
+        expect(notices).toHaveLength(1);
+        expect(notices[0]).not.toContain('from Claude Code');
+        expect(traces).toEqual(['possible Claude Code compact prompt drift: unknown-version']);
+      } finally {
+        resetCompactPromptDriftWarningsForTests();
+        releaseNotices();
+      }
+    }
+  });
+
+  it('does not warn on probes, quotes, tool results, split blocks, history, or prefills', () => {
+    const notices: string[] = [];
+    const traces: string[] = [];
+    const releaseNotices = installParentNoticeSink(line => notices.push(line));
+    resetCompactPromptDriftWarningsForTests();
+    const base = {
+      model: 'gpt-5.6-sol',
+      tools: shellSessionTools,
+      tool_choice: { type: 'auto' as const },
+    };
+    try {
+      const requests = [
+        {
+          ...base,
+          diagnostics: { previous_message_id: null },
+          messages: [{ role: 'user' as const, content: driftedCompactPrompt() }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: `Why does Claude Code send this?\n\n${driftedCompactPrompt()}\n\nExplain it.`,
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: `QUOTED PROMPT: ${driftedCompactPrompt('Return only plain text. Never invoke any tools.')}`,
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: driftedCompactPrompt('STOP: Respond with plain text only. Do not call any tools.'),
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: [
+              'Return only plain text. Never invoke any tools.',
+              '- Tool calls will be REJECTED and nothing else.',
+            ].join('\n'),
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: [
+              'Return only plain text. Never invoke any tools.',
+              `This prose quotes "${'- Tool calls will be REJECTED and will waste your only turn'}" for discussion.`,
+            ].join('\n'),
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: [
+              `Respond with plain text only. Never ${'delay '.repeat(12)}invoke tools.`,
+              '- Tool calls will be REJECTED and will waste your only turn — explain this.',
+            ].join('\n'),
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: [
+              `Respond with plain text only. Never invoke tools. ${'Continue briefly. '.repeat(10)}`,
+              '- Tool calls will be REJECTED and will waste your only turn — explain this.',
+            ].join('\n'),
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: [
+              'Respond quickly, do not stop.',
+              '- Tool calls will be REJECTED and will waste your only turn — explain this.',
+            ].join('\n'),
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: [
+              'Respond immediately. Do not call any tools.',
+              '- Tool calls will be REJECTED and will waste your only turn — explain this.',
+            ].join('\n'),
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: [
+              'Respond with plain text only. Be concise.',
+              '- Tool calls will be REJECTED and will waste your only turn — explain this.',
+            ].join('\n'),
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: [
+              'Respondent: use plain text only and do not call tools.',
+              '- Tool calls will be REJECTED and will waste your only turn — explain this.',
+            ].join('\n'),
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: [
+              'Respond with plain text only. Never invoke any tools.',
+              '- Tool calls are discussed here, but this is not the compaction instruction.',
+            ].join('\n'),
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: [
+              { type: 'tool_result', tool_use_id: 'call_1', content: driftedCompactPrompt() },
+              { type: 'text', text: 'summarize that file for me' },
+            ],
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: `${CC_COMPACT_HEAD}\n\nSummarise the work.\n\nAnswer in plain text only.`,
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: `CRITICAL: Respond with TEXT ONLY when you summarise, but run tests first.${CC_COMPACT_TAIL}`,
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: [
+              { type: 'text', text: `${CC_COMPACT_HEAD}\n\nis what it opens with.` },
+              { type: 'text', text: `and it closes with${CC_COMPACT_TAIL}` },
+            ],
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: `Why does Claude Code send this?\n\n${ccCompactPrompt}`,
+          }],
+        },
+        {
+          ...base,
+          messages: [{
+            role: 'user' as const,
+            content: [
+              { type: 'text', text: 'IMPORTANT: Return only plain text. Never invoke any tools.' },
+              {
+                type: 'text',
+                text: '- Tool calls will be REJECTED and will waste your only turn — explain this.',
+              },
+            ],
+          }],
+        },
+        {
+          ...base,
+          messages: [
+            { role: 'user' as const, content: driftedCompactPrompt() },
+            { role: 'assistant' as const, content: '<summary>earlier work</summary>' },
+            { role: 'user' as const, content: 'now finish the refactor' },
+          ],
+        },
+        {
+          ...base,
+          messages: [
+            { role: 'user' as const, content: 'quote the old compaction instructions' },
+            { role: 'assistant' as const, content: driftedCompactPrompt() },
+          ],
+        },
+      ];
+
+      for (const request of requests) {
+        translateRequest(request, '@ai-sdk/openai', { openAiOAuth: true, log: m => traces.push(m) });
+      }
+      expect(notices).toEqual([]);
+      expect(traces).toEqual([]);
+    } finally {
+      resetCompactPromptDriftWarningsForTests();
+      releaseNotices();
+    }
+  });
 
   it('disables tools for a compact request from a session that has no StructuredOutput tool', () => {
     // The dominant shape on the wire: Claude Code merges the compact prompt into

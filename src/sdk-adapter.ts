@@ -23,6 +23,7 @@ import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-t
 import { anthropicErrorType, upstreamHttpStatus } from './upstream-error.js';
 import { upstreamMaxRetries } from './upstream-retry.js';
 import { emitParentNotice } from './parent-notice.js';
+import { CLAUDE_CODE_COMPACT_PROMPT_MARKERS } from './claude-code-compact-prompt.js';
 import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
 
 export { silenceSdkWarnings };
@@ -90,6 +91,8 @@ export interface TranslateRequestOptions {
   claudeSessionId?: string;
   /** Hard cap on tools sent to the provider (e.g. Groq: 128). Excess tools are silently dropped. */
   maxTools?: number;
+  /** Immediate trace-log sink; diagnostics must call it before terminal-warning suppression. */
+  log?: (message: string) => void;
 }
 
 const CLAUDE_SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -467,8 +470,10 @@ export function translateToolChoice(tc: AnthropicRequest['tool_choice']): SdkCal
   return undefined;
 }
 
-const COMPACT_TEXT_ONLY_START = 'CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.';
-const COMPACT_TEXT_ONLY_END = 'REMINDER: Do NOT call any tools. Respond with plain text only';
+const {
+  start: COMPACT_TEXT_ONLY_START,
+  end: COMPACT_TEXT_ONLY_END,
+} = CLAUDE_CODE_COMPACT_PROMPT_MARKERS;
 
 /**
  * Claude Code forks its reactive-compaction turn with the SAME tool definitions
@@ -512,6 +517,83 @@ function isClaudeCodeCompactRequest(body: AnthropicRequest): boolean {
     text.startsWith(COMPACT_TEXT_ONLY_START) && text.includes(COMPACT_TEXT_ONLY_END));
 }
 
+// This sentence is the reason the compaction fork needs a text-only response,
+// not decoration around it. It occurs in both prompt builders across 27 extracted
+// 2.1.238–2.1.260 bundles; all eight platforms are represented for 2.1.257 and
+// 2.1.260. The recognizer deliberately covers only rewordings that preserve this
+// anchor and a bounded opening grammar. The imperative must start at byte zero
+// (after an optional known severity label), so quoted copies with a preamble stay
+// out; a raw copy pasted with no preamble is indistinguishable from Claude Code's
+// own prompt. The START guard excludes known partial envelopes. A
+// START-intact/END-reworded prompt also stays invisible by design because it is
+// indistinguishable from a user quoting the header; the per-build release probe
+// catches removal or in-place rewording of either current marker.
+const COMPACT_DRIFT_ANCHOR = 'Tool calls will be REJECTED and will waste your only turn';
+const COMPACT_DRIFT_ANCHOR_LINE = new RegExp(
+  `(?:^|\\n)[-*•\\s]{0,4}${COMPACT_DRIFT_ANCHOR}`,
+);
+const COMPACT_DRIFT_OPENING = /^(?:(?:critical|important|warning|caution|urgent|notice):\s*)?(?:respond|return|answer|output|write|provide)\b(?=[^\n]{1,160}(?:\n|$))(?=[^\n]*\b(?:text\s+only|plain\s+text\s+only|only\s+(?:plain\s+)?text)\b)(?=[^\n]*\b(?:do not|don't|never|without)\b[^\n]{0,48}\btools?\b)/i;
+
+function looksLikeDriftedClaudeCodeCompactRequest(body: AnthropicRequest): boolean {
+  if (body.diagnostics !== undefined) return false;
+
+  const finalMessage = body.messages.at(-1);
+  if (!finalMessage || finalMessage.role !== 'user') return false;
+  const texts = typeof finalMessage.content === 'string'
+    ? [finalMessage.content]
+    : finalMessage.content
+      .filter(block => block.type === 'text')
+      .map(block => block.text ?? '');
+  return texts.some(text =>
+    !text.startsWith(COMPACT_TEXT_ONLY_START)
+    && COMPACT_DRIFT_OPENING.test(text)
+    && COMPACT_DRIFT_ANCHOR_LINE.test(text));
+}
+
+function claudeCodeVersionFromRequest(body: AnthropicRequest): string | undefined {
+  const texts = typeof body.system === 'string'
+    ? [body.system]
+    : (body.system ?? []).map(block => typeof block === 'string' ? block : block.text ?? '');
+  for (const text of texts) {
+    if (!text.startsWith(CLAUDE_CODE_BILLING_HEADER_PREFIX)) continue;
+    const match = text.match(/\bcc_version=([0-9A-Za-z][0-9A-Za-z._+-]{0,63})(?:;|\s|$)/);
+    if (match) return match[1];
+  }
+  return undefined;
+}
+
+const warnedCompactPromptDrifts = new Set<string>();
+const MAX_COMPACT_PROMPT_DRIFT_WARNINGS = 3;
+
+function reportClaudeCodeCompactPromptDrift(
+  body: AnthropicRequest,
+  log?: (message: string) => void,
+): void {
+  if (!looksLikeDriftedClaudeCodeCompactRequest(body)) return;
+  const version = claudeCodeVersionFromRequest(body);
+  const signature = version ?? 'unknown-version';
+  try { log?.(`possible Claude Code compact prompt drift: ${signature}`); } catch { /* ignore */ }
+  if (warnedCompactPromptDrifts.has(signature)) return;
+  if (warnedCompactPromptDrifts.size >= MAX_COMPACT_PROMPT_DRIFT_WARNINGS) return;
+  warnedCompactPromptDrifts.add(signature);
+  const versionText = version ? ` from Claude Code ${version}` : '';
+  // emitParentNotice, not a bare process.stderr.write: while `clodex claude` has
+  // Claude Code running, launch.ts mutes the parent's stderr to protect the TUI.
+  emitParentNotice(
+    `clodex: warning: a request${versionText} looks like a compaction turn, but its prompt no longer `
+      + "matches clodex's text-only guard. Tools were left enabled and compaction may fail. Please "
+      + 'report this at https://github.com/bman654/clodex/issues',
+  );
+  if (warnedCompactPromptDrifts.size === MAX_COMPACT_PROMPT_DRIFT_WARNINGS) {
+    emitParentNotice('clodex: warning: further compact-prompt drift warnings suppressed.');
+  }
+}
+
+/** Test seam: the warning cap is process-wide and would leak between cases. */
+export function resetCompactPromptDriftWarningsForTests(): void {
+  warnedCompactPromptDrifts.clear();
+}
+
 export function translateRequest(
   body: AnthropicRequest,
   npm: string,
@@ -538,6 +620,7 @@ export function translateRequest(
   // definitions intact for prompt-cache prefix reuse; toolChoice='none' below
   // makes them unavailable at the provider API rather than by prompt compliance.
   const compactRequest = isClaudeCodeCompactRequest(body);
+  if (!compactRequest) reportClaudeCodeCompactPromptDrift(body, options?.log);
   let upstreamTools = resolveUpstreamTools(
     body.tools as unknown as AnthropicToolDefinition[] | undefined,
     messages as unknown as AnthropicRequestMessage[],
