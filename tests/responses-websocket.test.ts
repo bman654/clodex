@@ -33,6 +33,7 @@ import {
   type ResponsesWebSocketDiagnosticEvent,
 } from '../src/oauth/responses-websocket.js';
 import { sdkUpstreamErrorDetails } from '../src/upstream-error.js';
+import type { UpgradeAdmission } from '../src/oauth/ws-upgrade-pacer.js';
 
 const WS_URL = 'wss://chatgpt.com/backend-api/codex/responses';
 
@@ -3835,5 +3836,595 @@ describe('createResponsesWebSocketFetch', () => {
   it('canonicalizes object key ordering in prompt fingerprints', () => {
     expect(responsesWebSocketPromptFingerprint({ model: 'm', tools: [{ name: 'x', parameters: { b: 2, a: 1 } }], input: ['a'] }))
       .toBe(responsesWebSocketPromptFingerprint({ tools: [{ parameters: { a: 1, b: 2 }, name: 'x' }], model: 'm', input: ['different'] }));
+  });
+});
+
+describe('new-connection pacing', () => {
+  beforeEach(() => {
+    resetResponsesWebSocketConnectionsForTests();
+    fakeSockets.length = 0;
+  });
+
+  /** Records every admission request; production shares one process-wide pacer. */
+  function recordingPacer(admission: UpgradeAdmission = { kind: 'admitted', waitedMs: 0 }) {
+    return { admit: vi.fn(async () => admission) };
+  }
+
+  it('never asks the pacer for a request that reuses an existing connection', async () => {
+    const pacer = recordingPacer();
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-pacing-reuse',
+      pacer,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'first turn' }] }];
+
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.created', response: { id: 'resp_pace_1' },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: {
+        type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'Read',
+        arguments: '{"path":"file.ts"}', status: 'completed',
+      },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.completed', response: { id: 'resp_pace_1' },
+    })));
+    await readAll(first);
+    expect(pacer.admit).toHaveBeenCalledTimes(1);
+
+    // Second turn continues the same head: no new connection, so no pacing.
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_1', name: 'Read', arguments: '{"path":"file.ts"}',
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_1', output: 'contents' };
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([...input, echoedCall, toolOutput])),
+    });
+    expect(fakeSockets).toHaveLength(1);
+    expect(diagnostics.at(-1)).toMatchObject({ event: 'ws_head_decision', decision: 'continuation' });
+    expect(pacer.admit).toHaveBeenCalledTimes(1);
+    emitTextResponse(socket, 'resp_pace_2', 'done');
+    await readAll(second);
+    expect(pacer.admit).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks the pacer for each primary connection it opens', async () => {
+    const pacer = recordingPacer();
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-pacing-open',
+      pacer,
+    });
+    // Two unrelated conversations: each needs its own head.
+    for (const text of ['alpha', 'beta']) {
+      const response = await wsFetch('https://x', {
+        method: 'POST', headers: {},
+        body: JSON.stringify(sessionPayload(
+          [{ role: 'user', content: [{ type: 'input_text', text }] }],
+          { prompt_cache_key: `relay-session-${text}` },
+        )),
+      });
+      const socket = lastSocket();
+      socket.emit('open');
+      emitTextResponse(socket, `resp_${text}`, 'ok');
+      await readAll(response);
+    }
+    expect(fakeSockets).toHaveLength(2);
+    expect(pacer.admit).toHaveBeenCalledTimes(2);
+  });
+
+  it('records how long a delayed connection waited, on both diagnostics', async () => {
+    const debug: string[] = [];
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, message => debug.push(message), {
+      accountId: 'acct-pacing-delay',
+      pacer: recordingPacer({ kind: 'admitted', waitedMs: 2_500 }),
+      onDiagnostic: event => diagnostics.push(event),
+    });
+
+    const response = await withResponsesWebSocketDiagnosticContext(
+      { requestId: 'req-paced' },
+      () => wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+      }),
+    );
+    const socket = lastSocket();
+    socket.emit('open');
+    emitTextResponse(socket, 'resp_paced', 'ok');
+    await readAll(response);
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_new_connection_paced',
+      outcome: 'admitted',
+      waitedMs: 2_500,
+      requestId: 'req-paced',
+    }));
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_head_decision',
+      pacingWaitedMs: 2_500,
+    }));
+    expect(debug).toContain('ws: paced new connection by 2500ms');
+  });
+
+  it('refuses without opening a socket, in a shape that classifies as a retryable 429', async () => {
+    const debug: string[] = [];
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, message => debug.push(message), {
+      accountId: 'acct-pacing-refused',
+      pacer: recordingPacer({ kind: 'refused', requiredWaitMs: 7_400, retryAfterSeconds: 8 }),
+      onDiagnostic: event => diagnostics.push(event),
+    });
+
+    const response = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    });
+
+    // The whole point: the connection this would have opened is not opened.
+    expect(fakeSockets).toHaveLength(0);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('text/event-stream; charset=utf-8');
+    // A real header, not only the prose: the SDK's backoff reads headers and
+    // ignores the body. It does not de-correlate a fan-out — everyone refused at
+    // the same instant gets the same hint — it defers the group long enough for
+    // the bucket to refill.
+    expect(response.headers.get('retry-after')).toBe('8');
+
+    // A refusal happens before any connection or request context exists, so it
+    // cannot go through failContext. Prove the standalone frame still CLASSIFIES
+    // downstream as a retryable rate limit carrying the backoff hint — the same
+    // classification the real upgrade 403 gets. `classifyThroughSdk` runs with
+    // maxRetries: 0, so this pins the classification, not the retrying; the
+    // 403 test above is what exercises an actual SDK retry.
+    const body = await readAll(response);
+    // The frame itself, matching the shape failContext writes for a 403.
+    expect(JSON.parse(body.replace(/^data: /, '').trim())).toMatchObject({
+      type: 'error',
+      error: { type: 'rate_limit_error', code: '429', retry_after_seconds: 8 },
+    });
+    // And through the real provider. Note the hint survives via the PROSE: the
+    // SDK's chunk schema strips `retry_after_seconds`, so the frame field alone
+    // would not reach the client.
+    expect(await classifyThroughSdk(body)).toMatchObject({
+      statusCode: 429,
+      isRetryable: true,
+      retryAfterSeconds: 8,
+    });
+
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_new_connection_paced',
+      outcome: 'refused',
+      requiredWaitMs: 7_400,
+      retryAfterSeconds: 8,
+    }));
+    expect(diagnostics.some(event => event.event === 'ws_head_decision')).toBe(false);
+    expect(debug).toContain(
+      'ws: refused a new connection to hold the pacing rate; retry after 8s',
+    );
+  });
+
+  it('does not open a second persistent head for a partition that filled up during the wait', async () => {
+    // The head scan runs before the wait. A same-partition request that starts
+    // while this one is queued would otherwise leave BOTH registering
+    // persistent nursery heads for one key, filling the nursery with
+    // duplicates and evicting other conversations' reusable heads.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    let releaseQueued: (() => void) | undefined;
+    const queued = new Promise<void>(resolve => { releaseQueued = resolve; });
+    let markQueued: (() => void) | undefined;
+    const isQueued = new Promise<void>(resolve => { markQueued = resolve; });
+    let admissions = 0;
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-pacing-overlap',
+      pacer: {
+        admit: async (): Promise<UpgradeAdmission> => {
+          admissions += 1;
+          if (admissions > 1) return { kind: 'admitted', waitedMs: 0 };
+          markQueued!();
+          await queued;
+          return { kind: 'admitted', waitedMs: 25 };
+        },
+      },
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const body = (text: string) => JSON.stringify(sessionPayload(
+      [{ role: 'user', content: [{ type: 'input_text', text }] }],
+    ));
+
+    // Classified with an empty partition, then held inside the pacer.
+    const held = wsFetch('https://x', { method: 'POST', headers: {}, body: body('held') });
+    await isQueued;
+
+    // A second request for the same partition gets in and goes in flight.
+    const overtaking = await wsFetch('https://x', { method: 'POST', headers: {}, body: body('overtaking') });
+    lastSocket().emit('open');
+
+    releaseQueued!();
+    const heldResponse = await held;
+
+    const decisions = diagnostics.filter(event => event.event === 'ws_head_decision');
+    expect(decisions).toHaveLength(2);
+    expect(decisions[1]).toMatchObject({
+      decision: 'parallel_isolated',
+      createdGeneration: 'isolated',
+      pacingWaitedMs: 25,
+    });
+
+    for (const socket of fakeSockets) socket.emit('open');
+    emitTextResponse(fakeSockets[1]!, 'resp_held', 'ok');
+    emitTextResponse(fakeSockets[0]!, 'resp_overtaking', 'ok');
+    await readAll(heldResponse);
+    await readAll(overtaking);
+  });
+
+  it('asks the pacer for every shape of primary new connection', async () => {
+    // Four shapes reach the creation path. The parallel one dominates real
+    // traffic (2,844 of 2,987 observed upgrades), so none of them may be left
+    // on prose.
+    const pacer = recordingPacer();
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-pacing-shapes',
+      pacer,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const lastDecision = () => diagnostics.filter(event => event.event === 'ws_head_decision').at(-1);
+    const send = (payload: unknown) => wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(payload),
+    });
+    const turn = (text: string) => [{ role: 'user', content: [{ type: 'input_text', text }] }];
+
+    // 1. unpartitioned_socket — no prompt_cache_key, so there is no partition.
+    const unpartitioned = await send({ model: 'gpt-5.6-sol', input: turn('no session') });
+    lastSocket().emit('open');
+    emitTextResponse(lastSocket(), 'resp_unpartitioned', 'ok');
+    await readAll(unpartitioned);
+    expect(lastDecision()).toMatchObject({ decision: 'unpartitioned_socket' });
+    expect(pacer.admit).toHaveBeenCalledTimes(1);
+
+    // 2. new_partition_head — first turn of a session.
+    const root = await send(sessionPayload(turn('root')));
+    lastSocket().emit('open');
+    emitTextResponse(lastSocket(), 'resp_root', 'ok');
+    await readAll(root);
+    expect(lastDecision()).toMatchObject({ decision: 'new_partition_head' });
+    expect(pacer.admit).toHaveBeenCalledTimes(2);
+
+    // 3. history_mismatch_new_head — same partition, divergent history.
+    const diverged = await send(sessionPayload(turn('a different root')));
+    expect(lastDecision()).toMatchObject({ decision: 'history_mismatch_new_head' });
+    expect(pacer.admit).toHaveBeenCalledTimes(3);
+
+    // 4. parallel_isolated — same partition while that one is still in flight.
+    const parallel = await send(sessionPayload(turn('a third root')));
+    expect(lastDecision()).toMatchObject({ decision: 'parallel_isolated' });
+    expect(pacer.admit).toHaveBeenCalledTimes(4);
+
+    for (const socket of fakeSockets) if (socket.listenerCount('open') > 0) socket.emit('open');
+    emitTextResponse(fakeSockets[2]!, 'resp_diverged', 'ok');
+    emitTextResponse(fakeSockets[3]!, 'resp_parallel', 'ok');
+    await readAll(diverged);
+    await readAll(parallel);
+  });
+
+  it('does not pace the replacement a transport retry opens', async () => {
+    // Deliberate exemption: it recovers a request that was already admitted,
+    // it is capped at one per request, and it is built inside a socket
+    // callback. Pinned so the exemption cannot drift into an accident.
+    const pacer = recordingPacer();
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-pacing-transport-replacement',
+      pacer,
+    });
+    const response = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([{ role: 'user', content: [{ type: 'input_text', text: 'hi' }] }])),
+    });
+    fakeSockets[0]!.emit('open');
+    fakeSockets[0]!.emit('error', new Error('connection reset'));
+
+    expect(fakeSockets).toHaveLength(2);
+    expect(pacer.admit).toHaveBeenCalledTimes(1);
+
+    fakeSockets[1]!.emit('open');
+    emitTextResponse(fakeSockets[1]!, 'resp_replaced', 'ok');
+    await readAll(response);
+  });
+
+  it('does not pace the replacement a missing previous response opens', async () => {
+    // The second unpaced replacement path, and the one the deep doc used to
+    // omit entirely.
+    const pacer = recordingPacer();
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-pacing-prev-missing',
+      pacer,
+    });
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'hi' }] }];
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    fakeSockets[0]!.emit('open');
+    emitTextResponse(fakeSockets[0]!, 'resp_prev_1', 'ok');
+    await readAll(first);
+    expect(pacer.admit).toHaveBeenCalledTimes(1);
+
+    const echoed = [
+      ...input,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'ok' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'next' }] },
+    ];
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(echoed)),
+    });
+    const continued = fakeSockets.length;
+    fakeSockets[0]!.emit('message', Buffer.from(JSON.stringify({
+      type: 'error', status: 400,
+      error: { code: 'previous_response_not_found', message: 'gone' },
+    })));
+
+    // A replacement socket was opened without consulting the pacer.
+    expect(fakeSockets.length).toBeGreaterThan(continued);
+    expect(pacer.admit).toHaveBeenCalledTimes(1);
+
+    const replacement = lastSocket();
+    replacement.emit('open');
+    emitTextResponse(replacement, 'resp_prev_2', 'ok');
+    await readAll(second);
+  });
+
+  it('demotes a concurrent sibling even when neither request waited', async () => {
+    // `admit` is async, so even an immediate admission resumes a microtask
+    // later and BOTH requests classify themselves against an empty partition
+    // before either registers. Gating the re-check on having waited would let
+    // both open a persistent head for one key.
+    //
+    // The barrier holds both inside the pacer until both have been classified,
+    // which is the interleaving that makes this deterministic rather than a
+    // race the scheduler happens to win.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    let admitted = 0;
+    let barrierArmed = false;
+    let openBarrier: (() => void) | undefined;
+    const barrier = new Promise<void>(resolve => { openBarrier = resolve; });
+    const debug: string[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, message => debug.push(message), {
+      accountId: 'acct-pacing-concurrent',
+      pacer: {
+        admit: async (): Promise<UpgradeAdmission> => {
+          if (!barrierArmed) return { kind: 'admitted', waitedMs: 0 };
+          admitted += 1;
+          if (admitted === 2) openBarrier!();
+          await barrier;
+          return { kind: 'admitted', waitedMs: 0 };
+        },
+      },
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const send = (text: string) => wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([{ role: 'user', content: [{ type: 'input_text', text }] }])),
+    });
+
+    // Resolve the mocked `ws` module BEFORE the concurrent phase: two dynamic
+    // imports of a mocked module in flight at once can race in vitest and hand
+    // one caller the unmocked module.
+    const warmup = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload(
+        [{ role: 'user', content: [{ type: 'input_text', text: 'warmup' }] }],
+        { prompt_cache_key: 'relay-session-warmup' },
+      )),
+    });
+    lastSocket().emit('open');
+    emitTextResponse(lastSocket(), 'resp_warmup', 'ok');
+    await readAll(warmup);
+    barrierArmed = true;
+
+    const [alpha, beta] = await Promise.all([send('alpha'), send('beta')]);
+
+    // The warmup produced a decision of its own; the pair is the last two.
+    const decisions = diagnostics.filter(event => event.event === 'ws_head_decision').slice(-2);
+    expect(decisions).toHaveLength(2);
+    // Both were classified against an empty partition — the race is real...
+    expect(decisions.map(event => event.candidateCount)).toEqual([0, 0]);
+    // ...but only one of them may end up holding a persistent head for it.
+    // Without the demotion both are 'nursery': two persistent heads, one key.
+    expect(decisions.map(event => event.createdGeneration).sort())
+      .toEqual(['isolated', 'nursery']);
+    expect(debug).toContain('ws: parallel request using an isolated socket after pacing');
+
+    for (const socket of fakeSockets.slice(-2)) {
+      socket.emit('open');
+      emitTextResponse(socket, `resp_${fakeSockets.indexOf(socket)}`, 'ok');
+    }
+    await Promise.all([readAll(alpha), readAll(beta)]);
+  });
+
+  it('ages the heads it reports from after the wait, not from arrival', async () => {
+    // The decision record must not mix head ages read on arrival with pool
+    // counts read after the wait; a queued request can be seconds old by then.
+    let clockMs = 0;
+    let waits = 0;
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-pacing-clock',
+      now: () => clockMs,
+      pacer: {
+        admit: async (): Promise<UpgradeAdmission> => {
+          waits += 1;
+          if (waits === 1) return { kind: 'admitted', waitedMs: 0 };
+          clockMs += 4_000;
+          return { kind: 'admitted', waitedMs: 4_000 };
+        },
+      },
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const body = (text: string) => JSON.stringify(sessionPayload(
+      [{ role: 'user', content: [{ type: 'input_text', text }] }],
+    ));
+
+    const first = await wsFetch('https://x', { method: 'POST', headers: {}, body: body('first') });
+    lastSocket().emit('open');
+    emitTextResponse(lastSocket(), 'resp_clock', 'ok');
+    await readAll(first);
+
+    // Same partition, different history: an idle head is reported, not reused.
+    const second = await wsFetch('https://x', { method: 'POST', headers: {}, body: body('second') });
+    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1);
+    expect(decision).toMatchObject({ pacingWaitedMs: 4_000 });
+    // Read on arrival this head looks freshly used; it is 4s idle by admission.
+    expect((decision as { heads: Array<{ idleMs: number }> }).heads[0]!.idleMs).toBe(4_000);
+
+    lastSocket().emit('open');
+    emitTextResponse(lastSocket(), 'resp_clock_2', 'ok');
+    await readAll(second);
+  });
+
+  it('uses the shared bucket and its env var when no pacer is injected', async () => {
+    // Nothing here injects a pacer, so this fails if production stops
+    // consulting the shared one — or stops reading the environment.
+    // 3/minute, not 1: three is the lowest rate at which refusing can still
+    // reach a refill inside a request's retry schedule at the default
+    // timeouts, and it is far from the default of 60, so this still proves the
+    // environment is read. Rate 1 is covered by the test below.
+    process.env.CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN = '3';
+    try {
+      resetResponsesWebSocketConnectionsForTests();
+      const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-pacing-shared',
+        onDiagnostic: event => diagnostics.push(event),
+      });
+      const open = async (text: string) => {
+        const response = await wsFetch('https://x', {
+          method: 'POST',
+          headers: {},
+          body: JSON.stringify(sessionPayload(
+            [{ role: 'user', content: [{ type: 'input_text', text }] }],
+            { prompt_cache_key: `relay-session-${text}` },
+          )),
+        });
+        const socket = fakeSockets[fakeSockets.length - 1];
+        if (socket && socket.listenerCount('open') > 0) {
+          socket.emit('open');
+          emitTextResponse(socket, `resp_${text}`, 'ok');
+        }
+        return readAll(response);
+      };
+
+      // At three new connections per minute the burst of ten is free; the
+      // eleventh needs twenty seconds, far past the wait bound, so it is
+      // refused.
+      for (let index = 0; index < 10; index += 1) await open(`burst-${index}`);
+      expect(fakeSockets).toHaveLength(10);
+
+      const refusedBody = await open('past-the-burst');
+      expect(fakeSockets).toHaveLength(10);
+      expect(await classifyThroughSdk(refusedBody)).toMatchObject({
+        statusCode: 429,
+        isRetryable: true,
+      });
+      expect(diagnostics).toContainEqual(expect.objectContaining({
+        event: 'ws_new_connection_paced',
+        outcome: 'refused',
+      }));
+    } finally {
+      delete process.env.CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN;
+      resetResponsesWebSocketConnectionsForTests();
+    }
+  });
+
+  it('admits late instead of refusing at a rate a retry cannot outlast', async () => {
+    // REGRESSION, end to end through the production singleton. Capping the
+    // refusal hint at the wait bound stopped requests overrunning their
+    // deadline, but at 1/minute the first free slot is 60s away while the whole
+    // retry schedule is spent inside 20s — so every refused request used up its
+    // retries and died as a rate-limit error, manufactured by the feature meant
+    // to reduce them. Nothing may be refused here.
+    process.env.CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN = '1';
+    try {
+      resetResponsesWebSocketConnectionsForTests();
+      const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-pacing-lowrate',
+        onDiagnostic: event => diagnostics.push(event),
+      });
+      const open = async (text: string) => {
+        const response = await wsFetch('https://x', {
+          method: 'POST',
+          headers: {},
+          body: JSON.stringify(sessionPayload(
+            [{ role: 'user', content: [{ type: 'input_text', text }] }],
+            { prompt_cache_key: `relay-session-${text}` },
+          )),
+        });
+        const socket = fakeSockets[fakeSockets.length - 1];
+        if (socket && socket.listenerCount('open') > 0) {
+          socket.emit('open');
+          emitTextResponse(socket, `resp_${text}`, 'ok');
+        }
+        return readAll(response);
+      };
+
+      // Eleven, opened sequentially: ten spend the burst and the eleventh has
+      // to wait. Arrivals here are sequential rather than simultaneous, so each
+      // one refills roughly what it consumes and keeps paying the bound — the
+      // ceiling is weaker than the configured rate, but it is still a ceiling.
+      for (let index = 0; index < 11; index += 1) await open(`low-${index}`);
+
+      // Every one of them opened a connection; none was turned away.
+      expect(fakeSockets).toHaveLength(11);
+      expect(diagnostics).not.toContainEqual(expect.objectContaining({
+        event: 'ws_new_connection_paced',
+        outcome: 'refused',
+      }));
+
+      // And pacing is still SHAPING, not switched off: the first arrival past
+      // the burst really did wait out the bound. Asserting only that sockets
+      // opened cannot tell this apart from disabled pacing.
+      const waits = diagnostics
+        .filter((event): event is typeof event & { waitedMs: number } =>
+          event.event === 'ws_new_connection_paced'
+          && (event as { outcome?: string }).outcome === 'admitted'
+          && typeof (event as { waitedMs?: unknown }).waitedMs === 'number')
+        .map(event => event.waitedMs);
+      expect(waits).toHaveLength(1);
+      expect(waits[0]).toBeGreaterThan(1_000);
+    } finally {
+      delete process.env.CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN;
+      resetResponsesWebSocketConnectionsForTests();
+    }
+    // Deliberately at the SHIPPED timeouts, which is where the failure was
+    // measured, so one request really does wait out the ~4.8s bound.
+  }, 20_000);
+
+  it('opens no connection for a request cancelled while it was queued', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const aborted = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-pacing-abort',
+      pacer: { admit: vi.fn(async () => { throw aborted; }) },
+      onDiagnostic: event => diagnostics.push(event),
+    });
+
+    await expect(wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([])),
+    })).rejects.toBe(aborted);
+
+    expect(fakeSockets).toHaveLength(0);
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_new_connection_paced',
+      outcome: 'aborted',
+    }));
+    // The request never reached a head decision, so none is reported.
+    expect(diagnostics.some(event => event.event === 'ws_head_decision')).toBe(false);
   });
 });

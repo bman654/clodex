@@ -15,6 +15,12 @@ import { outboundWsProxyAgent } from '../outbound-proxy.js';
 import { emitParentNotice } from '../parent-notice.js';
 import { anthropicErrorType, clampRetryAfterSeconds, frameStatusCode } from '../upstream-error.js';
 import { sanitizeToolInput } from '../tool-input-sanitize.js';
+import {
+  resetWsUpgradePacerForTests,
+  sharedWsUpgradePacer,
+  type ConnectionPacer,
+  type UpgradeAdmission,
+} from './ws-upgrade-pacer.js';
 
 const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite';
 const TERMINAL_EVENT_TYPES = new Set(['response.completed', 'response.failed', 'response.incomplete']);
@@ -35,6 +41,8 @@ export interface ResponsesWebSocketFetchOptions {
   nurseryIdleTtlMs?: number;
   maxConnections?: number;
   maxNurseryConnections?: number;
+  /** Test override; production shares the process-wide new-connection pacer. */
+  pacer?: ConnectionPacer;
   now?: () => number;
   /** Opt-in structured transport diagnostics; never receives conversation content. */
   onDiagnostic?: (event: ResponsesWebSocketDiagnosticEvent) => void;
@@ -201,6 +209,9 @@ export function resetResponsesWebSocketConnectionsForTests(): void {
   }
   connections.clear();
   nextConnectionDebugId = 1;
+  // The shared pacer counts connections, so it has to be dropped with them:
+  // otherwise one test file's sockets pace the next test's first request.
+  resetWsUpgradePacerForTests();
 }
 
 /** Normalize the SDK's HeadersInit into a plain record for `ws`. */
@@ -1801,6 +1812,46 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   }
 }
 
+/**
+ * What the pacer hands back instead of opening a connection it cannot afford.
+ *
+ * Shaped like the frame `failContext` writes for an upgrade 403, but built
+ * standalone: a refusal happens before any connection or request context
+ * exists, so there is no stream to write into, nothing registered to delete and
+ * no context to close. `code` is the stringified status `frameStatusCode` reads
+ * preferentially. The `Retry-After` header is what the SDK's own backoff reads;
+ * the "retry after Ns" prose is the separate channel that carries the hint to
+ * the CLIENT, because the SDK's chunk schema strips `retry_after_seconds`
+ * before `sdkUpstreamErrorDetails` ever sees it.
+ */
+function pacedRefusalResponse(retryAfterSeconds: number): Response {
+  const frame = {
+    type: 'error',
+    sequence_number: 0,
+    error: {
+      type: anthropicErrorType(429),
+      code: '429',
+      message: 'clodex is limiting how fast it opens new OpenAI connections to reduce the chance '
+        + `of an upstream rate limit; retry after ${retryAfterSeconds}s`,
+      param: null,
+      retry_after_seconds: retryAfterSeconds,
+    },
+  };
+  return new Response(`data: ${JSON.stringify(frame)}\n\n`, {
+    status: 200,
+    headers: {
+      'content-type': 'text/event-stream; charset=utf-8',
+      // A real header, not just the prose: `getRetryDelayInMs` reads headers and
+      // ignores the body, so without one the SDK falls back to its fixed 2s/4s
+      // ladder. This does NOT de-correlate the group — refusals debit nothing,
+      // so everyone refused at the same instant sees the same deficit and gets
+      // the same hint — it defers the whole group by long enough for the bucket
+      // to refill, which is what turns a retry storm into a successful retry.
+      'retry-after': String(retryAfterSeconds),
+    },
+  });
+}
+
 function numericRetryAfterHeader(value: string | string[] | undefined): number | undefined {
   const single = Array.isArray(value) ? value[0] : value;
   return typeof single === 'string' && /^\d+$/.test(single.trim())
@@ -1992,7 +2043,9 @@ export function createResponsesWebSocketFetch(
     const promptFieldHashes = responsesWebSocketPromptFieldHashes(payload);
     const instructionsSnapshot = instructionsFromPayload(payload);
     const diagnosticCorrelation = diagnosticContext.getStore();
-    const now = resolvedOptions.now();
+    // Re-read after a pacing wait, so head ages stay comparable with the pool
+    // counts reported alongside them.
+    let now = resolvedOptions.now();
     const evictions = cleanupExpiredConnections(now);
 
     const candidates = partitionKey ? connectionEntries(partitionKey) : [];
@@ -2082,6 +2135,76 @@ export function createResponsesWebSocketFetch(
       decision = 'unpartitioned_socket';
     }
 
+    // Pace only the path that opens a NEW connection. Reusing a head — nursery
+    // or established — sends on a socket that already exists, costs the account
+    // no upgrade, and must never wait behind the bucket. The wait sits ahead of
+    // the nursery eviction below so a queued request does not retire a head it
+    // may still be seconds away from needing.
+    let pacingWaitedMs: number | undefined;
+    if (!selected) {
+      const pacer = options.pacer ?? sharedWsUpgradePacer();
+      const pacingStartedAt = resolvedOptions.now();
+      let admission: UpgradeAdmission;
+      try {
+        admission = await pacer.admit(init?.signal ?? undefined);
+      } catch (error) {
+        // Cancelled while queued: never open the connection it was waiting for.
+        emitDiagnostic(options, {
+          event: 'ws_new_connection_paced',
+          outcome: 'aborted',
+          decision,
+          waitedMs: Math.max(0, resolvedOptions.now() - pacingStartedAt),
+        }, diagnosticCorrelation);
+        throw error;
+      }
+      if (admission.kind === 'refused') {
+        debug(
+          `refused a new connection to hold the pacing rate; retry after ${admission.retryAfterSeconds}s`,
+        );
+        emitDiagnostic(options, {
+          event: 'ws_new_connection_paced',
+          outcome: 'refused',
+          decision,
+          requiredWaitMs: admission.requiredWaitMs,
+          retryAfterSeconds: admission.retryAfterSeconds,
+        }, diagnosticCorrelation);
+        return pacedRefusalResponse(admission.retryAfterSeconds);
+      }
+      if (admission.waitedMs > 0) {
+        pacingWaitedMs = admission.waitedMs;
+        debug(`paced new connection by ${admission.waitedMs}ms`);
+        emitDiagnostic(options, {
+          event: 'ws_new_connection_paced',
+          outcome: 'admitted',
+          decision,
+          waitedMs: admission.waitedMs,
+        }, diagnosticCorrelation);
+      }
+      // Unconditional, NOT gated on having waited: `admit` is async, so even an
+      // immediate admission resumes a microtask later, and two same-partition
+      // requests arriving in one tick both resume having waited zero. The head
+      // scan above ran before that yield either way.
+      //
+      // Re-read the clock and reap what expired meanwhile, so head ages are
+      // measured from now rather than from arrival. The candidate SET is still
+      // the one scanned on arrival: a head that appeared or was reaped during
+      // the wait is not reflected in `heads`, only in the pool counts.
+      now = resolvedOptions.now();
+      evictions.push(...cleanupExpiredConnections(now));
+      // A same-partition request may have gone in flight across the yield. It
+      // was classified when no head existed, so without this both would open a
+      // persistent nursery head for one key — and a fan-out would fill the
+      // nursery with duplicates, evicting other conversations' heads and
+      // forcing the full-context resends that open still more connections. An
+      // overlap like this takes an isolated socket today; keep that.
+      if (persistent && partitionKey
+        && connectionEntries(partitionKey).some(entry => entry.inFlight)) {
+        persistent = false;
+        decision = 'parallel_isolated';
+        debug('parallel request using an isolated socket after pacing');
+      }
+    }
+
     if (!selected && persistent) {
       evictions.push(...evictOldestIdleGeneration(
         'nursery',
@@ -2128,6 +2251,7 @@ export function createResponsesWebSocketFetch(
       continuationMatchMode: selectedMatch?.mode,
       promotedConnectionId,
       createdConnectionId: selected ? undefined : nextConnectionDebugId,
+      ...(pacingWaitedMs !== undefined ? { pacingWaitedMs } : {}),
       createdGeneration: selected ? undefined : persistent ? 'nursery' : 'isolated',
       incrementalInputItems: selectedDelta?.length,
       heads: candidates.map(entry => ({

@@ -58,4 +58,4 @@ Several need real Claude Code bundles. Extract them once with
 | --- | --- |
 | `pr92-selfconnect-guard-matrix` | The self-connection guard across address forms — exact, loopback alias, wildcard bind. |
 | `pr92-selfconnect-loop-repro` | Reproduces the recursive self-tunnel the guard exists to prevent. |
-| `fix-parent-notice-tui-and-epipe-round2` | Parent notices under a real Claude Code TUI, plus async EPIPE containment. Needs a real binary; set `CLODEX_CLAUDE_PATH` and `MAINBASE_DIR`. |
+| `fix-parent-notice-tui-and-epipe-round2` | **BROKEN — does not run.** It imports `tests/helpers/register-ts-resolve-hook.mjs`, which was never committed, so both probes exit 1 at module resolution. Supply that hook before trusting anything here. Claim it was written to settle: parent notices under a real Claude Code TUI, plus async EPIPE containment. Needs a real binary; set `CLODEX_CLAUDE_PATH` and `MAINBASE_DIR`. |

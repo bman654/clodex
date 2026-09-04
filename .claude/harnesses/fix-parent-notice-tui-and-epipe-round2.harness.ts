@@ -7,6 +7,12 @@ import { afterAll, describe, expect, it } from 'vitest';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const MAINBASE = process.env['MAINBASE_DIR'] ?? '../clodex-review/mainbase';
+// NOTE: this file does not exist in the repository and never has — it was not
+// committed with the harness. Both probes below therefore exit 1 at module
+// resolution before running anything. Recorded rather than silently left: the
+// call this harness makes into src/upstream-retry.ts was updated when
+// `upstreamMaxRetries` was removed, but that repair is UNVERIFIED: nothing here
+// has been executed, and it cannot be until this hook is supplied.
 const REGISTER_HOOK = join(ROOT, 'tests/helpers/register-ts-resolve-hook.mjs');
 const LAUNCH_URL = pathToFileURL(join(ROOT, 'src/launch.ts')).href;
 const NOTICE_URL = pathToFileURL(join(ROOT, 'src/parent-notice.ts')).href;
@@ -115,7 +121,7 @@ describe('round-two parent notice runtime review', () => {
       const retryUrl = pathToFileURL(join(root, 'src/upstream-retry.ts')).href;
       writeFileSync(child, `#!/bin/sh\nprintf 'child-first-line\\n'\ntouch ${JSON.stringify(started)}\nsleep 1\n`);
       chmodSync(child, 0o755);
-      writeFileSync(probe, `import { existsSync } from 'node:fs';\nimport { launchClaude } from ${JSON.stringify(launchUrl)};\nimport { upstreamMaxRetries } from ${JSON.stringify(retryUrl)};\nconst sleep = ms => new Promise(r => setTimeout(r, ms));\nprocess.env.CLODEX_CLAUDE_PATH = ${JSON.stringify(child)};\nconst running = launchClaude({ ...process.env }, undefined, []);\nwhile (!existsSync(${JSON.stringify(started)})) await sleep(10);\nawait sleep(300);\nupstreamMaxRetries({ CLODEX_UPSTREAM_MAX_RETRIES: '6' });\nawait running;\nawait sleep(200);\n`);
+      writeFileSync(probe, `import { existsSync } from 'node:fs';\nimport { launchClaude } from ${JSON.stringify(launchUrl)};\nimport { upstreamRequestBudget } from ${JSON.stringify(retryUrl)};\nconst sleep = ms => new Promise(r => setTimeout(r, ms));\nprocess.env.CLODEX_CLAUDE_PATH = ${JSON.stringify(child)};\nconst running = launchClaude({ ...process.env }, undefined, []);\nwhile (!existsSync(${JSON.stringify(started)})) await sleep(10);\nawait sleep(300);\nupstreamRequestBudget({ env: { CLODEX_UPSTREAM_MAX_RETRIES: '6' } });\nawait running;\nawait sleep(200);\n`);
       writeFileSync(runner, `#!/bin/bash\nset +e\nset -o pipefail\n${JSON.stringify(process.execPath)} --experimental-strip-types --no-warnings --import ${JSON.stringify(REGISTER_HOOK)} ${JSON.stringify(probe)} 2>&1 | head -n 1\ncodes=(\"\${PIPESTATUS[@]}\")\nprintf '${label}_node=%s head=%s\\n' \"\${codes[0]}\" \"\${codes[1]}\"\n`);
       chmodSync(runner, 0o755);
       return execFileSync(runner, { encoding: 'utf8', env: { ...process.env, CLODEX_HOME: join(dir, 'home') } });

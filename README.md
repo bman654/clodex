@@ -398,6 +398,40 @@ clodex --version    # version
   so telling the client never to resend a request is not quietly undone one
   layer down.
   Recovered requests appear in the inference log as `response_retried`.
+- **Connection pacing (ChatGPT/Codex plans):** when many agents run at once,
+  clodex spaces out the new connections it opens to OpenAI, which should make a
+  burst of parallel work less likely to trip OpenAI's own rate limit. (In the
+  traffic we sampled, the rejections clustered in the busiest minutes; that the
+  rate is what triggers them is a reasonable reading of that, not something we
+  can prove.) A follow-up turn that can reuse the connection it already has is
+  never delayed by this;
+  what goes through the limiter is work that needs a *new* connection — a first
+  turn, a conversation that branched, or several agents running at once. The
+  default is 60 new connections a minute, with an allowance of 10 opened back
+  to back after a quiet spell.
+  **This is a real throughput ceiling, not a brief pause.** One new connection
+  per second means that if you run many agents at once and each needs its own
+  connection, they end up sharing that budget: roughly 20 agents settle at
+  about 20 seconds per turn instead of a few seconds. That is the trade — you
+  wait longer, in exchange for a lower chance of losing turns to rate-limit
+  errors. It reduces that risk rather than removing it: clodex cannot see
+  OpenAI's actual limit, and under a heavy enough fan-out pacing can itself
+  answer a turn with a rate-limit response. Work over the
+  rate is queued for a few seconds, and anything still over is answered with
+  the same "try again shortly" response OpenAI itself would return, which
+  clodex retries for you with backoff. Set
+  `CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN` to another whole number between `1`
+  and `600` to change the rate, or to `0` to turn pacing off. Higher values
+  clamp to `600` with a one-time warning, and an unreadable value is reported
+  once and ignored. If you have turned retries off with
+  `CLODEX_UPSTREAM_MAX_RETRIES=0`, pacing never refuses a request — but it also
+  stops limiting once its initial allowance is used up, because there would be
+  nothing left to retry a refused request. The same applies at very low rates:
+  if clodex cannot retry a turned-away request for long enough to reach the
+  next free connection slot — which is the case around 1 or 2 connections a
+  minute at the default timeouts — it admits the excess late rather than
+  failing it, and says so once. Turning a rate that low into hard failures
+  would manufacture the errors this feature exists to reduce.
 
 ## Known limitations
 
