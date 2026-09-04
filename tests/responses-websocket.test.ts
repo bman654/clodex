@@ -4374,14 +4374,30 @@ describe('new-connection pacing', () => {
         return readAll(response);
       };
 
-      for (let index = 0; index < 12; index += 1) await open(`low-${index}`);
+      // Eleven, opened sequentially: ten spend the burst and the eleventh has
+      // to wait. Arrivals here are sequential rather than simultaneous, so each
+      // one refills roughly what it consumes and keeps paying the bound — the
+      // ceiling is weaker than the configured rate, but it is still a ceiling.
+      for (let index = 0; index < 11; index += 1) await open(`low-${index}`);
 
       // Every one of them opened a connection; none was turned away.
-      expect(fakeSockets).toHaveLength(12);
+      expect(fakeSockets).toHaveLength(11);
       expect(diagnostics).not.toContainEqual(expect.objectContaining({
         event: 'ws_new_connection_paced',
         outcome: 'refused',
       }));
+
+      // And pacing is still SHAPING, not switched off: the first arrival past
+      // the burst really did wait out the bound. Asserting only that sockets
+      // opened cannot tell this apart from disabled pacing.
+      const waits = diagnostics
+        .filter((event): event is typeof event & { waitedMs: number } =>
+          event.event === 'ws_new_connection_paced'
+          && (event as { outcome?: string }).outcome === 'admitted'
+          && typeof (event as { waitedMs?: unknown }).waitedMs === 'number')
+        .map(event => event.waitedMs);
+      expect(waits).toHaveLength(1);
+      expect(waits[0]).toBeGreaterThan(1_000);
     } finally {
       delete process.env.CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN;
       resetResponsesWebSocketConnectionsForTests();

@@ -412,8 +412,64 @@ describe('the wait bound against the resolved request budget', () => {
       expect(admissions.some(entry => entry.state() === 'refused')).toBe(false);
       expect(admissions.every(entry => entry.state() === 'admitted')).toBe(true);
       expect(clock.pending).toBe(0);
+
+      // ...but this is NOT the same as pacing switched off. The burst is still
+      // shaped: the first arrival past it waits out the whole bound, and only
+      // the ones past the debt floor go straight through. Without this, zeroing
+      // the refill rate here would be indistinguishable from disabled pacing.
+      const delayed = admissions.filter(entry => (entry.settledAt() ?? 0) > 0);
+      expect(delayed).toHaveLength(1);
+      expect(delayed[0]!.settledAt()).toBe(pacer.maxWaitMs);
+      expect(admissions.filter(entry => entry.settledAt() === 0)).toHaveLength(19);
     },
   );
+
+  it.each([
+    // [bound, maxRetries, rate, canRefuse] — the shipped budget AND a
+    // user-shortened one. Every committed case used to be the shipped 4833ms
+    // bound with five retries, so a rule that ignored the budget entirely
+    // (`ratePerMinute >= 3`) passed the whole suite while recreating the
+    // terminal-failure defect under CLODEX_UPSTREAM_IDLE_TIMEOUT_MS=10000.
+    [4_833, 5, 60, true],    // shipped defaults
+    [4_833, 5, 3, true],     // lowest rate the shipped budget can still serve
+    [4_833, 5, 2, false],
+    [4_833, 5, 1, false],
+    [666, 2, 3, false],      // 10s budget: schedule 2s vs a 20s refill
+    [666, 2, 29, false],     // still short of the threshold
+    [666, 2, 30, true],      // exactly at it: schedule 2s vs a 2s refill
+    [666, 2, 60, true],
+    [15_000, 1, 4, true],    // 15s schedule vs a 15s refill
+    [15_000, 1, 3, false],   // 15s schedule vs a 20s refill
+  ])(
+    'decides refusability from the whole budget: bound=%i retries=%i rate=%i -> %s',
+    (bound, maxRetries, rate, expected) => {
+      expect(canRefuseAtRate(bound, maxRetries, rate)).toBe(expected);
+    },
+  );
+
+  it.each([
+    // The same thing behaviourally, on a NON-default budget, because a truth
+    // table over the helper cannot prove the constructor consults it.
+    [3, false],
+    [30, true],
+  ])('honours a shortened deadline when deciding to refuse (rate %i)', async (rate, refuses) => {
+    const clock = new TestClock();
+    const pacer = new WsUpgradePacer({
+      ratePerMinute: rate,
+      burst: 1,
+      idleTimeoutMs: 10_000,
+      maxRetries: 2,
+      now: clock.now,
+      schedule: clock.schedule,
+    });
+    expect(pacer.maxWaitMs).toBe(666);
+
+    const admissions = Array.from({ length: 6 }, () => track(clock, pacer.admit()));
+    await flush();
+    await clock.advance(pacer.maxWaitMs);
+
+    expect(admissions.some(entry => entry.state() === 'refused')).toBe(refuses);
+  });
 
   it('still refuses at the shipped rate, where a retry can outlast a refill', () => {
     // The guard above must not disable refusals at the default. One token per

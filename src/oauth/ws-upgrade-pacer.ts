@@ -234,12 +234,23 @@ export function refusalScheduleMs(maxWaitMs: number, maxRetries: number): number
  * died as a rate-limit error — manufactured by the very thing meant to avoid
  * them. Measured at 1/min and 2/min: 10 of 10 refused requests terminal.
  *
- * No hint strategy fixes that. Serving a 60s deficit needs a 60s wait, and a
- * 120s deadline covering six attempts cannot fund one; that is the same
- * arithmetic that forced the cap. So when the schedule cannot reach a refill,
- * the pacer stops refusing and shapes what it can instead — the identical rule
- * it already applies to a zero bound, where refusing everything past the burst
- * is worse than not pacing. Admitted late beats failed.
+ * This is a TRADE-OFF, not an impossibility. An earlier version of this comment
+ * claimed no hint strategy could fix it; that was wrong, and a review disproved
+ * it. A separately budgeted 12s hint reaches the 1/minute refill — attempts at
+ * 0, 12, 24, 36, 48 and 60s — and still fits the conservative mixed-gap bound
+ * at the shipped budget: 6 x 4833 + max(12,2) + max(12,4) + max(12,8) +
+ * max(12,16) + max(12,32) = 112,998ms < 120,000ms.
+ *
+ * What IS true is narrower: no strategy can admit all the overflow inside the
+ * deadline while preserving the configured ceiling. At 1/minute, ten
+ * simultaneous overflow requests need ten minutes of capacity, so a longer hint
+ * rescues one of them and still fails the other nine.
+ *
+ * Given that, shaping is chosen over refusing because it spends the shortfall
+ * on latency the user configured rather than on errors, and because it keeps
+ * one hint rule instead of two. A separately budgeted hint is a reasonable
+ * follow-up, not a correction. This is the same rule already applied to a zero
+ * bound, where refusing everything past the burst is worse than not pacing.
  */
 export function canRefuseAtRate(
   maxWaitMs: number,
@@ -429,8 +440,8 @@ export class WsUpgradePacer implements ConnectionPacer {
         `pacing new OpenAI connections at ${ratePerMinute}/minute without refusing overflow: a `
         + `${maxRetries}-retry schedule spans only `
         + `${refusalScheduleMs(this.maxWaitMs, maxRetries)}ms, which cannot outlast the `
-        + `${Math.round(60_000 / ratePerMinute)}ms wait for a free connection slot, so excess `
-        + 'connections are admitted late rather than failed',
+        + `${Math.round(60_000 / ratePerMinute)}ms wait for a free connection slot, so clodex `
+        + 'shapes the opening burst and then admits remaining overflow instead of failing it',
         message => emitParentNotice(`clodex: ${message}`),
       );
     }

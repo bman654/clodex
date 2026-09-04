@@ -11,8 +11,8 @@ const MAINBASE = process.env['MAINBASE_DIR'] ?? '../clodex-review/mainbase';
 // committed with the harness. Both probes below therefore exit 1 at module
 // resolution before running anything. Recorded rather than silently left: the
 // call this harness makes into src/upstream-retry.ts was updated when
-// `upstreamMaxRetries` was removed, so the harness is correct by inspection but
-// still not executable until this hook is supplied.
+// `upstreamMaxRetries` was removed, but that repair is UNVERIFIED: nothing here
+// has been executed, and it cannot be until this hook is supplied.
 const REGISTER_HOOK = join(ROOT, 'tests/helpers/register-ts-resolve-hook.mjs');
 const LAUNCH_URL = pathToFileURL(join(ROOT, 'src/launch.ts')).href;
 const NOTICE_URL = pathToFileURL(join(ROOT, 'src/parent-notice.ts')).href;

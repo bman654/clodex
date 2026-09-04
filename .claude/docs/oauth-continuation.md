@@ -126,11 +126,19 @@ and broke low rates in the other direction — at 1/minute the first token is 60
 attempts ~4s apart are all spent inside 20s, so every refused request exhausted its retries before
 a token could exist. Measured at 1/min and 2/min: 10 of 10 refused requests terminal.
 
-No hint strategy fixes that, because serving a 60s deficit needs a 60s wait and a 120s deadline
-covering six attempts cannot fund one. So **the pacer refuses only when its retry schedule can
-outlast the wait for a refill** (`canRefuseAtRate`); below that it shapes what it can and admits
-the rest late, with a notice. That is the same rule the zero-bound case already used: admitted late
-beats failed.
+**That is a trade-off, not an impossibility** — an earlier draft of this section claimed no hint
+strategy could fix it and was wrong. A separately budgeted 12s hint does reach the 1/minute refill
+(attempts at 0, 12, 24, 36, 48, 60s) and still fits the conservative mixed-gap bound:
+`6 x 4833 + max(12,2) + max(12,4) + max(12,8) + max(12,16) + max(12,32) = 112,998ms < 120,000ms`.
+What is true is narrower: no strategy admits ALL the overflow inside the deadline while preserving
+the configured ceiling, because at 1/minute ten simultaneous overflow requests need ten minutes of
+capacity.
+
+So **the pacer refuses only when its retry schedule can outlast the wait for a refill**
+(`canRefuseAtRate`); below that it shapes the opening burst and then admits the remaining overflow
+rather than failing it, with a notice. That is the same rule the zero-bound case already used, and
+it is chosen because it spends the shortfall on latency the user configured rather than on errors.
+A separately budgeted hint would be a reasonable follow-up.
 
 Because the head scan runs before the wait, an admitted request re-reads the clock, reaps whatever
 expired while it was queued, and demotes itself to `parallel_isolated` if a same-partition request
