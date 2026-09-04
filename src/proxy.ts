@@ -619,6 +619,7 @@ export async function startProxyCatalog(
             openAiOAuth,
             claudeSessionId,
             maxTools: maxToolsForNpm(route.npm),
+            log: plog,
             reasoningMetadata: {
               providerId: route.providerId,
               apiBaseUrl: route.baseURL,

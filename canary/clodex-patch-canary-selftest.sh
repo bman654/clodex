@@ -378,10 +378,11 @@ gate_denied "a subset run never counts as full coverage" \
 
 # 17. A SKIP is a site that did nothing. Counting it as applied is how "all 11 applied" stays
 #     true while a clodex feature is quietly off.
-MATRIX_SITES='{"PATCH 1: a":"OK","PATCH 3: b":"OK","PATCH 7: c":"SKIP","PATCH 9: d":"OK"}' \
+MATRIX_SITES='{"compact-prompt-markers":"OK","published-content":"OK","PATCH 1: a":"OK","PATCH 3: b":"OK","PATCH 7: c":"SKIP","PATCH 9: d":"OK"}' \
   write_matrix "$HOST:host:pass"
-matrix_check "applied counts OK only, not SKIP" "3" "$(matrix_applied_sites "$HOST")"
-matrix_check "reported counts every site" "4" "$(matrix_total_sites "$HOST")"
+matrix_check "applied counts OK patch sites only, not SKIP or probe checks" "3" \
+  "$(matrix_applied_sites "$HOST")"
+matrix_check "reported counts patch sites only, not probe checks" "4" "$(matrix_total_sites "$HOST")"
 matrix_check "a platform with no sites reports zero" "0" "$(matrix_applied_sites nonesuch)"
 
 # 18. The brief coverage block used in the fail alert: failures in full, passes collapsed.
@@ -432,6 +433,7 @@ matrix_check "--no-container is not reported as Docker being down" "0" \
 #      a clean pass while reporting the same break on the two Linux builds that DO have images.
 MECHANISM_CHECKS='[{"name":"pristine-parses","ok":true,"detail":"entry module is needs-shim"},
                    {"name":"read-content","ok":true,"detail":"28147627 bytes of JavaScript"},
+                   {"name":"compact-prompt-markers","ok":true,"detail":"both strict compaction prompt markers are present"},
                    {"name":"published-content","ok":true,"detail":"byte-for-byte"}]'
 
 # write_probe_json <file> <verdict> <patch-sites-json> [reasons-json] [extra-check-json]
@@ -469,6 +471,20 @@ matrix_check "a probe records its patch sites alongside its mechanism checks" "O
 matrix_check "a probe records how many patch sites applied" "3" \
   "$(printf '%s' "$LEG_DETAIL" | jq -r '.patchSites.applied')"
 
+# A host/container patch can pass without observing prompt drift, so an older probe that omits the
+# exact-marker result cannot be accepted as the prerequisite for either execution leg.
+jq 'del(.checks[] | select(.name == "compact-prompt-markers"))' \
+  "$TMP/probe-ok.json" > "$TMP/probe-no-compact-markers.json"
+leg_reset
+evaluate_probe_leg win32-arm64 "$TMP/probe-no-compact-markers.json" 0 "$TMP/probe.stderr" >/dev/null
+matrix_check "a probe with no compaction-marker result is never a pass" "error" "$LEG_STATUS"
+case "$LEG_REASONS" in
+  *"prompt drift was not checked"*)
+    pass=$((pass + 1)); printf 'ok   %s\n' "a probe with no compaction-marker result names the coverage gap" ;;
+  *)
+    fail=$((fail + 1)); printf 'FAIL a probe with no compaction-marker result says why — got: %s\n' "$LEG_REASONS" ;;
+esac
+
 leg_reset
 write_probe_json "$TMP/probe-p5.json" fail "$PATCH5_MISSING" \
   '["patch sites FAILED: PATCH 5: model picker options"]' \
@@ -493,7 +509,236 @@ case "$LEG_REASONS" in
   *) fail=$((fail + 1)); printf 'FAIL a probe with no patch-site results says why — got: %s\n' "$LEG_REASONS" ;;
 esac
 
-# 19c. The whole incident, end to end at the matrix level: 2.1.238 lost PATCH 5 on the two arm64
+# 19c. Every mode runs the probe. Host/container then add execution evidence without replacing the
+# probe's marker verdict. Stubs drive the real dispatcher and merger; no binary or Docker is needed.
+exercise_leg_dispatch() { # exercise_leg_dispatch <mode> [probe-status] [execution-status]
+  local mode="$1" STUB_PROBE_STATUS="${2:-pass}" STUB_EXECUTION_STATUS="${3:-pass}"
+  (
+    CALLS=""
+    run_leg_probe() {
+      CALLS="${CALLS:+$CALLS,}probe"
+      leg_reset
+      LEG_STATUS="$STUB_PROBE_STATUS"
+      case "$STUB_PROBE_STATUS" in
+        pass) LEG_REASONS="" ;;
+        fail) LEG_REASONS="- compact prompt marker(s) missing: end" ;;
+        error) LEG_REASONS="- the probe produced no usable result" ;;
+      esac
+      LEG_SITES='{"compact-prompt-markers":"FAIL","published-content":"OK","PATCH 10: child network environment":"FAIL"}'
+      [ "$STUB_PROBE_STATUS" != "pass" ] || LEG_SITES='{"compact-prompt-markers":"OK","published-content":"OK","PATCH 10: child network environment":"OK"}'
+      LEG_MARKERS='["ccpatch:probe"]'
+      LEG_DETAIL='{"format":"elf","sourceBytes":28147627}'
+    }
+    run_leg_host() {
+      CALLS="${CALLS:+$CALLS,}host"
+      leg_reset
+      LEG_STATUS="$STUB_EXECUTION_STATUS"
+      LEG_REASONS="$( [ "$STUB_EXECUTION_STATUS" = "pass" ] || printf '%s\n' '- host patch failed' )"
+      LEG_SITES='{"PATCH 10: child network environment":"OK"}'
+      LEG_MARKERS='["ccpatch:child-network-env"]'
+      LEG_DETAIL='{"patchedVersion":"2.1.261"}'
+    }
+    run_leg_container() {
+      CALLS="${CALLS:+$CALLS,}container"
+      leg_reset
+      LEG_STATUS="$STUB_EXECUTION_STATUS"
+      LEG_REASONS="$( [ "$STUB_EXECUTION_STATUS" = "pass" ] || printf '%s\n' '- container patch failed' )"
+      LEG_SITES='{"PATCH 10: child network environment":"OK"}'
+      LEG_MARKERS='["ccpatch:child-network-env"]'
+      LEG_DETAIL='{"image":"node:24-bookworm"}'
+    }
+
+    run_platform_leg test-platform 2.1.261 "$mode"
+    jq -n -c --arg calls "$CALLS" --arg status "$LEG_STATUS" --arg reasons "$LEG_REASONS" \
+      --argjson sites "$LEG_SITES" --argjson markers "$LEG_MARKERS" --argjson detail "$LEG_DETAIL" \
+      '{calls: $calls, status: $status, reasons: $reasons, sites: $sites,
+        markers: $markers, detail: $detail}'
+  )
+}
+
+DISPATCH="$(exercise_leg_dispatch host)"
+matrix_check "a host build is probed before it is patched" "probe,host" \
+  "$(printf '%s' "$DISPATCH" | jq -r '.calls')"
+matrix_check "a host result retains the compaction-marker check" "OK" \
+  "$(printf '%s' "$DISPATCH" | jq -r '.sites["compact-prompt-markers"]')"
+matrix_check "a host result keeps probe and execution patch-site verdicts distinct" "OK OK" \
+  "$(printf '%s' "$DISPATCH" | jq -r '.sites["probe:PATCH 10: child network environment"] + " " + .sites["PATCH 10: child network environment"]')"
+matrix_check "a host result retains probe details beside execution details" "elf 2.1.261" \
+  "$(printf '%s' "$DISPATCH" | jq -r '.detail.probe.format + " " + .detail.patchedVersion')"
+
+DISPATCH="$(exercise_leg_dispatch container)"
+matrix_check "a container build is probed before it is patched" "probe,container" \
+  "$(printf '%s' "$DISPATCH" | jq -r '.calls')"
+matrix_check "a container result retains the compaction-marker check" "OK" \
+  "$(printf '%s' "$DISPATCH" | jq -r '.sites["compact-prompt-markers"]')"
+
+DISPATCH="$(exercise_leg_dispatch probe)"
+matrix_check "a probe-only build runs exactly one probe" "probe" \
+  "$(printf '%s' "$DISPATCH" | jq -r '.calls')"
+
+DISPATCH="$(exercise_leg_dispatch host fail pass)"
+matrix_check "a marker failure survives a successful host patch" "fail" \
+  "$(printf '%s' "$DISPATCH" | jq -r '.status')"
+matrix_check "a failed probe site is not overwritten by a successful host site" "FAIL OK" \
+  "$(printf '%s' "$DISPATCH" | jq -r '.sites["probe:PATCH 10: child network environment"] + " " + .sites["PATCH 10: child network environment"]')"
+case "$(printf '%s' "$DISPATCH" | jq -r '.reasons')" in
+  *"compact prompt marker(s) missing: end"*)
+    pass=$((pass + 1)); printf 'ok   %s\n' "a marker failure keeps its missing-marker reason" ;;
+  *)
+    fail=$((fail + 1)); printf 'FAIL a marker failure lost its reason — got: %s\n' "$DISPATCH" ;;
+esac
+
+DISPATCH="$(exercise_leg_dispatch host error pass)"
+matrix_check "a probe error survives a successful host patch" "error" \
+  "$(printf '%s' "$DISPATCH" | jq -r '.status')"
+case "$(printf '%s' "$DISPATCH" | jq -r '.reasons')" in
+  *"CANARY INFRASTRUCTURE: the probe produced no usable result"*)
+    pass=$((pass + 1)); printf 'ok   %s\n' "a merged probe error identifies itself as infrastructure" ;;
+  *)
+    fail=$((fail + 1)); printf 'FAIL a merged probe error was not tagged — got: %s\n' "$DISPATCH" ;;
+esac
+
+DISPATCH="$(exercise_leg_dispatch host error fail)"
+matrix_check "an execution failure outranks a probe error" "fail" \
+  "$(printf '%s' "$DISPATCH" | jq -r '.status')"
+printf '%s\n' "$DISPATCH" | jq -c \
+  '. + {platform:"test-platform",mode:"host",downgraded:false,binary:"",tarball:""}' > "$MATRIX"
+matrix_check "a probe error is excluded from grouped release evidence" \
+  "- host patch failed [test-platform]" "$(matrix_reason_groups)"
+matrix_check "a probe error retained in a failed row reaches infrastructure notes" \
+  "- the probe produced no usable result" "$(matrix_error_notes)"
+
+# Marker drift breaks OpenAI compaction, not binary patching. Human alerts must preserve that
+# distinction, including when an infrastructure failure from the execution tier shares the row.
+MARKER_REASON="Compaction-prompt drift is not a patch failure: no patch site is broken"
+MATRIX_SITES='{"compact-prompt-markers":"FAIL","published-content":"OK"}' \
+  write_matrix "darwin-arm64:host:fail:$MARKER_REASON" "win32-x64:probe:fail:$MARKER_REASON"
+EXTRA_REASONS=""
+if only_compact_prompt_drift_failed; then
+  pass=$((pass + 1)); printf 'ok   %s\n' "marker-only failures get their own human alert category"
+else
+  fail=$((fail + 1)); printf 'FAIL %s\n' "marker-only failures get their own human alert category"
+fi
+EXTRA_REASONS="- on win32-x64, PATCH 5 changed from OK to SKIP
+"
+if only_compact_prompt_drift_failed; then
+  fail=$((fail + 1)); printf 'FAIL %s\n' "a baseline regression vetoes the marker-only human alert"
+else
+  pass=$((pass + 1)); printf 'ok   %s\n' "a baseline regression vetoes the marker-only human alert"
+fi
+EXTRA_REASONS=""
+case "$(matrix_coverage_brief)" in
+  *"compaction prompt marker check failed"*"native execution not checked"*)
+    pass=$((pass + 1)); printf 'ok   %s\n' "a failed probe row names the prompt marker check" ;;
+  *)
+    fail=$((fail + 1)); printf 'FAIL marker failure coverage label — got: %s\n' "$(matrix_coverage_brief)" ;;
+esac
+matrix_check "marker drift headline does not call it a patch break" \
+  ":warning: *Claude Code 2.1.999 changed its compaction prompt* on 2 of 8 builds" \
+  "$(compact_prompt_drift_headline 2.1.999 2 8)"
+case "$(compact_prompt_drift_impact)" in
+  *"does not mean \`clodex patch\` is broken"*"no patch site failed"*'Prompt is too long'*"updated prompt markers"*)
+    pass=$((pass + 1)); printf 'ok   %s\n' "marker drift impact explains the real user risk without prescribing rollback" ;;
+  *)
+    fail=$((fail + 1)); printf 'FAIL marker drift impact — got: %s\n' "$(compact_prompt_drift_impact)" ;;
+esac
+
+MATRIX_SITES='{"compact-prompt-markers":"FAIL","PATCH 1: Agent tool model enum":"FAIL"}' \
+  write_matrix "darwin-arm64:host:fail:$MARKER_REASON"
+if matrix_failures_are_compact_prompt_drift_only; then
+  fail=$((fail + 1)); printf 'FAIL %s\n' "a patch-site failure cannot use the marker-only alert"
+else
+  pass=$((pass + 1)); printf 'ok   %s\n' "a patch-site failure cannot use the marker-only alert"
+fi
+
+jq -n -c --arg r "- $MARKER_REASON
+- CANARY INFRASTRUCTURE: host execution unavailable
+" \
+  '{platform:"darwin-arm64",mode:"host",status:"fail",reasons:$r,binary:"",tarball:"",
+    downgraded:false,sites:{"compact-prompt-markers":"FAIL"},markers:[],detail:{}}' > "$MATRIX"
+if matrix_failures_are_compact_prompt_drift_only; then
+  pass=$((pass + 1)); printf 'ok   %s\n' "infrastructure evidence does not recategorize marker drift as a patch break"
+else
+  fail=$((fail + 1)); printf 'FAIL %s\n' "infrastructure evidence does not recategorize marker drift as a patch break"
+fi
+
+# Render the real agent-facing prompt with stdin closed. The jq file argument must stay in the
+# substitution: when it was split onto the next shell line, jq read stdin and rendered an empty
+# verification loop under launchd (or hung forever on an interactive --retriage).
+MATRIX_SITES='{"compact-prompt-markers":"FAIL","published-content":"OK"}' \
+  write_matrix "darwin-arm64:host:fail:$MARKER_REASON" "win32-x64:probe:fail:$MARKER_REASON"
+VERSION=2.1.999
+MAIN_SHA=1234567890abcdef
+MAIN_SUBJECT="test canary"
+BASE_VERSION=2.1.998
+WORK="$TMP/triage-work"
+REPO_DIR="$TMP/triage-repo"
+TRIAGE_PROMPT="$(investigation_prompt "$VERSION" "- $MARKER_REASON" "$TMP/run.log" </dev/null 2>/dev/null)"
+case "$TRIAGE_PROMPT" in
+  *"for p in darwin-arm64 win32-x64;"*)
+    pass=$((pass + 1)); printf 'ok   %s\n' "the generated verification loop includes every downloaded matrix row" ;;
+  *)
+    fail=$((fail + 1)); printf 'FAIL generated verification loop — got:\n%s\n' "$TRIAGE_PROMPT" ;;
+esac
+case "$TRIAGE_PROMPT" in
+  *'A `compact-prompt-markers` failure is NOT a patch failure'*"bundle-reader"*)
+    pass=$((pass + 1)); printf 'ok   %s\n' "generated triage distinguishes marker drift from a patch failure" ;;
+  *)
+    fail=$((fail + 1)); printf 'FAIL generated marker triage branch is missing\n' ;;
+esac
+
+# A container executes and mutates its install after the universal probe. Its generated MODE=probe
+# reproduction must therefore prefer clodex's pristine backup, not re-probe the patched survivor.
+REPRO_OUTPUT="$(
+  (
+    WORK="$TMP/repro-marker"
+    VERSION=2.1.261
+    REPO_DIR="$WORK/repo"
+    MATRIX="$WORK/matrix.jsonl"
+    mkdir -p "$WORK/clodex-home" "$WORK/linux-arm64/install" \
+      "$WORK/linux-arm64/tweakcc" "$REPO_DIR/scripts" "$REPO_DIR/node_modules/tweakcc"
+    printf '{}\n' > "$WORK/clodex-home/config.json"
+    printf 'patched\n' > "$WORK/linux-arm64/install/claude"
+    printf 'pristine\n' > "$WORK/linux-arm64/tweakcc/native-binary.backup"
+    jq -n -c \
+      '{platform:"linux-arm64",mode:"container",status:"fail",reasons:"marker missing",
+        binary:"",tarball:"",downgraded:false,sites:{"compact-prompt-markers":"FAIL"},
+        markers:[],detail:{image:"node:24-bookworm",dockerPlatform:"linux/arm64"}}' > "$MATRIX"
+    cat > "$REPO_DIR/scripts/probe-patch-mechanism.mjs" <<'PROBE'
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+const binary = process.argv[2];
+const sandbox = path.dirname(path.dirname(binary));
+const expected = {
+  HOME: path.join(sandbox, 'home'),
+  CLODEX_HOME: path.join(sandbox, 'clodex-home'),
+  TWEAKCC_CONFIG_DIR: path.join(sandbox, 'tweakcc'),
+  TWEAKCC_CC_INSTALLATION_PATH: binary,
+};
+const isolated = Object.entries(expected).every(([key, value]) => process.env[key] === value)
+  && ['CLODEX_TRACE', 'FORCE_COLOR', 'CLICOLOR_FORCE'].every(key => !(key in process.env));
+console.log(`probe-input=${readFileSync(binary, 'utf8').trim()}`);
+console.log(`probe-environment=${isolated ? 'isolated' : 'leaked'}`);
+PROBE
+    write_repro_script >/dev/null
+    CLODEX_TRACE=dirty FORCE_COLOR=1 CLICOLOR_FORCE=1 \
+      MODE=probe "$WORK/repro.sh" linux-arm64 "$REPO_DIR"
+  )
+)"
+case "$REPRO_OUTPUT" in
+  *"probe-input=pristine"*)
+    pass=$((pass + 1)); printf 'ok   %s\n' "a container probe reproduction starts from its pristine backup" ;;
+  *)
+    fail=$((fail + 1)); printf 'FAIL container probe reproduction used the wrong bytes — got: %s\n' "$REPRO_OUTPUT" ;;
+esac
+case "$REPRO_OUTPUT" in
+  *"probe-environment=isolated"*)
+    pass=$((pass + 1)); printf 'ok   %s\n' "a probe reproduction fences home, config and inherited diagnostics" ;;
+  *)
+    fail=$((fail + 1)); printf 'FAIL probe reproduction leaked its environment — got: %s\n' "$REPRO_OUTPUT" ;;
+esac
+
+# 19d. The whole incident, end to end at the matrix level: 2.1.238 lost PATCH 5 on the two arm64
 #      Linux builds AND on win32-arm64. All three must fail, as one grouped cause, and the run
 #      must not earn the green tick.
 write_matrix \
