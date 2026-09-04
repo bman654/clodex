@@ -3,7 +3,8 @@ import type { LanguageModel, ModelMessage } from 'ai';
 import { parseToolArguments } from './proxy-shared.js';
 import type { SdkCallParams } from './sdk-adapter.js';
 import { oauthServiceTier, reportUnsupportedServiceTier } from './sdk-adapter.js';
-import { upstreamMaxRetries } from './upstream-retry.js';
+import { upstreamRequestBudget } from './upstream-retry.js';
+import { trackUpstreamAttempts } from './upstream-attempts.js';
 
 // ── OpenAI request shapes ───────────────────────────────────────────────────
 
@@ -194,6 +195,68 @@ export async function collectOpenAiStream(stream: AsyncIterable<unknown>): Promi
   return collected;
 }
 
+interface ActiveUpstreamBudget {
+  model: LanguageModel;
+  maxRetries: number;
+  abortSignal: AbortSignal;
+  onStreamPart: () => void;
+  close: () => void;
+}
+
+function startUpstreamBudget(model: LanguageModel, streaming: boolean): ActiveUpstreamBudget {
+  const { idleTimeoutMs, totalTimeoutMs, maxRetries } = upstreamRequestBudget();
+  const attempts = trackUpstreamAttempts(model);
+  const abort = new AbortController();
+  const idleError = () => attempts.deadlineError(new Error(
+    `no data received from provider for ${Math.round(idleTimeoutMs / 1000)}s`,
+  ));
+  let idleTimer = streaming
+    ? setTimeout(() => abort.abort(idleError()), idleTimeoutMs)
+    : undefined;
+  const totalTimer = setTimeout(
+    () => abort.abort(attempts.deadlineError(new Error(
+      `provider ${streaming ? 'stream' : 'request'} exceeded ${Math.round(totalTimeoutMs / 1000)}s`,
+    ))),
+    totalTimeoutMs,
+  );
+
+  return {
+    model: attempts.model,
+    maxRetries,
+    abortSignal: abort.signal,
+    onStreamPart: () => {
+      if (idleTimer === undefined) return;
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => abort.abort(idleError()), idleTimeoutMs);
+    },
+    close: () => {
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      clearTimeout(totalTimer);
+      if (!abort.signal.aborted) abort.abort();
+    },
+  };
+}
+
+async function* watchOpenAiStream(
+  stream: AsyncIterable<unknown>,
+  budget: ActiveUpstreamBudget,
+): AsyncIterable<unknown> {
+  for await (const part of stream) {
+    if (budget.abortSignal.aborted || (part as { type?: string }).type === 'abort') {
+      throw budget.abortSignal.reason instanceof Error
+        ? budget.abortSignal.reason
+        : new Error('SDK stream aborted');
+    }
+    budget.onStreamPart();
+    yield part;
+  }
+  if (budget.abortSignal.aborted) {
+    throw budget.abortSignal.reason instanceof Error
+      ? budget.abortSignal.reason
+      : new Error('SDK stream aborted');
+  }
+}
+
 export async function generateOpenAiResponse(
   model: LanguageModel,
   params: SdkCallParams,
@@ -201,24 +264,39 @@ export async function generateOpenAiResponse(
   options?: { forceStream?: boolean },
 ) {
   let result: { text: string; toolCalls?: CollectedOpenAiStream['toolCalls']; finishReason?: string; usage?: CollectedOpenAiStream['usage']; warnings?: unknown };
-  if (options?.forceStream) {
-    // Some upstreams (e.g. ChatGPT's Codex OAuth backend) only ever answer as a
-    // stream. Request a real stream from the SDK and collect it into one
-    // response instead of issuing a non-streaming request upstream.
-    const { stream } = streamText({
-      model,
-      ...(params as any),
-      maxRetries: upstreamMaxRetries(),
-      onError: () => {},
-      onStepFinish: step => reportUnsupportedServiceTier(params, step.warnings),
-    });
-    result = await collectOpenAiStream(stream);
-  } else {
-    result = (await generateText({
-      model,
-      ...(params as any),
-      maxRetries: upstreamMaxRetries(),
-    })) as any;
+  const streaming = options?.forceStream === true;
+  const budget = startUpstreamBudget(model, streaming);
+  try {
+    if (streaming) {
+      // Some upstreams (e.g. ChatGPT's Codex OAuth backend) only ever answer as a
+      // stream. Request a real stream from the SDK and collect it into one
+      // response instead of issuing a non-streaming request upstream.
+      const { stream } = streamText({
+        model: budget.model,
+        ...(params as any),
+        maxRetries: budget.maxRetries,
+        abortSignal: budget.abortSignal,
+        onError: () => {},
+        onStepFinish: step => reportUnsupportedServiceTier(params, step.warnings),
+      });
+      result = await collectOpenAiStream(watchOpenAiStream(stream, budget));
+    } else {
+      try {
+        result = (await generateText({
+          model: budget.model,
+          ...(params as any),
+          maxRetries: budget.maxRetries,
+          abortSignal: budget.abortSignal,
+        })) as any;
+      } catch (error) {
+        if (budget.abortSignal.aborted && budget.abortSignal.reason instanceof Error) {
+          throw budget.abortSignal.reason;
+        }
+        throw error;
+      }
+    }
+  } finally {
+    budget.close();
   }
   reportUnsupportedServiceTier(params, result.warnings);
   const message: Record<string, any> = { role: 'assistant', content: result.text || null };
@@ -251,43 +329,49 @@ export async function streamOpenAiResponse(
   responseModelId: string,
   onChunk: (chunk: string) => void,
 ): Promise<void> {
-  const { stream } = streamText({
-    model,
-    ...(params as any),
-    maxRetries: upstreamMaxRetries(),
-    onStepFinish: step => reportUnsupportedServiceTier(params, step.warnings),
-  });
-  const baseData = {
-    id: `chatcmpl-${Date.now()}`,
-    object: 'chat.completion.chunk',
-    created: Math.floor(Date.now() / 1000),
-    model: responseModelId,
-  };
+  const budget = startUpstreamBudget(model, true);
+  try {
+    const { stream } = streamText({
+      model: budget.model,
+      ...(params as any),
+      maxRetries: budget.maxRetries,
+      abortSignal: budget.abortSignal,
+      onStepFinish: step => reportUnsupportedServiceTier(params, step.warnings),
+    });
+    const baseData = {
+      id: `chatcmpl-${Date.now()}`,
+      object: 'chat.completion.chunk',
+      created: Math.floor(Date.now() / 1000),
+      model: responseModelId,
+    };
 
-  const send = (delta: Record<string, any>, finish_reason: string | null = null) =>
-    onChunk(`data: ${JSON.stringify({ ...baseData, choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
+    const send = (delta: Record<string, any>, finish_reason: string | null = null) =>
+      onChunk(`data: ${JSON.stringify({ ...baseData, choices: [{ index: 0, delta, finish_reason }] })}\n\n`);
 
-  for await (const part of stream) {
-    const p = part as any;
-    switch (p.type) {
-      case 'text-delta':
-        send({ role: 'assistant', content: p.textDelta ?? p.text ?? '' });
-        break;
-      case 'tool-input-start':
-        send({ role: 'assistant', tool_calls: [{ index: 0, id: p.id ?? p.toolCallId, type: 'function', function: { name: p.toolName, arguments: '' } }] });
-        break;
-      case 'tool-input-delta':
-        send({ tool_calls: [{ index: 0, function: { arguments: p.delta ?? p.text ?? p.argsTextDelta ?? '' } }] });
-        break;
-      case 'finish':
-        send({}, p.finishReason || 'stop');
-        break;
-      case 'error':
-        throw p.error instanceof Error || (p.error && typeof p.error === 'object')
-          ? p.error
-          : new Error(typeof p.error === 'string' ? p.error : 'Upstream stream failed');
+    for await (const part of watchOpenAiStream(stream, budget)) {
+      const p = part as any;
+      switch (p.type) {
+        case 'text-delta':
+          send({ role: 'assistant', content: p.textDelta ?? p.text ?? '' });
+          break;
+        case 'tool-input-start':
+          send({ role: 'assistant', tool_calls: [{ index: 0, id: p.id ?? p.toolCallId, type: 'function', function: { name: p.toolName, arguments: '' } }] });
+          break;
+        case 'tool-input-delta':
+          send({ tool_calls: [{ index: 0, function: { arguments: p.delta ?? p.text ?? p.argsTextDelta ?? '' } }] });
+          break;
+        case 'finish':
+          send({}, p.finishReason || 'stop');
+          break;
+        case 'error':
+          throw p.error instanceof Error || (p.error && typeof p.error === 'object')
+            ? p.error
+            : new Error(typeof p.error === 'string' ? p.error : 'Upstream stream failed');
+      }
     }
-  }
 
-  onChunk('data: [DONE]\n\n');
+    onChunk('data: [DONE]\n\n');
+  } finally {
+    budget.close();
+  }
 }

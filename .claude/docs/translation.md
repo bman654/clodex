@@ -22,7 +22,10 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   tokenizes at ~1.5 chars/token — 200k+ tokens per screenshot, killing agents with "Prompt is too
   long" while the local bytes/4 estimate showed half the real count.
   `estimateAnthropicInputTokens` likewise counts each image block at a flat vision estimate.
-- `streamAnthropicResponse` maps SDK events to Anthropic SSE, aborting after 120s without an event.
+- Anthropic- and OpenAI-format `streamText` calls abort after the configured idle window without an
+  event (120s by default) or the configured total provider-call window (10m by default). True
+  `generateText` calls enforce only the total window because they expose no event that can reset an
+  idle clock.
 - `modelPrefersResponsesApi()` selects `provider.responses(id)` for models requiring the Responses
   API (GPT-5.4+, GPT-5.5, `*-codex`, o-series); `provider.chat(id)` otherwise. Originator string is
   `clodex`.
