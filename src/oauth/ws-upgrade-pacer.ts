@@ -38,7 +38,7 @@
 
 import { emitParentNotice } from '../parent-notice.js';
 import { clampRetryAfterSeconds } from '../upstream-error.js';
-import { upstreamMaxRetries } from '../upstream-retry.js';
+import { upstreamRequestBudget } from '../upstream-retry.js';
 
 export const WS_NEW_CONNECTIONS_PER_MIN_ENV = 'CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN';
 
@@ -80,29 +80,26 @@ export const WS_NEW_CONNECTION_BURST = 10;
 export const WS_NEW_CONNECTION_MAX_WAIT_CEILING_MS = 15_000;
 
 /**
- * The no-data deadline the pacer assumes for the request it is holding.
+ * The request budget this pacer sizes its wait bound against.
  *
- * The pacer does not read the resolved deadline: on this branch the translated
- * streaming paths use a fixed 120 seconds, and it is not exposed. Callers may
- * pass the real value through `idleTimeoutMs`, which is the seam to wire up
- * once that budget becomes configurable.
- */
-export const ASSUMED_UPSTREAM_IDLE_TIMEOUT_MS = 120_000;
-
-/** The AI SDK's own default when clodex does not override it. */
-export const SDK_DEFAULT_MAX_RETRIES = 2;
-
-/**
- * Retry attempts the bound has to cover.
+ * Both terms of that arithmetic are READ, never assumed. `maxRetries` and the
+ * no-data deadline are user-configurable (`CLODEX_UPSTREAM_MAX_RETRIES`,
+ * `CLODEX_UPSTREAM_IDLE_TIMEOUT_MS`, `CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS`) and
+ * interact — a shorter deadline lowers the retry ceiling — so they are resolved
+ * together by the same `upstreamRequestBudget` call every SDK generation entry
+ * point makes. Hardcoding either would make this feature's correctness depend
+ * on a constant a user can change out from under it: too small a deadline or
+ * too large a retry count and the ladder overruns the deadline it shares.
  *
- * Read, never assumed. A hardcoded guess would make this feature's correctness
- * depend on merge order against any change to the retry default: too low and
- * the ladder overruns the deadline, too high and the bound shrinks for no
- * reason. `upstreamMaxRetries` returns undefined when nothing overrides the
- * SDK, which is the SDK's own default of two.
+ * The no-argument call is the one the paced request itself resolves: no
+ * production caller passes `upstreamRequestBudget` an `idleTimeoutMs`
+ * override (that seam exists for direct adapter callers and is unused), so
+ * both read the same environment. The environment cannot change under a live
+ * process, so reading it once when the process-wide bucket is built is enough.
  */
-export function resolvedUpstreamMaxRetries(): number {
-  return upstreamMaxRetries() ?? SDK_DEFAULT_MAX_RETRIES;
+export function resolvedPacingBudget(): { idleTimeoutMs: number; maxRetries: number } {
+  const { idleTimeoutMs, maxRetries } = upstreamRequestBudget();
+  return { idleTimeoutMs, maxRetries };
 }
 
 /** First step of the AI SDK's backoff ladder; each later step doubles. */
@@ -117,13 +114,24 @@ const SDK_INITIAL_BACKOFF_MS = 2_000;
  *
  *     (maxRetries + 1) x bound + totalBackoff < idleTimeout
  *
- * At a 120s deadline and five retries the ladder alone is 2+4+8+16+32 = 62s,
- * leaving 58s for six attempts. Half of that is reserved for the provider's own
- * first byte, so the bound is ~4.8s. A flat 15s bound would instead allow six
- * attempts plus backoff to reach 152s against a 120s deadline — not a certain
- * timeout, since an attempt need not spend its whole bound, but a ceiling that
- * no longer fits the budget. Reserving time cannot GUARANTEE the ladder
- * completes either: first-byte latency is unbounded within the deadline.
+ * At the default 120s deadline and five retries the ladder alone is
+ * 2+4+8+16+32 = 62s, leaving 58s for six attempts. Half of that is reserved for
+ * the provider's own first byte, so the bound is ~4.8s. A flat 15s bound would
+ * instead allow six attempts plus backoff to reach 152s against a 120s
+ * deadline — not a certain timeout, since an attempt need not spend its whole
+ * bound, but a ceiling that no longer fits the budget. Reserving time cannot
+ * GUARANTEE the ladder completes either: first-byte latency is unbounded within
+ * the deadline.
+ *
+ * Halving is what makes the inequality STRICT for every input, rather than an
+ * arithmetic coincidence at one configuration: attempts x bound <=
+ * (idle - backoff) / 2, so attempts x bound + backoff <= (idle + backoff) / 2,
+ * which is below `idle` whenever `backoff < idle`. `upstreamRequestBudget`
+ * guarantees that side condition for every budget it resolves, because it caps
+ * `maxRetries` at the largest ladder that fits the resolved deadline. On any
+ * other input — an injected retry count above that cap, a deadline barely wider
+ * than its own ladder — the shareable term floors to zero and the bound with
+ * it, which the constructor reads as "do not pace".
  *
  * `totalBackoffMs` is the SDK's own exponential ladder, which is what it uses
  * when a failure carries no `Retry-After`. A refusal from this module DOES carry
@@ -133,9 +141,8 @@ const SDK_INITIAL_BACKOFF_MS = 2_000;
  * upper bound on the pacing case and the exact term for every other retryable
  * failure sharing the same deadline.
  *
- * `idleTimeoutMs` is assumed rather than read — the translated streaming paths
- * use a fixed 120s on this branch and do not expose it — while `maxRetries` is
- * read, because clodex's retry default is the term most likely to change.
+ * Both `idleTimeoutMs` and `maxRetries` are read from the resolved request
+ * budget rather than assumed; see `resolvedPacingBudget`.
  */
 export function wsNewConnectionMaxWaitMs(
   idleTimeoutMs: number,
@@ -238,7 +245,7 @@ function reportOnce(raw: string, message: string, warn: (message: string) => voi
  * queued longer or admitted anyway. Admitting anyway was tried first and does
  * not work: with the bound also acting as the debt floor, sustained output
  * settles at exactly the offered rate delayed by the bound, so a 82/min fan-out
- * still went out at 82/min and simply arrived 15 seconds later. Refusing sheds
+ * still went out at 82/min and simply arrived one bound later. Refusing sheds
  * that overflow instead, in the same retryable 429 shape the upgrade 403
  * already produces today — the shape the client is known to handle.
  *
@@ -292,11 +299,14 @@ export class WsUpgradePacer implements ConnectionPacer {
   constructor(options: WsUpgradePacerOptions = {}) {
     const ratePerMinute = options.ratePerMinute ?? DEFAULT_WS_NEW_CONNECTIONS_PER_MIN;
     const burst = options.burst ?? WS_NEW_CONNECTION_BURST;
-    const maxRetries = options.maxRetries ?? resolvedUpstreamMaxRetries();
-    this.maxWaitMs = wsNewConnectionMaxWaitMs(
-      options.idleTimeoutMs ?? ASSUMED_UPSTREAM_IDLE_TIMEOUT_MS,
-      maxRetries,
-    );
+    // Resolve the environment only when a term is missing, so a fully injected
+    // test pacer never depends on ambient configuration.
+    const budget = options.idleTimeoutMs === undefined || options.maxRetries === undefined
+      ? resolvedPacingBudget()
+      : { idleTimeoutMs: options.idleTimeoutMs, maxRetries: options.maxRetries };
+    const idleTimeoutMs = options.idleTimeoutMs ?? budget.idleTimeoutMs;
+    const maxRetries = options.maxRetries ?? budget.maxRetries;
+    this.maxWaitMs = wsNewConnectionMaxWaitMs(idleTimeoutMs, maxRetries);
     // A bound of zero means the deadline has no room to queue anything, so
     // pacing would degenerate into refusing everything past the burst. Not
     // pacing at all is the safer reading of that configuration.
@@ -306,9 +316,9 @@ export class WsUpgradePacer implements ConnectionPacer {
       // Turning itself off on a seam is the one failure mode nobody would
       // notice, so it is never silent.
       reportOnce(
-        `disabled:${maxRetries}`,
+        `disabled:${maxRetries}:${idleTimeoutMs}`,
         `not pacing new OpenAI connections: a ${maxRetries}-retry budget leaves no room to `
-        + 'queue inside the request deadline',
+        + `queue inside the resolved ${idleTimeoutMs}ms request deadline`,
         message => emitParentNotice(`clodex: ${message}`),
       );
     }

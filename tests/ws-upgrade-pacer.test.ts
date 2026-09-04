@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
-  ASSUMED_UPSTREAM_IDLE_TIMEOUT_MS,
   DEFAULT_WS_NEW_CONNECTIONS_PER_MIN,
   MAX_WS_NEW_CONNECTIONS_PER_MIN,
   WsUpgradePacer,
@@ -8,11 +7,47 @@ import {
   WS_NEW_CONNECTION_BURST,
   WS_NEW_CONNECTION_MAX_WAIT_CEILING_MS,
   resetWsUpgradePacerForTests,
-  resolvedUpstreamMaxRetries,
+  resolvedPacingBudget,
   wsNewConnectionMaxWaitMs,
   wsNewConnectionsPerMinute,
   type UpgradeAdmission,
 } from '../src/oauth/ws-upgrade-pacer.js';
+import {
+  UPSTREAM_IDLE_TIMEOUT_ENV,
+  UPSTREAM_MAX_RETRIES_ENV,
+  UPSTREAM_TOTAL_TIMEOUT_ENV,
+  upstreamRequestBudget,
+} from '../src/upstream-retry.js';
+
+/** The AI SDK's fallback ladder: 2s, 4s, 8s, … with no jitter. */
+function sdkBackoffMs(maxRetries: number): number {
+  return 2_000 * (2 ** maxRetries - 1);
+}
+
+/**
+ * Run `body` against a known-clean upstream-budget environment.
+ *
+ * The budget is resolved from `process.env` in production, so a stray ambient
+ * value would silently change what these assertions mean.
+ */
+function withUpstreamEnv<T>(values: Record<string, string | undefined>, body: () => T): T {
+  const keys = [UPSTREAM_IDLE_TIMEOUT_ENV, UPSTREAM_TOTAL_TIMEOUT_ENV, UPSTREAM_MAX_RETRIES_ENV];
+  const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  try {
+    for (const key of keys) {
+      const value = values[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    return body();
+  } finally {
+    for (const key of keys) {
+      const value = saved[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
 
 /**
  * Deterministic clock. Nothing in this file sleeps: time only moves when a test
@@ -95,29 +130,15 @@ describe('wsNewConnectionMaxWaitMs', () => {
   // matrix is the point: a bound derived for one retry count and used with
   // another is how this becomes a merge-order bug.
   it.each([0, 1, 2, 3, 5])('keeps a %i-retry ladder inside the deadline it shares', maxRetries => {
-    const idleTimeoutMs = ASSUMED_UPSTREAM_IDLE_TIMEOUT_MS;
+    const idleTimeoutMs = 120_000;
     const bound = wsNewConnectionMaxWaitMs(idleTimeoutMs, maxRetries);
-    const backoffMs = 2_000 * (2 ** maxRetries - 1);
+    const backoffMs = sdkBackoffMs(maxRetries);
 
     expect(bound).toBeGreaterThan(0);
     expect((maxRetries + 1) * bound + backoffMs).toBeLessThan(idleTimeoutMs);
     // Pacing takes at most half of what the backoff ladder leaves, so the
     // request keeps an equal share for the provider's own first byte.
     expect((maxRetries + 1) * bound).toBeLessThanOrEqual((idleTimeoutMs - backoffMs) / 2);
-  });
-
-  it('reads the retry budget in force rather than assuming one', () => {
-    // Unset, the AI SDK applies its own default of two. A hardcoded assumption
-    // here would be wrong on one side or the other of any change to that.
-    expect(resolvedUpstreamMaxRetries()).toBe(2);
-    process.env.CLODEX_UPSTREAM_MAX_RETRIES = '5';
-    try {
-      expect(resolvedUpstreamMaxRetries()).toBe(5);
-      expect(new WsUpgradePacer().maxWaitMs)
-        .toBe(wsNewConnectionMaxWaitMs(ASSUMED_UPSTREAM_IDLE_TIMEOUT_MS, 5));
-    } finally {
-      delete process.env.CLODEX_UPSTREAM_MAX_RETRIES;
-    }
   });
 
   it('is total on degenerate input rather than failing open into an unbounded wait', () => {
@@ -138,12 +159,173 @@ describe('wsNewConnectionMaxWaitMs', () => {
     // nothing is queued and the overflow is refused instead.
     expect(wsNewConnectionMaxWaitMs(10_000, 5)).toBe(0);
   });
+});
 
-  it('is what the pacer actually uses, and is 15s at most', () => {
-    expect(new WsUpgradePacer().maxWaitMs)
-      .toBe(wsNewConnectionMaxWaitMs(ASSUMED_UPSTREAM_IDLE_TIMEOUT_MS, resolvedUpstreamMaxRetries()));
-    // Independent oracle: the literal, not the constant the code imports.
-    expect(new WsUpgradePacer().maxWaitMs).toBeLessThanOrEqual(15_000);
+/**
+ * The bound against the budget the paced request actually spends.
+ *
+ * Both terms of `(maxRetries + 1) x bound + totalBackoff < idleTimeout` are
+ * user-configurable and they interact, so checking the arithmetic at one
+ * deadline proves nothing about the rest of the range. These drive real
+ * environments through the real budget resolver, which is the composition no
+ * single change's CI exercises.
+ *
+ * Two mutations this is built to catch, both of which ship a default-on hard
+ * abort: a flat 15s bound reads 6 x 15s + 62s = 152s against the default 120s
+ * deadline, and a bound derived from a hardcoded 120s is wrong at every
+ * deadline the user can actually configure.
+ */
+describe('the wait bound against the resolved request budget', () => {
+  const IDLE_TIMEOUTS = [
+    undefined,   // shipped default
+    '9000',      // below the floor: clamps up to 10s
+    '10000',     // the floor
+    '14001',     // barely wider than its own backoff ladder
+    '20000',
+    '30000',
+    '120000',
+    '300000',
+    '3600000',   // the ceiling
+    '7200000',   // above the ceiling: clamps down
+    'nonsense',  // malformed: falls back to the default
+  ];
+  const RETRIES = [undefined, '0', '1', '2', '5', '10', '99', '-1'];
+
+  it.each(IDLE_TIMEOUTS.flatMap(idle => RETRIES.map(retries => [idle, retries] as const)))(
+    'keeps the whole retry ladder inside the deadline (idle=%s, retries=%s)',
+    (idle, retries) => {
+      const budget = withUpstreamEnv(
+        {
+          [UPSTREAM_IDLE_TIMEOUT_ENV]: idle,
+          [UPSTREAM_MAX_RETRIES_ENV]: retries,
+          // Pinned high so the idle timeout is never lowered to meet it; the
+          // pair's interaction has its own case below.
+          [UPSTREAM_TOTAL_TIMEOUT_ENV]: '21600000',
+        },
+        () => upstreamRequestBudget({ warn: () => {} }),
+      );
+      const bound = wsNewConnectionMaxWaitMs(budget.idleTimeoutMs, budget.maxRetries);
+
+      // The inequality, stated exactly as the module documents it.
+      expect((budget.maxRetries + 1) * bound + sdkBackoffMs(budget.maxRetries))
+        .toBeLessThan(budget.idleTimeoutMs);
+      expect(bound).toBeGreaterThanOrEqual(0);
+      expect(bound).toBeLessThanOrEqual(WS_NEW_CONNECTION_MAX_WAIT_CEILING_MS);
+    },
+  );
+
+  it('holds when a short total timeout drags the idle timeout down with it', () => {
+    // #171's pair rule: an explicit total below the idle lowers the idle. The
+    // pacer must size itself against the lowered value, not the requested one.
+    const budget = withUpstreamEnv(
+      {
+        [UPSTREAM_IDLE_TIMEOUT_ENV]: '600000',
+        [UPSTREAM_TOTAL_TIMEOUT_ENV]: '60000',
+      },
+      () => upstreamRequestBudget({ warn: () => {} }),
+    );
+    expect(budget.idleTimeoutMs).toBe(60_000);
+
+    const bound = wsNewConnectionMaxWaitMs(budget.idleTimeoutMs, budget.maxRetries);
+    expect((budget.maxRetries + 1) * bound + sdkBackoffMs(budget.maxRetries))
+      .toBeLessThan(60_000);
+  });
+
+  it('reads the budget in force rather than assuming one', () => {
+    // Unset, this is #171's derived default: five retries inside a 120s window.
+    expect(withUpstreamEnv({}, () => resolvedPacingBudget()))
+      .toEqual({ idleTimeoutMs: 120_000, maxRetries: 5 });
+    expect(withUpstreamEnv({ [UPSTREAM_MAX_RETRIES_ENV]: '2' }, () => resolvedPacingBudget()))
+      .toEqual({ idleTimeoutMs: 120_000, maxRetries: 2 });
+    expect(withUpstreamEnv({ [UPSTREAM_IDLE_TIMEOUT_ENV]: '30000' }, () => resolvedPacingBudget()))
+      // A 30s window cannot fund a fourth retry, so the ceiling caps it at three.
+      .toEqual({ idleTimeoutMs: 30_000, maxRetries: 3 });
+  });
+
+  it('is what the pacer actually uses, at the shipped default', () => {
+    const pacer = withUpstreamEnv({}, () => new WsUpgradePacer());
+    // Independent oracle: the arithmetic written out, not the function reused.
+    // (120000 - 62000) / 2 / 6 attempts.
+    expect(pacer.maxWaitMs).toBe(4_833);
+    expect(6 * pacer.maxWaitMs + 62_000).toBeLessThan(120_000);
+  });
+
+  it('shrinks its bound when the user shortens the deadline', () => {
+    // A pacer that derived its bound from a hardcoded 120s would read 13250ms
+    // here — over six times the deadline's actual share.
+    const pacer = withUpstreamEnv(
+      { [UPSTREAM_IDLE_TIMEOUT_ENV]: '30000' },
+      () => new WsUpgradePacer(),
+    );
+    expect(pacer.maxWaitMs).toBe(2_000);
+    expect(wsNewConnectionMaxWaitMs(120_000, 3)).toBe(13_250);
+  });
+
+  it('grows its bound only up to the ceiling when the user lengthens the deadline', () => {
+    const pacer = withUpstreamEnv(
+      { [UPSTREAM_IDLE_TIMEOUT_ENV]: '3600000' },
+      () => new WsUpgradePacer(),
+    );
+    expect(pacer.maxWaitMs).toBe(WS_NEW_CONNECTION_MAX_WAIT_CEILING_MS);
+  });
+
+  it('refuses only past a large simultaneous fan-out at the shipped defaults', async () => {
+    // Reachability, measured rather than argued: an ordinary user never sees a
+    // refusal. The tighter bound #171's five-retry default produces moves this
+    // threshold down from 26 simultaneous new connections to 15, which is the
+    // figure the PR and the deep doc quote.
+    const clock = new TestClock();
+    const pacer = withUpstreamEnv(
+      {},
+      () => new WsUpgradePacer({ now: clock.now, schedule: clock.schedule }),
+    );
+    const admissions = Array.from({ length: 30 }, () => track(clock, pacer.admit()));
+    await flush();
+
+    expect(admissions.findIndex(entry => entry.state() === 'refused')).toBe(14);
+    expect(admissions.slice(0, 14).some(entry => entry.state() === 'refused')).toBe(false);
+  });
+
+  it('shapes 25 connections and then stops, with retries turned off', async () => {
+    // With retries off the ladder costs nothing, so the bound is the flat
+    // ceiling and the shaped burst is the doc's `burst + bound x refill` = 25.
+    // Pinned because the bound now differs between this mode and the default.
+    const clock = new TestClock();
+    const pacer = withUpstreamEnv(
+      { [UPSTREAM_MAX_RETRIES_ENV]: '0' },
+      () => new WsUpgradePacer({ now: clock.now, schedule: clock.schedule }),
+    );
+    expect(pacer.maxWaitMs).toBe(WS_NEW_CONNECTION_MAX_WAIT_CEILING_MS);
+
+    const admissions = Array.from({ length: 40 }, () => track(clock, pacer.admit()));
+    await flush();
+    await clock.advance(pacer.maxWaitMs);
+
+    expect(admissions.every(entry => entry.state() === 'admitted')).toBe(true);
+    expect(admissions.filter(entry => (entry.settledAt() ?? 0) > 0)).toHaveLength(15);
+  });
+
+  it('stops pacing rather than holding a request its deadline cannot fund', async () => {
+    // 14001ms funds a three-retry ladder costing 14000ms. There is 1ms left, so
+    // there is no room to queue: pacing off is the only safe reading.
+    const pacer = withUpstreamEnv(
+      { [UPSTREAM_IDLE_TIMEOUT_ENV]: '14001' },
+      () => new WsUpgradePacer(),
+    );
+    expect(pacer.maxWaitMs).toBe(0);
+
+    // Degrading means admitting without delay, never refusing everything past
+    // the burst and never queueing past the deadline.
+    const clock = new TestClock();
+    const disabled = withUpstreamEnv(
+      { [UPSTREAM_IDLE_TIMEOUT_ENV]: '14001' },
+      () => new WsUpgradePacer({ now: clock.now, schedule: clock.schedule }),
+    );
+    const admissions = await Promise.all(
+      Array.from({ length: 50 }, () => disabled.admit()),
+    );
+    expect(admissions.every(entry => entry.kind === 'admitted' && entry.waitedMs === 0)).toBe(true);
+    expect(clock.pending).toBe(0);
   });
 });
 

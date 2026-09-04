@@ -81,15 +81,27 @@ extra admission at that instant.
 
 **The wait bound is derived, not chosen.** Every attempt of one request shares ONE no-data deadline
 (the timer starts before the SDK call and only a stream part resets it), so the whole ladder must
-fit: `(maxRetries + 1) x bound + totalBackoff < idleTimeout`. At a 120s deadline and five retries
-the backoff ladder alone is 62s and the bound works out at ~4.8s; a flat 15s would instead let six
-attempts plus backoff reach 152s against 120s. `maxRetries` is **read** through `upstreamMaxRetries`
-rather than assumed, so the bound is correct whatever clodex's retry default is — assuming it would
-make this feature's correctness depend on the merge order of any change to that default.
-`idleTimeoutMs` is still assumed at 120s, because the translated streaming paths do not expose the
-value; it is an option on the pacer and is the seam to wire a resolved budget into. When the
-arithmetic leaves no room to queue at all the pacer disables itself, since refusing everything past
-the burst would be worse than not pacing.
+fit: `(maxRetries + 1) x bound + totalBackoff < idleTimeout`. At the default 120s deadline and five
+retries the backoff ladder alone is 62s and the bound works out at ~4.8s; a flat 15s would instead
+let six attempts plus backoff reach 152s against 120s.
+
+**Both terms are read, not assumed.** Every term of that inequality is user-configurable
+(`CLODEX_UPSTREAM_IDLE_TIMEOUT_MS`, `CLODEX_UPSTREAM_TOTAL_TIMEOUT_MS`,
+`CLODEX_UPSTREAM_MAX_RETRIES`) and they interact — a shorter deadline lowers the retry ceiling — so
+the pacer resolves them together through the same `upstreamRequestBudget()` call every SDK
+generation entry point makes, and sizes its bound against the deadline the paced request will
+actually spend. No production caller overrides `idleTimeoutMs` on that call, so the two resolve
+identically. Hardcoding either term would leave the bound correct only at the default
+configuration.
+
+The inequality holds strictly for every resolvable configuration rather than by coincidence at one
+of them: pacing takes at most half of what the ladder leaves, so `attempts x bound + backoff <=
+(idle + backoff) / 2 < idle` whenever `backoff < idle`, and `upstreamRequestBudget` guarantees that
+side condition by capping `maxRetries` at the largest ladder fitting the resolved deadline. Where a
+configuration leaves too little room — the extreme being a deadline barely wider than its own
+backoff ladder, e.g. `CLODEX_UPSTREAM_IDLE_TIMEOUT_MS=14001` — the bound floors to zero and the
+pacer disables itself with a notice, since refusing everything past the burst would be worse than
+not pacing. It degrades to less pacing, never to a request pushed past its deadline.
 
 Because the head scan runs before the wait, an admitted request re-reads the clock, reaps whatever
 expired while it was queued, and demotes itself to `parallel_isolated` if a same-partition request
