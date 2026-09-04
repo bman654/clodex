@@ -7,11 +7,13 @@ import {
   WS_NEW_CONNECTION_BURST,
   WS_NEW_CONNECTION_MAX_WAIT_CEILING_MS,
   resetWsUpgradePacerForTests,
+  pacedRetryAfterSeconds,
   resolvedPacingBudget,
   wsNewConnectionMaxWaitMs,
   wsNewConnectionsPerMinute,
   type UpgradeAdmission,
 } from '../src/oauth/ws-upgrade-pacer.js';
+import { installParentNoticeSink } from '../src/parent-notice.js';
 import {
   UPSTREAM_IDLE_TIMEOUT_ENV,
   UPSTREAM_MAX_RETRIES_ENV,
@@ -211,6 +213,19 @@ describe('the wait bound against the resolved request budget', () => {
         .toBeLessThan(budget.idleTimeoutMs);
       expect(bound).toBeGreaterThanOrEqual(0);
       expect(bound).toBeLessThanOrEqual(WS_NEW_CONNECTION_MAX_WAIT_CEILING_MS);
+
+      // And the same inequality against what the request ACTUALLY spends
+      // between attempts. The SDK substitutes a supplied hint for its own rung
+      // rather than taking the larger, so the real per-gap delay is the pacer's
+      // capped hint wherever that exceeds the rung. Budgeting only the ladder
+      // is what let a 30s hint overrun a 10s deadline.
+      const hintCapMs = pacedRetryAfterSeconds(Number.POSITIVE_INFINITY, bound) * 1_000;
+      let worstGapsMs = 0;
+      for (let retry = 0; retry < budget.maxRetries; retry += 1) {
+        worstGapsMs += Math.max(hintCapMs, 2_000 * 2 ** retry);
+      }
+      expect((budget.maxRetries + 1) * bound + worstGapsMs)
+        .toBeLessThan(budget.idleTimeoutMs);
     },
   );
 
@@ -269,11 +284,84 @@ describe('the wait bound against the resolved request budget', () => {
     expect(pacer.maxWaitMs).toBe(WS_NEW_CONNECTION_MAX_WAIT_CEILING_MS);
   });
 
+  it('never asks the client to wait longer than the deadline funds', async () => {
+    // REGRESSION. The bound budgets the SDK's 2s/4s/8s ladder, but a refusal
+    // carries its own `retry-after`, and `getRetryDelayInMs` (ai@7.0.22,
+    // util/retry-with-exponential-backoff.ts) RETURNS that hint in place of the
+    // rung whenever it is under 60s. So the hint, not the ladder, is what the
+    // request actually spends between attempts — and an uncapped hint derived
+    // from the token deficit silently replaces the term the bound was derived
+    // against.
+    //
+    // At 2/minute the deficit is 30s while the deadline funds a 666ms bound.
+    // Before the cap this refusal asked for 30s inside a 10s deadline: the
+    // request died at the deadline having made ONE attempt, with the two
+    // retries its budget had paid for never running.
+    const clock = new TestClock();
+    const pacer = new WsUpgradePacer({
+      ratePerMinute: 2,
+      burst: 1,
+      idleTimeoutMs: 10_000,
+      maxRetries: 2,
+      now: clock.now,
+      schedule: clock.schedule,
+    });
+    expect(pacer.maxWaitMs).toBe(666);
+
+    const admissions = Array.from({ length: 11 }, () => track(clock, pacer.admit()));
+    await flush();
+
+    const refusals = admissions
+      .map(entry => entry.admission())
+      .filter((value): value is Extract<UpgradeAdmission, { kind: 'refused' }> =>
+        value?.kind === 'refused');
+    expect(refusals.length).toBeGreaterThan(0);
+
+    for (const refusal of refusals) {
+      // The deficit is still reported honestly; only the hint is capped.
+      expect(refusal.requiredWaitMs).toBeGreaterThan(pacer.maxWaitMs);
+      // A whole-second hint cannot go below 1s, and 1s is under the SDK's
+      // smallest rung, so it stays inside the term the bound already budgets.
+      expect(refusal.retryAfterSeconds * 1_000)
+        .toBeLessThanOrEqual(Math.max(1_000, pacer.maxWaitMs));
+      // ...and never reaches zero. `retry-after: 0` means retry immediately,
+      // which would burn the whole retry budget in milliseconds. A sub-second
+      // bound (666ms here) is exactly where flooring would produce it.
+      expect(refusal.retryAfterSeconds).toBeGreaterThanOrEqual(1);
+    }
+  });
+
+  it('does not let a rate notice suppress the notice that pacing turned itself off', () => {
+    // The two notices shared one dedupe set keyed by an ARBITRARY environment
+    // string, so a rate value spelled like the disabled key silenced the one
+    // notice that must never go missing. Namespaced keys keep them apart.
+    resetWsUpgradePacerForTests();
+    const notices: string[] = [];
+    const release = installParentNoticeSink(line => { notices.push(line); });
+    try {
+      // Crafted to collide with the disabled notice's `${retries}:${idle}` key.
+      expect(wsNewConnectionsPerMinute({
+        [WS_NEW_CONNECTIONS_PER_MIN_ENV]: 'disabled:3:14001',
+      })).toBe(DEFAULT_WS_NEW_CONNECTIONS_PER_MIN);
+      expect(notices.some(line => line.includes('ignoring'))).toBe(true);
+
+      const pacer = withUpstreamEnv(
+        { [UPSTREAM_IDLE_TIMEOUT_ENV]: '14001' },
+        () => new WsUpgradePacer(),
+      );
+      expect(pacer.maxWaitMs).toBe(0);
+    } finally {
+      release();
+    }
+    expect(notices.some(line => line.includes('not pacing new OpenAI connections'))).toBe(true);
+  });
+
   it('refuses only past a large simultaneous fan-out at the shipped defaults', async () => {
-    // Reachability, measured rather than argued: an ordinary user never sees a
-    // refusal. The tighter bound #171's five-retry default produces moves this
-    // threshold down from 26 simultaneous new connections to 15, which is the
-    // figure the PR and the deep doc quote.
+    // Reachability, measured rather than argued. This is where a user first
+    // meets a refusal, and it is NOT out of reach: 15 simultaneous agents is
+    // inside the many-agent workload this feature targets. #171's five-retry
+    // default tightens the bound and moves the threshold down from 26 to 15,
+    // so the rebase made refusals easier to reach, not harder.
     const clock = new TestClock();
     const pacer = withUpstreamEnv(
       {},
@@ -473,11 +561,14 @@ describe('WsUpgradePacer', () => {
     await flush();
 
     expect(admissions[0]!.admission()).toEqual({ kind: 'admitted', waitedMs: 0 });
+    // The deficit is 3s but the bound is 2s, and the SDK spends this hint
+    // INSTEAD of its own backoff rung — so the hint is capped at the bound
+    // while `requiredWaitMs` still reports the deficit honestly.
     expect(admissions[3]!.admission()).toEqual({
-      kind: 'refused', requiredWaitMs: 3_000, retryAfterSeconds: 3,
+      kind: 'refused', requiredWaitMs: 3_000, retryAfterSeconds: 2,
     });
     expect(admissions[4]!.admission()).toEqual({
-      kind: 'refused', requiredWaitMs: 3_000, retryAfterSeconds: 3,
+      kind: 'refused', requiredWaitMs: 3_000, retryAfterSeconds: 2,
     });
 
     await clock.advance(2_000);

@@ -55,7 +55,10 @@ export const WS_NEW_CONNECTIONS_PER_MIN_ENV = 'CLODEX_WS_MAX_NEW_CONNECTIONS_PER
  * One connection per second is a real aggregate ceiling: by Little's law, N
  * agents that each need a new connection per turn settle at about N seconds per
  * turn once the burst is gone — roughly 20s per turn at 20 agents, against ~3s
- * unpaced. That trade is the feature: throughput for not tripping the throttle.
+ * unpaced. That trade is the feature: throughput for a LOWER CHANCE of tripping
+ * the throttle. Not for immunity from it — the causal link is this module's
+ * assumption (see the header), and a fan-out big enough to exhaust the bound is
+ * refused here, which the client sees as a rate limit.
  */
 export const DEFAULT_WS_NEW_CONNECTIONS_PER_MIN = 60;
 
@@ -164,6 +167,40 @@ export function wsNewConnectionMaxWaitMs(
     : 0;
 }
 
+/**
+ * Backoff hint a refusal sends the client, in whole seconds.
+ *
+ * THIS IS PART OF THE BOUND, NOT A COURTESY. `wsNewConnectionMaxWaitMs` budgets
+ * the SDK's own 2s/4s/8s/16s/32s ladder as the delay between attempts, but
+ * `getRetryDelayInMs` (ai@7.0.22, `util/retry-with-exponential-backoff.ts`)
+ * RETURNS a supplied hint in place of that rung whenever the hint is under 60
+ * seconds — it does not take the larger of the two. So whatever this function
+ * emits is what the request actually spends between attempts, and an uncapped
+ * hint taken from the token deficit would silently replace the very term the
+ * bound was derived against.
+ *
+ * It did. At 2 connections/minute the deficit is 30s while a 10s deadline funds
+ * a 666ms bound: the refusal asked for 30s, the request hit its deadline having
+ * made one attempt, and the two retries its budget had paid for never ran.
+ *
+ * So the hint is capped at the bound. `requiredWaitMs` is still reported
+ * honestly to diagnostics; only the number the client is asked to honour is
+ * capped. The floor is one second because `Retry-After` is whole seconds and
+ * zero would mean "immediately"; one second is below the SDK's smallest rung
+ * (2s), so it always fits inside the ladder term the bound already budgets.
+ *
+ * The cost is real and is the right trade: a refused request comes back sooner
+ * than the deficit needs and may be refused again. It spends its retries inside
+ * its deadline instead of spending its whole deadline on one oversized sleep.
+ */
+export function pacedRetryAfterSeconds(requiredWaitMs: number, maxWaitMs: number): number {
+  const capSeconds = Number.isFinite(maxWaitMs) ? Math.max(1, Math.floor(maxWaitMs / 1_000)) : 1;
+  const wantSeconds = Number.isFinite(requiredWaitMs)
+    ? Math.max(1, Math.ceil(requiredWaitMs / 1_000))
+    : 1;
+  return Math.min(wantSeconds, capSeconds);
+}
+
 /** Outcome of asking the pacer for permission to open a new connection. */
 export type UpgradeAdmission =
   | {
@@ -221,11 +258,17 @@ function abortError(signal: AbortSignal | undefined): Error {
   return error;
 }
 
-const reportedRates = new Set<string>();
+const reportedNotices = new Set<string>();
 
-function reportOnce(raw: string, message: string, warn: (message: string) => void): void {
-  if (reportedRates.has(raw)) return;
-  reportedRates.add(raw);
+/**
+ * `key` must carry its own namespace prefix. Rate-validation notices key off an
+ * arbitrary environment string, so an unprefixed key let a hostile or unlucky
+ * value collide with the pacing-disabled key and suppress the one notice that
+ * must never go missing — that pacing turned itself off.
+ */
+function reportOnce(key: string, message: string, warn: (message: string) => void): void {
+  if (reportedNotices.has(key)) return;
+  reportedNotices.add(key);
   try {
     warn(message);
   } catch {
@@ -352,10 +395,11 @@ export class WsUpgradePacer implements ConnectionPacer {
       return {
         kind: 'refused',
         requiredWaitMs: reservation.requiredWaitMs,
-        // Round UP, so the retry lands after a token exists rather than a
-        // fraction of a second before it.
+        // Capped at the bound: the SDK substitutes this hint for its own
+        // backoff rung, so an uncapped one would overrun the deadline the
+        // bound was derived to fit. See `pacedRetryAfterSeconds`.
         retryAfterSeconds: clampRetryAfterSeconds(
-          Math.max(1, Math.ceil(reservation.requiredWaitMs / 1_000)),
+          pacedRetryAfterSeconds(reservation.requiredWaitMs, this.maxWaitMs),
         ),
       };
     }
@@ -448,7 +492,7 @@ export function wsNewConnectionsPerMinute(
   const value = Number(raw);
   if (!Number.isInteger(value) || value < 0) {
     reportOnce(
-      raw,
+      `rate:${raw}`,
       `ignoring ${WS_NEW_CONNECTIONS_PER_MIN_ENV}=${raw} `
       + `(expected a non-negative integer; using ${DEFAULT_WS_NEW_CONNECTIONS_PER_MIN})`,
       warn,
@@ -457,7 +501,7 @@ export function wsNewConnectionsPerMinute(
   }
   if (value > MAX_WS_NEW_CONNECTIONS_PER_MIN) {
     reportOnce(
-      raw,
+      `rate:${raw}`,
       `clamping ${WS_NEW_CONNECTIONS_PER_MIN_ENV}=${raw} to ${MAX_WS_NEW_CONNECTIONS_PER_MIN} `
       + '(a higher rate shapes nothing OpenAI throttles on)',
       warn,
@@ -473,10 +517,15 @@ let sharedPacer: ConnectionPacer | undefined;
  * The process-wide pacer.
  *
  * Shared rather than per-transport for the same reason the connection pools
- * are: the throttle is the account's, and the server keeps a separate
- * transport per model, so a per-transport bucket would multiply the rate by the
- * number of models in play. A multi-account process shares one bucket and is
- * therefore paced more conservatively than it strictly needs to be.
+ * are: the server keeps a separate transport per model, so a per-transport
+ * bucket would multiply the rate by the number of models in play.
+ *
+ * What the throttle is actually scoped to is NOT known. One account on one
+ * machine cannot distinguish an account-, IP-, model- or edge-level limit, and
+ * the sample behind this module is exactly that. Sharing one bucket is the
+ * conservative choice under that uncertainty: it paces a multi-account process
+ * harder than it may need to be paced, which is the safe direction to be wrong
+ * in.
  */
 export function sharedWsUpgradePacer(): ConnectionPacer {
   sharedPacer ??= new WsUpgradePacer({ ratePerMinute: wsNewConnectionsPerMinute() });
@@ -486,5 +535,5 @@ export function sharedWsUpgradePacer(): ConnectionPacer {
 /** Test-only: drop the shared bucket's accumulated state and re-read the env. */
 export function resetWsUpgradePacerForTests(): void {
   sharedPacer = undefined;
-  reportedRates.clear();
+  reportedNotices.clear();
 }

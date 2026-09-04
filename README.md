@@ -413,7 +413,10 @@ clodex --version    # version
   per second means that if you run many agents at once and each needs its own
   connection, they end up sharing that budget: roughly 20 agents settle at
   about 20 seconds per turn instead of a few seconds. That is the trade — you
-  wait longer, and you stop losing turns to rate-limit errors. Work over the
+  wait longer, in exchange for a lower chance of losing turns to rate-limit
+  errors. It reduces that risk rather than removing it: clodex cannot see
+  OpenAI's actual limit, and under a heavy enough fan-out pacing can itself
+  answer a turn with a rate-limit response. Work over the
   rate is queued for a few seconds, and anything still over is answered with
   the same "try again shortly" response OpenAI itself would return, which
   clodex retries for you with backoff. Set

@@ -39,8 +39,10 @@ continuation, and the two replacement paths below are exempt by design.
 Defaults: 60 new connections per minute sustained, burst 10. Override the rate with
 `CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN` (integer 1-600; `0` disables pacing, values above 600 clamp,
 malformed values are reported once and ignored). The bucket is shared process-wide for the same
-reason the pools are: the throttle is the account's, and the server holds a separate transport per
-model.
+reason the pools are: the server holds a separate transport per model, so a per-transport bucket
+would multiply the rate by the number of models in play. What the throttle is scoped to is not
+known — one account on one machine cannot tell an account-, IP-, model- or edge-level limit
+apart — so one shared bucket is the conservative reading, not a modelled one.
 
 **Overflow is refused, not delayed indefinitely.** A request the rate cannot serve within the wait
 bound gets the same retryable 429 frame shape the upgrade 403 produces — `code: '429'` plus the
@@ -64,8 +66,10 @@ correlates with rejection.
 **What pacing costs.** One new connection per second is an aggregate ceiling, not a per-request
 delay. By Little's law, N agents that each need a new connection per turn settle at roughly N
 seconds per turn once the burst is spent: about 20s per turn at 20 agents against ~3s unpaced. The
-trade is throughput for not tripping the throttle, and it is the point of the feature rather than a
-side effect.
+trade is throughput for a lower chance of tripping the throttle, and it is the point of the feature
+rather than a side effect. It is a reduction in risk, not a guarantee: the causal link is assumed
+(see the scope note below), and a fan-out large enough to exhaust the bound is refused by the pacer
+itself, which the client sees as a rate limit.
 
 **A refusal debits nothing.** That is what makes the retry ladder safe — a refused request opens no
 connection and will be retried, so charging it a token would let each retry deepen the deficit that
