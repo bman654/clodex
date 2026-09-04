@@ -66,8 +66,28 @@ import {
  * An install patched by an older clodex is not wrong, but it was produced by a
  * transform set whose anchors are narrower, so it re-reads as stale rather than
  * current.
+ *
+ * 12 — PATCH 10 stopped recognising Claude Code 2.1.260 on all eight published
+ * builds. Its head anchor spelled the remote-mode check as a call wrapping a
+ * `process.env` read, `<fn>(process.env.CLAUDE_CODE_REMOTE)?`; 2.1.260 reads the
+ * flag off the typed env accessor and compares it directly
+ * (`i=a.CLAUDE_CODE_REMOTE===!0`), so neither the call nor the `process.env.`
+ * prefix survives. The head now also accepts `getAgentProxyEnv` — the agent-proxy
+ * env the builder folds into the child's environment — and tolerates that name
+ * being destructured. The old ternary is kept as the alternative, because the
+ * 2.1.238 builder reaches the same env through a helper and spells the name
+ * nowhere.
+ *
+ * Unlike 10 and 11, this bump rescues nobody by itself: on all 19 measured
+ * pre-2.1.260 bundles the version-12 output is byte-identical to version 11's, so
+ * the repatch it forces reproduces the same bytes; and an install already on
+ * 2.1.260 was never patched at all (`applyClodexPatches` throws before anything is
+ * written) and re-reads as stale from the version comparison regardless. It is
+ * bumped because the rule above says a changed anchor is bumped — an install
+ * patched by an older clodex is not wrong, but it was produced by a transform set
+ * whose anchors are narrower, so it re-reads as stale rather than current.
  */
-export const PATCH_TRANSFORMS_VERSION = 11;
+export const PATCH_TRANSFORMS_VERSION = 12;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -676,27 +696,89 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   //     the declarators out, or forbidding braces in the run between them, read
   //     both of those as "anchor not found" — and because PATCH 10 is required,
   //     `clodex patch` then refused to patch the release at all, on every
-  //     platform. So the head run is now "anything up to the CLAUDE_CODE_REMOTE
-  //     ternary, containing no `;` and no unmatched brace": `[^;{}]` characters
-  //     or a single balanced `{...}` group. That still cannot leave the `let`
-  //     statement it starts in, let alone the function — consuming the enclosing
-  //     function's closing `}` would need an unmatched brace.
+  //     platform. So the head run is "anything up to the pinned name, containing
+  //     no `;`": `[^;{}]` characters or a single balanced `{...}` group, and then
+  //     optionally a single UNCLOSED `{…` so the pin may sit inside a
+  //     destructuring pattern. The opening `let` may itself be `let{` or `let[` —
+  //     a minifier drops the space when the first declarator is a pattern of
+  //     either kind, and each measured DARWIN 2.1.260 bundle already carries 4784
+  //     `let{` and 2246 `let[` occurrences, opening 84 and 17 zero-arg functions
+  //     respectively (the Linux and Windows builds are within a few dozen of
+  //     that). None of that lets
+  //     the run leave the function: consuming the enclosing function's closing `}`
+  //     would need an unmatched CLOSING brace, which the run never admits — that
+  //     part is unconditional. Staying inside the opening `let` STATEMENT rests on
+  //     excluding `;`, which is a property of minified output, not of JavaScript:
+  //     a review reached a second statement across a newline through automatic
+  //     semicolon insertion. No measured bundle relies on ASI here, and the
+  //     function-level containment above holds either way.
+  //     Both tolerances are there because upstream has made this exact move once
+  //     already — 2.1.239 turned the settings-colour env, the SIBLING property on
+  //     the same registry entry, into a destructuring declarator. Neither shape
+  //     occurs in the 27 measured bundles; both were constructed against a real
+  //     2.1.260 bundle, both refuse without the tolerances, and adding them
+  //     changes nothing measurable on those 27.
+  //
+  //     What the run ends AT has drifted too, and for the same reason: a value
+  //     the builder happens to COMPUTE is only as durable as the expression that
+  //     computes it. Through 2.1.259 the only thing it could end at was the
+  //     remote-mode ternary `<fn>(process.env.CLAUDE_CODE_REMOTE)?`; 2.1.260 reads
+  //     that flag off the typed env accessor and compares it inline
+  //     (`i=a.CLAUDE_CODE_REMOTE===!0`), keeping neither the call nor the
+  //     `process.env.` prefix, and PATCH 10 refused all eight builds. So the run
+  //     now ends at EITHER that ternary or `getAgentProxyEnv` — the agent-proxy
+  //     env this builder folds into the child's environment, and the thing PATCH 10
+  //     exists to correct rather than a flag check that can be rewritten again.
+  //     `getAgentProxyEnv` is a cross-module property and export name — a class
+  //     field assigned from outside the class (directly on the registry entry from
+  //     2.1.246 on, through a setter method in 2.1.238) and re-exported under its
+  //     own name — and it survived unminified, spelled identically,
+  //     in all 27 bundles measured below. That is an observation, not a guarantee:
+  //     nothing stops a future build renaming it, and — the likelier move — nothing
+  //     stops the builder reaching it through a helper instead of spelling it, which
+  //     is exactly what the 2.1.238 builder does (see below). A name is only as
+  //     durable as the builder INLINING it.
+  //
+  //     The ternary is kept as the second alternative for that reason. The name
+  //     `getAgentProxyEnv` is NOT new — it occurs 6 times in the real 2.1.238
+  //     bundle, including its own `__export` map entry — but that builder reaches
+  //     the agent-proxy env through a plain call, `function JP(){let e=NDt(),…`,
+  //     where `NDt` is `return <mod>.getAgentProxyEnv?.()??{}`, so the name appears
+  //     nowhere in the builder itself. Every measured builder from 2.1.246 on
+  //     spells it inline. Dropping the ternary would therefore have refused
+  //     2.1.238 — measured on its darwin-arm64 build, the only one on disk — and
+  //     presumably everything older, which is not measured at all.
+  //
+  //     The pair produced no extra candidates in the corpus. Over 27 real bundles
+  //     (2.1.238, 2.1.246, 2.1.252, 2.1.257, 2.1.259 and all eight 2.1.260 builds)
+  //     the head matches EXACTLY ONCE per bundle, as does the whole anchor; and on
+  //     the 19 that predate 2.1.260 the WHOLE ANCHOR's matched span — not the head
+  //     prefix, which now ends earlier — is byte-identical to what version 11
+  //     matched, and so is the whole `applyClodexPatches` output. Relaxing instead
+  //     to a bare `CLAUDE_CODE_REMOTE` was measured and is the worse trade: four
+  //     head candidates on 2.1.238, five on each 2.1.246 build and six from 2.1.252
+  //     on, leaving identity to rest entirely on the passthrough count below.
   //
   //   * tail — through 2.1.238 the builder ended by scrubbing GitHub Actions
   //     inputs (``delete p[`INPUT_${f}`]``); 2.1.239 dropped that entirely. The
   //     tail is now tied to the merged copy by BACK-REFERENCE: the same variable
   //     the builder declares for `{...process.env,...}` is the one it returns at
-  //     the end. That is upstream-refactor-proof in a way a named statement is
-  //     not, and it also proves we stopped at the function's own closing brace.
+  //     the end. That survives a RENAME of the merged copy in a way a named
+  //     statement does not — but it is not refactor-proof, and it does NOT prove
+  //     we stopped at the function's own closing brace. It can stop short at a
+  //     nested `return <copy>}`, and if the builder's own final return is ever
+  //     minified to the comma form it runs long into a neighbour. The brace walk
+  //     below is what rules out both.
   //
   // Identity is carried by the passthrough early-out — `)return process.env;let
-  // <copy>={` — which only the shared child-env builder can mean ("nothing to
-  // change, so hand the parent's own env straight through, otherwise start a
+  // <copy>={` — which reads as nothing but the shared child-env builder ("nothing
+  // to change, so hand the parent's own env straight through, otherwise start a
   // copy"). It is counted across the WHOLE bundle before the anchor runs, so a
-  // second candidate fails loud instead of being silently preferred; over 29
-  // real bundles (2.1.208 through every 2.1.239 build) it occurs exactly once,
-  // and exactly one `<fn>(process.env.CLAUDE_CODE_REMOTE)?` ternary precedes it.
-  // Those two facts together are what pin the head to the real builder.
+  // second candidate fails loud instead of being silently preferred. It occurs
+  // exactly once — over 29 real bundles (2.1.208 through every 2.1.239 build),
+  // and again over the 27 re-measured for 2.1.260, where it sits inside the
+  // builder and exactly one head candidate precedes it. Those two facts together
+  // are what pin the head to the real builder.
   //
   // The nested-function and brace-balance checks below are the last line: they
   // reject a match that ends at a nested `return <copy>}` (which would truncate
@@ -710,15 +792,19 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     const contractVar = q(NETWORK_ENV_CONTRACT_VAR);
     const networkVars = JSON.stringify(CHILD_NETWORK_ENV_VARS);
     // What the REWRITE depends on: `{...process.env` is the merged copy every
-    // `process.env` read is redirected away from. (The `CLAUDE_CODE_REMOTE`
-    // ternary is load-bearing too, but the anchor already requires it inside the
-    // captured body, so restating it here could never fail.)
+    // `process.env` read is redirected away from. Nothing else is: the builder's
+    // remote-mode check used to read `process.env.CLAUDE_CODE_REMOTE` and so was
+    // rewritten with everything else, but 2.1.260 reads that flag off the typed
+    // env accessor instead and the rewrite no longer touches it. That is a change
+    // in nothing that matters here — `CLAUDE_CODE_REMOTE` is not one of the
+    // network variables clodex reverts, so which object it is read from cannot
+    // change what the child sees.
     const requiredBodyLiterals = ['{...process.env'];
     // A smell test, NOT the identity proof. Identity is the whole-bundle count of
-    // the passthrough early-out below, the head's CLAUDE_CODE_REMOTE ternary, and
-    // the brace walk proving the match spans exactly the function it started in.
-    // Measured on both real bundles: with these names ignored entirely, the full
-    // anchor still has exactly ONE candidate. They never choose among candidates,
+    // the passthrough early-out below, the name the head pins on, and the brace
+    // walk proving the match spans exactly the function it started in.
+    // Measured on all 27 real bundles above: with these names ignored entirely,
+    // the full anchor still has exactly ONE candidate in each. They never choose among candidates,
     // so all they can do is reject one already identified.
     //
     // Which is what makes an aggressive threshold the wrong trade. These are names
@@ -766,11 +852,30 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
      * `…if(x){var re=/}/;return <copy>}…;return <copy>}` where the unbalanced `}`
      * inside the regex literal moved this walk's zero-crossing onto the NESTED
      * return, so a truncated match agreed with it and PATCH 10 reported OK with
-     * a live `process.env` read stranded past the rewritten span. It is left
-     * as-is deliberately: no such shape occurs in any of the 29 real bundles
-     * from 2.1.208 to 2.1.239, it needs a regex literal no minifier emits here,
-     * and closing it means parsing JavaScript. Every wrong bind reachable from a
-     * shape a real build could emit fails LOUD instead.
+     * a live `process.env` read stranded past the rewritten span. A later review
+     * built a worse one: a decoy carrying `/[{]/` and an ARROW-function builder
+     * carrying `/[}]/`, where the two phantom braces cancel, `bound` lands on 0,
+     * the nested-`function` guard never fires because the builder is an arrow, and
+     * the emitted builder READS `_clodexChildEnv` without declaring it — every
+     * child command would throw. It reproduces identically on the pre-2.1.260
+     * anchor, so it is a property of this walk, not of any one head.
+     *
+     * It is left as-is deliberately, but NOT for the reason once written here.
+     * "A regex literal no minifier emits" is measurably false: `2.1.260`'s
+     * darwin-arm64 bundle alone holds 90 regex literals with unbalanced unescaped
+     * braces (`/[)`}]/`, `/[*?[{]/`, …), and walking every zero-arg function with
+     * this routine disagrees with a real parser 3-4 times per bundle, in all 27
+     * (counting the named `function X(){` bodies this anchor can open, which is
+     * the population that matters — not arrows, methods or anonymous functions).
+     * (Escaped `\{`/`\}` are harmless — the `\\` branch skips them.)
+     *
+     * What actually makes it unreachable is narrower and stronger: a mis-tallied
+     * function only matters if it can REACH the passthrough, and in all 27 bundles
+     * the builder is immediately preceded by `}function `, which the body run
+     * refuses to cross — a 0-byte window. None of the disagreeing functions is in
+     * front of the builder in any measured bundle. Closing the limit properly
+     * means parsing JavaScript; until the window stops being 0, every wrong bind
+     * reachable from a shape a real build emits still fails LOUD.
      */
     const blockEndIndex = (text: string, open: number): number => {
       // Each entry is a brace depth; a new entry is pushed on entering `${`.
@@ -836,7 +941,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     }
     applyOnce(
       patchName,
-      /(function [\w$]+\(\)\{)(let (?:[^;{}]|\{[^;{}]*\})*?[\w$]+\(process\.env\.CLAUDE_CODE_REMOTE\)\?(?:(?!\}\s*function )[\s\S])*?\)return process\.env;let ([\w$]+)=\{(?:(?!\}\s*function )[\s\S])*?return \3)(\})/,
+      /(function [\w$]+\(\)\{)(let[ {[](?:[^;{}]|\{[^;{}]*\})*?(?:\{[^;{}]*)?(?:getAgentProxyEnv|[\w$]+\(process\.env\.CLAUDE_CODE_REMOTE\)\?)(?:(?!\}\s*function )[\s\S])*?\)return process\.env;let ([\w$]+)=\{(?:(?!\}\s*function )[\s\S])*?return \3)(\})/,
       (match, head, body, _copyVar, tail) => {
         // The tail is found lazily, so it can stop in the wrong place in EITHER
         // direction, and both are silent without this check:
