@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.10.0](https://github.com/bman654/clodex/compare/v2.9.0...v2.10.0) (2026-09-04)
+
+
+### Features
+
+* **openai:** reduce the risk of rate-limit errors when many agents run at once ([#172](https://github.com/bman654/clodex/issues/172)) ([28be454](https://github.com/bman654/clodex/commit/28be454332169a220144387c9ad8b950f260e2e5))
+
+
+### Bug Fixes
+
+* **openai:** stop long sessions on OpenAI models dying with "Prompt is too long" ([#167](https://github.com/bman654/clodex/issues/167)) ([a6fddd9](https://github.com/bman654/clodex/commit/a6fddd9d087241326894adc29ff7dc46e8bb0040))
+
 ## [2.9.0](https://github.com/bman654/clodex/compare/v2.8.5...v2.9.0) (2026-09-04)
 
 
