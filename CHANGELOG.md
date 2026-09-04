@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.11.0](https://github.com/bman654/clodex/compare/v2.10.0...v2.11.0) (2026-09-04)
+
+
+### Features
+
+* **models:** add support for GPT-6 Astra and GPT Daybreak Blue ([1df736a](https://github.com/bman654/clodex/commit/1df736a6f48b15d259dddd957746c2c925f3b25b))
+* **models:** keep future OpenAI model families working without a clodex update ([1df736a](https://github.com/bman654/clodex/commit/1df736a6f48b15d259dddd957746c2c925f3b25b))
+
+
+### Bug Fixes
+
+* **models:** apply new model settings without a manual provider refresh ([1df736a](https://github.com/bman654/clodex/commit/1df736a6f48b15d259dddd957746c2c925f3b25b))
+* **models:** show the effort selector for these models in patched Claude Code ([1df736a](https://github.com/bman654/clodex/commit/1df736a6f48b15d259dddd957746c2c925f3b25b))
+* **models:** stop GPT-6 Astra failing with an "upgrade to a newer Codex" error ([1df736a](https://github.com/bman654/clodex/commit/1df736a6f48b15d259dddd957746c2c925f3b25b))
+* **models:** warn when a large prompt crosses into a model's higher-priced band ([1df736a](https://github.com/bman654/clodex/commit/1df736a6f48b15d259dddd957746c2c925f3b25b))
+* **reasoning:** honor the effort level you pick on GPT-6 and Daybreak models ([1df736a](https://github.com/bman654/clodex/commit/1df736a6f48b15d259dddd957746c2c925f3b25b))
+
 ## [2.10.0](https://github.com/bman654/clodex/compare/v2.9.0...v2.10.0) (2026-09-04)
 
 
