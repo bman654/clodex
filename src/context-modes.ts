@@ -3,13 +3,6 @@
 // request, so the default stop sits under that line and the larger one is opt-in.
 // The field shape mirrors the Codex model catalog.
 
-/**
- * Share of a raw window a client fills, matching the Codex catalog default. Carried
- * only by the ChatGPT OAuth provider, whose models follow that convention; applying
- * it to an API-key provider would shrink every other model by 5%.
- */
-export const DEFAULT_EFFECTIVE_CONTEXT_PERCENT = 95;
-
 export type ContextStopName = 'standard' | 'max';
 export type ContextStop = ContextStopName | number;
 
@@ -18,7 +11,7 @@ export interface ContextLimits {
   contextWindow: number;
   /** Highest raw window the model accepts. Absent means the default is the ceiling. */
   maxContextWindow?: number;
-  /** Share of the raw window to fill. Absent uses the catalog default. */
+  /** Share of the raw window to fill, when a provider declares one. Absent means all of it. */
   effectiveContextPercent?: number;
   /** Raw input size above which the provider bills at a higher rate. */
   pricingBoundary?: number;

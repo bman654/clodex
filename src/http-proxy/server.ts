@@ -951,9 +951,9 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         // The adapter resolves alias names itself and must echo the client's
         // requested model id in response messages. Encoded bodies are decoded
         // for this local hop, but their JSON model value is not rewritten.
-        // Claude Code resolves context windows from the response model field, so
-        // substituting the canonical route id here breaks its window lookup for
-        // patched/alias model ids (wrong auto-compact threshold → agent death).
+        // Substituting the canonical route id here broke patched/alias ids in the
+        // field. The window lookup does not read the response body in 2.1.261 (see
+        // `.claude/docs/claude-code-internals.md`); the echo is about identity.
         await forwardToAdapter(
           req,
           res,

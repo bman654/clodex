@@ -119,6 +119,42 @@ describe('registry/refresh-models', () => {
       }
     });
 
+    // The Codex catalog reports effective_context_window_percent as null for every
+    // model it returns. Inventing a share here is what made clodex hand Claude Code
+    // a window 5% below the provider's real one, for no benefit: Claude Code already
+    // holds back a flat 33,000 tokens and applies no share of its own.
+    it('invents no context share when the catalog reports none', async () => {
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI (ChatGPT)',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          models: [
+            { slug: 'gpt-5.6-sol', title: 'Sol', context_window: 272000, max_context_window: 872000 },
+            { slug: 'gpt-brand-new', title: 'New', context_window: 272000 },
+          ],
+        }),
+      } as Response);
+
+      await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
+
+      const saved = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+      for (const model of saved.providers[0]?.modelsCache?.models ?? []) {
+        expect(model.effectiveContextPercent, model.id).toBeUndefined();
+      }
+    });
+
     // Scope guard for the default above. Tier 2 is the general ChatGPT catalog — the
     // web model picker — which carries plainly non-reasoning models, so the
     // "only agentic models" premise that justifies the default does not hold there.
@@ -388,7 +424,8 @@ describe('registry/refresh-models', () => {
       const sol = models.find(m => m.id === 'gpt-5.6-sol');
       expect(sol?.contextWindow).toBe(272_000);
       expect(sol?.maxContextWindow).toBe(872_000);
-      expect(sol?.effectiveContextPercent).toBe(95);
+      // Discovery no longer invents a share the catalog did not report.
+      expect(sol?.effectiveContextPercent).toBeUndefined();
       expect(sol?.pricingBoundary).toBe(272_000);
 
       // A discovered model outside the seed still gets no invented ceiling.

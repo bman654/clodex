@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   contextLimitsFrom,
   contextClampNotice,
-  DEFAULT_EFFECTIVE_CONTEXT_PERCENT,
   effectiveContextWindow,
   parseContextStop,
   pricingBoundaryWarning,
@@ -15,15 +14,58 @@ import {
 
 // Mirrors what the Codex catalog actually reports for this family: a 272,000
 // default and an account-scoped 872,000 ceiling, not the published model spec.
+// The percent is declared EXPLICITLY here because the mechanism still honours one
+// when a provider states it — clodex just no longer imposes a share of its own.
 const SOL = {
   contextWindow: 272_000,
   maxContextWindow: 872_000,
-  effectiveContextPercent: DEFAULT_EFFECTIVE_CONTEXT_PERCENT,
+  effectiveContextPercent: 95,
   pricingBoundary: 272_000,
   pricingBoundaryNote: 'Above it, the full request is priced higher.',
 };
 
 beforeEach(() => resetContextStops());
+
+// After clodex stopped imposing a share of its own, the standard stop for this family
+// lands EXACTLY on the pricing boundary (272,000 vs 272,000). That makes the boundary
+// comparison's strictness load-bearing for the first time: with `>=` instead of `>`,
+// every default-stop launch would warn that the window "can grow past" a line it sits
+// precisely on, contradicting the documented promise that standard stays under it.
+describe('a standard stop that lands exactly on the pricing boundary', () => {
+  const AT_BOUNDARY = {
+    contextWindow: 272_000,
+    maxContextWindow: 872_000,
+    pricingBoundary: 272_000,
+    pricingBoundaryNote: 'Above it, the full request is priced higher.',
+  };
+
+  it('does not report crossing when the window equals the boundary', () => {
+    const resolved = resolveContextStop(AT_BOUNDARY, 'standard');
+    expect(resolved.effective).toBe(272_000);
+    expect(resolved.crossesPricingBoundary).toBe(false);
+  });
+
+  it('reports crossing one token above the boundary', () => {
+    const resolved = resolveContextStop({ ...AT_BOUNDARY, contextWindow: 272_001 }, 'standard');
+    expect(resolved.crossesPricingBoundary).toBe(true);
+  });
+
+  it('still reports crossing on the larger stop', () => {
+    expect(resolveContextStop(AT_BOUNDARY, 'max').crossesPricingBoundary).toBe(true);
+  });
+
+  // The comparison reads `effective`, and with no share imposed `effective === raw` for
+  // every model in practice — so swapping one for the other is an equivalent mutant
+  // today. Pin the distinction with a declared share, which is the only way the two
+  // diverge, so the field being compared stays deliberate rather than incidental.
+  it('compares the effective window, not the raw one', () => {
+    const withShare = { ...AT_BOUNDARY, contextWindow: 300_000, effectiveContextPercent: 80 };
+    const resolved = resolveContextStop(withShare, 'standard');
+    expect(resolved.raw).toBe(300_000);
+    expect(resolved.effective).toBe(240_000);
+    expect(resolved.crossesPricingBoundary).toBe(false);
+  });
+});
 
 describe('effectiveContextWindow', () => {
   it('applies a declared percent', () => {

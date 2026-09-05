@@ -9,7 +9,6 @@
 // nothing. Availability still varies by tier, so the full set is listed and the user
 // discovers what their plan unlocks at inference time.
 
-import { DEFAULT_EFFECTIVE_CONTEXT_PERCENT } from '../context-modes.js';
 import { resolveContextWindow } from '../context-window.js';
 import { deriveBrand } from '../models.js';
 import type { CachedModel } from '../registry/types.js';
@@ -124,9 +123,41 @@ export function openAiPricingMetadata(
 }
 
 /**
+ * The share clodex used to impose on every ChatGPT OAuth window before reporting it.
+ * Kept only to recognise and discard the value in caches written by those versions.
+ */
+const LEGACY_IMPOSED_CONTEXT_PERCENT = 95;
+
+/**
+ * Drop a context share that clodex imposed on itself rather than being told.
+ *
+ * The Codex catalog does not report `effective_context_window_percent` — it is null
+ * for every model it returns — and no clodex command writes the field, so a cached
+ * 95 can only be the default older versions injected at discovery. Reporting a
+ * window 5% below the provider's real one made Claude Code compact early for no
+ * benefit: it already holds back a flat 33,000 tokens of its own (a 20,000 response
+ * reserve plus a 13,000 summary buffer) and applies no share of its own to the
+ * number it is given, so the reduction was pure loss of usable context.
+ *
+ * Discarded at projection rather than at refresh so an install that never re-runs
+ * `clodex providers refresh-models` still gets its window back. The cache file itself
+ * is never rewritten by this, so the check has to stay for as long as those caches do.
+ *
+ * KNOWN LIMITATION: this keys on the value, and 95 is exactly the share the Codex
+ * client uses, so it is the most plausible number the catalog would ever start
+ * reporting. If it does, clodex will ignore it. That is a deliberate trade rather than
+ * an oversight — 95 is a CLIENT-side convention, and clodex is not the client; Claude
+ * Code is, and it does its own reserving. Revisit if the catalog ever populates this
+ * field, which it does not today (null for all ten models it returns, 2026-09-05).
+ */
+function migratedEffectiveContextPercent(cached: number | undefined): number | undefined {
+  return cached === LEGACY_IMPOSED_CONTEXT_PERCENT ? undefined : cached;
+}
+
+/**
  * Fill context metadata that a catalog cached before these fields existed is missing.
  * Only absent fields are filled, so live discovery always wins; without this a stale
- * cache reports a raw window with no headroom and no reachable ceiling.
+ * cache reports no reachable ceiling, collapsing the larger stop onto the standard one.
  *
  * `reasoning` is the one field a seed OVERRIDES rather than merely fills. The Codex
  * catalog has never reported it: a cached value was written by whatever id guess the
@@ -145,9 +176,7 @@ export function applyOAuthSeedContextMetadata(models: CachedModel[]): CachedMode
     return {
       ...model,
       maxContextWindow: model.maxContextWindow ?? seed?.maxContextWindow,
-      effectiveContextPercent: model.effectiveContextPercent
-        ?? seed?.effectiveContextPercent
-        ?? DEFAULT_EFFECTIVE_CONTEXT_PERCENT,
+      effectiveContextPercent: migratedEffectiveContextPercent(model.effectiveContextPercent),
       pricingBoundary: model.pricingBoundary ?? seed?.pricingBoundary ?? pricing.pricingBoundary,
       pricingBoundaryNote: model.pricingBoundaryNote
         ?? seed?.pricingBoundaryNote
@@ -170,7 +199,7 @@ export function buildOpenAiOAuthModels(): CachedModel[] {
       brand: deriveBrand(prefix),
       contextWindow: resolveContextWindow(seed.id, seed.contextWindow),
       maxContextWindow: seed.maxContextWindow,
-      effectiveContextPercent: seed.effectiveContextPercent ?? DEFAULT_EFFECTIVE_CONTEXT_PERCENT,
+      effectiveContextPercent: seed.effectiveContextPercent,
       pricingBoundary: seed.pricingBoundary ?? pricing.pricingBoundary,
       pricingBoundaryNote: seed.pricingBoundaryNote ?? pricing.pricingBoundaryNote,
       maxOutputTokens: seed.maxOutputTokens,

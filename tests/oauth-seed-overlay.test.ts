@@ -1,14 +1,18 @@
 import { describe, it, expect } from 'vitest';
 import { projectProviderCachedModels } from '../src/registry/materialize.js';
+import { buildOpenAiOAuthModels } from '../src/data/openai-oauth-models.js';
 import type { RegistryProvider } from '../src/registry/types.js';
 
 /**
  * A catalog cached before the context-budget fields existed carries none of them.
- * Reading it back unchanged reports a raw window with no headroom and no reachable
- * ceiling, which silently collapses the larger stop onto the standard one. That is
- * not hypothetical: the install this was written against held a cache in exactly
- * that shape, and the export returned 272,000 instead of 258,400 until the overlay
- * was added.
+ * Reading it back unchanged reports no reachable ceiling, which silently collapses the
+ * larger stop onto the standard one. That is not hypothetical: the install this was
+ * written against held a cache in exactly that shape.
+ *
+ * The overlay originally also imposed a 95% share on the window. It no longer does —
+ * that share was clodex's own invention and cost usable context — so these tests now
+ * assert the provider's real numbers, and one of them pins the discard of a share left
+ * behind in caches written by those versions.
  */
 function providerWithLegacyCache(overrides: Partial<RegistryProvider> = {}): RegistryProvider {
   return {
@@ -39,7 +43,9 @@ describe('legacy OAuth cache overlay', () => {
   it('fills the budget fields a pre-existing cache never stored', () => {
     const [sol] = projectProviderCachedModels(providerWithLegacyCache());
     expect(sol?.contextWindow).toBe(272_000);
-    expect(sol?.effectiveContextPercent).toBe(95);
+    // No share is imposed: the provider does not report one, so the window clodex
+    // reports is the window the provider actually gives.
+    expect(sol?.effectiveContextPercent).toBeUndefined();
     expect(sol?.maxContextWindow).toBe(872_000);
     expect(sol?.pricingBoundary).toBe(272_000);
     expect(sol?.maxOutputTokens).toBe(128_000);
@@ -161,6 +167,39 @@ describe('legacy OAuth cache overlay', () => {
         .toBeUndefined();
     },
   );
+
+  // The seed list is written straight into the cache on the Tier-3 discovery-outage
+  // path, so a share injected here would be persisted even though projection strips it
+  // on the way back out. Assert the source, not just the projection, or the injection
+  // is invisible for as long as the migration happens to mask it.
+  it('declares no context share in the seed list itself', () => {
+    for (const model of buildOpenAiOAuthModels()) {
+      expect(model.effectiveContextPercent, model.id).toBeUndefined();
+    }
+  });
+
+  // The migration for installs that refreshed while clodex still imposed a share.
+  // A cached 95 is not a provider answer — the Codex catalog reports null for this
+  // field on every model, and no clodex command writes it — so it can only be the
+  // value older versions injected. Left in place it would keep costing 13,600
+  // tokens on every session until the user happened to re-run a model refresh.
+  it('discards the share clodex used to impose on a cached window', () => {
+    const provider = providerWithLegacyCache();
+    const cached = provider.modelsCache?.models[0];
+    if (cached) cached.effectiveContextPercent = 95;
+    const [sol] = projectProviderCachedModels(provider);
+    expect(sol?.effectiveContextPercent).toBeUndefined();
+  });
+
+  // Under-scope: a share a provider genuinely declares must still be honoured, or
+  // the migration has become a blanket "ignore this field".
+  it.each([90, 80, 50])('keeps a declared share of %i%%', percent => {
+    const provider = providerWithLegacyCache();
+    const cached = provider.modelsCache?.models[0];
+    if (cached) cached.effectiveContextPercent = percent;
+    const [sol] = projectProviderCachedModels(provider);
+    expect(sol?.effectiveContextPercent).toBe(percent);
+  });
 
   // Only the ChatGPT OAuth provider uses the Codex effective-window convention.
   // Applying it to an API-key provider would shrink every other model by 5%.

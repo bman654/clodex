@@ -83,7 +83,7 @@ describe('models --json', () => {
     expect(parsed[0]!['id']).toBe('clodex:openai-oauth:gpt-5.6-sol');
     expect(parsed[0]!['alias']).toBe('sol');
     const context = parsed[0]!['context'] as Record<string, unknown>;
-    expect(context['effective']).toBe(258_400);
+    expect(context['effective']).toBe(272_000);
     expect(context['max']).toBe(872_000);
     expect(parsed[0]!['pricingBoundary']).toBe(272_000);
   });
@@ -100,8 +100,8 @@ describe('models --json', () => {
     const parsed = JSON.parse(cap.stdout.join('')) as Array<Record<string, unknown>>;
     const context = parsed[0]!['context'] as Record<string, unknown>;
     expect(context['stop']).toBe('max');
-    expect(context['effective']).toBe(828_400);
-    expect(cap.stderr.join('\n')).toContain('828,400');
+    expect(context['effective']).toBe(872_000);
+    expect(cap.stderr.join('\n')).toContain('872,000');
     // Session-scoped: nothing was written to preferences.
     expect(loadPreferences().modelContextModes ?? {}).toEqual({});
   });
@@ -125,7 +125,7 @@ describe('--context assignments', () => {
       after.restore();
     }
     const parsed = JSON.parse(after.stdout.join('')) as Array<Record<string, unknown>>;
-    expect((parsed[0]!['context'] as Record<string, unknown>)['effective']).toBe(828_400);
+    expect((parsed[0]!['context'] as Record<string, unknown>)['effective']).toBe(872_000);
   });
 
   it('warns when the selected stop can reach the higher-rate band', async () => {
@@ -159,7 +159,7 @@ describe('--context assignments', () => {
       cap.restore();
     }
     const all = [...cap.stdout, ...cap.stderr].join('\n');
-    expect(all).toContain('828,400');
+    expect(all).toContain('872,000');
     expect(all).not.toContain('Add --save');
     expect(all).toContain('clodex models --context');
   });
@@ -173,7 +173,7 @@ describe('--context assignments', () => {
     } finally {
       cap.restore();
     }
-    expect(cap.stderr.join('\n')).not.toContain('828,400');
+    expect(cap.stderr.join('\n')).not.toContain('872,000');
     expect(cap.stdout.join('\n')).toContain('--context');
   });
 

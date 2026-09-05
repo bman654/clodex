@@ -11,8 +11,11 @@ const SOL: ModelMetadata = {
   context: {
     stop: 'standard',
     raw: 272_000,
-    effective: 258_400,
-    effectivePercent: 95,
+    // A share of 90 rather than 95: the serializer must still carry a declared
+    // percent, but 95 is the one value the OAuth overlay now discards as clodex's
+    // own legacy injection, so a fixture built on it would model an unreachable state.
+    effective: 244_800,
+    effectivePercent: 90,
     max: 872_000,
   },
   maxOutputTokens: 128_000,
