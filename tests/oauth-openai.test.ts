@@ -5,7 +5,9 @@ import http from 'node:http';
 import {
   buildOpenAiAuthorizeUrl,
   extractOpenAiAccountId,
+  pollOpenAiDeviceCodeToken,
   refreshOpenAiAccessToken,
+  requestOpenAiDeviceCode,
   runOpenAiBrowserFlow,
   runOpenAiDeviceCodeFlow,
 } from '../src/oauth/openai.js';
@@ -19,8 +21,37 @@ describe('oauth/openai', () => {
 
   afterEach(() => {
     global.fetch = originalFetch;
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
+
+  function responseWithStalledJsonBody(init?: RequestInit): Response {
+    const signal = init?.signal;
+    const body = new Promise<never>((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+    return { ok: true, status: 200, json: () => body } as Response;
+  }
+
+  async function expectErrorAtTimeout(
+    operation: Promise<unknown>,
+    timeoutMs: number,
+    message: string,
+  ): Promise<void> {
+    const pending = Symbol('pending');
+    let outcome: unknown = pending;
+    void operation.then(
+      value => { outcome = value; },
+      error => { outcome = error; },
+    );
+
+    await vi.advanceTimersByTimeAsync(timeoutMs - 1);
+    expect(outcome).toBe(pending);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect((outcome as Error).message).toBe(message);
+  }
 
   describe('extractOpenAiAccountId', () => {
     function buildJwt(claims: unknown): string {
@@ -305,6 +336,191 @@ describe('oauth/openai', () => {
   });
 
   describe('runOpenAiDeviceCodeFlow', () => {
+    it('aborts device-code initiation when the response body stalls', async () => {
+      vi.useFakeTimers();
+      vi.mocked(global.fetch).mockImplementationOnce(async (_input, init) =>
+        responseWithStalledJsonBody(init),
+      );
+
+      const request = requestOpenAiDeviceCode();
+
+      await expectErrorAtTimeout(
+        request,
+        30_000,
+        'OpenAI device authorization timed out while requesting a sign-in code',
+      );
+      expect(global.fetch).toHaveBeenCalledWith(
+        'https://auth.openai.com/api/accounts/deviceauth/usercode',
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+    });
+
+    it('aborts a stalled device-token poll at the device-code deadline', async () => {
+      vi.useFakeTimers();
+      vi.mocked(global.fetch).mockImplementationOnce(async (_input, init) =>
+        responseWithStalledJsonBody(init),
+      );
+
+      const poll = pollOpenAiDeviceCodeToken({
+        device_auth_id: 'auth_id',
+        user_code: 'user_code',
+        interval: '1',
+        // Synthetic short lifetime to exercise the deadline boundary quickly.
+        expires_in: 5,
+      });
+
+      await expectErrorAtTimeout(poll, 5_000, 'OpenAI device authorization timed out');
+      expect(global.fetch).toHaveBeenCalledWith(
+        'https://auth.openai.com/api/accounts/deviceauth/token',
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+    });
+
+    it('preserves a non-timeout error from the device token exchange', async () => {
+      vi.mocked(global.fetch)
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ authorization_code: 'auth_code', code_verifier: 'verifier' }),
+        } as Response)
+        .mockResolvedValueOnce({ ok: false, status: 400 } as Response);
+
+      const exchange = pollOpenAiDeviceCodeToken({
+        device_auth_id: 'auth_id',
+        user_code: 'user_code',
+        interval: '1',
+      });
+
+      const error = await exchange.catch((cause: unknown) => cause);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).constructor).toBe(Error);
+      expect((error as Error).message).toBe('OpenAI token exchange failed (400)');
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      const exchangeSignal = vi.mocked(global.fetch).mock.calls[1]?.[1]?.signal as AbortSignal;
+      expect(exchangeSignal.aborted).toBe(true);
+      expect(exchangeSignal.reason).toMatchObject({
+        name: 'Error',
+        message: 'OAuth request completed',
+      });
+    });
+
+    it('aborts a stalled authorization-code exchange after 30 seconds', async () => {
+      vi.useFakeTimers();
+      vi.mocked(global.fetch)
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ authorization_code: 'auth_code', code_verifier: 'verifier' }),
+        } as Response)
+        .mockImplementationOnce(async (_input, init) => responseWithStalledJsonBody(init));
+
+      const exchange = pollOpenAiDeviceCodeToken({
+        device_auth_id: 'auth_id',
+        user_code: 'user_code',
+        interval: '1',
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+
+      await expectErrorAtTimeout(exchange, 30_000, 'OpenAI token exchange timed out');
+      expect(global.fetch).toHaveBeenLastCalledWith(
+        'https://auth.openai.com/oauth/token',
+        expect.objectContaining({ signal: expect.any(AbortSignal) }),
+      );
+    });
+
+    it('lets a healthy token exchange finish after the device-code deadline', async () => {
+      vi.useFakeTimers();
+      let now = 0;
+      vi.mocked(global.fetch)
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => {
+            now = 4_900;
+            return { authorization_code: 'auth_code', code_verifier: 'verifier' };
+          },
+        } as Response)
+        .mockImplementationOnce(async (_input, init) => new Promise<Response>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            now = 5_300;
+            resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({ access_token: 'final_access_token' }),
+            } as Response);
+          }, 400);
+          init?.signal?.addEventListener('abort', () => {
+            clearTimeout(timer);
+            reject(init.signal?.reason);
+          }, { once: true });
+        }));
+
+      const exchange = pollOpenAiDeviceCodeToken({
+        device_auth_id: 'auth_id',
+        user_code: 'user_code',
+        interval: '1',
+        // Synthetic short lifetime to stage a winning poll 100ms before expiry.
+        expires_in: 5,
+      }, { now: () => now });
+      const pending = Symbol('pending');
+      let outcome: unknown = pending;
+      void exchange.then(
+        value => { outcome = value; },
+        error => { outcome = error; },
+      );
+
+      await vi.advanceTimersByTimeAsync(399);
+      expect(outcome).toBe(pending);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(outcome).not.toBeInstanceOf(Error);
+      expect(outcome).toMatchObject({ tokens: { access_token: 'final_access_token' } });
+    });
+
+    it('continues polling after one request times out', async () => {
+      vi.useFakeTimers();
+      vi.mocked(global.fetch)
+        .mockImplementationOnce(async (_input, init) => responseWithStalledJsonBody(init))
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ authorization_code: 'auth_code', code_verifier: 'verifier' }),
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ access_token: 'final_access_token' }),
+        } as Response);
+
+      const poll = pollOpenAiDeviceCodeToken({
+        device_auth_id: 'auth_id',
+        user_code: 'user_code',
+        interval: '1',
+      });
+      const firstSignal = vi.mocked(global.fetch).mock.calls[0]?.[1]?.signal as AbortSignal;
+      const pending = Symbol('pending');
+      let outcome: unknown = pending;
+      void poll.then(
+        value => { outcome = value; },
+        error => { outcome = error; },
+      );
+
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(firstSignal.aborted).toBe(false);
+      expect(outcome).toBe(pending);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(firstSignal.aborted).toBe(true);
+      expect(outcome).toBe(pending);
+      await vi.advanceTimersByTimeAsync(3_999);
+      expect(outcome).toBe(pending);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(outcome).toMatchObject({ tokens: { access_token: 'final_access_token' } });
+      expect(global.fetch).toHaveBeenCalledTimes(3);
+    });
+
     it('handles successful polling loop', async () => {
       // 1. Device initiation response
       vi.mocked(global.fetch).mockResolvedValueOnce({
@@ -362,6 +578,24 @@ describe('oauth/openai', () => {
       } as Response);
 
       await expect(runOpenAiDeviceCodeFlow(vi.fn())).rejects.toThrow('Failed to initiate OpenAI device authorization');
+    });
+
+    it('propagates a non-timeout poll failure without retrying', async () => {
+      vi.mocked(global.fetch).mockRejectedValueOnce(new TypeError('fetch failed'));
+      let now = 0;
+      const sleep = vi.fn(async () => {
+        now = 300_000;
+      });
+
+      const poll = pollOpenAiDeviceCodeToken({
+        device_auth_id: 'auth_id',
+        user_code: 'user_code',
+        interval: '1',
+      }, { sleep, now: () => now });
+
+      await expect(poll).rejects.toThrowError(new TypeError('fetch failed'));
+      expect(global.fetch).toHaveBeenCalledOnce();
+      expect(sleep).not.toHaveBeenCalled();
     });
 
     it('throws if polling hits an unexpected error (e.g. 500)', async () => {

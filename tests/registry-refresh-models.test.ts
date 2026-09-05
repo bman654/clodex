@@ -37,10 +37,163 @@ describe('registry/refresh-models', () => {
 
   afterEach(() => {
     global.fetch = originalFetch;
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
+  function bodyStalledUntilAbort(init?: RequestInit): Promise<never> {
+    const signal = init?.signal;
+    return new Promise<never>((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+  }
+
+  async function expectSettledAfterTimeout<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
+    const pending = Symbol('pending');
+    let outcome: T | unknown = pending;
+    void operation.then(
+      value => { outcome = value; },
+      error => { outcome = error; },
+    );
+
+    await vi.advanceTimersByTimeAsync(timeoutMs - 1);
+    expect(outcome).toBe(pending);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(outcome).not.toBe(pending);
+    if (outcome instanceof Error) throw outcome;
+    return outcome as T;
+  }
+
   describe('refreshProviderModels (OpenAI OAuth 3-tier fetch)', () => {
+    it('aborts the catalog controller after a successful response body is consumed', async () => {
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI (ChatGPT)',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+      let requestSignal: AbortSignal | undefined;
+      const json = vi.fn(async () => {
+        expect(requestSignal?.aborted).toBe(false);
+        return { models: [{ slug: 'gpt-4', title: 'GPT-4' }] };
+      });
+      vi.mocked(global.fetch).mockImplementationOnce(async (_input, init) => {
+        requestSignal = init?.signal ?? undefined;
+        return { ok: true, status: 200, json } as Response;
+      });
+
+      const result = await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
+
+      expect(result).toEqual({
+        id: 'openai-oauth',
+        name: 'OpenAI (ChatGPT)',
+        ok: true,
+        modelCount: 1,
+        previousModelCount: undefined,
+        reason: undefined,
+      });
+      expect(json).toHaveBeenCalledOnce();
+      expect(requestSignal?.aborted).toBe(true);
+      expect(requestSignal?.reason).toBeInstanceOf(Error);
+      expect(requestSignal?.reason).toMatchObject({
+        name: 'Error',
+        message: 'OpenAI catalog request completed',
+      });
+    });
+
+    it('times out a stalled Codex catalog body before trying the general catalog', async () => {
+      vi.useFakeTimers();
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+      vi.mocked(global.fetch)
+        .mockImplementationOnce(async (_input, init) => ({
+          ok: true,
+          status: 200,
+          json: () => bodyStalledUntilAbort(init),
+        } as Response))
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ models: [{ slug: 'gpt-4', title: 'GPT-4' }] }),
+        } as Response);
+
+      const result = await expectSettledAfterTimeout(
+        refreshProviderModels('openai-oauth', 'mock_token', mockRegistry),
+        10_000,
+      );
+
+      expect(result).toMatchObject({ ok: true, modelCount: 1 });
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      const codexSignal = vi.mocked(global.fetch).mock.calls[0]?.[1]?.signal as AbortSignal;
+      expect(codexSignal.aborted).toBe(true);
+      expect(codexSignal.reason).toMatchObject({
+        name: 'AbortError',
+        message: 'This operation was aborted',
+      });
+    });
+
+    it('times out a stalled general-catalog error body before using the static seed', async () => {
+      vi.useFakeTimers();
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+      vi.mocked(global.fetch)
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ models: [] }),
+        } as Response)
+        .mockImplementationOnce(async (_input, init) => ({
+          ok: false,
+          status: 500,
+          text: () => bodyStalledUntilAbort(init),
+        } as Response));
+
+      const result = await expectSettledAfterTimeout(
+        refreshProviderModels('openai-oauth', 'mock_token', mockRegistry),
+        10_000,
+      );
+
+      expect(result.ok).toBe(true);
+      expect(result.modelCount).toBeGreaterThan(0);
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      const generalSignal = vi.mocked(global.fetch).mock.calls[1]?.[1]?.signal as AbortSignal;
+      expect(generalSignal.aborted).toBe(true);
+      expect(generalSignal.reason).toMatchObject({
+        name: 'AbortError',
+        message: 'This operation was aborted',
+      });
+    });
+
     it('Tier 1: uses Codex endpoint if available', async () => {
       const mockRegistry: ProviderRegistry = {
         version: 1,
