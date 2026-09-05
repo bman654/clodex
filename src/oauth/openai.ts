@@ -3,7 +3,11 @@
 import { generatePkce, generateOAuthState, positiveSecondsToMs, sleepMs } from './pkce.js';
 import type { OAuthTokenResponse } from './types.js';
 import { VERSION } from '../constants.js';
-import { postOAuthRefresh } from './refresh-http.js';
+import {
+  OAUTH_REQUEST_TIMEOUT_MS,
+  postOAuthRefresh,
+  withOAuthRequestTimeout,
+} from './refresh-http.js';
 import { startCallbackServer } from './callback-server.js';
 
 const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
@@ -29,6 +33,10 @@ export interface OpenAiDeviceCodeData {
   expires_in?: number;
 }
 
+function isTimeoutError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'TimeoutError';
+}
+
 export function extractOpenAiAccountId(tokens: OAuthTokenResponse): string | undefined {
   const token = tokens.id_token ?? tokens.access_token;
   if (!token) return undefined;
@@ -45,18 +53,30 @@ export function extractOpenAiAccountId(tokens: OAuthTokenResponse): string | und
 }
 
 export async function requestOpenAiDeviceCode(): Promise<OpenAiDeviceCodeData> {
-  const response = await fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'User-Agent': `clodex/${VERSION}`,
-    },
-    body: JSON.stringify({ client_id: CLIENT_ID }),
-  });
-  if (!response.ok) {
-    throw new Error('Failed to initiate OpenAI device authorization');
+  try {
+    return await withOAuthRequestTimeout(async signal => {
+      const response = await fetch(`${ISSUER}/api/accounts/deviceauth/usercode`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': `clodex/${VERSION}`,
+        },
+        body: JSON.stringify({ client_id: CLIENT_ID }),
+        signal,
+      });
+      if (!response.ok) {
+        throw new Error('Failed to initiate OpenAI device authorization');
+      }
+      return await response.json() as OpenAiDeviceCodeData;
+    });
+  } catch (error) {
+    if (isTimeoutError(error)) {
+      throw new Error('OpenAI device authorization timed out while requesting a sign-in code', {
+        cause: error,
+      });
+    }
+    throw error;
   }
-  return response.json() as Promise<OpenAiDeviceCodeData>;
 }
 
 export function openAiDeviceCodeUrl(): string {
@@ -72,44 +92,79 @@ export async function pollOpenAiDeviceCodeToken(
   const intervalMs = Math.max(parseInt(deviceData.interval, 10) || 5, 1) * 1000;
   const deadline = now() + positiveSecondsToMs(deviceData.expires_in, DEVICE_CODE_DEFAULT_EXPIRES_MS);
 
-  while (now() < deadline) {
-    const response = await fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': `clodex/${VERSION}`,
-      },
-      body: JSON.stringify({
-        device_auth_id: deviceData.device_auth_id,
-        user_code: deviceData.user_code,
-      }),
-    });
+  // A poll gets at most the shared 30-second OAuth budget and cannot
+  // outlive the remaining time for the user to approve the device code.
+  const remainingPollTimeoutMs = () =>
+    Math.min(OAUTH_REQUEST_TIMEOUT_MS, Math.max(0, deadline - now()));
+  const waitForNextPoll = () =>
+    sleep(Math.min(intervalMs + OAUTH_POLLING_SAFETY_MARGIN_MS, Math.max(0, deadline - now())));
 
-    if (response.ok) {
-      const data = await response.json() as { authorization_code: string; code_verifier: string };
-      const tokenResponse = await fetch(`${ISSUER}/oauth/token`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          grant_type: 'authorization_code',
-          code: data.authorization_code,
-          redirect_uri: `${ISSUER}/deviceauth/callback`,
-          client_id: CLIENT_ID,
-          code_verifier: data.code_verifier,
-        }).toString(),
-      });
-      if (!tokenResponse.ok) {
-        throw new Error(`OpenAI token exchange failed (${tokenResponse.status})`);
+  while (now() < deadline) {
+    const pollTimeoutMs = remainingPollTimeoutMs();
+    if (pollTimeoutMs <= 0) break;
+
+    let result: {
+      status: number;
+      data?: { authorization_code: string; code_verifier: string };
+    };
+    try {
+      result = await withOAuthRequestTimeout(async signal => {
+        const response = await fetch(`${ISSUER}/api/accounts/deviceauth/token`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': `clodex/${VERSION}`,
+          },
+          body: JSON.stringify({
+            device_auth_id: deviceData.device_auth_id,
+            user_code: deviceData.user_code,
+          }),
+          signal,
+        });
+        const data = response.ok
+          ? await response.json() as { authorization_code: string; code_verifier: string }
+          : undefined;
+        return { status: response.status, data };
+      }, pollTimeoutMs);
+    } catch (error) {
+      if (!isTimeoutError(error)) throw error;
+      if (now() >= deadline) break;
+      await waitForNextPoll();
+      continue;
+    }
+
+    if (result.data) {
+      let tokens: OAuthTokenResponse;
+      try {
+        tokens = await postOAuthRefresh(
+          `${ISSUER}/oauth/token`,
+          new URLSearchParams({
+            grant_type: 'authorization_code',
+            code: result.data.authorization_code,
+            redirect_uri: `${ISSUER}/deviceauth/callback`,
+            client_id: CLIENT_ID,
+            code_verifier: result.data.code_verifier,
+          }),
+          {
+            contentType: 'form',
+            errorPrefix: 'OpenAI token exchange failed',
+            includeStatus: true,
+          },
+        );
+      } catch (error) {
+        if (isTimeoutError(error)) {
+          throw new Error('OpenAI token exchange timed out', { cause: error });
+        }
+        throw error;
       }
-      const tokens = await tokenResponse.json() as OAuthTokenResponse;
       return { tokens, accountId: extractOpenAiAccountId(tokens) };
     }
 
-    if (response.status !== 403 && response.status !== 404) {
-      throw new Error(`OpenAI device authorization failed (${response.status})`);
+    if (result.status !== 403 && result.status !== 404) {
+      throw new Error(`OpenAI device authorization failed (${result.status})`);
     }
 
-    await sleep(Math.min(intervalMs + OAUTH_POLLING_SAFETY_MARGIN_MS, Math.max(0, deadline - now())));
+    await waitForNextPoll();
   }
   throw new Error('OpenAI device authorization timed out');
 }

@@ -52,6 +52,34 @@ describe('oauth refresh http', () => {
     vi.restoreAllMocks();
   });
 
+  it('aborts the controller after a successful response body is consumed', async () => {
+    let requestSignal: AbortSignal | undefined;
+    const tokens = { access_token: 'access', refresh_token: 'refresh', expires_in: 3_600 };
+    const json = vi.fn(async () => {
+      expect(requestSignal?.aborted).toBe(false);
+      return tokens;
+    });
+    vi.stubGlobal('fetch', vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      requestSignal = init?.signal ?? undefined;
+      return { ok: true, json } as Response;
+    }));
+
+    const result = await postOAuthRefresh(
+      'https://auth/token',
+      new URLSearchParams({ grant_type: 'refresh_token' }),
+      { contentType: 'form', errorPrefix: 'token refresh failed' },
+    );
+
+    expect(result).toEqual(tokens);
+    expect(json).toHaveBeenCalledOnce();
+    expect(requestSignal?.aborted).toBe(true);
+    expect(requestSignal?.reason).toBeInstanceOf(Error);
+    expect(requestSignal?.reason).toMatchObject({
+      name: 'Error',
+      message: 'OAuth request completed',
+    });
+  });
+
   it('posts form refresh requests and includes response text in the error', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: false,
@@ -124,7 +152,11 @@ describe('oauth refresh http', () => {
     expect(signal.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(signal.aborted).toBe(true);
-    await expect(rejection).resolves.toMatchObject({ name: 'TimeoutError' });
+    expect(signal.reason).toMatchObject({
+      name: 'TimeoutError',
+      message: 'The operation was aborted due to timeout',
+    });
+    await expect(rejection).resolves.toBe(signal.reason);
   });
 
   it('keeps the 30-second timeout active while reading the response body', async () => {
@@ -158,7 +190,11 @@ describe('oauth refresh http', () => {
     expect(signal.aborted).toBe(false);
     await vi.advanceTimersByTimeAsync(1);
     expect(signal.aborted).toBe(true);
-    await expect(rejection).resolves.toMatchObject({ name: 'TimeoutError' });
+    expect(signal.reason).toMatchObject({
+      name: 'TimeoutError',
+      message: 'The operation was aborted due to timeout',
+    });
+    await expect(rejection).resolves.toBe(signal.reason);
   });
 });
 

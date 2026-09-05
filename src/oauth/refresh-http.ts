@@ -1,6 +1,6 @@
 import type { OAuthTokenResponse } from './types.js';
 
-const OAUTH_REFRESH_TIMEOUT_MS = 30_000;
+export const OAUTH_REQUEST_TIMEOUT_MS = 30_000;
 
 export interface PostOAuthRefreshOptions {
   contentType: 'form' | 'json';
@@ -10,24 +10,38 @@ export interface PostOAuthRefreshOptions {
   headers?: Record<string, string>;
 }
 
-export async function postOAuthRefresh(
-  url: string,
-  body: URLSearchParams | Record<string, string>,
-  options: PostOAuthRefreshOptions,
-): Promise<OAuthTokenResponse> {
-  const isJson = options.contentType === 'json';
+export async function withOAuthRequestTimeout<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs = OAUTH_REQUEST_TIMEOUT_MS,
+): Promise<T> {
   const abortController = new AbortController();
   const timeout = setTimeout(() => {
     abortController.abort(new DOMException(
       'The operation was aborted due to timeout',
       'TimeoutError',
     ));
-  }, OAUTH_REFRESH_TIMEOUT_MS);
+  }, timeoutMs);
   timeout.unref();
   try {
+    return await operation(abortController.signal);
+  } finally {
+    clearTimeout(timeout);
+    if (!abortController.signal.aborted) {
+      abortController.abort(new Error('OAuth request completed'));
+    }
+  }
+}
+
+export async function postOAuthRefresh(
+  url: string,
+  body: URLSearchParams | Record<string, string>,
+  options: PostOAuthRefreshOptions,
+): Promise<OAuthTokenResponse> {
+  const isJson = options.contentType === 'json';
+  return withOAuthRequestTimeout(async signal => {
     const response = await fetch(url, {
       method: 'POST',
-      signal: abortController.signal,
+      signal,
       headers: {
         'Content-Type': isJson ? 'application/json' : 'application/x-www-form-urlencoded',
         Accept: 'application/json',
@@ -52,7 +66,5 @@ export async function postOAuthRefresh(
     }
 
     return await response.json() as OAuthTokenResponse;
-  } finally {
-    clearTimeout(timeout);
-  }
+  });
 }
