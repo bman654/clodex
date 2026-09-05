@@ -384,11 +384,16 @@ clodex --version    # version
   … backoff, so a shorter idle timeout automatically lowers both. The ceiling
   is `5` at the default timeout and can rise to `10` at the maximum. Larger
   integers clamp with a one-time warning that names the active idle timeout.
-  On a genuinely unavailable provider, five retries can add roughly 62s of
-  fallback backoff instead of the SDK default's roughly 6s; the longer wait is
-  deliberate so transient failures have more time to recover. Provider
-  `retry-after` hints and time spent in failed attempts can mean fewer retries
-  start before a streaming idle deadline; the shared abort signal still
+  Without a retry hint, five retries can add roughly 62s of fallback
+  backoff instead of the SDK default's roughly 6s, giving a transiently
+  unavailable provider more time to recover. When OpenAI explicitly states an
+  acceptable delay for a WebSocket throttle, clodex gives that value to the
+  SDK instead of its fallback schedule. Clodex's existing 5s default remains a
+  client-facing hint for upgrade 403s and WebSocket connection-limit errors
+  that state no delay; it does not replace the SDK's fallback. Other hintless
+  429s also retain the fallback schedule. Provider `retry-after` hints and time
+  spent in failed attempts can mean fewer retries start before a streaming idle
+  deadline; the shared abort signal still
   interrupts backoff when that deadline fires. If a deadline interrupts a
   retry delay, clodex preserves the provider failure that prompted the retry;
   if a currently active call is silent, clodex reports the timeout instead.

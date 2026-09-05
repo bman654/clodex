@@ -3,6 +3,7 @@ import { APICallError, RetryError } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 import {
   anthropicErrorType,
+  clampAiSdkRetryAfterSeconds,
   clampRetryAfterSeconds,
   formatUpstreamError,
   isContextLengthExceededError,
@@ -488,9 +489,148 @@ describe('clampRetryAfterSeconds', () => {
     expect(clampRetryAfterSeconds(12)).toBe(12);
     expect(clampRetryAfterSeconds(3600)).toBe(60);
   });
+
+  it('keeps AI SDK retry headers below 60s so early backoff rungs accept them', () => {
+    expect(clampAiSdkRetryAfterSeconds(58.6)).toBe(59);
+    expect(clampAiSdkRetryAfterSeconds(3600)).toBe(59);
+  });
 });
 
 describe('retry deadline error preservation', () => {
+  async function passThroughTrackedFailure(providerError: APICallError): Promise<void> {
+    const model = new MockLanguageModelV4({
+      doStream: async () => { throw providerError; },
+    });
+    const tracked = trackUpstreamAttempts(model);
+    if (typeof tracked.model === 'string') throw new Error('expected a wrapped language model');
+    await expect(tracked.model.doStream({} as never)).rejects.toBe(providerError);
+  }
+
+  it('uses raw upstream hints without replacing captured retry headers', async () => {
+    const conflictingProseFrame = {
+      type: 'error',
+      sequence_number: 0,
+      error: {
+        type: 'rate_limit_error',
+        code: '429',
+        message: 'upstream prose says retry after 900s; retry after 2s',
+        param: 'clodex_retry_after:upstream:2',
+      },
+    };
+    const authoritativeRawSeconds = apiCallError({
+      statusCode: 429,
+      data: conflictingProseFrame,
+      responseBody: JSON.stringify(conflictingProseFrame),
+      responseHeaders: { 'content-type': 'text/event-stream' },
+      isRetryable: true,
+    });
+    await passThroughTrackedFailure(authoritativeRawSeconds);
+    expect(authoritativeRawSeconds.responseHeaders?.['retry-after']).toBe('2');
+
+    const capturedMilliseconds = apiCallError({
+      statusCode: 429,
+      data: conflictingProseFrame,
+      responseBody: JSON.stringify(conflictingProseFrame),
+      responseHeaders: { 'retry-after-ms': '1' },
+      isRetryable: true,
+    });
+    await passThroughTrackedFailure(capturedMilliseconds);
+    expect(capturedMilliseconds.responseHeaders).toEqual({ 'retry-after-ms': '1' });
+
+    const capturedSeconds = apiCallError({
+      statusCode: 429,
+      data: conflictingProseFrame,
+      responseBody: JSON.stringify(conflictingProseFrame),
+      responseHeaders: { 'retry-after': '7' },
+      isRetryable: true,
+    });
+    await passThroughTrackedFailure(capturedSeconds);
+    expect(capturedSeconds.responseHeaders).toEqual({ 'retry-after': '7' });
+  });
+
+  it('does not turn a clamped long upstream hint into repeated 59s waits', async () => {
+    const syntheticFrame = {
+      type: 'error',
+      sequence_number: 0,
+      error: {
+        type: 'rate_limit_error',
+        code: '429',
+        message: 'retry after 60s',
+        param: 'clodex_retry_after:upstream:1800',
+      },
+    };
+    const providerError = apiCallError({
+      statusCode: 429,
+      data: syntheticFrame,
+      responseBody: JSON.stringify(syntheticFrame),
+      responseHeaders: { 'content-type': 'text/event-stream' },
+      isRetryable: true,
+    });
+
+    await passThroughTrackedFailure(providerError);
+
+    expect(providerError.responseHeaders).toEqual({
+      'content-type': 'text/event-stream',
+    });
+  });
+
+  it.each([
+    ['a non-429 error', 500, {
+      type: 'error', error: {
+        code: '429', message: 'retry after 12s', param: 'clodex_retry_after:upstream:12',
+      },
+    }],
+    ['a non-synthetic 429 body', 429, {
+      error: {
+        code: '429', message: 'retry after 12s', param: 'clodex_retry_after:upstream:12',
+      },
+    }],
+    ['a synthetic 429 wrapper around a non-rate-limit frame', 429, {
+      type: 'error', error: {
+        code: '500', message: 'retry after 12s', param: 'clodex_retry_after:upstream:12',
+      },
+    }],
+    ['a synthetic 429 without a hint', 429, {
+      type: 'error', error: {
+        code: '429', message: 'rate limited', param: 'clodex_retry_after:upstream:12',
+      },
+    }],
+    ['a synthetic 429 hint without clodex provenance', 429, {
+      type: 'error', error: { code: '429', message: 'retry after 12s', param: null },
+    }],
+    ['a synthetic 429 hint with incomplete clodex provenance', 429, {
+      type: 'error', error: {
+        code: '429',
+        message: 'retry after 12s',
+        param: 'clodex_retry_after:upstream:',
+      },
+    }],
+    ['a synthetic 429 hint with non-finite upstream provenance', 429, {
+      type: 'error', error: {
+        code: '429',
+        message: 'retry after 12s',
+        param: 'clodex_retry_after:upstream:NaN',
+      },
+    }],
+    ['a synthetic 429 hint with negative upstream provenance', 429, {
+      type: 'error', error: {
+        code: '429',
+        message: 'retry after 12s',
+        param: 'clodex_retry_after:upstream:-1',
+      },
+    }],
+  ] as const)('leaves %s without a fabricated retry header', async (_name, statusCode, data) => {
+    const providerError = apiCallError({
+      statusCode,
+      data,
+      responseBody: JSON.stringify(data),
+      responseHeaders: { 'content-type': 'text/event-stream' },
+      isRetryable: statusCode >= 500 || statusCode === 429,
+    });
+    await passThroughTrackedFailure(providerError);
+    expect(providerError.responseHeaders?.['retry-after']).toBeUndefined();
+  });
+
   it.each(['doStream', 'doGenerate'] as const)(
     'preserves a rejected provider error from %s while the SDK waits to retry',
     async method => {

@@ -38,11 +38,38 @@ export function clampRetryAfterSeconds(value?: number): number {
   return Math.min(Math.round(value), MAX_RETRY_AFTER_SECONDS);
 }
 
-/**
- * Recover a backoff hint from message prose. The OAuth WebSocket transport's
- * synthetic error frames can only carry the hint this way — the AI SDK's chunk
- * schema is a closed zod object, so it strips `retry_after_seconds`.
- */
+/** Cap below 60s so the AI SDK accepts the hint independent of its current backoff rung. */
+export function clampAiSdkRetryAfterSeconds(value?: number): number {
+  return Math.min(clampRetryAfterSeconds(value), MAX_RETRY_AFTER_SECONDS - 1);
+}
+
+export type RetryAfterProvenance =
+  | { source: 'default' }
+  | { source: 'upstream'; rawSeconds: number };
+
+const RETRY_AFTER_PARAM_PREFIX = 'clodex_retry_after:';
+
+/** Preserve retry-hint provenance through the OpenAI stream schema's string `param`. */
+export function retryAfterProvenanceParam(provenance: RetryAfterProvenance): string {
+  return provenance.source === 'default'
+    ? `${RETRY_AFTER_PARAM_PREFIX}default`
+    : `${RETRY_AFTER_PARAM_PREFIX}upstream:${String(provenance.rawSeconds)}`;
+}
+
+export function retryAfterProvenanceFromParam(
+  value: unknown,
+): RetryAfterProvenance | undefined {
+  if (value === `${RETRY_AFTER_PARAM_PREFIX}default`) return { source: 'default' };
+  if (typeof value !== 'string' || !value.startsWith(`${RETRY_AFTER_PARAM_PREFIX}upstream:`)) {
+    return undefined;
+  }
+  const rawValue = value.slice(`${RETRY_AFTER_PARAM_PREFIX}upstream:`.length);
+  if (rawValue.length === 0) return undefined;
+  const rawSeconds = Number(rawValue);
+  return Number.isFinite(rawSeconds) ? { source: 'upstream', rawSeconds } : undefined;
+}
+
+/** Recover a backoff hint from the message retained by the OpenAI stream schema. */
 function retryAfterFromText(message: unknown): number | undefined {
   if (typeof message !== 'string') return undefined;
   const match = /retry after (\d+)s\b/i.exec(message);

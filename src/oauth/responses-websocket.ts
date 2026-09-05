@@ -13,7 +13,13 @@ import type { RawData, WebSocket as WsWebSocket } from 'ws';
 import { CODEX_RESPONSES_WEBSOCKETS_BETA } from '../constants.js';
 import { outboundWsProxyAgent } from '../outbound-proxy.js';
 import { emitParentNotice } from '../parent-notice.js';
-import { anthropicErrorType, clampRetryAfterSeconds, frameStatusCode } from '../upstream-error.js';
+import {
+  anthropicErrorType,
+  clampRetryAfterSeconds,
+  frameStatusCode,
+  retryAfterProvenanceParam,
+  type RetryAfterProvenance,
+} from '../upstream-error.js';
 import { sanitizeToolInput } from '../tool-input-sanitize.js';
 import {
   resetWsUpgradePacerForTests,
@@ -77,6 +83,8 @@ interface OutputAccumulator {
   summaries: Map<number, string>;
   done?: JsonObject;
 }
+
+type RetryAfterHint = { seconds: number } & RetryAfterProvenance;
 
 interface RequestContext {
   controller: ReadableStreamDefaultController<Uint8Array>;
@@ -1316,12 +1324,23 @@ function failContext(
   message: string,
   diagnosticDetails: Record<string, unknown>,
   statusCode?: number,
-  retryAfterSeconds?: number,
+  retryAfter?: RetryAfterHint,
 ): void {
   if (ctx.closed || entry.current !== ctx) return;
+  const retryAfterSeconds = retryAfter === undefined
+    ? undefined
+    : clampRetryAfterSeconds(retryAfter.seconds);
   entry.debug(`fail: ${message}`);
   emitResponseErrorDiagnostic(entry, ctx, {
     ...diagnosticDetails,
+    ...(retryAfter !== undefined
+      ? {
+          retryAfterSource: retryAfter.source,
+          ...('rawSeconds' in retryAfter
+            ? { rawRetryAfterSeconds: retryAfter.rawSeconds }
+            : {}),
+        }
+      : {}),
     ...diagnosticTextFingerprint('errorMessage', message),
   });
   flushPending(ctx);
@@ -1332,7 +1351,9 @@ function failContext(
       type: statusCode === undefined ? 'transport_error' : anthropicErrorType(statusCode),
       code: statusCode === undefined ? 'websocket_transport_error' : String(statusCode),
       message,
-      param: null,
+      param: retryAfter === undefined
+        ? null
+        : retryAfterProvenanceParam(retryAfter),
       ...(retryAfterSeconds !== undefined ? { retry_after_seconds: retryAfterSeconds } : {}),
     },
   });
@@ -1582,7 +1603,8 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   const previousMissing = errorCode === 'previous_response_not_found';
   const willRetry = previousMissing && ctx.continued && !ctx.retried && !ctx.emittedModelData;
   if (errorCode === 'websocket_connection_limit_reached' && !ctx.emittedModelData) {
-    const retryAfterSeconds = clampRetryAfterSeconds(responseRetryAfterSeconds(event));
+    const rawRetryAfterSeconds = responseRetryAfterSeconds(event);
+    const retryAfterSeconds = clampRetryAfterSeconds(rawRetryAfterSeconds);
     failContext(
       entry,
       ctx,
@@ -1594,7 +1616,9 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
         retryAfterSeconds,
       },
       429,
-      retryAfterSeconds,
+      rawRetryAfterSeconds === undefined
+        ? { seconds: retryAfterSeconds, source: 'default' }
+        : { seconds: retryAfterSeconds, source: 'upstream', rawSeconds: rawRetryAfterSeconds },
     );
     return;
   }
@@ -1654,10 +1678,11 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
   }
 
   if (errorStatus !== undefined) {
-    // The AI SDK strips unknown frame fields, so a backoff hint survives only
-    // baked into the message text — same reason the connection-limit branch
-    // above spells it out. Clamped, so a hostile hint cannot park a client
-    // indefinitely.
+    // The closed SDK schema strips `retry_after_seconds`, while its declared
+    // string `param` survives; Response headers were already snapshotted before
+    // this event arrived. Keep the existing bounded message suffix for
+    // downstream recovery and carry authoritative source/raw data in `param` so
+    // the retry boundary can restore a safe captured header.
     // Only when upstream actually gave one. `clampRetryAfterSeconds` supplies a
     // 5s DEFAULT for a missing hint, so clamping unconditionally would have
     // every 429 assert a backoff upstream never stated — and that value becomes
@@ -1665,9 +1690,14 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
     // where the reason says hours: a prose-only "retry after 1800s" would get
     // "; retry after 5s" appended, and the client reads the first match.
     const statedRetryAfter = errorStatus === 429 ? responseRetryAfterSeconds(event) : undefined;
-    const retryAfterSeconds = statedRetryAfter === undefined
+    const retryAfter: RetryAfterHint | undefined = statedRetryAfter === undefined
       ? undefined
-      : clampRetryAfterSeconds(statedRetryAfter);
+      : {
+          seconds: clampRetryAfterSeconds(statedRetryAfter),
+          source: 'upstream',
+          rawSeconds: statedRetryAfter,
+        };
+    const retryAfterSeconds = retryAfter?.seconds;
     const reason = responseErrorMessage(event) ?? `OpenAI rejected the request (HTTP ${errorStatus})`;
     failContext(
       entry,
@@ -1687,7 +1717,7 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
         ...(retryAfterSeconds !== undefined ? { retryAfterSeconds } : {}),
       },
       errorStatus,
-      retryAfterSeconds,
+      retryAfter,
     );
     return;
   }
@@ -1741,13 +1771,20 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
       ? classified
       : settledReason ? 400 : 502;
     const usageLimited = statusCode === 429;
-    // Only when upstream stated one, and only baked into the TEXT: the AI SDK's
-    // chunk schema is a closed zod object that strips `retry_after_seconds`, so
-    // a hint carried only in the frame field never reaches the client. This is
-    // the same reason the status-carrying branch above spells it out.
-    const retryAfterSeconds = usageLimited && responseRetryAfterSeconds(event) !== undefined
-      ? clampRetryAfterSeconds(responseRetryAfterSeconds(event))
-      : undefined;
+    // Only when upstream stated one. The closed SDK schema strips
+    // `retry_after_seconds` but keeps the declared string `param`; Response
+    // headers were already snapshotted. The marker drives safe restoration,
+    // while this bounded summary remains the downstream fallback when a long
+    // upstream value is deliberately not restored.
+    const rawRetryAfterSeconds = usageLimited ? responseRetryAfterSeconds(event) : undefined;
+    const retryAfter: RetryAfterHint | undefined = rawRetryAfterSeconds === undefined
+      ? undefined
+      : {
+          seconds: clampRetryAfterSeconds(rawRetryAfterSeconds),
+          source: 'upstream',
+          rawSeconds: rawRetryAfterSeconds,
+        };
+    const retryAfterSeconds = retryAfter?.seconds;
     // The BOUNDED summary is the message, upstream's prose is not used at all.
     // A `response.failed` body can echo request content or backend detail, and
     // it does not stay in one place: the synthetic error is rethrown by the SDK
@@ -1775,7 +1812,7 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
         ...diagnosticTextFingerprint('upstreamMessage', responseErrorMessage(event)),
       },
       statusCode,
-      retryAfterSeconds,
+      retryAfter,
     );
     return;
   }
@@ -1819,10 +1856,9 @@ function handleSocketMessage(entry: ConnectionEntry, data: RawData): void {
  * standalone: a refusal happens before any connection or request context
  * exists, so there is no stream to write into, nothing registered to delete and
  * no context to close. `code` is the stringified status `frameStatusCode` reads
- * preferentially. The `Retry-After` header is what the SDK's own backoff reads;
- * the "retry after Ns" prose is the separate channel that carries the hint to
- * the CLIENT, because the SDK's chunk schema strips `retry_after_seconds`
- * before `sdkUpstreamErrorDetails` ever sees it.
+ * preferentially. The `Retry-After` header is what the SDK's own backoff and
+ * downstream classifier read; the prose keeps a user-facing explanation if
+ * the header is unavailable. The SDK schema strips `retry_after_seconds`.
  */
 function pacedRefusalResponse(retryAfterSeconds: number): Response {
   const frame = {
@@ -1919,18 +1955,21 @@ function createConnection(
       // to a retryable Anthropic 429 synchronously; failContext closes the
       // context here, so the socket error/close transport-retry path sees a
       // finished request and cannot double-handle this failure.
-      const retryAfterSeconds = clampRetryAfterSeconds(
-        numericRetryAfterHeader(response.headers['retry-after']),
-      );
-      // "retry after Ns" is load-bearing: the AI SDK strips unknown frame
-      // fields, so sdkUpstreamErrorDetails recovers the hint from this text.
+      const rawRetryAfterSeconds = numericRetryAfterHeader(response.headers['retry-after']);
+      const retryAfterSeconds = clampRetryAfterSeconds(rawRetryAfterSeconds);
+      // The closed SDK schema strips `retry_after_seconds` but keeps its
+      // declared string `param`, and the Response headers were captured before
+      // this rejection. The marker drives retry restoration; the message keeps
+      // the existing downstream fallback when no header is restored.
       failContext(entry, ctx, 'OpenAI edge throttled the Responses WebSocket upgrade '
         + `(HTTP 403); retry after ${retryAfterSeconds}s`, {
         source: 'unexpected_response',
         httpStatusCode: statusCode,
         mappedStatusCode: 429,
         retryAfterSeconds,
-      }, 429, retryAfterSeconds);
+      }, 429, rawRetryAfterSeconds === undefined
+        ? { seconds: retryAfterSeconds, source: 'default' }
+        : { seconds: retryAfterSeconds, source: 'upstream', rawSeconds: rawRetryAfterSeconds });
       return;
     }
     failContext(entry, ctx, `WebSocket upgrade failed (HTTP ${statusCode})`, {

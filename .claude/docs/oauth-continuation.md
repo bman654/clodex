@@ -185,10 +185,27 @@ SDK generation entry points retry transient provider failures up to five times b
 `CLODEX_UPSTREAM_MAX_RETRIES` through the same budget. Valid non-negative integers override the
 default; unset or malformed values preserve it. The default and ceiling fall with a shorter idle
 timeout. At the default timeout the ceiling is five, and the configured range permits at most ten,
-estimated from the SDK's fallback exponential backoff. Five retries can add roughly 62s of fallback
-backoff on a dead provider, versus roughly 6s for the SDK's former two-retry default. Provider retry
-hints and failed-attempt time can mean fewer retries begin before a streaming idle deadline; the
-stream's shared signal requests cancellation when that deadline expires. A deadline during retry
+estimated from the SDK's fallback exponential backoff. Without a retry hint, five retries can add
+roughly 62s of fallback backoff on a dead provider, versus roughly 6s for the SDK's former two-retry
+default. That fallback budget gives a transiently unavailable provider more time to recover. When
+OpenAI explicitly states an acceptable delay for a WebSocket throttle, clodex gives that value to
+the SDK instead of its fallback schedule. Clodex's existing 5s default remains a client-facing hint
+for upgrade 403s and WebSocket connection-limit errors that state no delay; it is not promoted into
+the SDK's retry loop. Other hintless 429s also retain the fallback schedule. A long accepted
+upstream delay can replace an early fallback rung and consume more of the request budget, so fewer
+retries may begin before the streaming idle deadline; the stream's shared signal requests
+cancellation when that deadline expires.
+
+Provider-utils snapshots Response headers when `fetch` resolves, before an asynchronous WebSocket
+failure supplies its throttle hint. The transport therefore preserves the hint's source and raw
+upstream value in the synthetic error's string `param`, which survives the OpenAI stream schema.
+`trackUpstreamAttempts` restores only an upstream-stated safe hint into the captured `APICallError`
+header record before the SDK selects its retry delay. A clodex-defaulted marker is deliberately
+ignored. Restoration never replaces an existing `retry-after` or `retry-after-ms`,
+even when that existing value is malformed; for values the SDK can parse, `retry-after-ms` takes
+precedence. Restored second-based hints cap at 59s so acceptance does not depend on the current
+fallback rung. An upstream value above clodex's 60s client-facing cap remains in diagnostics but is
+not promoted into repeated in-process waits. A deadline during retry
 backoff preserves the provider failure that prompted the retry, while a deadline during a silent
 active provider call remains a timeout. Proxy mode's raw HTTP MITM path shares the retry setting but
 retains its independent ceiling of five and one-retry default; other direct raw relays add no
