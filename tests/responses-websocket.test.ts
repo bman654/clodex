@@ -33,6 +33,7 @@ import {
   type ResponsesWebSocketDiagnosticEvent,
 } from '../src/oauth/responses-websocket.js';
 import { sdkUpstreamErrorDetails } from '../src/upstream-error.js';
+import { trackUpstreamAttempts } from '../src/upstream-attempts.js';
 import type { UpgradeAdmission } from '../src/oauth/ws-upgrade-pacer.js';
 
 const WS_URL = 'wss://chatgpt.com/backend-api/codex/responses';
@@ -757,6 +758,7 @@ describe('createResponsesWebSocketFetch', () => {
     expect(frame.error.code).toBe('429');
     expect(frame.error.retry_after_seconds).toBe(5);
     expect(frame.error.message).toMatch(/retry after 5s/i);
+    expect(frame.error.param).toBe('clodex_retry_after:default');
     expect(resume).toHaveBeenCalledOnce();
 
     // Through the real AI SDK the failure surfaces as a retryable 429 with the
@@ -777,11 +779,15 @@ describe('createResponsesWebSocketFetch', () => {
       httpStatusCode: 403,
       mappedStatusCode: 429,
       retryAfterSeconds: 5,
+      retryAfterSource: 'default',
     }));
   });
 
   it('honors an upstream retry-after header on a 403 rejection', async () => {
-    const wsFetch = createResponsesWebSocketFetch(WS_URL);
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      onDiagnostic: event => diagnostics.push(event),
+    });
     const res = await wsFetch('https://x', {
       method: 'POST',
       headers: { Authorization: 'Bearer tok' },
@@ -792,6 +798,12 @@ describe('createResponsesWebSocketFetch', () => {
     const frame = await readErrorFrame(res);
     expect(frame.error.type).toBe('rate_limit_error');
     expect(frame.error.retry_after_seconds).toBe(12);
+    expect(frame.error.param).toBe('clodex_retry_after:upstream:12');
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_response_error',
+      retryAfterSource: 'upstream',
+      rawRetryAfterSeconds: 12,
+    }));
   });
 
   it('clamps an oversized retry-after header and defaults a malformed one', async () => {
@@ -805,8 +817,9 @@ describe('createResponsesWebSocketFetch', () => {
     rejectUpgrade(lastSocket(), 403, { headers: { 'retry-after': '3600' } });
     const oversizedFrame = await readErrorFrame(oversized);
     expect(oversizedFrame.error.retry_after_seconds).toBe(60);
-    // The message text is the only channel that survives the AI SDK's chunk
-    // schema stripping, so the CLAMPED value must appear there too.
+    expect(oversizedFrame.error.param).toBe('clodex_retry_after:upstream:3600');
+    // The client-facing message uses the clamped value while provenance keeps
+    // the raw upstream value available to the retry boundary.
     expect(oversizedFrame.error.message).toMatch(/retry after 60s\b/i);
 
     const malformed = await wsFetch('https://x', {
@@ -848,41 +861,77 @@ describe('createResponsesWebSocketFetch', () => {
     }));
   });
 
-  it('lets the AI SDK transparently retry a 403-throttled upgrade and recover', async () => {
-    // The design premise of the 403->429 mapping: because the synthetic error
-    // frame arrives BEFORE any output chunk, @ai-sdk/openai's
-    // throwIfOpenAIStreamErrorBeforeOutput rejects doStream with a retryable
-    // 429 APICallError, so the AI SDK's own retry loop re-attempts the whole
-    // request — including a fresh WebSocket upgrade. This drives that loop for
-    // real: attempt 1 gets a 403 upgrade rejection, attempt 2 succeeds.
-    const wsFetch = createResponsesWebSocketFetch(WS_URL);
-    const provider = createOpenAI({ apiKey: 'test-only', fetch: wsFetch });
-    const streamed = streamText({
-      model: provider.responses('gpt-5.6-sol'),
-      prompt: 'retry me',
-      maxRetries: 1,
-      onError: () => {},
-    });
-    const collected = (async () => {
-      let out = '';
-      for await (const chunk of streamed.textStream) out += chunk;
-      return out;
-    })();
+  it.each([
+    // OpenAI did not state a delay: keep the SDK's roughly 2s fallback rather
+    // than promoting clodex's client-facing 5s default into the retry loop.
+    { label: 'defaulted', retryAfterSeconds: undefined, minimumDelayMs: 1_600, timeoutMs: 4_500 },
+    { label: 'upstream 0s', retryAfterSeconds: 0, minimumDelayMs: 0, timeoutMs: 1_000 },
+    { label: 'upstream 3s', retryAfterSeconds: 3, minimumDelayMs: 2_600, timeoutMs: 4_500 },
+    // Above clodex's accepted ceiling: retain the SDK's roughly 2s fallback
+    // rather than promoting the client-facing 60s clamp into a 59s wait.
+    { label: 'upstream 3600s', retryAfterSeconds: 3_600, minimumDelayMs: 1_600, timeoutMs: 4_500 },
+  ])(
+    'handles a $label 403 throttle in the real SDK retry loop',
+    async ({ retryAfterSeconds, minimumDelayMs, timeoutMs }) => {
+      // Because this synthetic frame arrives before output, @ai-sdk/openai
+      // rejects doStream with a retryable 429. Production's attempt-tracking
+      // middleware restores an upstream-stated late hint before the SDK
+      // schedules the next whole-request attempt; a local default is ignored.
+      const wsFetch = createResponsesWebSocketFetch(WS_URL);
+      const provider = createOpenAI({ apiKey: 'test-only', fetch: wsFetch });
+      const model = trackUpstreamAttempts(provider.responses('gpt-5.6-sol')).model;
+      const abortController = new AbortController();
+      const streamed = streamText({
+        model,
+        prompt: 'retry me',
+        maxRetries: 1,
+        abortSignal: abortController.signal,
+        onError: () => {},
+      });
+      const collected = (async () => {
+        let out = '';
+        for await (const chunk of streamed.textStream) out += chunk;
+        return out;
+      })();
+      // Attach a rejection handler immediately. If a mutation makes an assertion
+      // fail while the SDK is sleeping, `finally` aborts and settles this attempt
+      // before the next table case resets the shared fake-socket list.
+      const outcome = collected.then(
+        value => ({ value }),
+        error => ({ error }),
+      );
 
-    await vi.waitFor(() => expect(fakeSockets).toHaveLength(1));
-    rejectUpgrade(lastSocket(), 403);
+      try {
+        await vi.waitFor(() => expect(fakeSockets).toHaveLength(1));
+        const rejectedAt = performance.now();
+        if (retryAfterSeconds === undefined) rejectUpgrade(lastSocket(), 403);
+        else {
+          rejectUpgrade(lastSocket(), 403, {
+            headers: { 'retry-after': String(retryAfterSeconds) },
+          });
+        }
 
-    // The SDK backs off (no retry-after header on the synthetic SSE response,
-    // so its default ~2s exponential delay) and opens a SECOND upgrade.
-    await vi.waitFor(() => expect(fakeSockets).toHaveLength(2), { timeout: 10_000 });
-    const replacement = lastSocket();
-    replacement.emit('open');
-    emitTextResponse(replacement, 'resp_retry_recovered', 'recovered');
+        await vi.waitFor(
+          () => expect(fakeSockets).toHaveLength(2),
+          { timeout: timeoutMs },
+        );
+        const elapsedMs = performance.now() - rejectedAt;
+        expect(elapsedMs).toBeGreaterThanOrEqual(minimumDelayMs);
 
-    // Transparent recovery: the caller sees only the successful text.
-    await expect(collected).resolves.toBe('recovered');
-    expect(fakeSockets).toHaveLength(2);
-  }, 20_000);
+        const replacement = lastSocket();
+        replacement.emit('open');
+        emitTextResponse(replacement, 'resp_retry_recovered', 'recovered');
+
+        // Transparent recovery: the caller sees only the successful text.
+        await expect(outcome).resolves.toEqual({ value: 'recovered' });
+        expect(fakeSockets).toHaveLength(2);
+      } finally {
+        abortController.abort();
+        await outcome;
+      }
+    },
+    20_000,
+  );
 
   it('maps an in-band WebSocket connection limit error to a retryable 429', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
@@ -916,7 +965,7 @@ describe('createResponsesWebSocketFetch', () => {
         type: 'rate_limit_error',
         code: '429',
         message: 'OpenAI reported the Responses WebSocket connection limit was reached; retry after 12s',
-        param: null,
+        param: 'clodex_retry_after:upstream:12',
         retry_after_seconds: 12,
       },
     });
@@ -933,6 +982,8 @@ describe('createResponsesWebSocketFetch', () => {
       errorCode: 'websocket_connection_limit_reached',
       mappedStatusCode: 429,
       retryAfterSeconds: 12,
+      retryAfterSource: 'upstream',
+      rawRetryAfterSeconds: 12,
       emittedModelData: false,
     }));
   });
@@ -1019,7 +1070,7 @@ describe('createResponsesWebSocketFetch', () => {
     expect(record?.errorCode).toBeUndefined();
   });
 
-  it('carries an in-band 429 backoff hint through as message text', async () => {
+  it('carries an in-band 429 backoff hint through the synthetic error', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
       onDiagnostic: event => diagnostics.push(event),
@@ -1036,9 +1087,10 @@ describe('createResponsesWebSocketFetch', () => {
     })));
 
     const body = await readAll(res);
-    // The AI SDK strips unknown frame fields, so the hint only survives baked
-    // into the message — which is how the consumer recovers it.
+    // The closed SDK schema strips `retry_after_seconds` but preserves its
+    // declared string `param`; the message remains the downstream fallback.
     expect(body).toContain('retry after 45s');
+    expect(body).toContain('clodex_retry_after:upstream:45');
     expect(await classifyThroughSdk(body)).toMatchObject({
       statusCode: 429,
       isRetryable: true,
@@ -1050,6 +1102,8 @@ describe('createResponsesWebSocketFetch', () => {
       // The record that survives dedup must still name the failure.
       errorType: 'rate_limit_error',
       retryAfterSeconds: 45,
+      retryAfterSource: 'upstream',
+      rawRetryAfterSeconds: 45,
     }));
   });
 
@@ -1086,8 +1140,7 @@ describe('createResponsesWebSocketFetch', () => {
 
     const body = await readAll(res);
     expect(body).toContain('Resets in 4 hours.');
-    // Inventing a hint here would become a real `retry-after: 5` header and
-    // send the client back long before the limit resets.
+    // Inventing a hint here would send the client back long before the limit resets.
     expect(body).not.toContain('retry after');
     expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429 });
   });
@@ -1281,10 +1334,9 @@ describe('createResponsesWebSocketFetch', () => {
     }
   });
 
-  it('carries an output-less usage-limit backoff in the message text', async () => {
-    // The AI SDK's chunk schema is a closed zod object that strips
-    // `retry_after_seconds`, so a hint carried only in the frame field never
-    // reaches the client — it has to be baked into the prose.
+  it('carries an output-less usage-limit backoff in the synthetic error', async () => {
+    // The AI SDK's chunk schema strips `retry_after_seconds`, so the clamped
+    // hint is baked into the prose and its raw provenance into the string param.
     const body = await failWith({
       type: 'response.failed',
       response: {
@@ -1293,8 +1345,8 @@ describe('createResponsesWebSocketFetch', () => {
         error: { type: 'usage_limit_reached', message: 'weekly limit reached', retry_after_seconds: 1800 },
       },
     });
-    // Clamped to MAX_RETRY_AFTER_SECONDS so an hour-scale hint cannot park the client.
     expect(body).toContain('retry after 60s');
+    expect(body).toContain('clodex_retry_after:upstream:1800');
     expect(await classifyThroughSdk(body)).toMatchObject({ statusCode: 429, retryAfterSeconds: 60 });
   });
 

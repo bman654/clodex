@@ -139,7 +139,10 @@ const SDK_INITIAL_BACKOFF_MS = 2_000;
  * `totalBackoffMs` is the SDK's own exponential ladder, used when a failure
  * carries no `Retry-After`. A refusal from this module DOES carry one, and
  * `getRetryDelayInMs` SUBSTITUTES it for the rung rather than taking the larger
- * of the two, so the real gap between paced attempts is the hint.
+ * of the two, so the real gap between paced attempts is the hint. Other
+ * provider-directed delays, including WebSocket throttle hints, are outside
+ * this queue-budget proof and can stop the retry ladder early at its shared
+ * request deadline; they do not extend this module's per-attempt queue bound.
  *
  * The ladder is therefore NOT an upper bound on the pacing case — do not read
  * it as one. `pacedRetryAfterSeconds` caps the hint at this bound, and this
