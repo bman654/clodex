@@ -362,7 +362,12 @@ clodex --version    # version
   avoid near-immediate termination; the 1h/6h ceilings allow deliberately long
   calls without leaving stalls attached indefinitely. At either deadline,
   clodex aborts the SDK call; cancellation is cooperative, so a provider
-  transport that ignores the abort signal can settle later. These are
+  transport that ignores the abort signal can settle later. clodex also asks
+  the provider to stop as soon as the client that made the request goes away —
+  a Ctrl-C, a killed agent, or a closed browser — instead of waiting for a
+  deadline, whether the answer had started arriving or not. The same
+  cooperative limit applies: clodex stops relaying and requests cancellation,
+  but cannot guarantee the provider stops generating. These are
   server-side limits, and callers may stop sooner. Claude Code currently
   defaults to about 180s of downstream byte silence in proxy mode and 300s in
   endpoint mode, with

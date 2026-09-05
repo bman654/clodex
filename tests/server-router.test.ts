@@ -15,6 +15,7 @@ import {
 import { installParentNoticeSink } from '../src/parent-notice.js';
 import { generateOpenAiResponse, streamOpenAiResponse } from '../src/openai-adapter.js';
 import { resolveProviderCredential } from '../src/env.js';
+import { clientDisconnected, ResponseCompleted } from '../src/http-utils.js';
 
 const TEST_HELPER_REF = `helper:v1:${'a'.repeat(64)}:oauth:provider:oauth-provider`;
 
@@ -1677,5 +1678,481 @@ describe('anthropic count_tokens', () => {
     });
 
     expect(response.status).toBe(401);
+  });
+});
+
+// ── Client disconnect ───────────────────────────────────────────────────────
+// A downstream client that goes away (Ctrl-C, killed agent, closed browser)
+// must cancel the upstream request its request started. A request that
+// completed normally must never be *treated* as cancelled — its controller is
+// still aborted at end of life, but with the completion reason, so
+// `clientDisconnected` stays false and errors keep reaching the client.
+
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(r => { resolve = r; });
+  return { promise, resolve };
+}
+
+/** Resolve to 'settled' if `promise` settles inside `ms`, else 'timeout'. */
+async function settledWithin(promise: Promise<unknown>, ms = 5000): Promise<'settled' | 'timeout'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => 'settled' as const, () => 'settled' as const),
+      new Promise<'timeout'>(resolve => { timer = setTimeout(() => resolve('timeout'), ms); }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * An upstream that answers with SSE headers and one event, then holds the
+ * stream open. Cancelling after a chunk has reached the client is the shape a
+ * user pressing Ctrl-C part-way through an answer produces, and it is the case
+ * a controller wired only for the pre-header window would miss.
+ */
+async function startStreamingThenHangingUpstream(): Promise<{
+  baseUrl: string;
+  cancelled: Promise<void>;
+  close: () => Promise<void>;
+}> {
+  const cancelled = deferred();
+  const sockets = new Set<import('node:net').Socket>();
+  const server = createServer((req, res) => {
+    res.on('close', () => { if (!res.writableFinished) cancelled.resolve(); });
+    void readRequestBody(req as never).then(() => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('event: message_start\ndata: {"type":"message_start"}\n\n');
+      // Never finish: only cancellation can end this stream.
+    });
+  });
+  server.on('connection', socket => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('missing upstream address');
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    cancelled: cancelled.promise,
+    close: () => new Promise<void>((resolve, reject) => {
+      for (const socket of sockets) socket.destroy();
+      server.close(err => (err ? reject(err) : resolve()));
+    }),
+  };
+}
+
+/** Read one chunk, proving the response is past its headers and streaming. */
+async function readFirstChunk(response: Response): Promise<string> {
+  const reader = response.body!.getReader();
+  const chunk = await reader.read();
+  return new TextDecoder().decode(chunk.value);
+}
+
+/**
+ * An upstream that accepts a request and never answers it. The only thing that
+ * can end it is the caller cancelling — so `cancelled` resolving is proof the
+ * upstream connection was actually torn down rather than left running.
+ */
+async function startHangingUpstream(): Promise<{
+  baseUrl: string;
+  received: Promise<void>;
+  cancelled: Promise<void>;
+  close: () => Promise<void>;
+}> {
+  const received = deferred();
+  const cancelled = deferred();
+  const sockets = new Set<import('node:net').Socket>();
+  const server = createServer((req, res) => {
+    res.on('close', () => { if (!res.writableFinished) cancelled.resolve(); });
+    void readRequestBody(req as never).then(() => received.resolve());
+  });
+  server.on('connection', socket => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('missing upstream address');
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    received: received.promise,
+    cancelled: cancelled.promise,
+    close: () => new Promise<void>((resolve, reject) => {
+      for (const socket of sockets) socket.destroy();
+      server.close(err => (err ? reject(err) : resolve()));
+    }),
+  };
+}
+
+/** Resolve once the gateway's own response object for the next request closes. */
+function nextServerResponseClosed(handle: ServerHandle): Promise<void> {
+  const closed = deferred();
+  handle.server.once('request', (_req, res) => {
+    res.on('close', () => closed.resolve());
+  });
+  return closed.promise;
+}
+
+const TRANSLATED_MODEL: ServerModelInfo = {
+  id: 'translated-model',
+  name: 'Translated Model',
+  isFree: false,
+  brand: 'OpenAI',
+  providerId: 'openai',
+  sourceBackend: 'openai',
+  modelFormat: 'openai',
+  npm: '@ai-sdk/openai',
+  apiKey: 'synthetic-api-key',
+};
+
+describe('client disconnect cancels upstream work', () => {
+  it('cancels the Anthropic passthrough upstream request', async () => {
+    const upstream = await startHangingUpstream();
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        model('claude-native', 'anthropic', 'zen', { baseUrl: upstream.baseUrl }),
+      ]),
+    });
+
+    const client = new AbortController();
+    const request = fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-native', messages: [{ role: 'user', content: 'hi' }] }),
+      signal: client.signal,
+    }).catch(() => undefined);
+
+    await upstream.received;
+    client.abort();
+
+    expect(await settledWithin(upstream.cancelled)).toBe('settled');
+    await request;
+  });
+
+  it('cancels the count_tokens upstream request', async () => {
+    const upstream = await startHangingUpstream();
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        model('claude-native', 'anthropic', 'zen', { baseUrl: upstream.baseUrl }),
+      ]),
+    });
+
+    const client = new AbortController();
+    const request = fetch(`${server.url}/anthropic/v1/messages/count_tokens`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-native', messages: [{ role: 'user', content: 'hi' }] }),
+      signal: client.signal,
+    }).catch(() => undefined);
+
+    await upstream.received;
+    client.abort();
+
+    expect(await settledWithin(upstream.cancelled)).toBe('settled');
+    await request;
+  });
+
+  it('cancels the direct OpenAI chat-completions upstream request', async () => {
+    const upstream = await startHangingUpstream();
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        model('openai-format', 'openai', 'go', { completionsUrl: `${upstream.baseUrl}/v1/chat/completions` }),
+      ]),
+    });
+
+    const client = new AbortController();
+    const request = fetch(`${server.url}/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'openai-format', messages: [{ role: 'user', content: 'hi' }] }),
+      signal: client.signal,
+    }).catch(() => undefined);
+
+    await upstream.received;
+    client.abort();
+
+    expect(await settledWithin(upstream.cancelled)).toBe('settled');
+    await request;
+  });
+
+  it.each([
+    ['streaming', true],
+    ['non-streaming', false],
+  ] as const)('cancels the translated Anthropic %s SDK call', async (_name, stream) => {
+    const dispatched = deferred();
+    const sawAbort = deferred();
+    const release = deferred();
+    const hangUntilAborted = (signal: AbortSignal | undefined) => {
+      dispatched.resolve();
+      return new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => { sawAbort.resolve(); reject(signal.reason); }, { once: true });
+        void release.promise.then(() => reject(new Error('released')));
+      });
+    };
+    if (stream) {
+      vi.mocked(streamAnthropicResponse).mockImplementationOnce(
+        (_model, _params, _id, _write, _log, observer) => hangUntilAborted(observer?.abortSignal),
+      );
+    } else {
+      vi.mocked(generateAnthropicResponse).mockImplementationOnce(
+        (_model, _params, _id, options) => hangUntilAborted(options?.abortSignal),
+      );
+    }
+
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([TRANSLATED_MODEL]),
+    });
+
+    const client = new AbortController();
+    const request = fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'translated-model', stream, messages: [{ role: 'user', content: 'hi' }] }),
+      signal: client.signal,
+    }).catch(() => undefined);
+
+    try {
+      await dispatched.promise;
+      client.abort();
+      expect(await settledWithin(sawAbort.promise)).toBe('settled');
+    } finally {
+      release.resolve();
+      await request;
+    }
+  });
+
+  it.each([
+    ['streaming', true],
+    ['non-streaming', false],
+  ] as const)('cancels the translated OpenAI %s SDK call', async (_name, stream) => {
+    const dispatched = deferred();
+    const sawAbort = deferred();
+    const release = deferred();
+    const hangUntilAborted = (signal: AbortSignal | undefined) => {
+      dispatched.resolve();
+      return new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => { sawAbort.resolve(); reject(signal.reason); }, { once: true });
+        void release.promise.then(() => reject(new Error('released')));
+      });
+    };
+    if (stream) {
+      vi.mocked(streamOpenAiResponse).mockImplementationOnce(
+        (_model, _params, _id, _write, options) => hangUntilAborted(options?.abortSignal),
+      );
+    } else {
+      vi.mocked(generateOpenAiResponse).mockImplementationOnce(
+        (_model, _params, _id, options) => hangUntilAborted(options?.abortSignal),
+      );
+    }
+
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([TRANSLATED_MODEL]),
+    });
+
+    const client = new AbortController();
+    const request = fetch(`${server.url}/openai/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'translated-model', stream, messages: [{ role: 'user', content: 'hi' }] }),
+      signal: client.signal,
+    }).catch(() => undefined);
+
+    try {
+      await dispatched.promise;
+      client.abort();
+      expect(await settledWithin(sawAbort.promise)).toBe('settled');
+    } finally {
+      release.resolve();
+      await request;
+    }
+  });
+
+  it('cancels the Anthropic passthrough upstream after output has reached the client', async () => {
+    const upstream = await startStreamingThenHangingUpstream();
+    handles.push(upstream);
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        model('claude-native', 'anthropic', 'zen', { baseUrl: upstream.baseUrl }),
+      ]),
+    });
+
+    const client = new AbortController();
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-native', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+      signal: client.signal,
+    });
+
+    expect(response.status).toBe(200);
+    expect(await readFirstChunk(response)).toContain('message_start');
+    client.abort();
+
+    expect(await settledWithin(upstream.cancelled)).toBe('settled');
+  });
+
+  it.each([
+    ['Anthropic', '/anthropic/v1/messages'],
+    ['OpenAI', '/openai/v1/chat/completions'],
+  ] as const)('cancels the translated %s SDK stream after output has reached the client', async (family, path) => {
+    const sawAbort = deferred();
+    const release = deferred();
+    const streamThenHang = (write: (chunk: string) => void, signal: AbortSignal | undefined) => {
+      write('data: {"partial":true}\n\n');
+      return new Promise<never>((_resolve, reject) => {
+        signal?.addEventListener('abort', () => { sawAbort.resolve(); reject(signal.reason); }, { once: true });
+        void release.promise.then(() => reject(new Error('released')));
+      });
+    };
+    if (family === 'Anthropic') {
+      vi.mocked(streamAnthropicResponse).mockImplementationOnce(
+        (_model, _params, _id, write, _log, observer) => streamThenHang(write, observer?.abortSignal),
+      );
+    } else {
+      vi.mocked(streamOpenAiResponse).mockImplementationOnce(
+        (_model, _params, _id, write, options) => streamThenHang(write, options?.abortSignal),
+      );
+    }
+
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([TRANSLATED_MODEL]),
+    });
+
+    const client = new AbortController();
+    try {
+      const response = await fetch(`${server.url}${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: 'translated-model', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+        signal: client.signal,
+      });
+
+      expect(response.status).toBe(200);
+      expect(await readFirstChunk(response)).toContain('partial');
+      client.abort();
+
+      expect(await settledWithin(sawAbort.promise)).toBe('settled');
+    } finally {
+      release.resolve();
+    }
+  });
+
+  it.each([
+    ['Anthropic messages', '/anthropic/v1/messages', {}],
+    ['count_tokens', '/anthropic/v1/messages/count_tokens', {}],
+    ['OpenAI chat completions', '/openai/v1/chat/completions', { openai: true }],
+  ] as const)('still reports an unreachable upstream on the %s route', async (_name, path, shape) => {
+    // Cancellation is silent by design, so each abort check has to stay narrow:
+    // a transport failure with the client still connected must be answered.
+    const catalog = 'openai' in shape
+      ? createGatewayModelCatalog([
+        model('openai-format', 'openai', 'go', { completionsUrl: 'http://127.0.0.1:1/v1/chat/completions' }),
+      ])
+      : createGatewayModelCatalog([
+        model('claude-native', 'anthropic', 'zen', { baseUrl: 'http://127.0.0.1:1' }),
+      ]);
+    const server = await startTestServer({ catalog });
+
+    const response = await fetch(`${server.url}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'openai' in shape ? 'openai-format' : 'claude-native',
+        messages: [{ role: 'user', content: 'hi' }],
+      }),
+    });
+
+    expect(response.status).toBe(500);
+    expect(await response.json()).toMatchObject({ error: { message: expect.any(String) } });
+  });
+
+  it('does not cancel a passthrough stream that completes normally', async () => {
+    const sockets = new Set<import('node:net').Socket>();
+    const sseUpstream = createServer((req, res) => {
+      void readRequestBody(req as never).then(() => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('event: message_start\ndata: {"type":"message_start"}\n\n');
+        setTimeout(() => {
+          res.write('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+          res.end();
+        }, 50);
+      });
+    });
+    sseUpstream.on('connection', socket => {
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
+    });
+    await new Promise<void>(resolve => sseUpstream.listen(0, '127.0.0.1', resolve));
+    const address = sseUpstream.address();
+    if (!address || typeof address === 'string') throw new Error('missing upstream address');
+    handles.push({
+      close: () => new Promise<void>((resolve, reject) => {
+        for (const socket of sockets) socket.destroy();
+        sseUpstream.close(err => (err ? reject(err) : resolve()));
+      }),
+    });
+
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([
+        model('claude-native', 'anthropic', 'zen', { baseUrl: `http://127.0.0.1:${address.port}` }),
+      ]),
+    });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-native', stream: true, messages: [{ role: 'user', content: 'hi' }] }),
+    });
+
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).toContain('message_start');
+    expect(text).toContain('message_stop');
+  });
+
+  it('ends the translated SDK call signal with the completion reason, not a disconnect', async () => {
+    let observed: AbortSignal | undefined;
+    vi.mocked(generateAnthropicResponse).mockImplementationOnce(async (_model, _params, modelId, options) => {
+      observed = options?.abortSignal;
+      return {
+        id: 'msg-test',
+        type: 'message',
+        role: 'assistant',
+        model: modelId,
+        content: [{ type: 'text', text: 'sdk ok' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 1, output_tokens: 1 },
+      };
+    });
+
+    const server = await startTestServer({
+      catalog: createGatewayModelCatalog([TRANSLATED_MODEL]),
+    });
+    const serverResponseClosed = nextServerResponseClosed(server);
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'translated-model', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+
+    expect(response.status).toBe(200);
+    await response.json();
+    // The gateway's own response object has closed, so the watcher has run.
+    expect(await settledWithin(serverResponseClosed)).toBe('settled');
+    expect(observed).toBeDefined();
+    // Aborted on the success path too — no controller outlives its request
+    // unaborted — but carrying the completion reason, so nothing downstream
+    // mistakes a finished request for an abandoned one.
+    expect(observed!.aborted).toBe(true);
+    expect(observed!.reason).toBeInstanceOf(ResponseCompleted);
+    expect(clientDisconnected(observed!)).toBe(false);
   });
 });

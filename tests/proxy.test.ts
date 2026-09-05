@@ -802,6 +802,46 @@ describe('token counting', () => {
   });
 });
 
+/**
+ * The proxy's raw Anthropic relays stay silent about a request the client
+ * abandoned, and that silence is keyed on `clientDisconnected` rather than on
+ * `signal.aborted` — which is now true on the success path too. These pin the
+ * other side of the guard: a client that is still connected must still be told
+ * the upstream failed.
+ */
+describe('raw Anthropic relay error reporting', () => {
+  const unreachable: ProxyRoute = {
+    aliasId: 'anthropic-local__unreachable-model',
+    realModelId: 'unreachable-model',
+    displayName: 'Unreachable Model',
+    // Port 1 refuses immediately, so the relay fails without a client leaving.
+    upstreamUrl: 'http://127.0.0.1:1',
+    apiKey: 'provider-key',
+    modelFormat: 'anthropic',
+    providerId: 'local',
+  };
+
+  it.each([
+    ['messages', '/v1/messages'],
+    ['count_tokens', '/v1/messages/count_tokens'],
+  ] as const)('answers a connected client with 502 when the %s upstream is unreachable', async (_name, path) => {
+    const handle = await startProxyCatalog([unreachable], unreachable.aliasId, false);
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: unreachable.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      }, undefined, path);
+
+      expect(res.status).toBe(502);
+      expect(res.body).toContain('error');
+    } finally {
+      handle.close();
+    }
+  });
+});
+
 describe('translated request cancellation', () => {
   it('aborts the SDK provider request and records translation cancellation', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-sdk-cancel-'));

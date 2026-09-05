@@ -824,7 +824,7 @@ function streamAbortError(signal?: AbortSignal): Error {
  * an AbortSignal.any() composite. Node 24 retains source-aborted composite
  * signals in its internal gcPersistentSignals set when listeners remain.
  */
-function forwardAbortSignal(source: AbortSignal | undefined, target: AbortController): () => void {
+export function forwardAbortSignal(source: AbortSignal | undefined, target: AbortController): () => void {
   if (!source) return () => {};
   const forward = () => {
     if (!target.signal.aborted) target.abort(source.reason);
