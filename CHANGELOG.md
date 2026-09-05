@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.11.2](https://github.com/bman654/clodex/compare/v2.11.1...v2.11.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* **auth:** stop stalled OpenAI responses from hanging device-code sign-in ([132f4c0](https://github.com/bman654/clodex/commit/132f4c001b6d820ff463153fd5038085e6e2bbbe))
+* **models:** time out a stalled OpenAI reply so refreshing your model list can't hang ([f3b7e99](https://github.com/bman654/clodex/commit/f3b7e9913c7a746ed5c371b71758bd7eb79850f1))
+* **openai:** honor stated retry delays to improve rate-limit recovery ([d5e241b](https://github.com/bman654/clodex/commit/d5e241bad81006c7e5b09fd3527fc9add3a8bb7f))
+* **openai:** reuse connections that free up while parallel agents wait, so prompts stay cached ([#185](https://github.com/bman654/clodex/issues/185)) ([6cc786f](https://github.com/bman654/clodex/commit/6cc786f03e526263ecdaa9566dfc39bfeb31ee22))
+* **server:** cancel provider calls after clients disconnect to reduce wasted work ([#183](https://github.com/bman654/clodex/issues/183)) ([b8ad341](https://github.com/bman654/clodex/commit/b8ad341aa937096056d7e968434f7db3f186c815))
+
 ## [2.11.1](https://github.com/bman654/clodex/compare/v2.11.0...v2.11.1) (2026-09-05)
 
 
