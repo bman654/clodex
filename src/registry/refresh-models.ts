@@ -228,9 +228,9 @@ async function fetchJsonWithAuth(
   accessToken: string,
   timeoutMs: number,
 ): Promise<{ body: unknown | null; error?: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
     const response = await fetch(url, {
       headers: {
         Accept: 'application/json',
@@ -238,7 +238,7 @@ async function fetchJsonWithAuth(
         'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
       },
       signal: controller.signal,
-    }).finally(() => clearTimeout(timer));
+    });
     if (!response.ok) {
       const detail = await response.text().then(t => t.slice(0, 200)).catch(() => '');
       return { body: null, error: `HTTP ${response.status}${detail ? `: ${detail}` : ''}` };
@@ -246,6 +246,11 @@ async function fetchJsonWithAuth(
     return { body: await response.json() };
   } catch (err) {
     return { body: null, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timer);
+    if (!controller.signal.aborted) {
+      controller.abort(new Error('OpenAI catalog request completed'));
+    }
   }
 }
 
