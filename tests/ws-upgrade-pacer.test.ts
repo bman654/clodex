@@ -23,6 +23,15 @@ import {
   upstreamRequestBudget,
 } from '../src/upstream-retry.js';
 
+/**
+ * The full admitted shape. `queued` is asserted explicitly rather than derived
+ * from `waitedMs`, because the whole point of the flag is that the two can
+ * disagree when the clock moves.
+ */
+function admitted(waitedMs: number, queued: boolean) {
+  return { kind: 'admitted', waitedMs, queued, release: expect.any(Function) };
+}
+
 /** The AI SDK's fallback ladder: 2s, 4s, 8s, … with no jitter. */
 function sdkBackoffMs(maxRetries: number): number {
   return 2_000 * (2 ** maxRetries - 1);
@@ -590,14 +599,14 @@ describe('WsUpgradePacer', () => {
     expect(admissions.slice(10).map(entry => entry.state())).toEqual(['pending', 'pending', 'pending']);
 
     await clock.advance(1_000);
-    expect(admissions[10]!.admission()).toEqual({ kind: 'admitted', waitedMs: 1_000 });
+    expect(admissions[10]!.admission()).toEqual(admitted(1_000, true));
     expect(admissions[11]!.state()).toBe('pending');
 
     await clock.advance(1_000);
-    expect(admissions[11]!.admission()).toEqual({ kind: 'admitted', waitedMs: 2_000 });
+    expect(admissions[11]!.admission()).toEqual(admitted(2_000, true));
 
     await clock.advance(1_000);
-    expect(admissions[12]!.admission()).toEqual({ kind: 'admitted', waitedMs: 3_000 });
+    expect(admissions[12]!.admission()).toEqual(admitted(3_000, true));
     expect(clock.pending).toBe(0);
   });
 
@@ -712,7 +721,7 @@ describe('WsUpgradePacer', () => {
     const admissions = Array.from({ length: 5 }, () => track(clock, pacer.admit()));
     await flush();
 
-    expect(admissions[0]!.admission()).toEqual({ kind: 'admitted', waitedMs: 0 });
+    expect(admissions[0]!.admission()).toEqual(admitted(0, false));
     // The deficit is 3s but the bound is 2s, and the SDK spends this hint
     // INSTEAD of its own backoff rung — so the hint is capped at the bound
     // while `requiredWaitMs` still reports the deficit honestly.
@@ -725,8 +734,8 @@ describe('WsUpgradePacer', () => {
 
     await clock.advance(2_000);
     // The two that fitted inside the bound were queued, not refused.
-    expect(admissions[1]!.admission()).toEqual({ kind: 'admitted', waitedMs: 1_000 });
-    expect(admissions[2]!.admission()).toEqual({ kind: 'admitted', waitedMs: 2_000 });
+    expect(admissions[1]!.admission()).toEqual(admitted(1_000, true));
+    expect(admissions[2]!.admission()).toEqual(admitted(2_000, true));
     expect(clock.pending).toBe(0);
   });
 
@@ -753,7 +762,7 @@ describe('WsUpgradePacer', () => {
     await flush();
     // Three refusals debited nothing, so the bucket is back to full credit.
     // Had they each taken a token, this would be refused too.
-    expect(retried.admission()).toEqual({ kind: 'admitted', waitedMs: 0 });
+    expect(retried.admission()).toEqual(admitted(0, false));
   });
 
   it('lets a refused request through on a later attempt as the bucket refills', async () => {
@@ -813,7 +822,7 @@ describe('WsUpgradePacer', () => {
     const next = track(clock, pacer.admit());
     await flush();
     await clock.advance(1_000);
-    expect(next.admission()).toEqual({ kind: 'admitted', waitedMs: 1_000 });
+    expect(next.admission()).toEqual(admitted(1_000, true));
   });
 
   it('makes a queued request wait out the full queue when nobody aborts', async () => {
@@ -834,7 +843,7 @@ describe('WsUpgradePacer', () => {
     await clock.advance(1_000);
     expect(follower.state()).toBe('pending');
     await clock.advance(1_000);
-    expect(follower.admission()).toEqual({ kind: 'admitted', waitedMs: 2_000 });
+    expect(follower.admission()).toEqual(admitted(2_000, true));
   });
 
   it('spends no token on a request that was already cancelled', async () => {
@@ -854,7 +863,7 @@ describe('WsUpgradePacer', () => {
     const next = track(clock, pacer.admit());
     await flush();
     // Had the dead request taken the only token, this would have been queued.
-    expect(next.admission()).toEqual({ kind: 'admitted', waitedMs: 0 });
+    expect(next.admission()).toEqual(admitted(0, false));
     expect(clock.pending).toBe(0);
   });
 
@@ -894,6 +903,117 @@ describe('WsUpgradePacer', () => {
     await flush();
     expect(admissions.every(entry => entry.admission()?.kind === 'admitted')).toBe(true);
     expect(clock.pending).toBe(0);
+  });
+  it('returns a released token to the bucket, and only once', async () => {
+    // A caller admitted for a connection it then does not open — the head it
+    // needed freed up while it was queued — hands the token back, exactly as a
+    // cancellation does. Holding it would pace the next request against an
+    // upgrade that never happened.
+    const clock = new TestClock();
+    const pacer = new WsUpgradePacer({
+      ratePerMinute: 60,
+      burst: 2,
+      ...boundedBy(15_000),
+      now: clock.now,
+      schedule: clock.schedule,
+    });
+
+    const first = track(clock, pacer.admit());
+    const second = track(clock, pacer.admit());
+    await flush();
+    expect(first.admission()).toEqual(admitted(0, false));
+    expect(second.admission()).toEqual(admitted(0, false));
+
+    // Both tokens are spent; a third arrival would have to queue for one.
+    (first.admission() as { release: () => void }).release();
+    // A second call must mint nothing: that would raise the sustained rate
+    // rather than correct it.
+    (first.admission() as { release: () => void }).release();
+
+    const third = track(clock, pacer.admit());
+    await flush();
+    // The one returned token covers this arrival with no delay ...
+    expect(third.admission()).toEqual(admitted(0, false));
+
+    const fourth = track(clock, pacer.admit());
+    await flush();
+    // ... and there is no second one, so this waits out a refill.
+    expect(fourth.state()).toBe('pending');
+    await clock.advance(1_000);
+    expect(fourth.admission()).toEqual(admitted(1_000, true));
+  });
+
+  it('returns a queued admission\'s token, and only the fraction it debited', async () => {
+    // The release above is taken on the immediate path, which debits a whole
+    // token. Production's interesting case is the other one: a QUEUED admission,
+    // and — once the bucket is against its debt floor — one that could only
+    // debit a FRACTION of a token. Refunding a whole one there would mint
+    // capacity the bucket never charged, which raises the sustained rate rather
+    // than correcting it.
+    const clock = new TestClock();
+    // maxRetries 0 means nothing is ever refused, so overflow is shaped by the
+    // debt floor instead — the only path that debits a fraction.
+    const pacer = new WsUpgradePacer({
+      ratePerMinute: 60,
+      burst: 1,
+      idleTimeoutMs: 9_667,
+      maxRetries: 0,
+      now: clock.now,
+      schedule: clock.schedule,
+    });
+    // Bound 4833ms at one token per second, so the floor is 4.833 tokens down.
+    expect(pacer.maxWaitMs).toBe(4_833);
+
+    // Six reservations taken in one tick: the burst, four whole-token debits,
+    // and a sixth that finds only 0.833 of a token above the floor.
+    const admissions = Array.from({ length: 6 }, () => track(clock, pacer.admit()));
+    await flush();
+    await clock.advance(4_833);
+    expect(admissions[0]!.admission()).toEqual(admitted(0, false));
+    const fractional = admissions[5]!.admission();
+    expect(fractional).toEqual(admitted(4_833, true));
+
+    // It waited, then opened nothing, so it hands back what it took.
+    (fractional as { release: () => void }).release();
+
+    // 4900ms after those reservations the bucket has refilled 4.9 tokens. On top
+    // of the 0.833 returned that is 0.9 — still short of one, so the next
+    // arrival waits. A whole token returned instead would have made it 1.067,
+    // capped to a full token, and this would have been admitted immediately:
+    // one connection the configured rate never authorized.
+    await clock.advance(4_900 - clock.time);
+    const next = track(clock, pacer.admit());
+    await flush();
+    expect(next.state()).toBe('pending');
+    await clock.advance(200);
+    expect(next.admission()).toMatchObject({ kind: 'admitted', queued: true });
+  });
+
+  it('reports a request as queued even when the clock steps backwards', async () => {
+    // `waitedMs` is a difference of two clock reads. A machine that adjusts its
+    // clock backwards mid-wait reports 0 for a request that really was parked
+    // on the bucket, so a caller deciding what to re-check after the wait has
+    // to read the flag rather than the number.
+    const clock = new TestClock();
+    let skewMs = 0;
+    const pacer = new WsUpgradePacer({
+      ratePerMinute: 60,
+      burst: 1,
+      ...boundedBy(15_000),
+      now: () => clock.time + skewMs,
+      schedule: clock.schedule,
+    });
+
+    track(clock, pacer.admit());
+    await flush();
+    const queued = track(clock, pacer.admit());
+    await flush();
+    expect(queued.state()).toBe('pending');
+
+    skewMs = -5_000;
+    await clock.advance(1_000);
+    // Really queued for a second; reports zero elapsed, and says so.
+    expect(queued.admission()).toEqual(admitted(0, true));
   });
 });
 

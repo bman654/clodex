@@ -4108,6 +4108,9 @@ describe('new-connection pacing', () => {
       decision: 'parallel_isolated',
       createdGeneration: 'isolated',
       pacingWaitedMs: 25,
+      // It waited, so it re-scanned; the sibling head it found was in flight,
+      // so the demotion is still what decided this.
+      pacingRescanOutcome: 'parallel_isolated',
     });
 
     for (const socket of fakeSockets) socket.emit('open');
@@ -4478,5 +4481,817 @@ describe('new-connection pacing', () => {
     }));
     // The request never reached a head decision, so none is reported.
     expect(diagnostics.some(event => event.event === 'ws_head_decision')).toBe(false);
+  });
+  /**
+   * Stage ONE ordering of the overlap: a sibling holding the only head of a
+   * partition while a second same-partition request is classified and then
+   * held inside the pacer. The caller finishes the sibling — through the
+   * production producer, `response.output_item.done` — and releases.
+   *
+   * This ordering is a fixture, NOT a claim about how production reaches the
+   * state. Real traffic arrives at "an idle matching head exists by the time a
+   * queued request is admitted" by several routes, and what the queued request
+   * was classified as on arrival differs between them; the blank-completion
+   * test below stages a different one deliberately. What every route shares is
+   * only the end state, which is what the code reads.
+   */
+  function heldBehindASibling(options: {
+    accountId: string;
+    debug?: string[];
+    diagnostics: ResponsesWebSocketDiagnosticEvent[];
+    /** Elapsed time the held admission reports. It is queued either way. */
+    waitedMs?: number;
+  }) {
+    const clock = { ms: 0 };
+    const waitedMs = options.waitedMs ?? 4_000;
+    const releaseToken = vi.fn();
+    let releaseQueued: (() => void) | undefined;
+    const queued = new Promise<void>(resolve => { releaseQueued = resolve; });
+    let markQueued: (() => void) | undefined;
+    const isQueued = new Promise<void>(resolve => { markQueued = resolve; });
+    let admissions = 0;
+    const wsFetch = createResponsesWebSocketFetch(
+      WS_URL,
+      options.debug ? message => options.debug!.push(message) : undefined,
+      {
+        accountId: options.accountId,
+        // Injected: two heads created in the same millisecond tie on
+        // `lastUsedAt`, and a stable sort then silently reverses which is the
+        // most recent. Nothing here reads the wall clock.
+        now: () => clock.ms,
+        pacer: {
+          admit: async (): Promise<UpgradeAdmission> => {
+            admissions += 1;
+            if (admissions === 1) return { kind: 'admitted', waitedMs: 0, queued: false };
+            markQueued!();
+            await queued;
+            clock.ms += waitedMs;
+            return { kind: 'admitted', waitedMs, queued: true, release: releaseToken };
+          },
+        },
+        onDiagnostic: event => options.diagnostics.push(event),
+      },
+    );
+    return { wsFetch, isQueued, release: () => releaseQueued!(), releaseToken };
+  }
+
+  const FIRST_TURN = [{ role: 'user', content: [{ type: 'input_text', text: 'first turn' }] }];
+  const ECHOED_ASSISTANT = { role: 'assistant', content: [{ type: 'output_text', text: 'hi' }] };
+
+  it('continues a chain head that a sibling freed while this request was queued', async () => {
+    // The head scan runs BEFORE the wait, so this request is classified while
+    // its sibling still holds the only head of the partition — on arrival it
+    // can take nothing but an isolated socket. By the time the pacer admits
+    // it, the sibling has finished and left a head whose lineage it matches
+    // exactly. Continuing that head is one connection fewer and keeps the
+    // cached prefix; opening a duplicate instead is what evicts other
+    // conversations' heads out of the nursery.
+    const debug: string[] = [];
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const nextTurn = { role: 'user', content: [{ type: 'input_text', text: 'second turn' }] };
+    const { wsFetch, isQueued, release, releaseToken } = heldBehindASibling({
+      accountId: 'acct-pacing-rematch',
+      debug,
+      diagnostics,
+    });
+
+    // The sibling opens the only head and is still in flight.
+    const sibling = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(FIRST_TURN)),
+    });
+    const siblingSocket = lastSocket();
+    siblingSocket.emit('open');
+
+    // Same partition, the next turn of the same conversation.
+    const held = wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([...FIRST_TURN, ECHOED_ASSISTANT, nextTurn])),
+    });
+    await isQueued;
+    expect(fakeSockets).toHaveLength(1);
+
+    // The sibling COMPLETES while the queued request waits, leaving an idle
+    // reusable head. Staged through the production producer — the head's
+    // expected-assistant history is built from `response.output_item.done`,
+    // never planted in the request input.
+    emitTextResponse(siblingSocket, 'resp_rematch_1', 'hi');
+    await readAll(sibling);
+
+    release();
+    const heldResponse = await held;
+
+    // No second connection: the freed head carried the turn.
+    expect(fakeSockets).toHaveLength(1);
+    expect(siblingSocket.send).toHaveBeenCalledTimes(2);
+    const sent = JSON.parse(siblingSocket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_rematch_1');
+    expect(sent.input).toEqual([nextTurn]);
+
+    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1);
+    expect(decision).toMatchObject({
+      decision: 'continuation',
+      pacingWaitedMs: 4_000,
+      pacingRescanOutcome: 'continuation',
+      continuationMatchMode: 'exact',
+      selectedConnectionId: 1,
+      promotedConnectionId: 1,
+      // The duplicate this replaces would have taken a nursery slot of its own.
+      nurseryConnectionCount: 0,
+      establishedConnectionCount: 1,
+      // The candidate counts are the RE-SCANNED partition, as the deep doc
+      // says: on arrival the only head was in flight, so idle and matching
+      // were both zero.
+      candidateCount: 1,
+      idleCandidateCount: 1,
+      matchingCandidateCount: 1,
+    });
+    expect((decision as { heads: Array<{ connectionId: number; inFlight: boolean }> }).heads)
+      .toEqual([expect.objectContaining({ connectionId: 1, inFlight: false })]);
+    // It opened no connection, so the new-connection token it was charged goes
+    // back rather than delaying whoever asks next.
+    expect(releaseToken).toHaveBeenCalledTimes(1);
+    expect((decision as { createdConnectionId?: number }).createdConnectionId).toBeUndefined();
+    expect(debug).toContain('ws: continuing a chain head that freed up during the pacing wait');
+
+    emitTextResponse(siblingSocket, 'resp_rematch_2', 'done');
+    await readAll(heldResponse);
+  });
+
+  it('opens its own head when the head freed during the wait does not match', async () => {
+    // The safety property. A head that frees up mid-wait is continued ONLY
+    // where the exact-prefix check accepts it; continuing a chain whose
+    // lineage does not match is the failure that check exists to prevent, and
+    // a re-scan that ignored it would reintroduce exactly that.
+    const debug: string[] = [];
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const otherConversation = [
+      { role: 'user', content: [{ type: 'input_text', text: 'an unrelated conversation' }] },
+    ];
+    const { wsFetch, isQueued, release, releaseToken } = heldBehindASibling({
+      accountId: 'acct-pacing-rematch-mismatch',
+      debug,
+      diagnostics,
+    });
+
+    const sibling = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(FIRST_TURN)),
+    });
+    const siblingSocket = lastSocket();
+    siblingSocket.emit('open');
+
+    // Same partition (one Claude session, one model), divergent history.
+    const held = wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(otherConversation)),
+    });
+    await isQueued;
+
+    emitTextResponse(siblingSocket, 'resp_mismatch_1', 'hi');
+    await readAll(sibling);
+
+    release();
+    const heldResponse = await held;
+
+    // A head was freed and it was NOT continued.
+    expect(fakeSockets).toHaveLength(2);
+    const ownSocket = lastSocket();
+    ownSocket.emit('open');
+    const sent = JSON.parse(ownSocket.send.mock.calls[0]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    expect(sent.input).toEqual(otherConversation);
+
+    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1);
+    expect(decision).toMatchObject({
+      decision: 'parallel_isolated',
+      pacingWaitedMs: 4_000,
+      pacingRescanOutcome: 'no_change',
+      createdConnectionId: 2,
+      createdGeneration: 'isolated',
+    });
+    expect((decision as { selectedConnectionId?: number }).selectedConnectionId).toBeUndefined();
+    expect(debug).not.toContain('ws: continuing a chain head that freed up during the pacing wait');
+    // It DID open a connection, so it keeps the token it was charged for it.
+    expect(releaseToken).not.toHaveBeenCalled();
+
+    emitTextResponse(ownSocket, 'resp_mismatch_2', 'done');
+    await readAll(heldResponse);
+  });
+
+  it('continues a head whose response completed with no output, having copied nothing from it', async () => {
+    // THE SHAPE THAT MAKES THIS FEATURE REACHABLE, and it is not the obvious
+    // one. A continuation needs the head's stored `requestInput ++
+    // expectedAssistant` to be a strict prefix of the waiting request — which
+    // reads like the waiter must already contain the head's OUTPUT, i.e. must
+    // have been sent it, which two independent agents never are.
+    //
+    // `expectedAssistant` can be EMPTY. A response that completes with no
+    // output items stores a prefix equal to its own input alone, so any
+    // same-partition request that merely extends that input matches it having
+    // copied nothing. Two agents fanned out from one Claude session open with
+    // byte-identical inputs, which is exactly that condition.
+    //
+    // Everything here is staged through production producers: agent B's second
+    // turn is reconstructed only from frames B was itself sent, and agent A's
+    // head is built by A's own `response.completed`.
+    const debug: string[] = [];
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const releaseToken = vi.fn();
+    const clock = { ms: 0 };
+    let holdNext = false;
+    let releaseQueued: (() => void) | undefined;
+    const queued = new Promise<void>(resolve => { releaseQueued = resolve; });
+    let markQueued: (() => void) | undefined;
+    const isQueued = new Promise<void>(resolve => { markQueued = resolve; });
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, message => debug.push(message), {
+      accountId: 'acct-pacing-blank-head',
+      now: () => clock.ms,
+      pacer: {
+        // Held on demand rather than by counting admissions: this ordering has
+        // four of them and only the last one queues.
+        admit: async (): Promise<UpgradeAdmission> => {
+          if (!holdNext) return { kind: 'admitted', waitedMs: 0, queued: false };
+          holdNext = false;
+          markQueued!();
+          await queued;
+          clock.ms += 4_000;
+          return { kind: 'admitted', waitedMs: 4_000, queued: true, release: releaseToken };
+        },
+      },
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    // The identical opening two subagents of one session are handed.
+    const OPENING = [
+      { role: 'user', content: [{ type: 'input_text', text: '<system-reminder>shared preamble' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'do the assigned task' }] },
+    ];
+    const send = (input: unknown[]) => wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+
+    // Agent A takes the partition's head and is still in flight.
+    const agentA = await send(OPENING);
+    const socketA = lastSocket();
+    socketA.emit('open');
+
+    // Agent B's first turn: same partition, byte-identical input, so it is
+    // classified `parallel_isolated` and retains no head of its own.
+    const agentBFirst = await send(OPENING);
+    const socketB = lastSocket();
+    socketB.emit('open');
+    emitTextResponse(socketB, 'resp_b_1', 'B answer');
+    await readAll(agentBFirst);
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+      .toMatchObject({ decision: 'parallel_isolated', createdGeneration: 'isolated' });
+
+    // Agent B's second turn, built only from what B was sent.
+    const bAssistant = { role: 'assistant', content: [{ type: 'output_text', text: 'B answer' }] };
+    const bNextUser = { role: 'user', content: [{ type: 'input_text', text: 'B follow-up' }] };
+    holdNext = true;
+    const held = send([...OPENING, bAssistant, bNextUser]);
+    await isQueued;
+    expect(fakeSockets).toHaveLength(2);
+
+    // Agent A completes with NO output items — a real terminal shape — leaving
+    // a head whose stored prefix is its own two-item input and nothing else.
+    socketA.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.created', response: { id: 'resp_a_blank' },
+    })));
+    socketA.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.completed', response: { id: 'resp_a_blank' },
+    })));
+    await readAll(agentA);
+
+    releaseQueued!();
+    const heldResponse = await held;
+
+    // B continued A's head, on A's socket, with no new connection.
+    expect(fakeSockets).toHaveLength(2);
+    expect(socketA.send).toHaveBeenCalledTimes(2);
+    const sent = JSON.parse(socketA.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_a_blank');
+    expect(sent.input).toEqual([bAssistant, bNextUser]);
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+      .toMatchObject({
+        decision: 'continuation',
+        pacingRescanOutcome: 'continuation',
+        continuationMatchMode: 'exact',
+        selectedConnectionId: 1,
+        incrementalInputItems: 2,
+      });
+    expect(releaseToken).toHaveBeenCalledTimes(1);
+
+    emitTextResponse(socketA, 'resp_a_next', 'done');
+    await readAll(heldResponse);
+  });
+
+  it('re-matches on the pacer\'s queued flag, not on the elapsed time it reports', async () => {
+    // `waitedMs` is a difference of two clock reads, so a clock stepped
+    // backwards during the wait reports 0 for a request that really did queue.
+    // Gating on the number would skip the re-scan exactly there and open the
+    // duplicate connection this change exists to avoid.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const nextTurn = { role: 'user', content: [{ type: 'input_text', text: 'second turn' }] };
+    const { wsFetch, isQueued, release } = heldBehindASibling({
+      accountId: 'acct-pacing-rematch-clockskew',
+      diagnostics,
+      waitedMs: 0,
+    });
+
+    const sibling = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(FIRST_TURN)),
+    });
+    const siblingSocket = lastSocket();
+    siblingSocket.emit('open');
+    const held = wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([...FIRST_TURN, ECHOED_ASSISTANT, nextTurn])),
+    });
+    await isQueued;
+    emitTextResponse(siblingSocket, 'resp_skew_1', 'hi');
+    await readAll(sibling);
+    release();
+    const heldResponse = await held;
+
+    expect(fakeSockets).toHaveLength(1);
+    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1);
+    expect(decision).toMatchObject({
+      decision: 'continuation',
+      pacingRescanOutcome: 'continuation',
+    });
+    // It reported no elapsed time, so the paced-wait field is absent — and the
+    // re-scan ran anyway.
+    expect(decision).not.toHaveProperty('pacingWaitedMs');
+
+    emitTextResponse(siblingSocket, 'resp_skew_2', 'done');
+    await readAll(heldResponse);
+  });
+
+  it('does not continue a freed head that diverges deep inside a long history', async () => {
+    // THE STRONGEST SAFETY TEST IN THIS FILE, because this is the property whose
+    // failure corrupts a conversation: continuing a chain whose lineage is not
+    // actually ours. The other negative diverges at the FIRST item, which a
+    // matcher that compared only the first item would still reject — so it
+    // cannot see a shallow-comparison regression. This one diverges at item 20
+    // of a 25-item stored prefix: everything before it is byte-identical, which
+    // is what a genuine rewind or branch of a long agent conversation looks
+    // like.
+    const debug: string[] = [];
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    // 24 alternating turns, all produced the same way, so the only difference
+    // between the two histories is the one this test is about.
+    const longHistory = (rewoundAt?: number) => Array.from({ length: 24 }, (_, index) => (
+      index % 2 === 0
+        ? { role: 'user', content: [{ type: 'input_text', text: `turn ${index}` }] }
+        : {
+          role: 'assistant',
+          content: [{
+            type: 'output_text',
+            text: index === rewoundAt ? `answer ${index} (regenerated)` : `answer ${index}`,
+          }],
+        }
+    ));
+    const { wsFetch, isQueued, release, releaseToken } = heldBehindASibling({
+      accountId: 'acct-pacing-rematch-deep',
+      debug,
+      diagnostics,
+    });
+
+    const sibling = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(longHistory())),
+    });
+    const siblingSocket = lastSocket();
+    siblingSocket.emit('open');
+
+    // Same 24 turns except item 20, then this conversation's own next turn: 26
+    // items against a 25-item stored prefix, agreeing on the first 19.
+    const divergent = [
+      ...longHistory(19),
+      { role: 'assistant', content: [{ type: 'output_text', text: 'hi' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'branch follow-up' }] },
+    ];
+    const held = wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(divergent)),
+    });
+    await isQueued;
+
+    // The sibling completes, leaving a 25-item prefix (24 sent + one answer).
+    emitTextResponse(siblingSocket, 'resp_deep_1', 'hi');
+    await readAll(sibling);
+
+    release();
+    const heldResponse = await held;
+
+    // Rejected: its own head, full context, nothing continued.
+    expect(fakeSockets).toHaveLength(2);
+    const ownSocket = lastSocket();
+    ownSocket.emit('open');
+    const sent = JSON.parse(ownSocket.send.mock.calls[0]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    expect(sent.input).toEqual(divergent);
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+      .toMatchObject({ pacingRescanOutcome: 'no_change', createdGeneration: 'isolated' });
+    expect(debug).not.toContain('ws: continuing a chain head that freed up during the pacing wait');
+    expect(releaseToken).not.toHaveBeenCalled();
+
+    emitTextResponse(ownSocket, 'resp_deep_2', 'done');
+    await readAll(heldResponse);
+  });
+
+  it('continues a head opened by a shorter sibling that overtook it from an empty partition', async () => {
+    // #173's OWN ordering, which none of the tests above stage: the queued
+    // request is the FIRST into an empty partition, so it is classified
+    // `new_partition_head` and keeps `persistent` — and then a shorter sibling
+    // overtakes it and completes while it waits. Rematching only requests that
+    // arrived non-persistent would leave every other test here green and this
+    // one opening a second connection.
+    const debug: string[] = [];
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const clock = { ms: 0 };
+    let holdNext = true;
+    let releaseQueued: (() => void) | undefined;
+    const queued = new Promise<void>(resolve => { releaseQueued = resolve; });
+    let markQueued: (() => void) | undefined;
+    const isQueued = new Promise<void>(resolve => { markQueued = resolve; });
+    const releaseToken = vi.fn();
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, message => debug.push(message), {
+      accountId: 'acct-pacing-rematch-overtaken',
+      now: () => clock.ms,
+      pacer: {
+        admit: async (): Promise<UpgradeAdmission> => {
+          if (!holdNext) return { kind: 'admitted', waitedMs: 0, queued: false };
+          holdNext = false;
+          markQueued!();
+          await queued;
+          clock.ms += 4_000;
+          return { kind: 'admitted', waitedMs: 4_000, queued: true, release: releaseToken };
+        },
+      },
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const opening = { role: 'user', content: [{ type: 'input_text', text: 'shared opening' }] };
+    const longer = [
+      opening,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'its own earlier answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'its own follow-up' }] },
+    ];
+
+    // First into an EMPTY partition, then held: nothing to demote it, so it is
+    // classified as the partition's new head and stays persistent.
+    const held = wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(longer)),
+    });
+    await isQueued;
+    expect(fakeSockets).toHaveLength(0);
+
+    // A shorter sibling overtakes it, and finishes with no output — so its head
+    // stores only its own one-item input, which the queued request extends.
+    const overtaking = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([opening])),
+    });
+    const overtakingSocket = lastSocket();
+    overtakingSocket.emit('open');
+    overtakingSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.created', response: { id: 'resp_overtaking' },
+    })));
+    overtakingSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.completed', response: { id: 'resp_overtaking' },
+    })));
+    await readAll(overtaking);
+
+    releaseQueued!();
+    const heldResponse = await held;
+
+    // One connection for both, and the queued request continued the chain.
+    expect(fakeSockets).toHaveLength(1);
+    expect(overtakingSocket.send).toHaveBeenCalledTimes(2);
+    const sent = JSON.parse(overtakingSocket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_overtaking');
+    expect(sent.input).toEqual(longer.slice(1));
+    // What the HELD request was classified as on arrival — the paced event
+    // carries the pre-wait decision, and it is the only place that survives.
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_new_connection_paced',
+      outcome: 'admitted',
+      decision: 'new_partition_head',
+      waitedMs: 4_000,
+    }));
+    const decisions = diagnostics.filter(event => event.event === 'ws_head_decision');
+    expect(decisions.at(-1)).toMatchObject({
+      decision: 'continuation',
+      pacingRescanOutcome: 'continuation',
+      selectedConnectionId: 1,
+    });
+    expect(releaseToken).toHaveBeenCalledTimes(1);
+
+    emitTextResponse(overtakingSocket, 'resp_overtaken_next', 'done');
+    await readAll(heldResponse);
+  });
+
+  it('does not warn about degraded caching for a turn that then continued a freed head', async () => {
+    // The arrival classification can raise the "Prompt caching is degraded for
+    // this turn" canary against an idle head it gave up on — and then the
+    // re-scan continues a DIFFERENT head that freed up during the wait, so the
+    // turn was cached after all. Showing that warning anyway is how the one
+    // warning whose value depends on being believed gets trained away.
+    resetToolArgumentGapWarningsForTests();
+    const debug: string[] = [];
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const notices: string[] = [];
+    const releaseSink = installParentNoticeSink(line => notices.push(line));
+    try {
+      const clock = { ms: 0 };
+      let holdNext = false;
+      let releaseQueued: (() => void) | undefined;
+      const queued = new Promise<void>(resolve => { releaseQueued = resolve; });
+      let markQueued: (() => void) | undefined;
+      const isQueued = new Promise<void>(resolve => { markQueued = resolve; });
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, message => debug.push(message), {
+        accountId: 'acct-pacing-rematch-warning',
+        now: () => clock.ms,
+        pacer: {
+          admit: async (): Promise<UpgradeAdmission> => {
+            if (!holdNext) return { kind: 'admitted', waitedMs: 0, queued: false };
+            holdNext = false;
+            markQueued!();
+            await queued;
+            clock.ms += 4_000;
+            return { kind: 'admitted', waitedMs: 4_000, queued: true };
+          },
+        },
+        onDiagnostic: event => diagnostics.push(event),
+      });
+      const opening = { role: 'user', content: [{ type: 'input_text', text: 'run the search' }] };
+      const send = (input: unknown[]) => wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+      });
+
+      // A forked head: its snapshot of the call carries no filler, the echo
+      // does, so abandoning it trips the filler-strip canary.
+      const forked = await send([opening]);
+      const forkedSocket = lastSocket();
+      forkedSocket.emit('open');
+      forkedSocket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.created', response: { id: 'resp_forked' },
+      })));
+      forkedSocket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.done', output_index: 0,
+        item: {
+          type: 'function_call', id: 'fc_1', call_id: 'call_w', name: 'Ripgrep',
+          arguments: '{"pattern":"x"}', status: 'completed',
+        },
+      })));
+      forkedSocket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.completed', response: { id: 'resp_forked' },
+      })));
+      await readAll(forked);
+
+      // The queued turn: it mismatches that head only by the filler the strip
+      // rule removes, so classification warns — and is then held.
+      const echoedCall = {
+        type: 'function_call', call_id: 'call_w', name: 'Ripgrep',
+        arguments: '{"pattern":"x","glob":null}',
+      };
+      const output = { type: 'function_call_output', call_id: 'call_w', output: 'hits' };
+      holdNext = true;
+      const held = send([opening, echoedCall, output]);
+      await isQueued;
+      expect(debug.some(line => line.startsWith('ws: tool argument normalization gap'))).toBe(false);
+
+      // A sibling runs to completion inside that wait and leaves a head the
+      // queued turn extends exactly.
+      const sibling = await send([opening]);
+      const siblingSocket = lastSocket();
+      siblingSocket.emit('open');
+      siblingSocket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.created', response: { id: 'resp_sibling' },
+      })));
+      siblingSocket.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.completed', response: { id: 'resp_sibling' },
+      })));
+      await readAll(sibling);
+
+      releaseQueued!();
+      const heldResponse = await held;
+
+      // It continued a head, on an existing socket ...
+      expect(fakeSockets).toHaveLength(2);
+      const sent = JSON.parse(siblingSocket.send.mock.calls[1]![0] as string);
+      expect(sent.previous_response_id).toBe('resp_sibling');
+      // ... so nothing was degraded, and the user is told nothing. This is the
+      // assertion the whole test exists for; it is checked before the ledger.
+      expect(notices.join('')).not.toContain('Prompt caching is degraded');
+      expect(notices.join('')).not.toContain('Ripgrep');
+      expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+        .toMatchObject({
+          decision: 'continuation',
+          pacingRescanOutcome: 'continuation',
+          suppressedMismatchWarnings: 1,
+        });
+      // The drop is never invisible: it is in the trace and on the record.
+      expect(debug).toContain(
+        'ws: suppressed 1 arrival mismatch warning(s) after continuing a head that freed up '
+        + 'during the pacing wait',
+      );
+
+      emitTextResponse(siblingSocket, 'resp_sibling_next', 'done');
+      await readAll(heldResponse);
+    } finally {
+      releaseSink();
+      resetToolArgumentGapWarningsForTests();
+    }
+  });
+
+  it('reports prompt drift against the head it adopted, not against another idle branch', async () => {
+    // The arrival scan picks a diagnostic stand-in when nothing matches — the
+    // most recently used idle head, which on a busy session is some other
+    // branch of the same conversation. If the re-scan then adopts a DIFFERENT
+    // head, the record must describe the one actually being continued;
+    // otherwise the ledger attributes a prompt change to a chain that never
+    // saw it, which is the sort of thing these records get read to settle.
+    const debug: string[] = [];
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const clock = { ms: 0 };
+    let holdNext = false;
+    let releaseQueued: (() => void) | undefined;
+    const queued = new Promise<void>(resolve => { releaseQueued = resolve; });
+    let markQueued: (() => void) | undefined;
+    const isQueued = new Promise<void>(resolve => { markQueued = resolve; });
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, message => debug.push(message), {
+      accountId: 'acct-pacing-rematch-prompt',
+      now: () => clock.ms,
+      pacer: {
+        admit: async (): Promise<UpgradeAdmission> => {
+          if (!holdNext) return { kind: 'admitted', waitedMs: 0, queued: false };
+          holdNext = false;
+          markQueued!();
+          await queued;
+          clock.ms += 4_000;
+          return { kind: 'admitted', waitedMs: 4_000, queued: true };
+        },
+      },
+      onDiagnostic: event => diagnostics.push(event),
+    });
+
+    // A stale branch of the same session, left idle under DIFFERENT
+    // instructions. It is the newest idle head, so it is the stand-in the
+    // arrival scan reaches for.
+    const branch = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload(
+        [{ role: 'user', content: [{ type: 'input_text', text: 'an older branch' }] }],
+        { instructions: 'You are a coding assistant. A different skill was active.' },
+      )),
+    });
+    lastSocket().emit('open');
+    emitTextResponse(lastSocket(), 'resp_branch_head', 'branch answer');
+    await readAll(branch);
+
+    // The sibling, under the instructions the queued request also sends.
+    const sibling = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(FIRST_TURN)),
+    });
+    const siblingSocket = lastSocket();
+    siblingSocket.emit('open');
+
+    // The queued turn declares one more tool than either head was snapshotted
+    // under, so the two candidates disagree about what drifted: measured
+    // against the stale branch it is `instructions,tools`, against the head it
+    // actually continues it is `tools` alone.
+    const nextTurn = { role: 'user', content: [{ type: 'input_text', text: 'second turn' }] };
+    holdNext = true;
+    const held = wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([...FIRST_TURN, ECHOED_ASSISTANT, nextTurn], {
+        tools: [
+          { type: 'function', name: 'Read', parameters: { type: 'object' } },
+          { type: 'function', name: 'Write', parameters: { type: 'object' } },
+        ],
+      })),
+    });
+    await isQueued;
+    emitTextResponse(siblingSocket, 'resp_prompt_1', 'hi');
+    await readAll(sibling);
+    releaseQueued!();
+    const heldResponse = await held;
+
+    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1);
+    expect(decision).toMatchObject({
+      decision: 'continuation',
+      pacingRescanOutcome: 'continuation',
+      selectedConnectionId: 2,
+      promptChanges: ['tools'],
+    });
+    expect(debug).toContain('ws: prompt fields changed: tools');
+
+    emitTextResponse(siblingSocket, 'resp_prompt_2', 'done');
+    await readAll(heldResponse);
+  });
+
+  it('keeps an adopted head reusable when its transport then fails', async () => {
+    // The adopting request was demoted on arrival, and that demotion also
+    // cleared the persistence a replacement connection inherits. Adopting a
+    // head has to put it back: otherwise a transport failure on the very turn
+    // it continued drops the chain onto a throwaway socket, and the turn after
+    // that resends full context and opens yet another connection.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const nextTurn = { role: 'user', content: [{ type: 'input_text', text: 'second turn' }] };
+    const secondTurnInput = [...FIRST_TURN, ECHOED_ASSISTANT, nextTurn];
+    const { wsFetch, isQueued, release } = heldBehindASibling({
+      accountId: 'acct-pacing-rematch-persistent',
+      diagnostics,
+    });
+
+    const sibling = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(FIRST_TURN)),
+    });
+    const siblingSocket = lastSocket();
+    siblingSocket.emit('open');
+    const held = wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(secondTurnInput)),
+    });
+    await isQueued;
+    emitTextResponse(siblingSocket, 'resp_persist_1', 'hi');
+    await readAll(sibling);
+    release();
+    const heldResponse = await held;
+    expect(fakeSockets).toHaveLength(1);
+
+    // That continued turn's transport fails before any downstream output, so
+    // it replays with full context on a replacement connection.
+    siblingSocket.emit('error', Object.assign(new Error('reset'), { code: 'ECONNRESET' }));
+    expect(fakeSockets).toHaveLength(2);
+    const replacement = lastSocket();
+    replacement.emit('open');
+    expect(JSON.parse(replacement.send.mock.calls[0]![0] as string).input).toEqual(secondTurnInput);
+    emitTextResponse(replacement, 'resp_persist_2', 'recovered');
+    await readAll(heldResponse);
+
+    // The replacement kept the chain, so the next turn continues it instead of
+    // opening a third connection.
+    const third = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([
+        ...secondTurnInput,
+        { role: 'assistant', content: [{ type: 'output_text', text: 'recovered' }] },
+        { role: 'user', content: [{ type: 'input_text', text: 'third turn' }] },
+      ])),
+    });
+    expect(fakeSockets).toHaveLength(2);
+    expect(JSON.parse(replacement.send.mock.calls[1]![0] as string).previous_response_id)
+      .toBe('resp_persist_2');
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+      .toMatchObject({ decision: 'continuation' });
+    emitTextResponse(replacement, 'resp_persist_3', 'done');
+    await readAll(third);
+  });
+
+  it('re-scans nothing for a request that was never delayed', async () => {
+    // `CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN=0` switches pacing off, which is
+    // where the whole race is unreachable: nothing waits, so nothing is
+    // re-scanned and the decision is exactly the one the arrival scan made.
+    // A zero-wait admission resumes in the same microtask turn, and a head can
+    // only be freed by an upstream completion, which arrives on a socket event.
+    process.env.CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN = '0';
+    try {
+      resetResponsesWebSocketConnectionsForTests();
+      const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+      let clockMs = 0;
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-pacing-disabled',
+        now: () => clockMs,
+        onDiagnostic: event => diagnostics.push(event),
+      });
+
+      const sibling = await wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(FIRST_TURN)),
+      });
+      const siblingSocket = lastSocket();
+      siblingSocket.emit('open');
+
+      clockMs += 4_000;
+      const parallel = await wsFetch('https://x', {
+        method: 'POST', headers: {},
+        body: JSON.stringify(sessionPayload([...FIRST_TURN, ECHOED_ASSISTANT,
+          { role: 'user', content: [{ type: 'input_text', text: 'second turn' }] }])),
+      });
+
+      const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1);
+      expect(decision).toMatchObject({
+        decision: 'parallel_isolated',
+        createdGeneration: 'isolated',
+      });
+      // Unpaced, so neither pacing field is recorded at all.
+      expect(decision).not.toHaveProperty('pacingWaitedMs');
+      expect(decision).not.toHaveProperty('pacingRescanOutcome');
+
+      emitTextResponse(siblingSocket, 'resp_unpaced_1', 'hi');
+      await readAll(sibling);
+      const ownSocket = lastSocket();
+      ownSocket.emit('open');
+      emitTextResponse(ownSocket, 'resp_unpaced_2', 'done');
+      await readAll(parallel);
+    } finally {
+      delete process.env.CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN;
+      resetResponsesWebSocketConnectionsForTests();
+    }
   });
 });

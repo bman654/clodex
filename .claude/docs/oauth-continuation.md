@@ -33,8 +33,12 @@ is too small.
 traffic sampled below those rejections clustered in the minutes that opened the most new
 connections. The rejection is handled (see below) but the rate was previously unlimited. That the
 rate is what the edge reacts to is this module's working assumption, not a demonstrated cause. A process-wide token bucket now gates **primary connection creation** — a request that
-reuses an established or nursery head never consults it, so pacing can never add latency to a
-continuation, and the two replacement paths below are exempt by design.
+ALREADY has an established or nursery head to reuse when it arrives never consults it, so pacing
+never adds latency to a continuation it could have made on arrival, and the two replacement paths
+below are exempt by design. The one continuation that does pay is the one that could not have been
+made on arrival: a request admitted after queueing may find a head freed during its wait and
+continue that instead (see below), in which case it waited for a connection it then did not open
+and hands its token back.
 
 Defaults: 60 new connections per minute sustained, burst 10. Override the rate with
 `CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN` (integer 1-600; `0` disables pacing, values above 600 clamp,
@@ -143,15 +147,66 @@ connection rate, not a latency, and the fallback mostly adds no latency: at 1/mi
 simultaneous requests, 19 are admitted immediately, one waits out the bound and none is refused.
 A separately budgeted hint would be a reasonable follow-up.
 
-Because the head scan runs before the wait, an admitted request re-reads the clock, reaps whatever
-expired while it was queued, and demotes itself to `parallel_isolated` if a same-partition request
-went in flight meanwhile — otherwise two requests would each register a persistent nursery head for
-one key and a fan-out would evict other conversations' heads.
+Because the head scan runs before the wait, an admitted request re-reads the clock and reaps
+whatever expired while it was queued, then re-evaluates the partition before it opens anything.
+
+**A request that was actually QUEUED runs the head scan a second time**, because a sibling may have
+FINISHED during the wait and left an idle head it can continue. Without that it would open a
+duplicate head for a chain sitting right there — filling the nursery, evicting other conversations'
+heads and forcing the full-context resends that open still more connections. The second scan is the
+first one, unchanged: the same exact-prefix `continuationMatch`, the same tie-breaks, so a freed
+head whose lineage does not match is still not continued. Adopting a head restores exactly the state
+an arrival-time match would have left, including the persistence a transport-retry replacement
+inherits, and RETURNS the pacing token the request was charged — it opened no connection, so
+holding it would delay the next request for an upgrade that never happened. The scan is skipped for
+a request admitted on arrival: it resumes in the same microtask turn, and a head can only be freed
+by an upstream completion, which arrives on a socket event. The gate reads the pacer's `queued`
+flag, not `waitedMs`, which is a difference of two clock reads and reports zero for a genuinely
+queued request when the clock steps backwards. Nothing between that scan and the dispatch that
+claims the head awaits, so two queued requests cannot both adopt one freed head.
+
+**What makes this reachable at all is that `expectedAssistant` can be EMPTY.** A match needs the
+head's stored `requestInput ++ expectedAssistant` to be a strict prefix of the waiting request,
+which reads as though the waiter must already hold the head's output — something two independent
+agents never have. But a response that completes with no output items stores a prefix equal to its
+own input, and `continuationMatch`'s guard is `!entry.expectedAssistant`, which `[]` passes. Two
+subagents fanned out from one Claude session open with byte-identical inputs, so the second can
+extend the first's prefix having copied nothing from it.
+
+**How often that happens is not known, and the available diagnostics cannot say.** The necessary
+conditions are enumerable — a predecessor leaving a *reusable* head (a nursery creation or a
+continuation; a `parallel_isolated` socket is discarded and leaves nothing), that head's input
+being a strict prefix of the waiting request's, it completing inside the waiter's queue wait
+(4,833ms at the shipped defaults), and the waiter having matched nothing on arrival — and no
+qualifying opportunity appears anywhere in the local corpus (17 ledger files, 178,298 head
+decisions, 63,508 primary creations). But that corpus records **zero pacing events and zero
+decisions carrying `pacingWaitedMs`**, so it contains no queued requests at all and therefore
+supports no rate for this: there is no denominator. Do not convert the zero into a frequency.
+Note also that `ws_new_connection_paced` is emitted only on a nonzero wait, a refusal or an abort,
+so its absence is not evidence that pacing did not engage — replaying real creation timestamps
+through the shipped bucket predicts 1,686 waits and 1,590 refusals in one of those files.
+
+**Boundary, deliberate:** the second scan cannot undo an ARRIVAL-time `parallel_isolated` demotion
+when the partition simply goes quiet during the wait. Such a request already has `persistent` false
+and, absent a re-match, keeps it, so it opens an isolated socket that retains no head at all.
+Isolated sockets are 35-38% of decisions in busy diagnostics files — a larger share of the same
+harm than the case this closes.
+
+Failing a re-match, an admitted request still demotes itself to `parallel_isolated` if a
+same-partition request went in flight meanwhile — otherwise two requests would each register a
+persistent nursery head for one key and a fan-out would evict other conversations' heads. That check
+is unconditional; only the re-match is gated on having been queued.
 
 Diagnostics: a `ws_new_connection_paced` event (`outcome` of `admitted`, `refused`, or `aborted`,
 with `waitedMs` / `requiredWaitMs` / `retryAfterSeconds`) and `pacingWaitedMs` on the same request's
-`ws_head_decision`. Requests admitted on arrival record nothing. A request cancelled while queued
-returns its reservation and opens no connection.
+`ws_head_decision`. A request that waited also carries `pacingRescanOutcome` — `continuation` when
+the second scan adopted a freed head, `parallel_isolated` when the in-flight demotion decided it,
+`no_change` otherwise — so the ledger distinguishes a decision the second look changed. A queued
+request whose clock stepped backwards carries `pacingRescanOutcome` with no `pacingWaitedMs`. When it
+adopts a head, `candidateCount` / `idleCandidateCount` / `matchingCandidateCount` / `heads` report
+the partition as re-scanned; otherwise they remain the arrival scan's, so a head that appeared or
+was reaped during the wait shows up only in the pool counts. Requests admitted on arrival record
+nothing. A request cancelled while queued returns its reservation and opens no connection.
 
 The numbers come from re-reading one machine's `ws_head_decision` log (103,698 records over about a
 day and a half), bucketing records that carry a `createdConnectionId` by wall-clock minute. Every

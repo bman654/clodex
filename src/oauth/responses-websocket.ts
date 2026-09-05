@@ -654,7 +654,20 @@ function continuationMismatchDetails(
   // head is described in the diagnostic, and a gap on a head that lost to a better
   // match costs nothing, so warning on those would overstate the damage.
   warnOnGap = false,
+  /**
+   * Collects the stderr warnings as thunks instead of raising them, for a caller
+   * that may still overturn the mismatch being described — today, a request that
+   * goes on to continue a head freed during a pacing wait. Deferring the whole
+   * warning rather than emitting and retracting it is what keeps a dropped
+   * warning from spending the per-signature budget the next genuine occurrence
+   * needs.
+   */
+  deferWarnings?: Array<() => void>,
 ): Record<string, unknown> {
+  const raise = (warn: () => void): void => {
+    if (deferWarnings) deferWarnings.push(warn);
+    else warn();
+  };
   const full = inputArray(payload);
   const prefix = [...(entry.requestInput ?? []), ...(entry.expectedAssistant ?? [])];
   const comparable = Math.min(full.length, prefix.length);
@@ -668,7 +681,7 @@ function continuationMismatchDetails(
   const expected = mismatch < prefix.length ? prefix[mismatch] : undefined;
   const actual = mismatch < full.length ? full[mismatch] : undefined;
   const reasoningGap = reasoningNormalizationGap(expected, actual);
-  if (reasoningGap && warnOnGap) warnReasoningNormalizationGap(reasoningGap, log);
+  if (reasoningGap && warnOnGap) raise(() => warnReasoningNormalizationGap(reasoningGap, log));
   // Claude may legitimately omit stored reasoning items (continuationMatch's
   // omitted_reasoning mode), which shifts the exact-prefix divergence onto a
   // reasoning-vs-call pair and would hide a forked strip rule sitting on the
@@ -703,7 +716,8 @@ function continuationMismatchDetails(
   // shared with Claude Code's UI. Those are still recorded on the diagnostic, and
   // traced here so --trace alone shows a counted-but-not-warned gap.
   if (toolArgumentGap?.equalAfterStrip === true) {
-    if (warnOnGap) warnToolArgumentNormalizationGap(toolArgumentGap, log);
+    const gap = toolArgumentGap;
+    if (warnOnGap) raise(() => warnToolArgumentNormalizationGap(gap, log));
   } else if (toolArgumentGap && warnOnGap) {
     // Same gating as the warner: only the head clodex gave up on is described,
     // so the per-candidate loop cannot turn one mismatch into a trace stream.
@@ -2087,26 +2101,41 @@ export function createResponsesWebSocketFetch(
     let now = resolvedOptions.now();
     const evictions = cleanupExpiredConnections(now);
 
-    const candidates = partitionKey ? connectionEntries(partitionKey) : [];
-    const idleCandidates = candidates.filter(entry => !entry.inFlight);
-    // Canonicalize the incoming conversation ONCE, not once per candidate head.
-    const clientItems = idleCandidates.length ? canonicalItemStrings(inputArray(payload)) : [];
-    const matches = idleCandidates
-      .map(entry => ({ entry, match: continuationMatch(entry, payload, clientItems) }))
-      .filter((candidate): candidate is { entry: ConnectionEntry; match: ContinuationMatch } => candidate.match !== undefined)
-      // Prefer the longest matching history, which produces the smallest delta.
-      .sort((left, right) => left.match.delta.length - right.match.delta.length
-        || (left.match.mode === right.match.mode ? 0 : left.match.mode === 'exact' ? -1 : 1));
+    // Hoisted verbatim so the SAME scan can run a second time after a pacing
+    // wait: same expressions, same ordering, same tie-breaks. Nothing here is
+    // re-tuned — a difference between the two scans could only come from the
+    // partition having changed, which is the point.
+    const scanForHeads = (): {
+      candidates: ConnectionEntry[];
+      idleCandidates: ConnectionEntry[];
+      matches: Array<{ entry: ConnectionEntry; match: ContinuationMatch }>;
+    } => {
+      const scanned = partitionKey ? connectionEntries(partitionKey) : [];
+      const idle = scanned.filter(entry => !entry.inFlight);
+      // Canonicalize the incoming conversation ONCE, not once per candidate head.
+      const clientItems = idle.length ? canonicalItemStrings(inputArray(payload)) : [];
+      return {
+        candidates: scanned,
+        idleCandidates: idle,
+        matches: idle
+          .map(entry => ({ entry, match: continuationMatch(entry, payload, clientItems) }))
+          .filter((candidate): candidate is { entry: ConnectionEntry; match: ContinuationMatch } => candidate.match !== undefined)
+          // Prefer the longest matching history, which produces the smallest delta.
+          .sort((left, right) => left.match.delta.length - right.match.delta.length
+            || (left.match.mode === right.match.mode ? 0 : left.match.mode === 'exact' ? -1 : 1)),
+      };
+    };
+    let { candidates, idleCandidates, matches } = scanForHeads();
     let selected: ConnectionEntry | undefined = matches[0]?.entry;
-    const selectedMatch = matches[0]?.match;
-    const selectedDelta = selectedMatch?.delta;
+    let selectedMatch = matches[0]?.match;
+    let selectedDelta = selectedMatch?.delta;
     const diagnosticEntry = selected
       ?? [...idleCandidates].sort((left, right) => right.lastUsedAt - left.lastUsedAt)[0]
       ?? candidates[0];
     debug(
       `lookup key=${debugKey(partitionKey)} prompt=${debugKey(promptFingerprint)} hit=${candidates.length > 0} heads=${candidates.length} active_connections=${connectionCount()}`,
     );
-    const promptChanges = changedPromptFields(diagnosticEntry?.promptFieldHashes, promptFieldHashes);
+    let promptChanges = changedPromptFields(diagnosticEntry?.promptFieldHashes, promptFieldHashes);
     if (promptChanges.length) debug(`prompt fields changed: ${promptChanges.join(',')}`);
     if (promptChanges.includes('instructions')) {
       const summary = instructionChangeSummary(diagnosticEntry?.instructionsSnapshot, instructionsSnapshot);
@@ -2118,24 +2147,42 @@ export function createResponsesWebSocketFetch(
     let promotedConnectionId: number | undefined;
     let decision: 'continuation' | 'parallel_isolated' | 'history_mismatch_new_head' | 'new_partition_head' | 'unpartitioned_socket';
     let candidateMismatchDetails: Map<ConnectionEntry, Record<string, unknown>> | undefined;
+    // Held until this request's outcome is final. Classification runs against
+    // the partition as it stood on ARRIVAL, so a warning it raises can still be
+    // overturned by a head that frees up during a pacing wait — and telling a
+    // user their caching is degraded on a turn that ends up perfectly cached is
+    // how the one warning whose value depends on being believed gets ignored.
+    const deferredMismatchWarnings: Array<() => void> = [];
+    const flushMismatchWarnings = (): void => {
+      for (const warn of deferredMismatchWarnings) warn();
+      deferredMismatchWarnings.length = 0;
+    };
 
-    if (selected && selectedDelta) {
-      sendPayload = { ...payload, input: selectedDelta, previous_response_id: selected.responseId };
+    // Hoisted alongside the scan, and for the same reason: adopting a head found
+    // by the second scan has to leave exactly the state an arrival-time match
+    // would have left. Returns the decision so the chain below still assigns
+    // `decision` on every path.
+    const continueOnHead = (entry: ConnectionEntry, match: ContinuationMatch): 'continuation' => {
+      sendPayload = { ...payload, input: match.delta, previous_response_id: entry.responseId };
       continued = true;
-      if (selected.generation === 'nursery') {
+      if (entry.generation === 'nursery') {
         evictions.push(...evictOldestIdleGeneration(
           'established',
           resolvedOptions.maxConnections,
           'established_lru_cap',
         ));
-        selected.generation = 'established';
-        promotedConnectionId = selected.debugId;
+        entry.generation = 'established';
+        promotedConnectionId = entry.debugId;
       }
-      decision = 'continuation';
       debug(
-        `continuing chain with ${selectedDelta.length} incremental input item(s)`
-        + (selectedMatch.mode === 'omitted_reasoning' ? ' after accepting omitted reasoning' : ''),
+        `continuing chain with ${match.delta.length} incremental input item(s)`
+        + (match.mode === 'omitted_reasoning' ? ' after accepting omitted reasoning' : ''),
       );
+      return 'continuation';
+    };
+
+    if (selected && selectedDelta) {
+      decision = continueOnHead(selected, selectedMatch);
     } else if (candidates.some(entry => entry.inFlight)) {
       // Claude auxiliary requests can share a session id. Never multiplex or
       // queue a request whose lineage cannot yet include the active response.
@@ -2146,7 +2193,9 @@ export function createResponsesWebSocketFetch(
     } else if (diagnosticEntry) {
       // A rewind, branch, or hidden auxiliary inference gets its own full-context
       // head. Existing heads remain eligible for later exact-prefix matches.
-      const diagnosticMismatch = continuationMismatchDetails(diagnosticEntry, payload, debug, true);
+      const diagnosticMismatch = continuationMismatchDetails(
+        diagnosticEntry, payload, debug, true, deferredMismatchWarnings,
+      );
       candidateMismatchDetails = new Map([[diagnosticEntry, diagnosticMismatch]]);
       // Every abandoned non-diagnostic head warns independently of diagnostics.
       // Cache each mismatch so the diagnostic payload does not evaluate it again.
@@ -2154,7 +2203,7 @@ export function createResponsesWebSocketFetch(
         if (candidate === diagnosticEntry) continue;
         candidateMismatchDetails.set(
           candidate,
-          continuationMismatchDetails(candidate, payload, debug, true),
+          continuationMismatchDetails(candidate, payload, debug, true, deferredMismatchWarnings),
         );
       }
       debug(
@@ -2180,6 +2229,8 @@ export function createResponsesWebSocketFetch(
     // the nursery eviction below so a queued request does not retire a head it
     // may still be seconds away from needing.
     let pacingWaitedMs: number | undefined;
+    /** What the post-wait re-evaluation concluded; absent when nothing queued. */
+    let pacingRescanOutcome: 'continuation' | 'parallel_isolated' | 'no_change' | undefined;
     if (!selected) {
       const pacer = options.pacer ?? sharedWsUpgradePacer();
       const pacingStartedAt = resolvedOptions.now();
@@ -2194,6 +2245,8 @@ export function createResponsesWebSocketFetch(
           decision,
           waitedMs: Math.max(0, resolvedOptions.now() - pacingStartedAt),
         }, diagnosticCorrelation);
+        // Nothing will overturn the classification now, so it stands.
+        flushMismatchWarnings();
         throw error;
       }
       if (admission.kind === 'refused') {
@@ -2207,6 +2260,7 @@ export function createResponsesWebSocketFetch(
           requiredWaitMs: admission.requiredWaitMs,
           retryAfterSeconds: admission.retryAfterSeconds,
         }, diagnosticCorrelation);
+        flushMismatchWarnings();
         return pacedRefusalResponse(admission.retryAfterSeconds);
       }
       if (admission.waitedMs > 0) {
@@ -2219,29 +2273,96 @@ export function createResponsesWebSocketFetch(
           waitedMs: admission.waitedMs,
         }, diagnosticCorrelation);
       }
-      // Unconditional, NOT gated on having waited: `admit` is async, so even an
-      // immediate admission resumes a microtask later, and two same-partition
-      // requests arriving in one tick both resume having waited zero. The head
-      // scan above ran before that yield either way.
-      //
       // Re-read the clock and reap what expired meanwhile, so head ages are
-      // measured from now rather than from arrival. The candidate SET is still
-      // the one scanned on arrival: a head that appeared or was reaped during
-      // the wait is not reflected in `heads`, only in the pool counts.
+      // measured from now rather than from arrival.
       now = resolvedOptions.now();
       evictions.push(...cleanupExpiredConnections(now));
+      // A sibling may also have FINISHED while this request was queued, leaving
+      // an idle head it could continue. It was classified against the partition
+      // as it stood on arrival, so without a second scan it opens a duplicate
+      // persistent head for a chain that is sitting right there — which fills
+      // the nursery, evicts other conversations' heads and forces the
+      // full-context resends that open still more connections.
+      //
+      // Only when it was actually QUEUED. A request admitted on arrival resumes
+      // in the same microtask turn, and a head can only be freed by an upstream
+      // completion, which arrives on a socket event — a macrotask. So there the
+      // second scan could not see anything the first did not, and is skipped.
+      //
+      // Read from the pacer's own queued flag rather than from `waitedMs`,
+      // which is a difference of two clock reads: a clock stepped backwards
+      // during the wait reports 0 for a request that really did queue, and
+      // gating on the number would skip the re-scan exactly there. A pacer that
+      // reports no flag (an injected one) still falls back to the elapsed time.
+      //
+      // Nothing between this scan and `dispatchContext` below awaits, so the
+      // selection and the `inFlight` claim on the head happen in one
+      // synchronous run: two queued requests resuming from the pacer cannot
+      // both adopt the same freed head.
+      if (admission.queued ?? admission.waitedMs > 0) {
+        const rescan = scanForHeads();
+        const rematched = rescan.matches[0];
+        if (rematched) {
+          ({ candidates, idleCandidates, matches } = rescan);
+          selected = rematched.entry;
+          selectedMatch = rematched.match;
+          selectedDelta = rematched.match.delta;
+          // Restore what the in-flight demotion below (or on arrival) may have
+          // taken away: an adopted head must leave the same state an
+          // arrival-time match would have, including the persistence a
+          // transport-retry replacement inherits.
+          persistent = Boolean(partitionKey);
+          // Report the prompt drift against the head actually being continued,
+          // not against whichever idle branch the arrival scan happened to pick
+          // as its diagnostic stand-in.
+          promptChanges = changedPromptFields(rematched.entry.promptFieldHashes, promptFieldHashes);
+          decision = continueOnHead(rematched.entry, rematched.match);
+          pacingRescanOutcome = 'continuation';
+          debug('continuing a chain head that freed up during the pacing wait');
+          if (promptChanges.length) debug(`prompt fields changed: ${promptChanges.join(',')}`);
+          // This request opens no connection after all, so the token it was
+          // charged goes back instead of pacing the next request against an
+          // upgrade that never happened — the same rule a cancellation follows.
+          admission.release?.();
+        } else {
+          pacingRescanOutcome = 'no_change';
+        }
+      }
       // A same-partition request may have gone in flight across the yield. It
       // was classified when no head existed, so without this both would open a
       // persistent nursery head for one key — and a fan-out would fill the
       // nursery with duplicates, evicting other conversations' heads and
       // forcing the full-context resends that open still more connections. An
       // overlap like this takes an isolated socket today; keep that.
-      if (persistent && partitionKey
+      //
+      // Unconditional, NOT gated on having waited: `admit` is async, so even an
+      // immediate admission resumes a microtask later, and two same-partition
+      // requests arriving in one tick both resume having waited zero. The head
+      // scan above ran before that yield either way. It yields to a head this
+      // request can continue, exactly as the arrival-time chain does.
+      if (!selected && persistent && partitionKey
         && connectionEntries(partitionKey).some(entry => entry.inFlight)) {
         persistent = false;
         decision = 'parallel_isolated';
         debug('parallel request using an isolated socket after pacing');
+        if (pacingRescanOutcome === 'no_change') pacingRescanOutcome = 'parallel_isolated';
       }
+    }
+
+    // The classification is final here. A request that rematched after its wait
+    // was not degraded after all, so its arrival warnings are dropped rather
+    // than raised; the count stays in the ledger and the trace so the drop is
+    // never invisible.
+    let suppressedMismatchWarnings: number | undefined;
+    if (selected && deferredMismatchWarnings.length) {
+      suppressedMismatchWarnings = deferredMismatchWarnings.length;
+      debug(
+        `suppressed ${suppressedMismatchWarnings} arrival mismatch warning(s) after continuing a `
+        + 'head that freed up during the pacing wait',
+      );
+      deferredMismatchWarnings.length = 0;
+    } else {
+      flushMismatchWarnings();
     }
 
     if (!selected && persistent) {
@@ -2291,6 +2412,8 @@ export function createResponsesWebSocketFetch(
       promotedConnectionId,
       createdConnectionId: selected ? undefined : nextConnectionDebugId,
       ...(pacingWaitedMs !== undefined ? { pacingWaitedMs } : {}),
+      ...(pacingRescanOutcome !== undefined ? { pacingRescanOutcome } : {}),
+      ...(suppressedMismatchWarnings !== undefined ? { suppressedMismatchWarnings } : {}),
       createdGeneration: selected ? undefined : persistent ? 'nursery' : 'isolated',
       incrementalInputItems: selectedDelta?.length,
       heads: candidates.map(entry => ({
