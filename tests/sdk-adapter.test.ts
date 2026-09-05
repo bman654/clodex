@@ -1911,6 +1911,97 @@ describe('writeAnthropicStream', () => {
     await expect(writeAnthropicStream(parts() as any, 'm', () => {})).rejects.toBe(upstreamError);
   });
 
+  const transportDropFrame = {
+    type: 'error',
+    sequence_number: 3,
+    error: {
+      type: 'transport_error',
+      code: 'websocket_transport_error',
+      message: 'WebSocket closed (1006)',
+      param: null,
+    },
+  };
+
+  async function collectUntilError(parts: AsyncIterable<unknown>): Promise<{ events: string[]; error: unknown }> {
+    let raw = '';
+    let error: unknown;
+    try {
+      await writeAnthropicStream(parts as any, 'm', c => { raw += c; });
+    } catch (err) {
+      error = err;
+    }
+    const events = raw.split('\n\n').filter(Boolean).map(block => block.split('\n')[0]!.replace('event: ', ''));
+    return { events, error };
+  }
+
+  it('leaves an open thinking block unclosed when the transport drops mid-stream', async () => {
+    async function* parts() {
+      yield { type: 'reasoning-start', id: 'r1' };
+      yield { type: 'reasoning-delta', id: 'r1', text: 'thinking...' };
+      yield { type: 'error', error: transportDropFrame };
+    }
+
+    const { events, error } = await collectUntilError(parts());
+    expect(error).toBe(transportDropFrame);
+    expect(events).toEqual(['message_start', 'content_block_start', 'content_block_delta']);
+  });
+
+  it('still closes an open thinking block for a mid-stream provider error that is not a transport drop', async () => {
+    const providerError = {
+      type: 'error',
+      sequence_number: 3,
+      error: { type: 'server_error', code: 'server_error', message: 'upstream failed', param: null },
+    };
+    async function* parts() {
+      yield { type: 'reasoning-start', id: 'r1' };
+      yield { type: 'reasoning-delta', id: 'r1', text: 'thinking...' };
+      yield { type: 'error', error: providerError };
+    }
+
+    const { events, error } = await collectUntilError(parts());
+    expect(error).toBe(providerError);
+    expect(events).toEqual([
+      'message_start', 'content_block_start', 'content_block_delta', 'content_block_delta', 'content_block_stop',
+    ]);
+  });
+
+  it('still closes an open text block when the transport drops mid-stream', async () => {
+    async function* parts() {
+      yield { type: 'text-start', id: 't1' };
+      yield { type: 'text-delta', id: 't1', text: 'partial' };
+      yield { type: 'error', error: transportDropFrame };
+    }
+
+    const { events, error } = await collectUntilError(parts());
+    expect(error).toBe(transportDropFrame);
+    expect(events).toEqual(['message_start', 'content_block_start', 'content_block_delta', 'content_block_stop']);
+  });
+
+  it('still flushes and closes an open tool block when the transport drops mid-stream', async () => {
+    let raw = '';
+    let error: unknown;
+    async function* parts() {
+      yield { type: 'tool-input-start', id: 'call_1', toolName: 'Read' };
+      yield { type: 'tool-input-delta', id: 'call_1', delta: '{"path":' };
+      yield { type: 'error', error: transportDropFrame };
+    }
+    try {
+      await writeAnthropicStream(parts() as any, 'm', c => { raw += c; });
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBe(transportDropFrame);
+    const blocks = raw.split('\n\n').filter(Boolean).map(block => ({
+      event: block.split('\n')[0]!.replace('event: ', ''),
+      data: JSON.parse(block.split('\n')[1]!.replace('data: ', '')),
+    }));
+    expect(blocks.map(b => b.event)).toEqual([
+      'message_start', 'content_block_start', 'content_block_delta', 'content_block_stop',
+    ]);
+    expect(blocks[2]!.data.delta).toEqual({ type: 'input_json_delta', partial_json: '{"path":' });
+  });
+
   it('reports every SDK stream part to the lifecycle observer', async () => {
     const observed: string[] = [];
     async function* parts() {

@@ -546,7 +546,7 @@ async function handleAnthropicMessages(
             sendJson(res, status === 500 ? 502 : status, { error: { message: clientMessage } });
           }
         } else {
-          const errorType = anthropicErrorType(status);
+          const errorType = anthropicErrorType(status, details?.transportCode);
           res.write(`event: error\ndata: ${JSON.stringify({
             type: 'error',
             error: { type: errorType, message: clientMessage },

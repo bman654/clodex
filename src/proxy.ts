@@ -807,7 +807,7 @@ export async function startProxyCatalog(
               contextLengthExceeded ? (relayRequestId ?? randomUUID()) : undefined,
             );
           } else {
-            const errorType = anthropicErrorType(upstreamStatus);
+            const errorType = anthropicErrorType(upstreamStatus, details?.transportCode);
             res.write(`event: error\ndata: ${JSON.stringify({
               type: 'error',
               error: { type: errorType, message: clientMessage },

@@ -325,6 +325,43 @@ to 300s and `CLAUDE_STREAM_IDLE_TIMEOUT_MS` can raise it beyond 30m, but the byt
 the effective ceiling unless `CLAUDE_ENABLE_BYTE_WATCHDOG=false`. `API_TIMEOUT_MS` controls the SDK
 request deadline. Raising a clodex server timeout alone never raises any of these client limits.
 
+## Mid-stream error retry gate (verified 2.1.261, darwin-arm64)
+
+What Claude Code does with an `event: error` frame that arrives after `message_start`, and why
+clodex leaves a thinking block open on a WebSocket transport drop. Byte offsets are into the
+extracted `claude-2.1.261-*.js` bundle.
+
+- **The frame becomes a status-less APIError.** The Anthropic SDK's SSE reader (@83888) throws
+  `new APIError(undefined, body, undefined, headers, body.error.type)`; `message` is the
+  JSON-stringified body. No HTTP status is attached, so nothing that keys on `status >= 500` fires.
+- **Retry keys on the type text, not the status.** `ED(e)` (@3409302) is
+  `status === 529 || message.includes('"type":"overloaded_error"')`. A status-less `api_error`
+  matches nothing; the request-level predicate (@7169742) has `if(!e.status)return!1` and the
+  streaming catch has no branch for it. Neither path retries a status-less `api_error`.
+- **A completed content block blocks the retry, whatever the type.** The streaming catch's outer gate
+  (@9501970) is `if(Ac.some(block => block.type !== 'fallback') || Kn)`; both are set by
+  `content_block_stop` (@9489300) for any non-fallback block, thinking included. Inside the gate,
+  visible content (`Un`, set on `content_block_start` of a non-thinking block) finalizes a partial
+  response; otherwise the gate's last statement (@9505233) throws with
+  `fallback_cause:"partial_yield"`. Neither path retries. Replaying clodex's own bytes to `claude -p`
+  gave one upstream request for a closed thinking block followed by `overloaded_error`, and one
+  for `api_error`.
+- **The retry lives past the gate.** `if(e instanceof APIError && ED(e))` (@9507262), log string
+  "Mid-stream 529 before content", retries the stream up to `Rle=3` times (@7156910) while `Un` is
+  false, then falls back to a non-streaming request. Eligible query sources (`$ve`, @2083457) are
+  `undefined`, every `agent:*`, `sdk`, and the named auxiliary sources. With a fallback model
+  configured, the switch happens only after the three retries are spent (@9508100). The same
+  replay with the thinking block left open gave four upstream requests.
+- **A subagent dies on its first API-error message** (`AgentApiErrorTerminationError`, @8197079,
+  thrown at @8203646) with no agent-level retry; partial-output recovery (@8197191) applies only
+  to `rate_limit`, `overloaded`, and `server_error` kinds.
+
+So for a transport drop to be recoverable, clodex must (a) label the frame `overloaded_error`
+(`anthropicErrorType` in `src/upstream-error.ts`) and (b) not emit `content_block_stop` for an
+open thinking block first (`case 'error'` in `src/sdk-adapter.ts`). Either alone is inert. Text
+and tool blocks are still closed: visible output already stops the retry, and a tool block's
+buffered arguments must be flushed.
+
 ## Things that looked like clodex bugs and were not (not version-specific)
 
 - **"Concurrent subagents died at turn 2" was not unknown-model classification.** The agents' first
