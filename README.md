@@ -417,10 +417,17 @@ clodex --version    # version
   burst of parallel work less likely to trip OpenAI's own rate limit. (In the
   traffic we sampled, the rejections clustered in the busiest minutes; that the
   rate is what triggers them is a reasonable reading of that, not something we
-  can prove.) A follow-up turn that can reuse the connection it already has is
-  never delayed by this;
+  can prove.) A follow-up turn that already has a connection it can reuse when
+  it arrives is never delayed by this;
   what goes through the limiter is work that needs a *new* connection — a first
-  turn, a conversation that branched, or several agents running at once. The
+  turn, a conversation that branched, or several agents running at once. If a
+  turn that is waiting its place in the queue finds, on being let through, that
+  a connection has freed up and is carrying exactly the conversation it is
+  continuing, it picks that one up instead of opening another. That is
+  uncommon — it needs another turn to finish inside the few seconds this one
+  spends waiting AND to have been on the same conversation history — so treat
+  it as an edge taken when it appears, not as agents routinely sharing
+  connections. The
   default is 60 new connections a minute, with an allowance of 10 opened back
   to back after a quiet spell.
   **This is a real throughput ceiling, not a brief pause.** One new connection

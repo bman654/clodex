@@ -7,7 +7,9 @@
 // rejection — every upgrade 403 becomes a retryable 429 carrying a backoff hint
 // — but nothing limited how fast clodex asked for new connections. This module
 // shapes that rate on the assumption, not the proof, that it is what the edge
-// is reacting to. A request that reuses an existing chain head never comes here.
+// is reacting to. A request that already has a reusable chain head when it
+// arrives never comes here; a request that only finds one AFTER waiting does
+// come here, and returns its token through `release` when it opens nothing.
 //
 // Why these numbers. Measured by re-reading one machine's own
 // `ws_head_decision` diagnostics log (103,698 records spanning roughly a day
@@ -276,6 +278,21 @@ export type UpgradeAdmission =
     kind: 'admitted';
     /** Milliseconds spent queued. 0 means admitted on arrival. */
     waitedMs: number;
+    /**
+     * Whether this request was actually parked on the bucket. `waitedMs` alone
+     * cannot answer that: it is a difference of two clock reads, so a clock
+     * adjusted backwards during the wait reports 0 for a request that really
+     * did queue. Callers deciding what to re-check after the wait must read
+     * this, not the number.
+     */
+    queued?: boolean;
+    /**
+     * Returns the token this admission debited, for a caller that ends up
+     * opening NO connection after all. Idempotent. Same reasoning as the
+     * cancellation refund: pacing someone else against an upgrade that never
+     * happened is a delay charged for nothing.
+     */
+    release?: () => void;
   }
   | {
     kind: 'refused';
@@ -376,8 +393,8 @@ function reportOnce(key: string, message: string, warn: (message: string) => voi
  * queue is therefore bounded by construction, every queued request drains within
  * the bound, and — while refusals are available, i.e. with retries enabled —
  * admissions in any window T are at most `burst + maxWaitMs x refillPerMs +
- * rate x T + cancellations` however many retries arrive. With retries disabled
- * nothing is refused, so only the opening burst is shaped and that bound does
+ * rate x T + cancellations + releases` however many retries arrive. With retries
+ * disabled nothing is refused, so only the opening burst is shaped and that bound does
  * not hold.
  *
  * Two caveats on that bound, both real:
@@ -389,7 +406,14 @@ function reportOnce(key: string, message: string, warn: (message: string) => voi
  *   * A cancellation refunds its token but does not reschedule the reservations
  *     already queued behind it, so a later arrival can take the vacated slot
  *     alongside them. Each cancellation therefore permits one extra admission
- *     at that instant. It cannot reorder admissions, only coalesce them.
+ *     at that instant. It cannot reorder admissions, only coalesce them. A
+ *     `release` behaves identically. Both give back a token for a connection
+ *     that was never opened, so at the moment of the refund neither has raised
+ *     the socket count. That is NOT a guarantee about the socket count
+ *     afterwards: the released request continues on the head it found, and if
+ *     that head's transport then fails it builds a replacement through
+ *     `createReplacement` — an exempt path by the caveat above — so a released
+ *     admission can still be followed by a socket. Observed in a live probe.
  *
  * The bound is also on reservations, not on wall-clock departures: a stalled
  * event loop releases overdue timers together, and the pacer neither observes
@@ -464,8 +488,11 @@ export class WsUpgradePacer implements ConnectionPacer {
 
   /**
    * Resolves when this request may open a new connection, or resolves to a
-   * refusal the caller must report as a retryable rate limit. Callers that
-   * reuse an existing connection must not call this at all.
+   * refusal the caller must report as a retryable rate limit. A caller that can
+   * already reuse an existing connection must not call this at all; one that
+   * discovers a reusable connection only after being admitted must hand the
+   * token back through `release` instead of holding it for a socket it never
+   * opened.
    */
   async admit(signal?: AbortSignal): Promise<UpgradeAdmission> {
     if (!this.enabled) return { kind: 'admitted', waitedMs: 0 };
@@ -486,7 +513,14 @@ export class WsUpgradePacer implements ConnectionPacer {
         ),
       };
     }
-    if (reservation.waitMs <= 0) return { kind: 'admitted', waitedMs: 0 };
+    if (reservation.waitMs <= 0) {
+      return {
+        kind: 'admitted',
+        waitedMs: 0,
+        queued: false,
+        release: this.releaser(reservation.consumed),
+      };
+    }
 
     const startedAt = this.now();
     try {
@@ -497,7 +531,29 @@ export class WsUpgradePacer implements ConnectionPacer {
       this.refund(reservation.consumed);
       throw error;
     }
-    return { kind: 'admitted', waitedMs: Math.max(0, this.now() - startedAt) };
+    return {
+      kind: 'admitted',
+      // A clock moved backwards during the wait would otherwise report this
+      // request as never queued at all.
+      waitedMs: Math.max(0, this.now() - startedAt),
+      queued: true,
+      release: this.releaser(reservation.consumed),
+    };
+  }
+
+  /**
+   * One-shot refund for an admission whose caller opened nothing. Guarded
+   * because a second call would mint a token the bucket never charged, which
+   * is the one way a refund can raise the sustained rate instead of correcting
+   * it.
+   */
+  private releaser(consumed: number): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.refund(consumed);
+    };
   }
 
   private reserve(now: number): Reservation {
