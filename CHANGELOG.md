@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.11.1](https://github.com/bman654/clodex/compare/v2.11.0...v2.11.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **context:** stop cutting 5% off the context window clodex reports ([#180](https://github.com/bman654/clodex/issues/180)) ([8399e2d](https://github.com/bman654/clodex/commit/8399e2d6cb8772395f8513a2534f0d6d1e748df3))
+
 ## [2.11.0](https://github.com/bman654/clodex/compare/v2.10.0...v2.11.0) (2026-09-04)
 
 
