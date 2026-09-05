@@ -455,8 +455,24 @@ export function upstreamHttpStatus(err: unknown, message: string): number {
   return 500;
 }
 
-/** Anthropic SSE error `type` for a status code — lets clients tell retryable from terminal failures. */
-export function anthropicErrorType(status: number): string {
+/**
+ * Anthropic SSE error `type` for a status code — lets clients tell retryable
+ * from terminal failures.
+ *
+ * A mid-stream SSE error frame reaches Claude Code with no HTTP status, and its
+ * retry predicate rejects every status-less error except `overloaded_error`
+ * (matched on the type text). A WebSocket transport drop is exactly the
+ * transient failure that deserves a retry, so a frame carrying the bounded
+ * transport marker is presented as overloaded rather than as the generic
+ * `api_error` Claude Code would surface once and abandon. The recovered status
+ * (500) is untouched: logs, retryability, and the `(HTTP 500)` message text
+ * still describe what actually happened.
+ */
+export function anthropicErrorType(
+  status: number,
+  transportCode?: 'websocket_transport_error',
+): string {
+  if (transportCode === 'websocket_transport_error') return 'overloaded_error';
   switch (status) {
     case 400: return 'invalid_request_error';
     case 401: return 'authentication_error';
