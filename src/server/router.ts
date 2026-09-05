@@ -17,7 +17,7 @@ import {
   streamOpenAiResponse,
   type OpenAiRequest,
 } from '../openai-adapter.js';
-import { sendJson, readBody } from '../http-utils.js';
+import { sendJson, readBody, watchClientDisconnect, clientDisconnected } from '../http-utils.js';
 import { relayAnthropicMessages, resolveOAuthRetryReplacement } from '../upstream-forward.js';
 import {
   anthropicPromptTooLongMessage,
@@ -269,6 +269,7 @@ async function handleAnthropicMessages(
   modelCache: LanguageModelCache,
   plog: PLog,
 ): Promise<void> {
+  const clientAbort = watchClientDisconnect(res);
   const body = await readJson(req);
   if (!body) {
     sendJson(res, 400, { error: { message: 'Invalid JSON body' } });
@@ -353,31 +354,39 @@ async function handleAnthropicMessages(
       : undefined;
 
     plog(() => `anthropic-passthrough → ${messagesUrl} oauth=${isOAuth} stream=${clientWantsStream}`);
-    await relayAnthropicMessages(res, messagesUrl, forwardBody, apiKey, clientWantsStream, {
-      inboundBeta: effectiveBeta,
-      authType,
-      log: message => plog(message),
-      claudeCodeSessionId,
-      extraHeaders: model.headers,
-      refreshToken,
-      onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
-      // Echo the exact requested id when it differs from the upstream id, so
-      // clients that key context windows on the response model still resolve.
-      responseModelOverride:
-        typeof body.model === 'string' && body.model !== upstreamModelId(model)
-          ? body.model
+    try {
+      await relayAnthropicMessages(res, messagesUrl, forwardBody, apiKey, clientWantsStream, {
+        inboundBeta: effectiveBeta,
+        authType,
+        log: message => plog(message),
+        claudeCodeSessionId,
+        extraHeaders: model.headers,
+        refreshToken,
+        onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
+        signal: clientAbort.signal,
+        // Echo the exact requested id when it differs from the upstream id, so
+        // clients that key context windows on the response model still resolve.
+        responseModelOverride:
+          typeof body.model === 'string' && body.model !== upstreamModelId(model)
+            ? body.model
+            : undefined,
+        onUpstreamError: options.inferenceLogPath
+          ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
+              requestId,
+              modelId: body.model,
+              provider: inferenceProvider(model),
+              route: 'passthrough',
+              statusCode,
+              errorContent,
+            })
           : undefined,
-      onUpstreamError: options.inferenceLogPath
-        ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
-            requestId,
-            modelId: body.model,
-            provider: inferenceProvider(model),
-            route: 'passthrough',
-            statusCode,
-            errorContent,
-          })
-        : undefined,
-    });
+      });
+    } catch (err) {
+      // Cancellation is not a failure to report: the client that would read the
+      // error is the one that left. Proxy mode makes the same choice.
+      if (clientDisconnected(clientAbort.signal)) return;
+      throw err;
+    }
     return;
   }
 
@@ -462,6 +471,7 @@ async function handleAnthropicMessages(
           await withResponsesWebSocketDiagnosticContext(
             { requestId, claudeSessionId },
             () => streamAnthropicResponse(languageModel, params, responseModelId, writeStreamChunk, undefined, {
+              abortSignal: clientAbort.signal,
               initialInputTokens: estimateAnthropicInputTokens(body),
               onPromptTokens: total => reportPricingBoundaryCrossing({
                 modelKey: model.id,
@@ -481,6 +491,7 @@ async function handleAnthropicMessages(
             { requestId, claudeSessionId },
             () => generateAnthropicResponse(languageModel, params, responseModelId, {
               forceStream: openAiOAuth,
+              abortSignal: clientAbort.signal,
               onPromptTokens: total => reportPricingBoundaryCrossing({
                 modelKey: model.id,
                 modelLabel: model.name || model.id,
@@ -493,6 +504,9 @@ async function handleAnthropicMessages(
         }
         break;
       } catch (err) {
+        // A cancelled request has no client left to answer, and the abort is
+        // not an upstream failure worth recording as one.
+        if (clientDisconnected(clientAbort.signal)) break;
         const message = formatUpstreamError(err);
         const details = sdkUpstreamErrorDetails(err);
         const candidateStatus = details?.statusCode ?? upstreamHttpStatus(err, message);
@@ -569,6 +583,7 @@ async function handleAnthropicCountTokens(
   options: ServerOptions,
   plog: PLog,
 ): Promise<void> {
+  const clientAbort = watchClientDisconnect(res);
   const body = await readJson(req);
   if (!body) {
     sendJson(res, 400, { error: { message: 'Invalid JSON body' } });
@@ -630,14 +645,20 @@ async function handleAnthropicCountTokens(
 
   const countTokensUrl = `${model.baseUrl}/v1/messages/count_tokens`;
   plog(() => `anthropic-count-tokens → ${countTokensUrl} oauth=${isOAuth}`);
-  await relayAnthropicMessages(res, countTokensUrl, forwardBody, apiKey, false, {
-    inboundBeta,
-    authType,
-    log: message => plog(message),
-    extraHeaders: model.headers,
-    refreshToken,
-    onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
-  });
+  try {
+    await relayAnthropicMessages(res, countTokensUrl, forwardBody, apiKey, false, {
+      inboundBeta,
+      authType,
+      log: message => plog(message),
+      extraHeaders: model.headers,
+      refreshToken,
+      onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
+      signal: clientAbort.signal,
+    });
+  } catch (err) {
+    if (clientDisconnected(clientAbort.signal)) return;
+    throw err;
+  }
 }
 
 async function handleOpenAIChatCompletions(
@@ -647,6 +668,7 @@ async function handleOpenAIChatCompletions(
   modelCache: LanguageModelCache,
   plog: PLog,
 ): Promise<void> {
+  const clientAbort = watchClientDisconnect(res);
   const body = await readJson(req);
   if (!body) {
     sendJson(res, 400, { error: { message: 'Invalid JSON body' } });
@@ -693,21 +715,27 @@ async function handleOpenAIChatCompletions(
           rejectedAccessToken,
         )
       : undefined;
-    await relayAnthropicMessages(res, completionsUrl, forwardBody, apiKey, Boolean(body.stream), {
-      authType: model.authType ?? 'api',
-      extraHeaders: model.headers,
-      refreshToken,
-      onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
-      onUpstreamError: options.inferenceLogPath
-        ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
-            modelId: body.model,
-            provider: inferenceProvider(model),
-            route: 'passthrough',
-            statusCode,
-            errorContent,
-          })
-        : undefined,
-    });
+    try {
+      await relayAnthropicMessages(res, completionsUrl, forwardBody, apiKey, Boolean(body.stream), {
+        authType: model.authType ?? 'api',
+        extraHeaders: model.headers,
+        refreshToken,
+        onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
+        signal: clientAbort.signal,
+        onUpstreamError: options.inferenceLogPath
+          ? (statusCode, errorContent) => writeInferenceResponseErrorLog(options.inferenceLogPath!, {
+              modelId: body.model,
+              provider: inferenceProvider(model),
+              route: 'passthrough',
+              statusCode,
+              errorContent,
+            })
+          : undefined,
+      });
+    } catch (err) {
+      if (clientDisconnected(clientAbort.signal)) return;
+      throw err;
+    }
     return;
   }
 
@@ -764,18 +792,24 @@ async function handleOpenAIChatCompletions(
           }
           res.write(chunk);
         };
-        await streamOpenAiResponse(languageModel, params, responseModelId, writeStreamChunk);
+        await streamOpenAiResponse(languageModel, params, responseModelId, writeStreamChunk, {
+          abortSignal: clientAbort.signal,
+        });
         if (!res.headersSent) writeStreamChunk('');
         res.end();
       } else {
         // ChatGPT/Codex OAuth routes only ever answer as SSE (the WebSocket fetch
         // returns text/event-stream unconditionally), so stream internally and
         // collect the result instead of issuing a non-streaming SDK request.
-        const response = await generateOpenAiResponse(languageModel, params, responseModelId, { forceStream: openAiOAuth });
+        const response = await generateOpenAiResponse(languageModel, params, responseModelId, {
+          forceStream: openAiOAuth,
+          abortSignal: clientAbort.signal,
+        });
         sendJson(res, 200, response);
       }
       break;
     } catch (err) {
+      if (clientDisconnected(clientAbort.signal)) break;
       const message = formatUpstreamError(err);
       const details = sdkUpstreamErrorDetails(err);
       const candidateStatus = details?.statusCode ?? upstreamHttpStatus(err, message);

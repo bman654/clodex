@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import type { ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { appendFileSync, openSync, writeSync, closeSync } from 'node:fs';
-import { readBody, extractApiKey, sendJson } from './http-utils.js';
+import { readBody, extractApiKey, sendJson, watchClientDisconnect, clientDisconnected } from './http-utils.js';
 import { formatAnthropicModelEntry, formatAnthropicModelList } from './server/models.js';
 import {
   claudeCodeClientModelId,
@@ -393,14 +393,7 @@ export async function startProxyCatalog(
         return;
       }
 
-      const clientAbort = new AbortController();
-      const abortForClientDisconnect = () => {
-        if (!clientAbort.signal.aborted) clientAbort.abort(new Error('Client disconnected'));
-      };
-      req.once('aborted', abortForClientDisconnect);
-      res.once('close', () => {
-        if (!res.writableFinished) abortForClientDisconnect();
-      });
+      const clientAbort = watchClientDisconnect(res);
 
       let anthropicBody: any;
       try {
@@ -518,7 +511,7 @@ export async function startProxyCatalog(
             signal: clientAbort.signal,
           });
         } catch (err) {
-          if (clientAbort.signal.aborted) return;
+          if (clientDisconnected(clientAbort.signal)) return;
           const message = err instanceof UpstreamUnreachableError ? err.message : String(err);
           plog(() => `anthropic token-count error: ${message}`);
           anthropicError(res, 502, message);
@@ -592,7 +585,7 @@ export async function startProxyCatalog(
               : undefined,
           });
         } catch (err) {
-          if (clientAbort.signal.aborted) return;
+          if (clientDisconnected(clientAbort.signal)) return;
           const message = err instanceof UpstreamUnreachableError ? err.message : String(err);
           plog(() => `anthropic-passthrough error: ${message}`);
           anthropicError(res, 502, message);
@@ -755,7 +748,7 @@ export async function startProxyCatalog(
         const handleSdkError = async (
           err: unknown,
         ): Promise<'retry' | 'cancelled' | 'done'> => {
-          if (clientAbort.signal.aborted) {
+          if (clientDisconnected(clientAbort.signal)) {
             translationLifecycle?.cancel();
             return 'cancelled';
           }

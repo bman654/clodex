@@ -2,7 +2,7 @@ import { tool, jsonSchema, streamText, generateText } from 'ai';
 import type { LanguageModel, ModelMessage } from 'ai';
 import { parseToolArguments } from './proxy-shared.js';
 import type { SdkCallParams } from './sdk-adapter.js';
-import { oauthServiceTier, reportUnsupportedServiceTier } from './sdk-adapter.js';
+import { forwardAbortSignal, oauthServiceTier, reportUnsupportedServiceTier } from './sdk-adapter.js';
 import { upstreamRequestBudget } from './upstream-retry.js';
 import { trackUpstreamAttempts } from './upstream-attempts.js';
 
@@ -203,10 +203,16 @@ interface ActiveUpstreamBudget {
   close: () => void;
 }
 
-function startUpstreamBudget(model: LanguageModel, streaming: boolean): ActiveUpstreamBudget {
+function startUpstreamBudget(
+  model: LanguageModel,
+  streaming: boolean,
+  /** Client cancellation, forwarded into this request's own abort controller. */
+  clientSignal?: AbortSignal,
+): ActiveUpstreamBudget {
   const { idleTimeoutMs, totalTimeoutMs, maxRetries } = upstreamRequestBudget();
   const attempts = trackUpstreamAttempts(model);
   const abort = new AbortController();
+  const stopForwardingAbort = forwardAbortSignal(clientSignal, abort);
   const idleError = () => attempts.deadlineError(new Error(
     `no data received from provider for ${Math.round(idleTimeoutMs / 1000)}s`,
   ));
@@ -230,6 +236,7 @@ function startUpstreamBudget(model: LanguageModel, streaming: boolean): ActiveUp
       idleTimer = setTimeout(() => abort.abort(idleError()), idleTimeoutMs);
     },
     close: () => {
+      stopForwardingAbort();
       if (idleTimer !== undefined) clearTimeout(idleTimer);
       clearTimeout(totalTimer);
       if (!abort.signal.aborted) abort.abort();
@@ -261,11 +268,11 @@ export async function generateOpenAiResponse(
   model: LanguageModel,
   params: SdkCallParams,
   responseModelId: string,
-  options?: { forceStream?: boolean },
+  options?: { forceStream?: boolean; abortSignal?: AbortSignal },
 ) {
   let result: { text: string; toolCalls?: CollectedOpenAiStream['toolCalls']; finishReason?: string; usage?: CollectedOpenAiStream['usage']; warnings?: unknown };
   const streaming = options?.forceStream === true;
-  const budget = startUpstreamBudget(model, streaming);
+  const budget = startUpstreamBudget(model, streaming, options?.abortSignal);
   try {
     if (streaming) {
       // Some upstreams (e.g. ChatGPT's Codex OAuth backend) only ever answer as a
@@ -328,8 +335,9 @@ export async function streamOpenAiResponse(
   params: SdkCallParams,
   responseModelId: string,
   onChunk: (chunk: string) => void,
+  options?: { abortSignal?: AbortSignal },
 ): Promise<void> {
-  const budget = startUpstreamBudget(model, true);
+  const budget = startUpstreamBudget(model, true, options?.abortSignal);
   try {
     const { stream } = streamText({
       model: budget.model,

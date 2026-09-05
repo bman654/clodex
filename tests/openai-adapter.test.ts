@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { getEventListeners } from 'node:events';
 import { generateText, streamText } from 'ai';
 import { collectOpenAiStream, generateOpenAiResponse, streamOpenAiResponse, translateOpenAiRequest } from '../src/openai-adapter.js';
 import { resetServiceTierWarningForTests } from '../src/sdk-adapter.js';
@@ -632,6 +633,76 @@ describe('OpenAI-format service tier omission warning', () => {
       else process.env.CLODEX_SERVICE_TIER = prior;
       resetServiceTierWarningForTests();
       notices.release();
+      vi.mocked(streamText).mockReset();
+    }
+  });
+});
+
+describe('client cancellation', () => {
+  it.each([
+    ['forwarded OpenAI stream', 'stream'],
+    ['collected OpenAI stream', 'forceStream'],
+    ['non-streaming OpenAI request', 'generate'],
+  ] as const)('cancels a %s when the caller aborts', async (_name, route) => {
+    const client = new AbortController();
+    let sdkSignal: AbortSignal | undefined;
+    let dispatched!: () => void;
+    const started = new Promise<void>(resolve => { dispatched = resolve; });
+
+    const hang = (signal: AbortSignal | undefined) => new Promise<never>((_resolve, reject) => {
+      signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+    vi.mocked(streamText).mockImplementation(options => {
+      sdkSignal = options.abortSignal;
+      async function* stream() {
+        dispatched();
+        yield await hang(options.abortSignal);
+      }
+      return { stream: stream() } as never;
+    });
+    vi.mocked(generateText).mockImplementation(async options => {
+      sdkSignal = options.abortSignal;
+      dispatched();
+      return await hang(options.abortSignal);
+    });
+
+    try {
+      const request = route === 'stream'
+        ? streamOpenAiResponse({} as never, { messages: [] }, 'test-model', () => {}, {
+          abortSignal: client.signal,
+        })
+        : generateOpenAiResponse({} as never, { messages: [] }, 'test-model', {
+          forceStream: route === 'forceStream',
+          abortSignal: client.signal,
+        });
+      const rejection = request.catch((error: unknown) => error);
+
+      await started;
+      expect(sdkSignal?.aborted).toBe(false);
+      client.abort(new Error('Client disconnected'));
+      await expect(rejection).resolves.toMatchObject({ message: 'Client disconnected' });
+      expect(sdkSignal?.aborted).toBe(true);
+    } finally {
+      vi.mocked(streamText).mockReset();
+      vi.mocked(generateText).mockReset();
+    }
+  });
+
+  it('stops listening on the caller signal once the request finishes', async () => {
+    const client = new AbortController();
+    async function* stream() {
+      yield { type: 'finish', finishReason: 'stop' };
+    }
+    vi.mocked(streamText).mockReturnValue({ stream: stream() } as never);
+
+    try {
+      await streamOpenAiResponse({} as never, { messages: [] }, 'test-model', () => {}, {
+        abortSignal: client.signal,
+      });
+      // A per-request listener left behind would accumulate one entry per
+      // request on a caller signal that outlives the call.
+      expect(getEventListeners(client.signal, 'abort')).toHaveLength(0);
+    } finally {
       vi.mocked(streamText).mockReset();
     }
   });

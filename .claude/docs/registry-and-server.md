@@ -52,6 +52,17 @@ every slot credential for deletion.
 and `/openai/v1` (via `src/openai-adapter.ts`). Wizard/quick-start settings persist to config;
 network mode requires a password; default port 17645 (`--port` overrides).
 
+Every inference and count_tokens request builds a client-disconnect controller (`watchClientDisconnect`
+in `src/http-utils.ts`, shared with `src/proxy.ts`) and passes its signal to the upstream call — the
+raw relays' `fetch`, and the SDK adapters' `abortSignal`. The controller is aborted at end of life on
+every path, so consumer abort listeners run at a deterministic point rather than at the garbage
+collector's convenience; the abort reason says which path it was. A response `close` before the
+response finished writing is a real disconnect (mid-stream as well as before any output) and aborts
+with `Client disconnected`; a response that finished writing aborts with `ResponseCompleted` after its
+last byte. Ask `clientDisconnected(signal)`, never `signal.aborted`, when deciding whether an error is
+worth reporting — a cancelled request writes no error response, because the client that would read it
+is the one that left, while non-abort failures still answer the client.
+
 Endpoint-mode request model resolution (`createGatewayModelCatalog` in `server/models.ts`) accepts,
 in precedence order: exact catalog id (and its gateway-discovery id) → unmasked gateway id when
 `--mask-gateway-ids` is on (`vendor-mask.ts`) → canonical `clodex:{provider}:{model}` id → saved
