@@ -62,6 +62,7 @@ exact `Map.get`, so a wrong-case endpoint alias does not resolve.
 Invalid, reserved, conflicting, unavailable, or catalog-colliding aliases remain preserved in config
 but are reported and kept out of routing. **Aliases and canonical ids are accepted INPUT only** —
 `/models` listings advertise exactly the canonical/masked ids. **Echo invariant:** an aliased
-request's response `model` field echoes the alias verbatim (even under masking) so a patched Claude
-Code's context-window lookup keys match (`aliasNames` in `ServerOptions`).
+request's response `model` field echoes the alias verbatim (even under masking), so the id a client
+sees back is the one it sent (`aliasNames` in `ServerOptions`). Note the window lookup itself does
+not read the response body — see `.claude/docs/claude-code-internals.md`.
 

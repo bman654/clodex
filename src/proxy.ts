@@ -438,9 +438,11 @@ export async function startProxyCatalog(
       }
       const route = resolvedRoute ?? defaultRoute;
       // The identity a translated response reports. A request that named a
-      // route we honoured keeps its public id — patched Claude Code preflights
-      // with the request alias and resolves context windows from the response
-      // `model`, so rewriting it there would break auto-compaction.
+      // route we honoured keeps its public id: substituting the canonical id broke
+      // auto-compaction for patched/alias ids in the field. (The window lookup does
+      // not read the response body in 2.1.261 — see
+      // `.claude/docs/claude-code-internals.md` — so keep this for identity
+      // consistency, not because the client parses it.)
       // On a default-route fallback, report the answering/default model rather
       // than the unresolved requested id. Built-in Anthropic-format fallback is
       // routine in this PR, so the translated path must make that identity explicit.

@@ -40,7 +40,6 @@ import {
   CHATGPT_CODEX_UNSUPPORTED_MODELS,
   openAiPricingMetadata,
 } from '../data/openai-oauth-models.js';
-import { DEFAULT_EFFECTIVE_CONTEXT_PERCENT } from '../context-modes.js';
 import { isChatGptOAuthProvider } from './provider-kind.js';
 import { deriveBrand } from '../models.js';
 import { resolveContextWindow } from '../context-window.js';
@@ -197,8 +196,10 @@ function buildDynamicOAuthModel(
     brand: deriveBrand(prefix),
     contextWindow: entry.context_window ?? resolveContextWindow(id),
     maxContextWindow: entry.max_context_window,
-    effectiveContextPercent: entry.effective_context_window_percent
-      ?? DEFAULT_EFFECTIVE_CONTEXT_PERCENT,
+    // Absent means no reduction. clodex reports the window the provider actually
+    // gives; deciding how much of it to leave free is the client's job, and Claude
+    // Code already reserves a flat 33,000 tokens below whatever it is told.
+    effectiveContextPercent: entry.effective_context_window_percent,
     maxOutputTokens: entry.max_output_tokens,
     ...openAiPricingMetadata(id),
     modelFormat: 'openai' as const,

@@ -107,12 +107,15 @@ export interface RelayAnthropicOptions {
   onUpstreamError?: (statusCode: number, body: string) => void;
   signal?: AbortSignal;
   /**
-   * Echo this exact model id in the relayed response instead of the upstream's.
-   * Claude Code resolves context windows from the response `model` field but
-   * uses the request id for preflight, so a passthrough route selected through
-   * an alias must echo the alias or auto-compaction misses its window config
-   * (see CLAUDE.md "alias response-model echo"). Rewrites the JSON body's
-   * `model` and the SSE `message_start` event; every other byte passes through.
+   * Echo this exact model id in the relayed response instead of the upstream's,
+   * so a passthrough route selected through an alias reports the id the client
+   * asked for rather than the canonical one. Substituting the canonical id broke
+   * auto-compaction for patched/alias ids in the field; the window lookup itself
+   * does not read the response body in 2.1.261 (see
+   * `.claude/docs/claude-code-internals.md`), so keep this for identity
+   * consistency rather than because the client parses it. Rewrites the JSON
+   * body's `model` and the SSE `message_start` event; every other byte passes
+   * through.
    */
   responseModelOverride?: string;
 }

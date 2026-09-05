@@ -153,12 +153,21 @@ hand-rolled per-provider translation; don't add one. See `.claude/docs/translati
 
 These bite from outside the subsystem that owns them, so they live here rather than in a deep doc.
 
-- **Auto-compaction depends on the response-model echo.** The proxy-mode MITM forwards request
-  bodies **unrewritten** so responses echo the exact model id the client sent. Claude Code resolves
-  context windows from the response `model` field but uses the request alias for preflight —
-  substituting the canonical id in responses made patched/alias ids miss their window config,
-  auto-compact never fired, and agents died with "Prompt is too long". Endpoint mode's synthetic
-  `GET /v1/models` returns `context_window` per model so the status bar is accurate.
+- **The proxy-mode MITM forwards request bodies unrewritten** so responses echo the exact model id
+  the client sent. Substituting the canonical id made patched/alias ids miss their window config,
+  auto-compact never fired, and agents died with "Prompt is too long". Keep it that way.
+
+  **Keep the invariant; do not reuse the mechanism that used to be written here.** The claim that
+  Claude Code reads its window from the response `model` field does not hold in 2.1.261, and
+  repeating it cost a review. What the echo still buys is that the *request* id and the id the
+  client keys its own state on stay the same object — which is reason enough not to rewrite bodies.
+  Current internals live in `.claude/docs/claude-code-internals.md`; read that rather than
+  re-deriving, and re-stamp it when you verify against a new release.
+- **Report the provider's real context window; hold nothing back.** Claude Code already reserves
+  `min(maxOutputTokens, 20,000) + 13,000` below whatever window it is told — 33,000 for every clodex
+  identity — and applies no percentage of its own on the default path, so a window clodex
+  shrinks first is context the user simply loses. clodex once imposed a 95% share on ChatGPT OAuth
+  models; the catalog never asked for it. Honour a share a provider declares, never invent one.
 - **Anthropic-passthrough base URLs must NOT include `/v1`** — the Anthropic SDK appends
   `/v1/messages` itself.
 - **The alias IS the model identity** once a binary is patched: the short name is what lands in the

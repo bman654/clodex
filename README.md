@@ -245,8 +245,9 @@ A context window is a cost dial as much as a capacity number. OpenAI prices GPT-
 and later prompts above **272,000 input tokens at 2x input and 1.5x output for the
 full request**, which is why the Codex catalog reports a 272,000 window rather than
 the model's ceiling. Newer families inherit the same boundary, so a model released
-after this was written is covered without a clodex update. Clodex follows that: the default `standard` stop stays under the
-line, and a larger window is something you ask for.
+after this was written is covered without a clodex update. Clodex follows that: the
+default `standard` stop stays under the line, and a larger window is something you
+ask for.
 
 ```sh
 clodex models --context sol=max --save     # this model's default, with a cost warning
@@ -254,19 +255,21 @@ clodex claude --context sol=max            # this launch only, nothing saved
 clodex models --context sol=default --save # back to the provider's tuned window
 ```
 
-Each stop is reported with the numbers behind it: the raw window, the headroom
-percentage the Codex catalog uses, the effective window a client should fill, and the
-account ceiling a larger stop can reach. A stop above the ceiling is clamped and says
-so. When a request's own reported token count crosses the boundary, clodex warns once
-per model for the life of the process, because the client's token count and the
-provider's differ after translation and only the provider's settles it.
+Each stop is reported with the numbers behind it: the raw window, the effective
+window a client should fill, and the account ceiling a larger stop can reach. A stop
+above the ceiling is clamped and says so. When a request's own reported token count
+crosses the boundary, clodex warns once per model for the life of the process,
+because the client's token count and the provider's differ after translation and only
+the provider's settles it.
 
 Two things worth knowing about the numbers:
 
-- **ChatGPT/Codex OAuth models carry a 95% headroom convention**, matching the Codex
-  client. Their reported window is 5% below the raw catalog value: `gpt-5.6-sol`
-  reports 258,400 rather than 272,000. This applies to that provider only; API-key
-  and OpenCode Go models keep their full window.
+- **Clodex reports the window the provider actually gives, and holds nothing back.**
+  Deciding how much of a window to leave free is the client's job — Claude Code
+  already reserves a fixed amount below whatever window it is told, and shrinking the
+  number first only costs usable context. A provider that declares a share of its own
+  is still honoured; clodex just never invents one. Use `--context` if you want a
+  smaller window than the provider offers.
 - **The account ceiling moves.** It is server-side and per-account, and it has
   changed by more than 2x within a single day in the past. `max` reads whatever the
   catalog reports now and clamps to it, so a stale ceiling shrinks the stop rather

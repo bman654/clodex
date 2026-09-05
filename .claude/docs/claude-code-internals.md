@@ -161,7 +161,10 @@ Two things that are easy to assume wrongly about the blob:
   `entryPointId` names the entry module directly and survives renames; the *name* is only how
   tweakcc happens to look it up.
 
-## Unknown-model context-window enforcement (verified 2.1.223+)
+## Unknown-model context-window enforcement (verified 2.1.223+, re-verified 2.1.261)
+
+In 2.1.261 the minified names are `RV` (gate) and `GS` (resolver); the pre-2.1.261 names below are
+`KJe` and `Q9` respectively. Names change every build — find these by behaviour, not by symbol.
 
 Enforcement hangs off a single gate: `KJe(e,t)` returns `Q9(e,t).source !== "auto"`. `Q9` returns
 `{window, configured, source}`; the enforcement branch and the fallthrough return the **identical**
@@ -179,6 +182,51 @@ clodex identities. Recognized Anthropic models hit earlier branches.
 startup notice (`if (n !== "unknown-model") return null`) and the auto-compact setup wizard both
 labels the source and seeds its initial value differently. Both are **cosmetic**, so `KJe` remains the
 only behavioural gate — but the bundle already renders `model-default` as a first-class label.
+
+## Where the context window and the compaction point come from (verified 2.1.261, darwin-arm64)
+
+Names are from 2.1.261 and will change; the constants will not.
+
+**Window** — `vp(model, betas)`, in order:
+1. the `/*ccpatch:ctx*/` table `clodex patch` injects (PATCH 7 anchors here, ahead of everything else)
+2. `JL()` — `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, but **only when `DISABLE_COMPACT` is truthy**. `Ie()`
+   accepts exactly `1`/`true`/`yes`/`on`, so `DISABLE_COMPACT=0` does not arm it.
+3. `ivn()` — clamp to 200,000 when the account's long-context credits are blocked
+4. `QL()`: `[1m]` suffix → 1e6 (via `tc`, itself gated on `KN()`) · 1m-beta header → 1e6 · served
+   model catalog (`svn`/`Ya`, clamped to 200,000 unless native-1M) — a per-model experiment `sCt`
+   is consulted *inside* this branch and outranks the catalog value · `_g()` native-1M → 1e6 ·
+   `sCt` again · **`CLAUDE_CODE_MAX_CONTEXT_TOKENS` when `XL(e)`** — no `DISABLE_COMPACT` needed;
+   this is the branch endpoint mode relies on, set by `src/env.ts`. `XL` is roughly "not an id the
+   baked catalog recognises", not literally "does not start with `claude-`" · else 200,000
+
+Getting step 2 and the `XL` branch confused is an easy mistake and has been made in this repo: the
+env var is read in **three** places with different preconditions — those two, plus `XS`, which
+gates the unrecognized-model startup notice on `eor()`, the deliberate union of both. Only the
+first two decide a window; `XS` is cosmetic.
+
+`GS()` then layers overrides. **No branch can exceed `vp`:** every override is `Math.min`'d against
+it, and the remaining branches return it unchanged. Order:
+`CLAUDE_CODE_AUTO_COMPACT_WINDOW` (validated 100,000–1,000,000, `source:"env"`) → settings →
+clientdata → experiment → model-default clamps → unknown-model → `auto`.
+
+**Compaction point** — `threshold = GS().window − min(maxOutputTokens, 20,000) − 13,000`. A flat
+reserve, 33,000 for every current model; there is **no percentage on the default path**.
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` is a percent in `(0, 100]` — `parseFloat`, and anything outside
+that range, including `0`, is ignored silently applied as `Math.min(floor(effective × pct/100), effective − 13,000)` — it can only
+**lower** the threshold, and it multiplies the window *after* the 20,000 reserve, not the raw
+window. Identical in every cached bundle from 2.1.238 to 2.1.261. The one genuine
+percentage-of-window nearby (`0.2`) belongs to the speculative precompute arm, not the trigger.
+
+Because the reserve is flat, headroom as a *fraction* varies with window size: 16.5% at 200,000,
+12.1% at 272,000, 3.3% at 1,000,000.
+
+**The response body is not a source for the window.** A few consumers do read a model id off a
+response — one even calls `vp()` on it — but only to stamp a context window onto a cost record.
+None of them reach `GS`/`QF`/`MTe`/`RXo`, so nothing on the compaction path depends on the echo.
+The models-list fetch validates only `{id, display_name, description}`. The served-catalog lookup
+`Ya()` does prefer `runtime.max_input_tokens` over `context_window`, but in endpoint mode that
+lookup is unreachable anyway: it is gated on the Anthropic base URL being `api.anthropic.com`, and
+`src/env.ts` points the child at `127.0.0.1`.
 
 ## The shared child-environment builder (verified 2.1.221, re-verified 2.1.239 and 2.1.260)
 

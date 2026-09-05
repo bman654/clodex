@@ -862,10 +862,9 @@ async function getOrInitLanguageModel(
 }
 
 function getResponseModelId(bodyModel: unknown, model: ServerModelInfo, options: ServerOptions): string {
-  // Echo invariant: a saved short alias is echoed back verbatim even when
-  // masking is on — Claude Code resolves context windows from the response
-  // `model` field but preflights with the request alias, so rewriting it here
-  // would break auto-compaction (see CLAUDE.md).
+  // Echo invariant: a saved short alias is echoed back verbatim even when masking
+  // is on, so the id a client sees back is the id it sent. The window lookup itself
+  // does not read the response body — see `.claude/docs/claude-code-internals.md`.
   if (typeof bodyModel === 'string' && options.aliasNames?.has(bodyModel)) return bodyModel;
   return options.gateway?.maskGatewayIds
     ? gatewayDisplayName(model, options.gateway)
