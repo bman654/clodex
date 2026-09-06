@@ -1202,6 +1202,123 @@ describe('SDK translated error logging', () => {
     }
   }, 20_000);
 
+  /**
+   * Stub the OpenAI Responses transport with a stream that has produced only
+   * reasoning and then fails in-band — the exact frame shape the WebSocket
+   * transport emits when the upstream socket drops mid-response, at the point
+   * where Claude Code is still willing to retry (no visible content yet).
+   */
+  function stubMidStreamResponsesFailure(errorFrame: Record<string, unknown>): void {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      [
+        'data: {"type":"response.created","response":{"id":"resp_1","created_at":1,"model":"gpt-5.6-test"}}',
+        'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","summary":[]}}',
+        'data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","summary_index":0,"delta":"thinking"}',
+        `data: ${JSON.stringify(errorFrame)}`,
+        '',
+      ].join('\n\n'),
+      { status: 200, headers: { 'Content-Type': 'text/event-stream' } },
+    )));
+  }
+
+  const responsesRoute: ProxyRoute = {
+    aliasId: 'clodex:test:responses-model',
+    realModelId: 'gpt-5.6-test',
+    displayName: 'Responses Model',
+    upstreamUrl: '',
+    apiKey: 'provider-key',
+    modelFormat: 'openai',
+    npm: '@ai-sdk/openai',
+    providerId: 'test-provider',
+  };
+
+  function midStreamErrorFrames(body: string): Array<{ type: string; error: { type: string; message: string } }> {
+    return body
+      .split('\n\n')
+      .filter(block => block.startsWith('event: error'))
+      .map(block => JSON.parse(block.split('\n')[1]!.replace('data: ', '')));
+  }
+
+  function eventNames(body: string): string[] {
+    return body.split('\n\n').filter(Boolean).map(block => block.split('\n')[0]!.replace('event: ', ''));
+  }
+
+  it('reports a mid-stream WebSocket transport drop as overloaded_error with the thinking block left open', async () => {
+    stubMidStreamResponsesFailure({
+      type: 'error',
+      sequence_number: 3,
+      error: {
+        type: 'transport_error',
+        code: 'websocket_transport_error',
+        message: 'WebSocket closed (1006)',
+        param: null,
+      },
+    });
+    const handle = await startProxyCatalog([responsesRoute], responsesRoute.aliasId, false);
+
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: responsesRoute.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      });
+
+      // Output had already started, so the failure must arrive in-band, and
+      // the thinking block must not be closed first: a completed content
+      // block is what stops Claude Code from retrying the turn.
+      expect(res.status).toBe(200);
+      expect(res.body).toContain('"content_block":{"type":"thinking"');
+      expect(eventNames(res.body)).toEqual([
+        'message_start', 'content_block_start', 'content_block_delta', 'error',
+      ]);
+      const frames = midStreamErrorFrames(res.body);
+      expect(frames).toHaveLength(1);
+      expect(frames[0]).toEqual({
+        type: 'error',
+        error: { type: 'overloaded_error', message: 'WebSocket closed (1006) (HTTP 500)' },
+      });
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  }, 20_000);
+
+  it('keeps api_error for a mid-stream provider failure that is not a transport drop', async () => {
+    stubMidStreamResponsesFailure({
+      type: 'error',
+      sequence_number: 3,
+      error: {
+        type: 'server_error',
+        code: 'server_error',
+        message: 'The server had an error while processing your request',
+        param: null,
+      },
+    });
+    const handle = await startProxyCatalog([responsesRoute], responsesRoute.aliasId, false);
+
+    try {
+      const res = await postToProxy(handle.port, handle.token, {
+        model: responsesRoute.aliasId,
+        max_tokens: 100,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toContain('"content_block":{"type":"thinking"');
+      expect(eventNames(res.body)).toEqual([
+        'message_start', 'content_block_start', 'content_block_delta', 'content_block_delta', 'content_block_stop', 'error',
+      ]);
+      const frames = midStreamErrorFrames(res.body);
+      expect(frames).toHaveLength(1);
+      expect(frames[0]!.error.type).toBe('api_error');
+    } finally {
+      handle.close();
+      vi.unstubAllGlobals();
+    }
+  }, 20_000);
+
   it('translates an OpenAI context overflow into an Anthropic prompt-too-long error', async () => {
     const upstream = http.createServer((req, res) => {
       req.resume();

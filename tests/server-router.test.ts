@@ -1052,6 +1052,60 @@ describe('server router', () => {
     expect(resolveProviderCredential).toHaveBeenCalledTimes(1);
   });
 
+  it('carries the WebSocket transport marker into the mid-stream error frame as overloaded_error', async () => {
+    vi.mocked(streamAnthropicResponse).mockImplementationOnce(
+      async (_model, _params, _modelId, write) => {
+        write('event: message_start\ndata: {"type":"message_start"}\n\n');
+        // The frame the WebSocket transport emits when the socket drops
+        // mid-response, rethrown verbatim by the translation adapter.
+        throw {
+          type: 'error',
+          sequence_number: 3,
+          error: {
+            type: 'transport_error',
+            code: 'websocket_transport_error',
+            message: 'WebSocket closed (1006)',
+            param: null,
+          },
+        };
+      },
+    );
+    vi.mocked(resolveProviderCredential).mockResolvedValue('oauth-token');
+    const oauthCatalog = createGatewayModelCatalog([{
+      id: 'oauth-stream-dropped',
+      name: 'OAuth Stream Dropped',
+      isFree: false,
+      brand: 'Other',
+      providerId: 'oauth-provider',
+      sourceBackend: 'oauth-provider',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+      authType: 'oauth',
+      authRef: TEST_HELPER_REF,
+      apiKey: 'launch-token',
+    }]);
+    const server = await startTestServer({ catalog: oauthCatalog });
+
+    const response = await fetch(`${server.url}/anthropic/v1/messages`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'anthropic-oauth-provider__oauth-stream-dropped',
+        messages: [{ role: 'user', content: 'ping' }],
+        stream: true,
+      }),
+    });
+    const body = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(body).toContain('message_start');
+    const errorBlock = body.split('\n\n').find(block => block.startsWith('event: error'))!;
+    expect(JSON.parse(errorBlock.split('\n')[1]!.replace('data: ', ''))).toEqual({
+      type: 'error',
+      error: { type: 'overloaded_error', message: 'WebSocket closed (1006) (HTTP 500)' },
+    });
+  });
+
   it('refreshes once after a translated OpenAI-facing OAuth 401', async () => {
     vi.mocked(generateOpenAiResponse).mockClear();
     vi.mocked(generateOpenAiResponse).mockRejectedValueOnce(

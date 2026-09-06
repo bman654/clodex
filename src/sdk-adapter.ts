@@ -20,7 +20,7 @@ import {
 import { resolveUpstreamTools } from './tool-search.js';
 import { sanitizeToolInput } from './tool-input-sanitize.js';
 import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-types.js';
-import { anthropicErrorType, upstreamHttpStatus } from './upstream-error.js';
+import { anthropicErrorType, sdkUpstreamErrorDetails, upstreamHttpStatus } from './upstream-error.js';
 import { upstreamRequestBudget } from './upstream-retry.js';
 import { trackUpstreamAttempts } from './upstream-attempts.js';
 import { emitParentNotice } from './parent-notice.js';
@@ -1034,9 +1034,17 @@ export async function writeAnthropicStream(
       case 'error': {
         const e = part.error as { data?: unknown; message?: string } | undefined;
         const errMsg = e?.message || (typeof part.error === 'string' ? part.error : JSON.stringify(e?.data ?? part.error));
-        const errorType = anthropicErrorType(upstreamHttpStatus(part.error, errMsg));
+        const transportCode = sdkUpstreamErrorDetails(part.error)?.transportCode;
+        const errorType = anthropicErrorType(upstreamHttpStatus(part.error, errMsg), transportCode);
         log?.(() => `sdk stream error (${errorType}): ${errMsg}`);
-        closeOpen();
+        // Claude Code retries a mid-stream failure only while no content block
+        // has completed. Closing a thinking block here would count as completed
+        // content and turn a recoverable transport drop into a dead turn, so
+        // leave it open; the client closes it itself when it retries. Text and
+        // tool blocks stay closed: once visible output exists the client
+        // finalizes the partial turn either way, and a tool block's buffered
+        // arguments must still be flushed.
+        if (!(transportCode === 'websocket_transport_error' && openType === 'thinking')) closeOpen();
         throw part.error instanceof Error || (part.error && typeof part.error === 'object')
           ? part.error
           : new Error(errMsg);

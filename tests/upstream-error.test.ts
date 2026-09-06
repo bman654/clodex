@@ -225,6 +225,13 @@ describe('provider stream error frames', () => {
     expect(statusFor('429', 'rate_limit_error')).toBe(429);
   });
 
+  it('presents only the WebSocket transport marker as overloaded_error', () => {
+    expect(anthropicErrorType(500, 'websocket_transport_error')).toBe('overloaded_error');
+    expect(anthropicErrorType(500)).toBe('api_error');
+    expect(anthropicErrorType(500, undefined)).toBe('api_error');
+    expect(anthropicErrorType(429)).toBe('rate_limit_error');
+  });
+
   it('never infers a status from digits in the provider message', () => {
     // A recognized frame must resolve its own status; letting the recovered
     // message reach upstreamHttpStatus's prose sniffing turned a token count
