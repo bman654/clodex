@@ -138,5 +138,16 @@ Claude Code's own `NO_PROXY` matcher has two behaviors worth knowing before chan
 `no_proxy || NO_PROXY` means **lowercase wins outright — do not union the casings**, and `*` is
 bypass-all **only as the entire value** (a list-member `*` matches nothing).
 
+## WebSocket upgrade forwarding in proxy mode
+
+WebSocket upgrade requests inside intercepted `api.anthropic.com:443` connections use
+`forwardAnthropicUpgrade` (`src/http-proxy/server.ts`). It connects to the fixed Anthropic
+origin with the ordinary passthrough agent and TLS settings, preserves the upgrade status and
+headers from the upstream response, forwards any buffered head bytes, and pipes the sockets in
+both directions. Upstream HTTP rejections remain HTTP responses with correct chunk framing. Client
+disconnects and proxy shutdown cancel the upstream request and socket. This path does not
+translate models or inspect audio. Voice workloads use it to stream over persistent WebSocket
+connections.
+
 ---
 
