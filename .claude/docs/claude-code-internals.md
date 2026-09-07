@@ -362,6 +362,43 @@ open thinking block first (`case 'error'` in `src/sdk-adapter.ts`). Either alone
 and tool blocks are still closed: visible output already stops the retry, and a tool block's
 buffered arguments must be flushed.
 
+## Voice dictation transport (verified 2.1.263, darwin-arm64)
+
+How the dictation client reaches the network, read from the extracted `claude-2.1.263-*.js` bundle
+while reviewing #188. This is why proxy mode must relay a WebSocket upgrade and endpoint mode does
+not have to.
+
+- **The voice URL never follows `ANTHROPIC_BASE_URL`.** The client dials
+  `VOICE_STREAM_BASE_URL || <oauth-config>.BASE_API_URL` with `https://` rewritten to `wss://`
+  (@27520823), path `/api/ws/speech_to_text/voice_stream`. That base is the OAuth-config module's
+  hardcoded `https://api.anthropic.com`; `ANTHROPIC_BASE_URL` appears 77 times in the bundle and
+  never in that module. So endpoint mode, which points `ANTHROPIC_BASE_URL` at the local gateway and
+  strips `HTTP(S)_PROXY`, sends voice straight to Anthropic and needs no gateway support.
+- **The socket is Bun's native WebSocket behind a `ws` shim, not npm `ws`.** The module imports
+  `ws` bare and passes `{headers, proxy, tls}`; the shim forwards those to Bun's client. The
+  `proxy` value comes from the same env resolver the HTTP client uses (the `HTTPS_PROXY` family,
+  honouring `NO_PROXY`), with nothing platform-specific, so macOS and Windows both CONNECT through
+  clodex in proxy mode. `tls.ca` is built explicitly from `NODE_EXTRA_CA_CERTS` plus bundled and
+  system roots (@1604656, @1605611, @1609521); there is no `rejectUnauthorized:false` on the path,
+  so a bad CA fails closed rather than silently.
+- **Nothing is sent before the 101.** `send()` drops frames unless `readyState === OPEN`, audio
+  captured while connecting is queued outside the socket, and the first frame (`KeepAlive`) is
+  written from the `open` handler. The client's parser `head` on an upgrade is therefore always
+  empty for this client; the relay's `head`/`upstreamHead` forwarding is hardening, not a
+  production path.
+- **Failure mapping.** An HTTP response instead of a 101 goes through the `unexpected-response`
+  handler (@27524262) and renders as `Voice stream error: WebSocket upgrade rejected with HTTP
+  <status>`; only 4xx is marked fatal, anything else is retried once after 250 ms. The friendly
+  "Voice connection failed. Check your network and try again." comes from a recording-level selector
+  (@27531209) that fires when a >2 s recording ends with audio but the socket never connected —
+  which is exactly what a hung handshake produces. The handshake itself sits on Bun's native
+  `BUN_CONFIG_WS_HANDSHAKE_TIMEOUT`, default 120 s.
+- **Why main hung (Node, not Claude Code).** An `http(s).Server` with no `upgrade` listener does
+  *not* close the connection on Node >= 22.11; it falls the request through to the ordinary request
+  handler. clodex's passthrough then made an `https.request` with no `upgrade` listener of its own,
+  so when the origin answered 101 Node destroyed that socket and `response` never fired, leaving
+  the client waiting on the 120 s timeout above. Verified on 22.11.0, 22.14.0 and 24.14.1.
+
 ## Things that looked like clodex bugs and were not (not version-specific)
 
 - **"Concurrent subagents died at turn 2" was not unknown-model classification.** The agents' first
