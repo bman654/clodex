@@ -787,6 +787,13 @@ function forwardAnthropicUpgrade(
   agent: https.Agent | undefined,
   sockets: Set<Socket>,
 ): void {
+  // A pipelined request can still own the socket through an unfinished response.
+  // Sharing it would interleave the relay's bytes with that response, and
+  // assignSocket would throw, so drop the connection instead.
+  if ((clientSocket as Socket & { _httpMessage?: unknown })._httpMessage) {
+    clientSocket.destroy();
+    return;
+  }
   // A paused socket hides EOF while the upstream handshake is pending. Keep
   // reading into a bounded buffer without dropping early client frames.
   const clientData = new PassThrough();
@@ -843,6 +850,9 @@ function forwardAnthropicUpgrade(
     const response = new http.ServerResponse(req);
     response.shouldKeepAlive = false;
     response.assignSocket(clientSocket as Socket);
+    // Node removes its own drain forwarder from a socket it hands to 'upgrade',
+    // so a body larger than the write buffer would stall without this relay.
+    clientSocket.on('drain', () => response.emit('drain'));
     response.once('error', () => clientSocket.destroy());
     response.once('finish', () => clientSocket.end(() => clientSocket.destroy()));
     copyResponse(upstreamRes, response);

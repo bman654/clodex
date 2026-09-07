@@ -647,4 +647,112 @@ describe('first-party WebSocket passthrough', () => {
       await firstParty.close();
     }
   });
+
+  it('delivers a rejection body larger than the socket write buffer', async () => {
+    const origin = await startOrigin();
+    const body = 'voice-rejection-payload;'.repeat(512 * 1024 / 24);
+    origin.server.on('upgrade', (_req, socket) => {
+      socket.end([
+        'HTTP/1.1 401 Unauthorized',
+        'Content-Type: text/plain',
+        `Content-Length: ${Buffer.byteLength(body)}`,
+        'Connection: close',
+        '',
+        body,
+      ].join('\r\n'));
+    });
+    const proxy = await startProxy(origin.port);
+    let client: tls.TLSSocket | undefined;
+    try {
+      client = await connectMitm(proxy.port);
+      const response = readSocket(client);
+      const closed = waitForClose(client);
+      client.write(upgradeRequest());
+      await closed;
+      const wire = response.bytes().toString();
+      expect(wire).toContain('HTTP/1.1 401 Unauthorized\r\n');
+      expect(wire.slice(wire.indexOf('\r\n\r\n') + 4)).toBe(body);
+    } finally {
+      client?.destroy();
+      await proxy.close();
+      await origin.close();
+    }
+  });
+
+  it('relays a client frame sent while the upstream handshake is pending', async () => {
+    const origin = await startOrigin();
+    const pendingFrame = Buffer.from([0x82, 0x84, 9, 8, 7, 6, 0x0c, 0x0a, 0x0f, 0x0e]);
+    let received: ReturnType<typeof readSocket> | undefined;
+    origin.server.on('upgrade', (_req, socket, head) => {
+      received = readSocket(socket, head);
+    });
+    const proxy = await startProxy(origin.port);
+    let client: tls.TLSSocket | undefined;
+    try {
+      client = await connectMitm(proxy.port);
+      const response = readSocket(client);
+      const handshake = once(origin.server, 'upgrade', { signal: AbortSignal.timeout(3000) });
+      client.write(Buffer.concat([upgradeRequest(), clientFrame]));
+      const [, upstream] = await handshake as [http.IncomingMessage, Duplex, Buffer];
+      client.write(pendingFrame);
+      // The relay must buffer bytes the client sends before the upstream answers.
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(response.bytes()).toHaveLength(0);
+      upstream.write(upgradeResponse());
+      const wire = await response.waitFor(bytes => bytes.includes('\r\n\r\n'));
+      expect(wire.toString()).toContain('HTTP/1.1 101 Switching Protocols');
+      const relayed = await received!.waitFor(
+        bytes => bytes.length >= clientFrame.length + pendingFrame.length,
+      );
+      expect(relayed).toEqual(Buffer.concat([clientFrame, pendingFrame]));
+    } finally {
+      client?.destroy();
+      await proxy.close();
+      await origin.close();
+    }
+  });
+
+  it.each([false, true])('drops a pipelined upgrade without disturbing the response in flight (upgraded=%s)', async upgraded => {
+    const origin = await startOrigin();
+    const body = 'pipelined passthrough response';
+    origin.server.on('request', (req, res) => {
+      req.resume();
+      setTimeout(() => {
+        res.writeHead(200, {
+          'Content-Type': 'text/plain',
+          'Content-Length': String(Buffer.byteLength(body)),
+        });
+        res.end(body);
+      }, 120);
+    });
+    origin.server.on('upgrade', (_req, socket) => {
+      socket.end(upgraded
+        ? upgradeResponse()
+        : 'HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n');
+    });
+    const proxy = await startProxy(origin.port);
+    const uncaught: Error[] = [];
+    const record = (error: Error) => { uncaught.push(error); };
+    process.on('uncaughtException', record);
+    let client: tls.TLSSocket | undefined;
+    try {
+      client = await connectMitm(proxy.port);
+      const response = readSocket(client);
+      const closed = waitForClose(client);
+      client.write(Buffer.concat([
+        Buffer.from('GET /v1/models HTTP/1.1\r\nHost: api.anthropic.com\r\n\r\n'),
+        upgradeRequest(),
+      ]));
+      await closed;
+      const wire = response.bytes().toString();
+      expect(wire.split('HTTP/1.1 ').length - 1).toBeLessThanOrEqual(1);
+      expect(wire).not.toContain('101 Switching Protocols');
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off('uncaughtException', record);
+      client?.destroy();
+      await proxy.close();
+      await origin.close();
+    }
+  });
 });
