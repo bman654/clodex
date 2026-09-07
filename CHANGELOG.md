@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.11.3](https://github.com/bman654/clodex/compare/v2.11.2...v2.11.3) (2026-09-07)
+
+
+### Bug Fixes
+
+* **voice:** restore dictation in proxy mode to prevent connection errors ([#188](https://github.com/bman654/clodex/issues/188)) ([7c9dc43](https://github.com/bman654/clodex/commit/7c9dc43a199904704d46f70b58d0749e223d9a3d))
+
 ## [2.11.2](https://github.com/bman654/clodex/compare/v2.11.1...v2.11.2) (2026-09-06)
 
 
