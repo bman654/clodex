@@ -18,7 +18,7 @@ export type FullStreamPart = {
   };
   providerMetadata?: {
     google?: { thoughtSignature?: string; thought_signature?: string };
-    openai?: { reasoningEncryptedContent?: string | null };
+    openai?: { itemId?: string; reasoningEncryptedContent?: string | null };
   };
   error?: unknown;
   reason?: string;

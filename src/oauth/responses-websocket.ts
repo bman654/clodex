@@ -392,14 +392,15 @@ function normalizeToolCallJson(value: unknown): unknown {
   // never match its own echo. An empty array carries no information; drop it
   // from both sides. A populated `content` is real data and still compared.
   if (record.type === 'reasoning') {
+    // The round-trip envelope preserves the SDK itemId to rebuild summary groups.
+    // Expected-assistant snapshots omit this ephemeral field; compare like shapes
+    // without removing the original id from the payload actually sent upstream.
+    delete out.id;
     if (Array.isArray(record.content) && record.content.length === 0) delete out.content;
     // `encrypted_content` IS the reasoning item's identity, and the real state
     // lives upstream under previous_response_id — the summary is display text.
-    // It also cannot survive the round trip intact: the SDK emits one reasoning
-    // part per summary part, but only the LAST part's `reasoning-end` carries the
-    // encrypted content, so the unsigned earlier blocks are dropped on the way
-    // back and a multi-part summary returns holding only its final part. Compare
-    // on the blob and a head can match its own echo.
+    // Legacy thinking signatures retained only the last summary of each item.
+    // Keep accepting those histories even though new envelopes retain every part.
     if (typeof record.encrypted_content === 'string' && record.encrypted_content) delete out.summary;
   }
   return out;

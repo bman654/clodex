@@ -362,6 +362,37 @@ open thinking block first (`case 'error'` in `src/sdk-adapter.ts`). Either alone
 and tool blocks are still closed: visible output already stops the retry, and a tool block's
 buffered arguments must be flushed.
 
+### Multiple thinking summaries (re-verified 2.1.263, darwin-arm64)
+
+In the pristine `claude-2.1.263-ef5d2909c8af49f3.js` bundle, the parser sets `la` on the
+start of a non-thinking, non-redacted-thinking, non-fallback block. A block stop pushes that
+block's assistant-message envelope into `dc` and sets `mr`, including for thinking. The catch first tests
+`dc.some(message => message.content.some(block => !isFallback(block))) || mr`.
+Inside this completed-content gate, an SSE server/overload error finalizes partial output
+only when `la` is true; its thinking-only case throws `Rb`, recording telemetry
+`fallback_cause: "partial_yield"` instead.
+The socket-error and watchdog branches have separate retry rules, but clodex's in-band
+`websocket_transport_error` is an API error, not a socket error at the client.
+
+The overload branch is still **after** that gate: `La instanceof Lt && AD(La)`, where
+`AD` (@3409360) accepts status 529 or the literal `"type":"overloaded_error"` in the
+message. With `la` false it increments `qp` and retries while `qp < Nle` (`Nle=3`,
+@7157194), for eligible query sources, then takes the non-streaming fallback unless disabled.
+Thus the ordinary exhausted path is three streaming attempts plus one non-streaming request,
+not four streaming attempts. A fallback model or low-priority capacity-wait policy can alter
+that path. The completed-content gate and overload branch are around @9502000–9509900.
+
+Leaving only the **last** thinking block open is insufficient if earlier summaries already
+closed blocks. Clodex now coalesces consecutive OpenAI Responses reasoning into one live
+thinking block, retaining original item/summary boundaries in an opaque signature envelope.
+The stream parser treats signatures as opaque strings (`sl.signature = hp.signature`) and appends
+thinking text verbatim; it does not understand or decode that envelope. This is not a guarantee
+of byte-exact request replay: immediately before sending a request, `oot`/`wZ` recursively scan
+all string values and replace lone UTF-16 surrogates with U+FFFD (@211704–212238 and @9461968).
+Clodex therefore keeps the original summary strings inside its JSON-encoded signature, whose
+escaped surrogate code units survive that sanitizer, rather than depending on unchanged display
+text or sanitizing individual deltas (which would break valid pairs split across deltas).
+
 ## Voice dictation transport (verified 2.1.263, darwin-arm64)
 
 How the dictation client reaches the network, read from the extracted `claude-2.1.263-*.js` bundle
