@@ -16,6 +16,13 @@ is emitted downstream. A transport failure likewise retries once **with full con
 same continuation payload — while no downstream bytes, model data, or accumulated output exist; buffered control frames do not close that safe window, but any model
 output makes the failure terminal. OAuth requires `store:false` (a `store:true` probe returns 400).
 
+The Anthropic translation keeps consecutive OpenAI reasoning in a single live thinking block,
+with a self-contained signature envelope that restores individual summaries and encrypted items
+on the return trip (see `translation.md`). Restored reasoning IDs are kept in outgoing requests
+but omitted from comparison, matching the existing expected-assistant snapshot. Comparison still
+accepts legacy histories that omitted earlier summaries when the encrypted content matches; this
+compatibility rule is not permission to rewrite summaries in new upstream requests.
+
 **Connection pools are process-wide, not per-partition:** `maxConnections` (established, default 32)
 and `maxNurseryConnections` (default 8). A head starts in the nursery and is promoted only when
 successfully continued — so a workload fanning out into many concurrent subagent conversations (all

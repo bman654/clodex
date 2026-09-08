@@ -17,6 +17,25 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   responses in testing.
 - Cache reads and GPT-5.6 cache writes map to Anthropic
   `cache_read_input_tokens`/`cache_creation_input_tokens`.
+- Consecutive OpenAI Responses reasoning summaries/items stream into **one Anthropic thinking
+  block** until text, a tool, or successful completion closes it. A thinking-only WebSocket drop
+  leaves that block open, so an earlier summary cannot disable Claude Code's mid-stream retry.
+  `src/openai-thinking.ts` carries a versioned, self-contained signature envelope: original SDK
+  item IDs, original summary text, and encrypted content. On the next request it restores separate
+  SDK reasoning parts; the SDK rebuilds the original summary groups. Display-only paragraph breaks
+  never enter the upstream summaries. Original text lives inside the opaque signature rather than
+  being recovered from the display text, so client-side text edits or Unicode sanitization cannot
+  change what goes back to OpenAI. This duplicates summary text in client requests and transcripts
+  and retains any intermediate ciphertext the SDK exposes; only each item's final ciphertext goes
+  upstream. The envelope itself is never sent upstream. No process-local registry or provider
+  ciphertext rewriting is involved. Legacy raw signatures remain readable. An unknown or malformed
+  envelope is omitted, never forwarded as ciphertext; switching a valid envelope to another
+  translated provider retains only the display text. Older clodex builds cannot decode these new
+  signatures and would forward the envelope as provider ciphertext, which can cause upstream errors.
+  Resume such transcripts with an envelope-aware build rather than downgrading the bridge. This does not
+  change non-streaming responses' existing omission of reasoning, or the transport's prohibition
+  on replaying already-emitted model output. The guarantee covers SDK-visible summary text,
+  grouping and encrypted content, not output-only fields the SDK omits (such as `status`).
 - **Images in `tool_result` are lifted out of the text-only function-output channel** and delivered
   as real image parts on the following user message. Inline, a JSON.stringify'd base64 screenshot
   tokenizes at ~1.5 chars/token — 200k+ tokens per screenshot, killing agents with "Prompt is too
