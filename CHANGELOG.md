@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.11.4](https://github.com/bman654/clodex/compare/v2.11.3...v2.11.4) (2026-09-08)
+
+
+### Bug Fixes
+
+* **openai:** retry connection drops during thinking so agents can keep working ([#191](https://github.com/bman654/clodex/issues/191)) ([b314b38](https://github.com/bman654/clodex/commit/b314b38366034b2bb031393ad259b95cd3b216b0))
+
 ## [2.11.3](https://github.com/bman654/clodex/compare/v2.11.2...v2.11.3) (2026-09-07)
 
 
