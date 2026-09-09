@@ -20,10 +20,12 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   runLaunchPatchCheck,
   runPatchCommand,
@@ -31,6 +33,10 @@ import {
   resolveClaudeBinaryForPatch,
 } from '../src/patcher.js';
 import { LEGACY_LAUNCHERS, NATIVE_LAUNCHERS } from './helpers/npm-launchers.js';
+
+const NATIVE_PLACEHOLDER_BYTES = readFileSync(fileURLToPath(
+  new URL('./fixtures/claude-native-placeholder-2.1.266.exe', import.meta.url),
+));
 
 const hoisted = vi.hoisted(() => ({
   sentinel: '\n#__CLAUDE_BUNDLE__\n',
@@ -78,6 +84,12 @@ let home: string;
 let clodexHome: string;
 let tweakccDir: string;
 let logs: string[];
+
+function writeNativePlaceholder(path: string): void {
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, NATIVE_PLACEHOLDER_BYTES, { mode: 0o755 });
+  chmodSync(path, 0o755);
+}
 
 function writeFakeClaude(path: string, version: string, bundle = PRISTINE_BUNDLE): void {
   mkdirSync(join(path, '..'), { recursive: true });
@@ -238,6 +250,29 @@ describe('runPatchCommand version resolution', () => {
     expect(stderr.mock.calls.join('\n')).toMatch(/Could not determine the version/);
     expect(readPatchManifest()).toBeNull();
   });
+
+  it('reports an incomplete npm install for a directly selected placeholder before any write', async () => {
+    const program = join(home, 'npm-direct', 'bin', 'claude.exe');
+    writeNativePlaceholder(program);
+    process.env.TWEAKCC_CC_INSTALLATION_PATH = program;
+    const before = readFileSync(program);
+    const inode = statSync(program).ino;
+
+    expect(await runPatchCommand({})).toBe(1);
+
+    const output = logs.join('\n');
+    expect(output).toMatch(/npm install is incomplete/);
+    expect(output).toContain('node node_modules/@anthropic-ai/claude-code/install.cjs');
+    expect(output).toContain('without `--ignore-scripts` / `--omit=optional`');
+    expect(output).toContain('Then run `clodex patch` again');
+    expect(output).not.toMatch(/Could not determine the version/);
+    expect(readFileSync(program)).toEqual(before);
+    expect(statSync(program).ino).toBe(inode);
+    expect(backupFiles()).toEqual([]);
+    expect(readPatchManifest()).toBeNull();
+    expect(readdirSync(dirname(program))).toEqual(['claude.exe']);
+    expect(hoisted.readContentCalls).toEqual([]);
+  });
 });
 
 describe('runPatchCommand npm launcher resolution', () => {
@@ -305,6 +340,111 @@ describe('runPatchCommand npm launcher resolution', () => {
       expect(manifest?.pristineSha256).toBe(sha256OfBuffer(pristineBytes));
     },
   );
+
+  it('reports an incomplete npm install after following a launcher, before any write', async () => {
+    const { binDir, program, launchers } = installNpmClaude('2.1.266');
+    writeNativePlaceholder(program);
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+    const programBefore = readFileSync(program);
+    const programInode = statSync(program).ino;
+    const launcherBefore = readFileSync(launchers.cmd);
+
+    expect(await runPatchCommand({})).toBe(1);
+
+    const output = logs.join('\n');
+    expect(output).toMatch(/npm install is incomplete/);
+    expect(output).toContain(program);
+    expect(output).toContain('node node_modules/@anthropic-ai/claude-code/install.cjs');
+    expect(output).not.toMatch(/Could not determine the version/);
+    expect(readFileSync(program)).toEqual(programBefore);
+    expect(statSync(program).ino).toBe(programInode);
+    expect(readFileSync(launchers.cmd)).toEqual(launcherBefore);
+    expect(backupFiles()).toEqual([]);
+    expect(readPatchManifest()).toBeNull();
+    expect(candidateDirsIn(binDir)).toEqual([]);
+    expect(candidateDirsIn(dirname(program))).toEqual([]);
+    expect(hoisted.readContentCalls).toEqual([]);
+  });
+
+  it('reports the incomplete install on --restore without selecting or writing a backup', async () => {
+    const { binDir, program, launchers } = installNpmClaude('2.1.266');
+    writeNativePlaceholder(program);
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+    const programBefore = readFileSync(program);
+    const programInode = statSync(program).ino;
+    const launcherBefore = readFileSync(launchers.cmd);
+
+    expect(await runPatchCommand({ restore: true })).toBe(1);
+
+    const output = logs.join('\n');
+    expect(output).toMatch(/npm install is incomplete/);
+    expect(output).toContain('node node_modules/@anthropic-ai/claude-code/install.cjs');
+    expect(output).not.toMatch(/no patch manifest records a pristine backup/);
+    expect(output).not.toMatch(/claude --version` failed/);
+    expect(readFileSync(program)).toEqual(programBefore);
+    expect(statSync(program).ino).toBe(programInode);
+    expect(readFileSync(launchers.cmd)).toEqual(launcherBefore);
+    expect(backupFiles()).toEqual([]);
+    expect(readPatchManifest()).toBeNull();
+    expect(candidateDirsIn(binDir)).toEqual([]);
+    expect(candidateDirsIn(dirname(program))).toEqual([]);
+    expect(hoisted.readContentCalls).toEqual([]);
+  });
+
+  it('refuses --restore without consuming an existing manifest or pristine backup', async () => {
+    const { binDir, program, launchers } = installNpmClaude('2.1.266');
+    const launcherBefore = readFileSync(launchers.cmd);
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+
+    expect(await runPatchCommand({})).toBe(0);
+    const manifestBefore = readPatchManifest();
+    expect(manifestBefore).not.toBeNull();
+    const backupSnapshots = backupFiles().map(name => ({
+      name,
+      bytes: readFileSync(join(tweakccDir, name)),
+    }));
+
+    writeNativePlaceholder(program);
+    const placeholderBefore = readFileSync(program);
+    const programInode = statSync(program).ino;
+    logs.length = 0;
+    hoisted.readContentCalls.length = 0;
+
+    expect(await runPatchCommand({ restore: true })).toBe(1);
+
+    const output = logs.join('\n');
+    expect(output).toMatch(/npm install is incomplete/);
+    expect(output).toContain('node node_modules/@anthropic-ai/claude-code/install.cjs');
+    expect(readFileSync(program)).toEqual(placeholderBefore);
+    expect(statSync(program).ino).toBe(programInode);
+    expect(readFileSync(launchers.cmd)).toEqual(launcherBefore);
+    expect(readPatchManifest()).toEqual(manifestBefore);
+    expect(backupFiles()).toEqual(backupSnapshots.map(snapshot => snapshot.name));
+    for (const snapshot of backupSnapshots) {
+      expect(readFileSync(join(tweakccDir, snapshot.name))).toEqual(snapshot.bytes);
+    }
+    expect(candidateDirsIn(binDir)).toEqual([]);
+    expect(candidateDirsIn(dirname(program))).toEqual([]);
+    expect(hoisted.readContentCalls).toEqual([]);
+  });
+
+  it('keeps launch-time patch checks non-fatal for an incomplete npm install', async () => {
+    const { program, launchers } = installNpmClaude('2.1.266');
+    writeNativePlaceholder(program);
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+    const before = readFileSync(program);
+    const inode = statSync(program).ino;
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(runLaunchPatchCheck({})).resolves.toBeUndefined();
+
+    expect(stderr.mock.calls.flat().join('\n')).toMatch(/npm install is incomplete/);
+    expect(readFileSync(program)).toEqual(before);
+    expect(statSync(program).ino).toBe(inode);
+    expect(backupFiles()).toEqual([]);
+    expect(readPatchManifest()).toBeNull();
+    expect(hoisted.readContentCalls).toEqual([]);
+  });
 
   it('restores the program a launcher starts, not the launcher', async () => {
     const { program, launchers } = installNpmClaude('2.1.266');

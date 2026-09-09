@@ -64,6 +64,7 @@ import { isRetainedOpenCodeGoProvider } from './registry/resolve-template.js';
 import { findModelsDevModel } from './registry/models-dev.js';
 import { findClaudeBinary, getClaudeVersionForBinary } from './launch.js';
 import { resolveThroughNpmShims } from './npm-shim.js';
+import { isClaudeNativeBinaryPlaceholder } from './claude-native-placeholder.js';
 import {
   resignMachOBinary,
   restoreEntryModuleName,
@@ -477,6 +478,7 @@ export type ClaudePatchTarget =
   | { ok: true; binaryPath: string; version: string }
   | { ok: false; reason: 'binary-not-found' }
   | { ok: false; reason: 'version-unknown'; binaryPath: string }
+  | { ok: false; reason: 'native-binary-missing'; binaryPath: string }
   | {
       ok: false;
       reason: 'launcher-unresolved';
@@ -557,6 +559,9 @@ export function resolveClaudeBinaryForPatch(): ClaudePatchTarget {
   } catch {
     return { ok: false, reason: 'binary-not-found' };
   }
+  if (isClaudeNativeBinaryPlaceholder(resolved)) {
+    return { ok: false, reason: 'native-binary-missing', binaryPath: resolved };
+  }
   const version = getClaudeVersionForBinary(resolved);
   if (!version) return { ok: false, reason: 'version-unknown', binaryPath: resolved };
   return { ok: true, binaryPath: resolved, version };
@@ -571,6 +576,12 @@ export function describePatchTargetFailure(target: Extract<ClaudePatchTarget, { 
       + 'itself (for an npm install on Windows that is '
       + 'node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe under the directory holding the '
       + 'launcher), then run the command again.';
+  }
+  if (target.reason === 'native-binary-missing') {
+    return `${target.binaryPath} is Claude Code's npm placeholder, not its native binary, so the npm `
+      + 'install is incomplete. Run '
+      + '`node node_modules/@anthropic-ai/claude-code/install.cjs`, or reinstall Claude Code without '
+      + '`--ignore-scripts` / `--omit=optional`. Then run `clodex patch` again.';
   }
   return target.reason === 'binary-not-found'
     ? 'claude binary not found. Install Claude Code or set TWEAKCC_CC_INSTALLATION_PATH.'
@@ -1051,16 +1062,22 @@ export async function applyPatch(
 /**
  * `clodex patch --restore` — put the pristine bytes back over the live binary.
  *
- * A pristine backup exists PRECISELY for the case where the install is broken, so
- * recovery must not require the broken binary to run. When `--version` cannot be
- * probed, the version comes from the manifest instead — it recorded
+ * A pristine backup exists PRECISELY for the case where a patched install is broken,
+ * so generic recovery must not require the broken binary to run. When `--version`
+ * cannot be probed, the version comes from the manifest instead — it recorded
  * `claudeVersion`, `backupPath` and `pristineSha256` when the binary was patched,
- * which establishes provenance without executing anything. The patch path keeps
- * the hard failure: patching an unidentifiable binary is elective, restoring one
- * is the user's way out.
+ * which establishes provenance without executing anything.
+ *
+ * The npm placeholder is different: a package-manager operation has replaced the
+ * target, and the package may no longer be the version recorded by an old manifest.
+ * Restoring those bytes would guess. That state refuses above and points to npm's
+ * installer; the manifest fallback remains for an otherwise unprobeable binary.
  */
 function runRestoreCommand(target: ClaudePatchTarget): number {
-  if (!target.ok && target.reason === 'binary-not-found') {
+  if (!target.ok && (
+    target.reason === 'binary-not-found'
+    || target.reason === 'native-binary-missing'
+  )) {
     p.log.error(describePatchTargetFailure(target));
     return 1;
   }

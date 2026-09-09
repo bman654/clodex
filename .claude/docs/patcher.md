@@ -1,12 +1,12 @@
 <!-- Read when changing src/patcher.ts, patch-transforms.ts, patch-backup.ts, local-patches.ts,
-     built-in-patch-proofs.ts, bun-entry-module.ts, bun-bundle.ts, npm-shim.ts, or anything about
-     `clodex patch`. -->
+     built-in-patch-proofs.ts, bun-entry-module.ts, bun-bundle.ts, npm-shim.ts,
+     claude-native-placeholder.ts, or anything about `clodex patch`. -->
 
 # Patcher
 
 `src/patcher.ts` + `src/patch-transforms.ts` + `src/built-in-patch-proofs.ts` +
 `src/local-patches.ts` + `src/patch-backup.ts` + `src/bun-entry-module.ts` + `src/bun-bundle.ts` +
-`src/npm-shim.ts`.
+`src/npm-shim.ts` + `src/claude-native-placeholder.ts`.
 
 `clodex patch` uses tweakcc's programmatic API — an exact-pinned, declared runtime dependency
 (externalized in `tsup.config.ts`; it brings `node-lief` for native repacking and `ink`/`react` for
@@ -648,9 +648,21 @@ tweakcc's own repack reads back as an ordinary module name.
   restored, so borrowing it from a shim silently downgraded the user's Claude Code.
   **An unprobeable binary is a hard error on the patch path** — patching is elective, so it refuses
   rather than guessing. `resolveClaudeBinaryForPatch` returns `binary-not-found`,
-  `version-unknown` or `launcher-unresolved`; the launch-time
-  check stays non-fatal for all three (it prints one dim line for the latter two, nothing for the
-  first).
+  `version-unknown`, `native-binary-missing` or `launcher-unresolved`; the launch-time
+  check stays non-fatal for every reason (it prints one dim line for failures other than
+  `binary-not-found`).
+- **An npm placeholder is diagnosed before the version probe** (`claude-native-placeholder.ts`).
+  `@anthropic-ai/claude-code` publishes `bin/claude.exe` as a 500-byte text file which its
+  postinstall replaces with the platform-native binary. Skipped install scripts or omitted optional
+  dependencies leave that text in place, and executing it on Windows reports an invalid application
+  while the patcher otherwise collapses it into `version-unknown`. Detection reads content only
+  below a 64 KiB size ceiling and requires two independent signals from the shipped text; a real
+  binary is rejected by metadata without being read. `native-binary-missing` points to Anthropic's
+  install script or a reinstall without the two npm omission flags. Patch and restore both refuse
+  before any backup or candidate write, even when an old manifest matches the path: the npm
+  operation may have changed package versions, so restoring that manifest's bytes would guess.
+  Generic unprobeable binaries retain manifest-based recovery. Launch-time checking reports the
+  incomplete install without blocking launch.
 - **An npm launcher is followed to the program it starts, on the patch path only** (`npm-shim.ts`).
   **This is a Windows install shape**: npm's `bin-links` writes a symlink for a package bin on
   POSIX and only calls `cmd-shim` on Windows, where it writes three launchers per bin —
