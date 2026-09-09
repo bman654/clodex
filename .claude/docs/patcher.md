@@ -1,11 +1,12 @@
 <!-- Read when changing src/patcher.ts, patch-transforms.ts, patch-backup.ts, local-patches.ts,
-     built-in-patch-proofs.ts, bun-entry-module.ts, bun-bundle.ts, or anything about
+     built-in-patch-proofs.ts, bun-entry-module.ts, bun-bundle.ts, npm-shim.ts, or anything about
      `clodex patch`. -->
 
 # Patcher
 
 `src/patcher.ts` + `src/patch-transforms.ts` + `src/built-in-patch-proofs.ts` +
-`src/local-patches.ts` + `src/patch-backup.ts` + `src/bun-entry-module.ts` + `src/bun-bundle.ts`.
+`src/local-patches.ts` + `src/patch-backup.ts` + `src/bun-entry-module.ts` + `src/bun-bundle.ts` +
+`src/npm-shim.ts`.
 
 `clodex patch` uses tweakcc's programmatic API — an exact-pinned, declared runtime dependency
 (externalized in `tsup.config.ts`; it brings `node-lief` for native repacking and `ink`/`react` for
@@ -632,15 +633,56 @@ tweakcc's own repack reads back as an ordinary module name.
   failure (patching is elective; restoring is the way out), and its error message names `--restore`
   as the recovery.
 - **Binary resolution bypasses PATH shims** (cmux installs a shim copy):
-  `TWEAKCC_CC_INSTALLATION_PATH` → `~/.local/bin/claude` → `findClaudeBinary()`. **The version is
+  `TWEAKCC_CC_INSTALLATION_PATH` → `~/.local/bin/claude` → `findClaudeBinary()`.
+  **`~/.local/bin/claude.exe`, which the Windows native installer writes, is deliberately NOT
+  probed.** Adding it as a last-resort fallback made an existing restore weakness reachable:
+  `findClaudeBinary()` returns the same null for "`CLODEX_CLAUDE_PATH` names a file that is gone" as
+  for "nothing found", so a stale explicit override silently became a DIFFERENT install, and
+  `--restore` copied the missing install's pristine bytes over it and deleted the manifest —
+  reproduced on real 2.1.266 binaries, with the fallback deletion as the control. It stays out until
+  issue #199 (restore selects a backup by version without proving it belongs to the install being
+  restored) is fixed. **The version is
   probed from that resolved binary** (`getClaudeVersionForBinary`), never from
   `getInstalledClaudeVersion()`, whose PATH lookup can land on a different install and whose
   `'2.1.183'` fallback is only safe for request metadata. The version names the backup that gets
   restored, so borrowing it from a shim silently downgraded the user's Claude Code.
   **An unprobeable binary is a hard error on the patch path** — patching is elective, so it refuses
-  rather than guessing. `resolveClaudeBinaryForPatch` returns `binary-not-found` vs
-  `version-unknown`; the launch-time
-  check stays non-fatal for both.
+  rather than guessing. `resolveClaudeBinaryForPatch` returns `binary-not-found`,
+  `version-unknown` or `launcher-unresolved`; the launch-time
+  check stays non-fatal for all three (it prints one dim line for the latter two, nothing for the
+  first).
+- **An npm launcher is followed to the program it starts, on the patch path only** (`npm-shim.ts`).
+  **This is a Windows install shape**: npm's `bin-links` writes a symlink for a package bin on
+  POSIX and only calls `cmd-shim` on Windows, where it writes three launchers per bin —
+  extensionless `sh`, `.cmd`, `.ps1` — each naming its program relative to its OWN directory. The
+  parsing is platform-independent (which is what makes it testable off Windows), but the install
+  shape is not. `findBinaryOnPath` prefers `claude.cmd` on Windows **on purpose**, because
+  launching claude there needs a shell script, and `realpathSync` cannot see through a launcher
+  (there is no symlink), so the file is parsed with a port of npm's `read-cmd-shim` grammar. Both
+  bin shapes Claude Code has shipped must keep working: a native `bin/claude.exe`, which the
+  launcher runs directly, and a legacy `cli.js`, which it hands to a nearby node — the program
+  named LAST, before the argument forwarder, is the one to patch. `cmd-shim` 9 renamed the sh
+  launcher's base directory to `$basedir_win` for the legacy shape; both spellings are read.
+  A `cli.js` target is versioned by running it with clodex's own `process.execPath`, because it is
+  not an executable on Windows and need not carry the executable bit anywhere. **Do not move this
+  into `findClaudeBinary()`** — launch needs the launcher; only the patcher needs the program.
+  **Two rules read-cmd-shim does not have**, because clodex uses the answer to pick a file to
+  OVERWRITE rather than to report on a link: whole-line comments (`REM`, `::`, `#`) are skipped (the
+  grammar runs per line, so it also cannot stitch a target across two of them), and a launcher whose
+  remaining lines name two DIFFERENT programs is refused instead of resolved to whichever came
+  first — a review reproduced `clodex patch` reporting success against an install the shell never
+  starts. Repetition is normal (the real PowerShell launcher names one target four times);
+  disagreement is not. **Neither rule is shell analysis.** A line a shell would never reach — a dead
+  `if` branch, a heredoc body, a trailing inline comment — is still a candidate; the outcome there
+  is the refusal, not a wrong guess, and closing it properly would mean parsing three shells.
+  Resolution failure (a launcher whose program is gone, a `.cmd`/`.ps1` whose program cannot be
+  read, two programs named) is a refusal *before* any candidate, backup or manifest write, naming
+  `CLODEX_CLAUDE_PATH` as the way out — never a fallback to patching the launcher, which is what
+  produced issue #193's
+  "Unable to detect installation type from path ...\\.clodex-patch-XXXX\\claude.cmd". When the
+  program's path could be read but the file is gone, that path is what the failure carries, so a
+  manifest recorded against it still matches and `--restore` still works. That is a rescue path
+  with a dedicated end-to-end test; a mutation to the launcher path left the whole suite green.
 - Concurrency lock `~/.clodex/patch.lock` (pid + 10-min staleness + ESRCH liveness); the loser skips
   with a notice — never blocks, corrupts, or double-patches.
 - `runLaunchPatchCheck()` in `clodex claude`: interactive y/N offer when stale; non-TTY or

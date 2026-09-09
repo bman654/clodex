@@ -195,6 +195,8 @@ Patch the installed Claude Code binary so clodex favorites and aliases are first
 | `--disable-local-patches` | Disable local patches and rebuild from pristine bytes without them |
 | `--help` | Help |
 
+On Windows, when Claude Code was installed with `npm install -g`, the `claude` on your PATH is a small launcher script (`claude.cmd`, `claude.ps1`, and an extensionless one) rather than the program itself; `clodex patch` follows it to the program and patches that. (On macOS and Linux npm makes a symlink instead, which always worked.) If the launcher cannot be followed — its program moved or removed, or it names two different programs — `clodex patch` stops without touching anything and tells you to set `CLODEX_CLAUDE_PATH` to the program directly.
+
 The patch map is built from your favorites and aliases; context windows come from provider metadata. A pristine per-version backup is kept, and a manifest (`~/.clodex/patch-state.json`) makes re-runs no-ops until your config or Claude Code version changes — then the binary is restored first and re-patched fresh. `clodex claude` checks patch freshness at launch and offers to re-patch (a non-blocking notice when not interactive). Re-run `clodex patch` after every `claude` update.
 
 #### Local patches (trusted code)

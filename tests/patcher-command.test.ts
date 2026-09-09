@@ -23,8 +23,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
-import { runLaunchPatchCheck, runPatchCommand, readPatchManifest } from '../src/patcher.js';
+import { basename, dirname, join } from 'node:path';
+import {
+  runLaunchPatchCheck,
+  runPatchCommand,
+  readPatchManifest,
+  resolveClaudeBinaryForPatch,
+} from '../src/patcher.js';
+import { LEGACY_LAUNCHERS, NATIVE_LAUNCHERS } from './helpers/npm-launchers.js';
 
 const hoisted = vi.hoisted(() => ({
   sentinel: '\n#__CLAUDE_BUNDLE__\n',
@@ -231,6 +237,228 @@ describe('runPatchCommand version resolution', () => {
 
     expect(stderr.mock.calls.join('\n')).toMatch(/Could not determine the version/);
     expect(readPatchManifest()).toBeNull();
+  });
+});
+
+describe('runPatchCommand npm launcher resolution', () => {
+  /**
+   * The reporter's Windows layout (issue #193): `npm install -g` puts the three
+   * launchers it writes on PATH and the program itself under `node_modules`.
+   * `where.exe claude` returns the launchers; none of them is Claude Code.
+   */
+  function installNpmClaude(version: string, bundle = PRISTINE_BUNDLE): {
+    binDir: string;
+    program: string;
+    launchers: { sh: string; cmd: string; ps1: string };
+  } {
+    const binDir = join(home, 'nodejs');
+    const program = join(binDir, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
+    writeFakeClaude(program, version, bundle);
+    const launchers = {
+      sh: join(binDir, 'claude'),
+      cmd: join(binDir, 'claude.cmd'),
+      ps1: join(binDir, 'claude.ps1'),
+    };
+    writeFileSync(launchers.sh, NATIVE_LAUNCHERS.sh, { mode: 0o755 });
+    writeFileSync(launchers.cmd, NATIVE_LAUNCHERS.cmd, { mode: 0o755 });
+    writeFileSync(launchers.ps1, NATIVE_LAUNCHERS.ps1, { mode: 0o755 });
+    return { binDir, program: realpathSync(program), launchers };
+  }
+
+  const candidateDirsIn = (directory: string) =>
+    readdirSync(directory).filter(name => name.startsWith('.clodex-patch-'));
+
+  const launcherNames = ['cmd', 'ps1', 'sh'] as const;
+
+  it.each(launcherNames)(
+    'patches the program a %s launcher starts and leaves every launcher byte-identical',
+    async kind => {
+      const { binDir, program, launchers } = installNpmClaude('2.1.266');
+      const pristineBytes = readFileSync(program);
+      const launcherBytes = {
+        sh: readFileSync(launchers.sh),
+        cmd: readFileSync(launchers.cmd),
+        ps1: readFileSync(launchers.ps1),
+      };
+      process.env.CLODEX_CLAUDE_PATH = launchers[kind];
+
+      expect(await runPatchCommand({})).toBe(0);
+
+      // The program was patched...
+      expect(bundleOf(program)).toContain('"sol"');
+      // ...and the launchers were not touched at all.
+      expect(readFileSync(launchers.sh)).toEqual(launcherBytes.sh);
+      expect(readFileSync(launchers.cmd)).toEqual(launcherBytes.cmd);
+      expect(readFileSync(launchers.ps1)).toEqual(launcherBytes.ps1);
+      // The candidate is created beside the PROGRAM, not beside the launcher, so
+      // that is where a leak would show up.
+      expect(candidateDirsIn(dirname(program))).toEqual([]);
+      expect(candidateDirsIn(binDir)).toEqual([]);
+
+      // Backup and manifest key off the PROGRAM, which is what makes --restore
+      // able to find them again.
+      const manifest = readPatchManifest();
+      expect(manifest?.binaryPath).toBe(program);
+      expect(manifest?.claudeVersion).toBe('2.1.266');
+      expect(manifest?.backupPath).toMatch(/claude-2\.1\.266-[0-9a-f]{16}\.orig$/);
+      expect(readFileSync(manifest!.backupPath)).toEqual(pristineBytes);
+      expect(manifest?.pristineSha256).toBe(sha256OfBuffer(pristineBytes));
+    },
+  );
+
+  it('restores the program a launcher starts, not the launcher', async () => {
+    const { program, launchers } = installNpmClaude('2.1.266');
+    const pristineBytes = readFileSync(program);
+    const launcherBytes = readFileSync(launchers.cmd);
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+
+    expect(await runPatchCommand({})).toBe(0);
+    expect(readFileSync(program)).not.toEqual(pristineBytes);
+
+    expect(await runPatchCommand({ restore: true })).toBe(0);
+    expect(readFileSync(program)).toEqual(pristineBytes);
+    expect(readFileSync(launchers.cmd)).toEqual(launcherBytes);
+    expect(readPatchManifest()).toBeNull();
+  });
+
+  it('restores through a stale launcher after the program it named has gone', async () => {
+    // The rescue that failed issue #193's reporter. A patch succeeded, then the
+    // program disappeared (a broken reinstall, a moved node_modules). The
+    // launcher still NAMES it, so the failure carries that path rather than the
+    // launcher's — which is the only thing that lets the manifest recorded
+    // against the program still be recognised.
+    const { program, launchers } = installNpmClaude('2.1.266');
+    const pristineBytes = readFileSync(program);
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+
+    expect(await runPatchCommand({})).toBe(0);
+    expect(readFileSync(program)).not.toEqual(pristineBytes);
+    rmSync(program);
+
+    expect(await runPatchCommand({ restore: true })).toBe(0);
+
+    expect(existsSync(program)).toBe(true);
+    expect(readFileSync(program)).toEqual(pristineBytes);
+    expect(readPatchManifest()).toBeNull();
+    expect(logs.join('\n')).toMatch(/Restored pristine claude 2\.1\.266/);
+  });
+
+  it('refuses before any write when the launcher names a program that is gone', async () => {
+    const { binDir, program, launchers } = installNpmClaude('2.1.266');
+    rmSync(program);
+    const launcherBytes = readFileSync(launchers.cmd);
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+
+    expect(await runPatchCommand({})).toBe(1);
+
+    expect(logs.join('\n')).toMatch(/does not exist/);
+    expect(logs.join('\n')).toMatch(/CLODEX_CLAUDE_PATH/);
+    expect(readFileSync(launchers.cmd)).toEqual(launcherBytes);
+    expect(backupFiles()).toEqual([]);
+    expect(readPatchManifest()).toBeNull();
+    expect(candidateDirsIn(binDir)).toEqual([]);
+    expect(candidateDirsIn(dirname(program))).toEqual([]);
+  });
+
+  it('refuses a Windows launcher it cannot read instead of handing it to the patcher', async () => {
+    const { binDir, program, launchers } = installNpmClaude('2.1.266');
+    writeFileSync(launchers.cmd, '@ECHO off\r\nnode "%~dp0\\..\\thing.js" %1\r\n');
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+
+    expect(await runPatchCommand({})).toBe(1);
+
+    expect(logs.join('\n')).toMatch(/could not read which file it starts/);
+    expect(logs.join('\n')).toMatch(/CLODEX_CLAUDE_PATH/);
+    expect(backupFiles()).toEqual([]);
+    expect(readPatchManifest()).toBeNull();
+    expect(candidateDirsIn(binDir)).toEqual([]);
+    expect(candidateDirsIn(dirname(program))).toEqual([]);
+  });
+
+  it('keeps a launch alive, with one line of advice, when a launcher cannot be followed', async () => {
+    const { program, launchers } = installNpmClaude('2.1.266');
+    rmSync(program);
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(runLaunchPatchCheck({})).resolves.toBeUndefined();
+
+    expect(stderr.mock.calls.flat().join('\n')).toMatch(/CLODEX_CLAUDE_PATH/);
+    expect(readPatchManifest()).toBeNull();
+  });
+
+  it('follows a legacy launcher to an npm cli.js and reads its version with node', () => {
+    // Older Claude Code packages declared `bin: cli.js`, so npm generated the
+    // node-plus-script launchers instead. A `cli.js` carries no executable bit
+    // on Windows and need not carry one anywhere, so the version has to be read
+    // by running it with node — from that exact file, never guessed.
+    const binDir = join(home, 'nodejs');
+    const cli = join(binDir, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
+    mkdirSync(dirname(cli), { recursive: true });
+    writeFileSync(
+      cli,
+      'if (process.argv.includes("--version")) console.log("2.1.266 (Claude Code)");\n',
+      { mode: 0o644 },
+    );
+    writeFileSync(join(binDir, 'claude.cmd'), LEGACY_LAUNCHERS.cmd, { mode: 0o755 });
+    process.env.CLODEX_CLAUDE_PATH = join(binDir, 'claude.cmd');
+
+    expect(resolveClaudeBinaryForPatch()).toEqual({
+      ok: true,
+      binaryPath: realpathSync(cli),
+      version: '2.1.266',
+    });
+  });
+
+  it('refuses a launcher that names two different programs, before any write', async () => {
+    // No real cmd-shim output names two DISTINCT programs. A hand-edited one can,
+    // and picking either would patch an install the shell may never start.
+    const { binDir, program, launchers } = installNpmClaude('2.1.266');
+    const programBytes = readFileSync(program);
+    writeFileSync(launchers.cmd, [
+      '@ECHO off',
+      '"%dp0%\\decoy.exe"   %*',
+      '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*',
+      '',
+    ].join('\r\n'));
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+
+    expect(await runPatchCommand({})).toBe(1);
+
+    expect(logs.join('\n')).toMatch(/names more than one program/);
+    expect(logs.join('\n')).toMatch(/CLODEX_CLAUDE_PATH/);
+    expect(readFileSync(program)).toEqual(programBytes);
+    expect(backupFiles()).toEqual([]);
+    expect(readPatchManifest()).toBeNull();
+    expect(candidateDirsIn(binDir)).toEqual([]);
+    expect(candidateDirsIn(dirname(program))).toEqual([]);
+  });
+
+  it('tells the user the launcher could not be read, not that a version probe failed', async () => {
+    // `--restore` refuses before any version probe when the launcher names no
+    // program at all, so reporting a failed `claude --version` would name the
+    // wrong cause and send the user to the wrong remedy.
+    const { launchers } = installNpmClaude('2.1.266');
+    writeFileSync(launchers.cmd, '@ECHO off\r\nnode "%~dp0\\..\\thing.js" %1\r\n');
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+
+    expect(await runPatchCommand({ restore: true })).toBe(1);
+
+    expect(logs.join('\n')).toMatch(/could not read which file it starts/);
+    expect(logs.join('\n')).toMatch(/CLODEX_CLAUDE_PATH/);
+    expect(logs.join('\n')).not.toMatch(/claude --version` failed/);
+    expect(backupFiles()).toEqual([]);
+  });
+
+  it('patches a wrapper-style claude that is not an npm launcher rather than following it', async () => {
+    // The over-scope negative. A hand-written wrapper (cmux installs one) execs
+    // an absolute path and is NOT a cmd-shim; clodex must patch the file it
+    // found, exactly as it did before launcher resolution existed.
+    const real = installClaude('2.1.220', `${PRISTINE_BUNDLE}\nexec "/opt/real/claude" "$@"`);
+
+    expect(await runPatchCommand({})).toBe(0);
+    expect(bundleOf(real)).toContain('"sol"');
+    expect(readPatchManifest()?.binaryPath).toBe(real);
   });
 });
 
