@@ -22,6 +22,16 @@
 //     no backup existed, and the version-resolution bug generated exactly that
 //     state. Patching poisoned bytes would double-patch the install AND launder
 //     the result into a content-addressed name that rule 1 then trusts on sight.
+//  4. A version tag is not install provenance. The npm platform package and the
+//     native installer ship DIFFERENT files under the same Claude Code version,
+//     and both are supported, so a user can hold two same-version installs whose
+//     bytes differ. The manifest is the only record of which install a backup was
+//     made for, and it holds ONE install, so it can confirm a backup but never
+//     rule one in by elimination: when it records a different install, or names
+//     pristine bytes for this one that are no longer on disk, restoring is
+//     refused rather than guessed (issue #199). What remains is the case of no
+//     manifest at all, where selection still rests on the version tag; the plan
+//     carries a note saying so.
 //
 // Everything here is deterministic given its inputs so the decisions can be
 // tested directly; the caller performs the file copies.
@@ -188,6 +198,14 @@ export function looksLikeLegacyClodexPatch(source: string): boolean {
 
 export interface PatchManifestFacts {
   binaryPath: string;
+  /**
+   * The claude version the manifest was written for. A manifest that recorded a
+   * DIFFERENT version says nothing about the backups tagged with the version now
+   * being restored — its own backup is not even among them — so its testimony is
+   * scoped to its version rather than applied across an upgrade. Absent in
+   * hand-edited or truncated manifests, which are treated as same-version.
+   */
+  claudeVersion?: string;
   backupPath?: string;
   patchedSha256?: string;
   pristineSha256?: string;
@@ -231,13 +249,71 @@ function noBackupMessage(facts: PristineFacts): string {
 }
 
 /**
+ * True when `manifest` recorded WHICH backup holds its install's pristine bytes.
+ * `pristineSha256` is absent from manifests written before content addressing,
+ * so the recorded path counts too; a manifest carrying neither identifies
+ * nothing and can neither confirm nor disqualify a backup.
+ */
+function identifiesABackup(manifest: PatchManifestFacts): boolean {
+  return manifest.pristineSha256 !== undefined || manifest.backupPath !== undefined;
+}
+
+/** The manifest named this install's pristine bytes, and they are no longer usable. */
+function recordedBackupGoneMessage(facts: PristineFacts, manifest: PatchManifestFacts): string {
+  const named = manifest.backupPath ?? `the backup holding sha256 ${manifest.pristineSha256}`;
+  const corrupt = facts.corruptBackups?.length
+    ? ` (${facts.corruptBackups.length} backup file(s) for this version failed integrity checks and were ignored)`
+    : '';
+  const others = facts.backups.length
+    ? `The ${facts.backups.length} other pristine backup(s) tagged claude ${facts.version} there were made `
+      + 'for some other install — two installs of one Claude Code version are different files, so '
+      + 'restoring one of them would overwrite this install with bytes that were never its own. '
+    : '';
+  return `The patch manifest records ${named} as the pristine content of ${facts.binaryPath}, and clodex `
+    + `cannot use it: it is missing from ${backupDir()}, failed its integrity check, or holds a `
+    + `different claude version${corrupt}. ${others}`
+    + 'Reinstall Claude Code to get a pristine binary, then run `clodex patch`.';
+}
+
+/** A manifest for a DIFFERENT install cannot vouch for anything in the backup directory. */
+function otherInstallMessage(facts: PristineFacts, otherBinaryPath: string): string {
+  return `The patch manifest records a different Claude Code install (${otherBinaryPath}), so nothing `
+    + `establishes that a pristine backup tagged claude ${facts.version} in ${backupDir()} belongs to `
+    + `${facts.binaryPath}. Two installs of one Claude Code version are different files, so restoring `
+    + 'by version tag alone would overwrite this install with another one\'s bytes. Set '
+    + `TWEAKCC_CC_INSTALLATION_PATH=${otherBinaryPath} to restore that install instead, or reinstall `
+    + 'Claude Code to make this one pristine.';
+}
+
+/**
  * Pick the pristine bytes to restore over an already-patched binary.
  * Every branch requires bytes whose provenance is established; when none are,
  * the result is an error rather than a guess.
  */
 function selectRestoreSource(facts: PristineFacts): RestorePlan {
   const notes: string[] = [];
-  const manifest = facts.manifest && facts.manifest.binaryPath === facts.binaryPath ? facts.manifest : null;
+  const recorded = facts.manifest;
+  // A manifest speaks only for the version it was written for. After an upgrade
+  // it records a backup of the OLD version, which is not among this version's
+  // candidates — treating that as "the recorded backup is gone" refused a restore
+  // that was never in danger, and treating it as evidence about another install
+  // refused one for a version it had never seen.
+  const speaksForThisVersion = !recorded?.claudeVersion || recorded.claudeVersion === facts.version;
+  const manifest = recorded && recorded.binaryPath === facts.binaryPath && speaksForThisVersion
+    ? recorded
+    : null;
+  // A manifest recorded against a DIFFERENT install is not the same thing as no
+  // manifest: it is positive evidence about the backup directory. The bytes it
+  // names are that other install's pristine bytes, and two supported installs of
+  // ONE Claude Code version are genuinely different files (the npm platform
+  // package and the native installer ship different binaries under the same
+  // version). Discarding the manifest and falling through to version-tag
+  // selection published one install's bytes over the other and then deleted the
+  // manifest, leaving no backup of what it clobbered — issue #199. Same version
+  // is not the same install.
+  const other = recorded && recorded.binaryPath !== facts.binaryPath && speaksForThisVersion
+    ? recorded
+    : null;
 
   // 1. The manifest's recorded pristine content, wherever it now lives. Matching
   //    on content (not path) also survives the legacy → content-addressed rename.
@@ -251,15 +327,31 @@ function selectRestoreSource(facts: PristineFacts): RestorePlan {
   //    match here instead of being copied over a newer binary.
   if (!chosen && manifest?.backupPath) {
     chosen = facts.backups.find(backup => backup.path === manifest.backupPath);
-    if (!chosen) {
-      notes.push(`Recorded pristine backup ${manifest.backupPath} is missing, corrupt, or belongs to another claude version — ignoring it.`);
-    }
+  }
+
+  // 2b. The manifest speaks FOR this install: it recorded which bytes are its
+  //     pristine content. When neither the recorded hash nor the recorded path is
+  //     on disk any more, every remaining same-version backup was made for some
+  //     other install, and the manifest's own testimony says so. Falling through
+  //     to version-tag selection here published another install's bytes.
+  if (!chosen && manifest && identifiesABackup(manifest)) {
+    return { action: 'error', message: recordedBackupGoneMessage(facts, manifest) };
   }
 
   // 3. No manifest help: fall back to the version's backups, but only when they
   //    agree on the content. Two different "pristine" snapshots of one version
   //    mean at least one is wrong; guessing is exactly the destructive move.
   if (!chosen) {
+    // A manifest recorded against a DIFFERENT install vouches for nothing here.
+    // Disqualifying only the backup IT names is not enough: the manifest holds one
+    // install, so every earlier install's backup is an unrecorded orphan carrying
+    // the same version tag, and picking "the one it did not name" hands a third
+    // install's bytes to this one. There is no evidence to select on — refuse.
+    if (other) {
+      return facts.backups.length
+        ? { action: 'error', message: otherInstallMessage(facts, other.binaryPath) }
+        : { action: 'error', message: noBackupMessage(facts) };
+    }
     const distinct = [...new Set(facts.backups.map(backup => backup.sha256))];
     if (distinct.length > 1) {
       return {
@@ -267,11 +359,25 @@ function selectRestoreSource(facts: PristineFacts): RestorePlan {
         message: `Found conflicting pristine backups for claude ${facts.version}: `
           + `${facts.backups.map(backup => backup.path).join(', ')}. `
           + 'They do not hold the same bytes, so clodex cannot tell which one is pristine. '
-          + 'Remove the wrong one (or reinstall Claude Code), then run `clodex patch`.',
+          + 'If this machine has more than one Claude Code install, both are probably genuine — one '
+          + `per install — and deleting either one is a guess. Reinstall the Claude Code at `
+          + `${facts.binaryPath} instead: a pristine install needs no backup, and \`clodex patch\` `
+          + 'will record its own.',
       };
     }
     // Prefer a self-validating name when both spellings hold the same bytes.
     chosen = facts.backups.find(backup => backup.kind === 'content-addressed') ?? facts.backups[0];
+    if (chosen) {
+      // Say so out loud: no manifest records this install, so the ONLY thing tying
+      // these bytes to it is the version tag in the file name. That is the last
+      // place a same-version backup from another install can still be selected.
+      notes.push(
+        `No patch manifest records ${facts.binaryPath}, so ${chosen.path} is being used as its `
+        + `pristine content on the strength of its claude ${facts.version} version tag alone. On a `
+        + 'machine with more than one Claude Code install those bytes may belong to the other one — '
+        + 'a clodex that had recorded this install would have refused rather than guess.',
+      );
+    }
   }
 
   if (!chosen) return { action: 'error', message: noBackupMessage(facts) };
