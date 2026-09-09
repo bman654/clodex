@@ -20,10 +20,12 @@ import {
   realpathSync,
   rmSync,
   symlinkSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   runLaunchPatchCheck,
   runPatchCommand,
@@ -31,6 +33,23 @@ import {
   resolveClaudeBinaryForPatch,
 } from '../src/patcher.js';
 import { LEGACY_LAUNCHERS, NATIVE_LAUNCHERS } from './helpers/npm-launchers.js';
+
+const NATIVE_PLACEHOLDER_BYTES = readFileSync(fileURLToPath(
+  new URL('./fixtures/claude-native-placeholder-2.1.266.exe', import.meta.url),
+));
+
+const NATIVE_PACKAGE_NAMES = [
+  '@anthropic-ai/claude-code-darwin-arm64',
+  '@anthropic-ai/claude-code-darwin-x64',
+  '@anthropic-ai/claude-code-linux-x64',
+  '@anthropic-ai/claude-code-linux-arm64',
+  '@anthropic-ai/claude-code-linux-x64-musl',
+  '@anthropic-ai/claude-code-linux-arm64-musl',
+  '@anthropic-ai/claude-code-linux-arm64-android',
+  '@anthropic-ai/claude-code-linux-x64-android',
+  '@anthropic-ai/claude-code-win32-x64',
+  '@anthropic-ai/claude-code-win32-arm64',
+] as const;
 
 const hoisted = vi.hoisted(() => ({
   sentinel: '\n#__CLAUDE_BUNDLE__\n',
@@ -78,6 +97,12 @@ let home: string;
 let clodexHome: string;
 let tweakccDir: string;
 let logs: string[];
+
+function writeNativePlaceholder(path: string): void {
+  mkdirSync(join(path, '..'), { recursive: true });
+  writeFileSync(path, NATIVE_PLACEHOLDER_BYTES, { mode: 0o755 });
+  chmodSync(path, 0o755);
+}
 
 function writeFakeClaude(path: string, version: string, bundle = PRISTINE_BUNDLE): void {
   mkdirSync(join(path, '..'), { recursive: true });
@@ -238,6 +263,51 @@ describe('runPatchCommand version resolution', () => {
     expect(stderr.mock.calls.join('\n')).toMatch(/Could not determine the version/);
     expect(readPatchManifest()).toBeNull();
   });
+
+  it('reports an incomplete npm install for a directly selected placeholder before any write', async () => {
+    const program = join(home, 'npm-direct', 'bin', 'claude.exe');
+    writeNativePlaceholder(program);
+    process.env.TWEAKCC_CC_INSTALLATION_PATH = program;
+    const before = readFileSync(program);
+    const inode = statSync(program).ino;
+
+    expect(await runPatchCommand({})).toBe(1);
+
+    const output = logs.join('\n');
+    expect(output).toMatch(/npm install is incomplete/);
+    expect(output).toMatch(/could not determine whether the platform-native package is installed/);
+    expect(output).toContain('node node_modules/@anthropic-ai/claude-code/install.cjs');
+    expect(output).toContain('reinstall Claude Code without `--ignore-scripts` / `--omit=optional`');
+    expect(output).toContain('Then run `clodex patch` again');
+    expect(output).toContain('set TWEAKCC_CC_INSTALLATION_PATH');
+    expect(output).not.toMatch(/Could not determine the version/);
+    expect(readFileSync(program)).toEqual(before);
+    expect(statSync(program).ino).toBe(inode);
+    expect(backupFiles()).toEqual([]);
+    expect(readPatchManifest()).toBeNull();
+    expect(readdirSync(dirname(program))).toEqual(['claude.exe']);
+    expect(hoisted.readContentCalls).toEqual([]);
+  });
+
+  it('detects an executable placeholder before running its version command', async () => {
+    const program = join(home, 'ordering', 'bin', 'claude.exe');
+    const probeMarker = join(home, 'version-probe-ran');
+    mkdirSync(dirname(program), { recursive: true });
+    writeFileSync(
+      program,
+      `#!/bin/sh\nprintf probed > ${JSON.stringify(probeMarker)}\n${NATIVE_PLACEHOLDER_BYTES.toString('utf8')}`,
+      { mode: 0o755 },
+    );
+    chmodSync(program, 0o755);
+    process.env.TWEAKCC_CC_INSTALLATION_PATH = program;
+
+    expect(await runPatchCommand({})).toBe(1);
+
+    expect(logs.join('\n')).toMatch(/npm install is incomplete/);
+    expect(existsSync(probeMarker)).toBe(false);
+    expect(readPatchManifest()).toBeNull();
+    expect(backupFiles()).toEqual([]);
+  });
 });
 
 describe('runPatchCommand npm launcher resolution', () => {
@@ -246,14 +316,41 @@ describe('runPatchCommand npm launcher resolution', () => {
    * launchers it writes on PATH and the program itself under `node_modules`.
    * `where.exe claude` returns the launchers; none of them is Claude Code.
    */
-  function installNpmClaude(version: string, bundle = PRISTINE_BUNDLE): {
+  function installNpmClaude(
+    version: string,
+    bundle = PRISTINE_BUNDLE,
+    nativePackage?: 'present' | 'missing',
+  ): {
     binDir: string;
     program: string;
+    installScript: string | null;
     launchers: { sh: string; cmd: string; ps1: string };
   } {
     const binDir = join(home, 'nodejs');
-    const program = join(binDir, 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe');
+    const packageRoot = join(binDir, 'node_modules', '@anthropic-ai', 'claude-code');
+    const program = join(packageRoot, 'bin', 'claude.exe');
     writeFakeClaude(program, version, bundle);
+
+    let installScript: string | null = null;
+    if (nativePackage !== undefined) {
+      installScript = join(packageRoot, 'install.cjs');
+      writeFileSync(join(packageRoot, 'package.json'), JSON.stringify({
+        name: '@anthropic-ai/claude-code',
+        version,
+        optionalDependencies: Object.fromEntries(
+          NATIVE_PACKAGE_NAMES.map(name => [name, version]),
+        ),
+      }));
+      writeFileSync(installScript, '// fixture for package resolution\n');
+      if (nativePackage === 'present') {
+        for (const name of NATIVE_PACKAGE_NAMES) {
+          const nativeRoot = join(binDir, 'node_modules', ...name.split('/'));
+          mkdirSync(nativeRoot, { recursive: true });
+          writeFileSync(join(nativeRoot, 'package.json'), JSON.stringify({ name, version }));
+        }
+      }
+    }
+
     const launchers = {
       sh: join(binDir, 'claude'),
       cmd: join(binDir, 'claude.cmd'),
@@ -262,7 +359,12 @@ describe('runPatchCommand npm launcher resolution', () => {
     writeFileSync(launchers.sh, NATIVE_LAUNCHERS.sh, { mode: 0o755 });
     writeFileSync(launchers.cmd, NATIVE_LAUNCHERS.cmd, { mode: 0o755 });
     writeFileSync(launchers.ps1, NATIVE_LAUNCHERS.ps1, { mode: 0o755 });
-    return { binDir, program: realpathSync(program), launchers };
+    return {
+      binDir,
+      program: realpathSync(program),
+      installScript: installScript === null ? null : realpathSync(installScript),
+      launchers,
+    };
   }
 
   const candidateDirsIn = (directory: string) =>
@@ -305,6 +407,141 @@ describe('runPatchCommand npm launcher resolution', () => {
       expect(manifest?.pristineSha256).toBe(sha256OfBuffer(pristineBytes));
     },
   );
+
+  it('reports an incomplete npm install after following a launcher, before any write', async () => {
+    const { binDir, program, installScript, launchers } = installNpmClaude(
+      '2.1.266',
+      PRISTINE_BUNDLE,
+      'present',
+    );
+    writeNativePlaceholder(program);
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+    const programBefore = readFileSync(program);
+    const programInode = statSync(program).ino;
+    const launcherBefore = readFileSync(launchers.cmd);
+
+    expect(await runPatchCommand({})).toBe(1);
+
+    const output = logs.join('\n');
+    expect(output).toMatch(/npm install is incomplete/);
+    expect(output).toContain(program);
+    expect(output).toMatch(/platform-native package is installed/);
+    expect(output).toContain(`node "${installScript}"`);
+    expect(output).not.toMatch(/Reinstall Claude Code/);
+    expect(output).not.toMatch(/Could not determine the version/);
+    expect(readFileSync(program)).toEqual(programBefore);
+    expect(statSync(program).ino).toBe(programInode);
+    expect(readFileSync(launchers.cmd)).toEqual(launcherBefore);
+    expect(backupFiles()).toEqual([]);
+    expect(readPatchManifest()).toBeNull();
+    expect(candidateDirsIn(binDir)).toEqual([]);
+    expect(candidateDirsIn(dirname(program))).toEqual([]);
+    expect(hoisted.readContentCalls).toEqual([]);
+  });
+
+  it('reports the incomplete install on --restore without selecting or writing a backup', async () => {
+    const { binDir, program, installScript, launchers } = installNpmClaude(
+      '2.1.266',
+      PRISTINE_BUNDLE,
+      'missing',
+    );
+    writeNativePlaceholder(program);
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+    const programBefore = readFileSync(program);
+    const programInode = statSync(program).ino;
+    const launcherBefore = readFileSync(launchers.cmd);
+
+    expect(await runPatchCommand({ restore: true })).toBe(1);
+
+    const output = logs.join('\n');
+    expect(output).toMatch(/npm install is incomplete/);
+    expect(output).toMatch(/platform-native optional package is missing/);
+    expect(output).toMatch(/`install\.cjs` cannot repair this state/);
+    expect(output).toMatch(/Reinstall Claude Code without `--ignore-scripts` \/ `--omit=optional`/);
+    expect(output).not.toContain(`node "${installScript}"`);
+    expect(output).toContain('Then run `clodex patch --restore` again');
+    expect(output).toContain(`pristine backups are in ${tweakccDir}`);
+    expect(output).not.toMatch(/no patch manifest records a pristine backup/);
+    expect(output).not.toMatch(/claude --version` failed/);
+    expect(readFileSync(program)).toEqual(programBefore);
+    expect(statSync(program).ino).toBe(programInode);
+    expect(readFileSync(launchers.cmd)).toEqual(launcherBefore);
+    expect(backupFiles()).toEqual([]);
+    expect(readPatchManifest()).toBeNull();
+    expect(candidateDirsIn(binDir)).toEqual([]);
+    expect(candidateDirsIn(dirname(program))).toEqual([]);
+    expect(hoisted.readContentCalls).toEqual([]);
+  });
+
+  it('refuses --restore without consuming an existing manifest or pristine backup', async () => {
+    const { binDir, program, installScript, launchers } = installNpmClaude(
+      '2.1.266',
+      PRISTINE_BUNDLE,
+      'missing',
+    );
+    const launcherBefore = readFileSync(launchers.cmd);
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+
+    expect(await runPatchCommand({})).toBe(0);
+    const manifestBefore = readPatchManifest();
+    expect(manifestBefore).not.toBeNull();
+    const backupSnapshots = backupFiles().map(name => ({
+      name,
+      bytes: readFileSync(join(tweakccDir, name)),
+    }));
+
+    writeNativePlaceholder(program);
+    const placeholderBefore = readFileSync(program);
+    const programInode = statSync(program).ino;
+    logs.length = 0;
+    hoisted.readContentCalls.length = 0;
+
+    expect(await runPatchCommand({ restore: true })).toBe(1);
+
+    const output = logs.join('\n');
+    expect(output).toMatch(/npm install is incomplete/);
+    expect(output).toMatch(/platform-native optional package is missing/);
+    expect(output).not.toContain(`node "${installScript}"`);
+    expect(output).toContain('Then run `clodex patch --restore` again');
+    expect(output).toContain(`pristine backups are in ${tweakccDir}`);
+    expect(readFileSync(program)).toEqual(placeholderBefore);
+    expect(statSync(program).ino).toBe(programInode);
+    expect(readFileSync(launchers.cmd)).toEqual(launcherBefore);
+    expect(readPatchManifest()).toEqual(manifestBefore);
+    expect(backupFiles()).toEqual(backupSnapshots.map(snapshot => snapshot.name));
+    for (const snapshot of backupSnapshots) {
+      expect(readFileSync(join(tweakccDir, snapshot.name))).toEqual(snapshot.bytes);
+    }
+    expect(candidateDirsIn(binDir)).toEqual([]);
+    expect(candidateDirsIn(dirname(program))).toEqual([]);
+    expect(hoisted.readContentCalls).toEqual([]);
+  });
+
+  it('keeps launch-time patch checks non-fatal for an incomplete npm install', async () => {
+    const { program, installScript, launchers } = installNpmClaude(
+      '2.1.266',
+      PRISTINE_BUNDLE,
+      'present',
+    );
+    writeNativePlaceholder(program);
+    process.env.CLODEX_CLAUDE_PATH = launchers.cmd;
+    const before = readFileSync(program);
+    const inode = statSync(program).ino;
+    const stderr = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(runLaunchPatchCheck({})).resolves.toBeUndefined();
+
+    const output = stderr.mock.calls.flat().join('\n');
+    expect(output).toMatch(/npm install is incomplete/);
+    expect(output).toMatch(/platform-native package is installed/);
+    expect(output).toContain(`node "${installScript}"`);
+    expect(output).toContain('Then run the command again');
+    expect(readFileSync(program)).toEqual(before);
+    expect(statSync(program).ino).toBe(inode);
+    expect(backupFiles()).toEqual([]);
+    expect(readPatchManifest()).toBeNull();
+    expect(hoisted.readContentCalls).toEqual([]);
+  });
 
   it('restores the program a launcher starts, not the launcher', async () => {
     const { program, launchers } = installNpmClaude('2.1.266');
