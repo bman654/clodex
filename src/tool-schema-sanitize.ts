@@ -50,13 +50,14 @@
 //     (`(?<=a+)`, `(?<=\d{2,3})`) — is legal in ECMAScript (ES2018) and
 //     rejected by Python's `re` ("look-behind requires fixed-width pattern").
 //     Recognising it needs a real regex parser, so this module does not, and
-//     such a pattern would still 400. None of the 245 regexes in Claude Code
-//     2.1.266's bundle that feed a tool schema uses one.
+//     such a pattern would still 400. Only 14 distinct `pattern` values reach a
+//     built-in tool schema in 2.1.266, and none of them uses one — Artifact's
+//     `field` is the only Python-incompatible value among them.
 //   - The scanner is narrower than Python in other ways too — `[\w-.]` (a
 //     shorthand escape as a range endpoint) and the JS `[^]` idiom compile in
-//     ECMAScript and are rejected by Python. Those are reachable only from a
-//     hand-written MCP or plugin schema, are not new here, and widening the
-//     scanner to cover them is tracked separately.
+//     ECMAScript and are rejected by Python. None of those 14 values hits one
+//     either; they are reachable only from a hand-written MCP or plugin schema,
+//     are not new here, and widening the scanner is tracked separately.
 //   - **Lookaround is reported rejected on OpenAI's strict structured-output
 //     path** (vercel/ai#16021, SmartBear/smartbear-mcp#491 — reports, not
 //     something verified here; the vercel maintainers could not reproduce it

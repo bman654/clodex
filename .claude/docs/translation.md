@@ -82,9 +82,10 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   quantified (`(?<=a+)`) — is legal in ECMAScript and rejected by Python (`look-behind requires
   fixed-width pattern`); recognising it needs a real regex parser, so it is not detected and would
   still 400. The scanner is narrower than Python in a few other spots too (`[\w-.]`, the JS `[^]`
-  idiom, bare `\pL`, backreferences to a group that does not exist). None of the 245 regexes in the
-  Claude Code 2.1.266 bundle that reach a tool schema hits any of them; they are reachable only from
-  a hand-written MCP or plugin schema. And OpenAI **does** reject lookaround outright on its strict
+  idiom, bare `\pL`, backreferences to a group that does not exist). Only 14 distinct `pattern`
+  values reach a built-in tool schema in 2.1.266 and none hits any of these — Artifact's `field` is
+  the sole Python-incompatible one — so they are reachable only from a hand-written MCP or plugin
+  schema. And OpenAI **does** reject lookaround outright on its strict
   structured-output path (`vercel/ai#16021`, `SmartBear/smartbear-mcp#491` — reports, not verified
   here; the vercel maintainers could not reproduce it synthetically). clodex does not meet that
   path: `translateTools` sends `strict: false` on `@ai-sdk/openai`, covering both OpenAI routes, and
