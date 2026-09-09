@@ -55,10 +55,22 @@ const VERSION_PROBE_TIMEOUT_MS = 15_000;
  */
 export function getClaudeVersionForBinary(binaryPath: string): string | null {
   try {
+    // A JavaScript entry point — an npm install's `cli.js` — is not an
+    // executable. POSIX ran it anyway via its `#!` line, but only while the file
+    // kept its executable bit, and Windows cannot run it at all (cmd would hand
+    // a `.js` to the Windows Script Host). Run it with the Node already running
+    // clodex instead; the version still comes from THIS exact file, which is the
+    // invariant that matters.
     // POSIX: exec the file directly so a path containing spaces still works.
     // Windows: `claude` is often a .cmd shim, which needs a shell — keep the
     // quoted shell invocation there.
-    const result = isWindows
+    const result = /\.[cm]?js$/i.test(binaryPath)
+      ? execFileSync(process.execPath, [binaryPath, '--version'], {
+          encoding: 'utf8',
+          stdio: ['pipe', 'pipe', 'pipe'],
+          timeout: VERSION_PROBE_TIMEOUT_MS,
+        })
+      : isWindows
       ? execSync(`"${binaryPath}" --version`, {
           encoding: 'utf8',
           stdio: ['pipe', 'pipe', 'pipe'],

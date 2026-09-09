@@ -63,6 +63,7 @@ import { projectProviderCachedModels } from './registry/materialize.js';
 import { isRetainedOpenCodeGoProvider } from './registry/resolve-template.js';
 import { findModelsDevModel } from './registry/models-dev.js';
 import { findClaudeBinary, getClaudeVersionForBinary } from './launch.js';
+import { resolveThroughNpmShims } from './npm-shim.js';
 import {
   resignMachOBinary,
   restoreEntryModuleName,
@@ -475,13 +476,45 @@ export function tryAcquirePatchLock(
 export type ClaudePatchTarget =
   | { ok: true; binaryPath: string; version: string }
   | { ok: false; reason: 'binary-not-found' }
-  | { ok: false; reason: 'version-unknown'; binaryPath: string };
+  | { ok: false; reason: 'version-unknown'; binaryPath: string }
+  | {
+      ok: false;
+      reason: 'launcher-unresolved';
+      /**
+       * The program the launcher names when that could be read — so `--restore`
+       * can still match a manifest recorded against it — and the launcher
+       * itself when it could not. `declaredTarget` says which of the two this
+       * is, because the difference decides what `--restore` may attempt.
+       */
+      binaryPath: string;
+      shimPath: string;
+      declaredTarget: string | null;
+      detail: string;
+    };
 
 /**
  * Locate the REAL native binary, bypassing wrapper shims (e.g. cmux) that a
  * plain PATH lookup can return. Order (ported from the relay-ai wrapper):
  * TWEAKCC_CC_INSTALLATION_PATH → ~/.local/bin/claude (stable native-install
  * symlink) → findClaudeBinary() PATH lookup.
+ *
+ * `%USERPROFILE%\.local\bin\claude.exe`, which the Windows native installer
+ * writes, is deliberately NOT probed here. Adding it as a fallback made an
+ * existing restore weakness reachable: `findClaudeBinary()` returns the same
+ * null for "CLODEX_CLAUDE_PATH names a file that is gone" as for "nothing was
+ * found", so a stale explicit override silently became that other install, and
+ * `--restore` copied the missing install's pristine bytes over it and dropped
+ * the manifest. Reproduced on real 2.1.266 binaries. It stays out until issue
+ * #199 (restore picks a backup by version without proving it belongs to the
+ * install being restored) is fixed.
+ *
+ * Whatever that finds is then followed through any npm launcher script to the
+ * program it starts (see `npm-shim.ts`). `findBinaryOnPath` prefers
+ * `claude.cmd` on Windows ON PURPOSE — launching claude there needs a shell
+ * script — but that file is a launcher, not Claude Code, and handing it to the
+ * patcher produced issue #193's "Unable to detect installation type from path"
+ * on every npm-installed Windows machine. Following it here, rather than in
+ * `findClaudeBinary`, keeps the launch path untouched.
  *
  * The version is probed from THAT binary, never from whatever `claude` PATH
  * resolves to. The two chains diverge exactly when the overrides matter (a shim
@@ -503,6 +536,22 @@ export function resolveClaudeBinaryForPatch(): ClaudePatchTarget {
   } catch {
     return { ok: false, reason: 'binary-not-found' };
   }
+  // Before anything is copied, backed up or renamed: an unfollowable launcher is
+  // a hard stop, not a file to patch. Everything downstream — the candidate
+  // directory, the pristine backup, the manifest, the final rename and
+  // `--restore` — keys off the single path returned here.
+  const followed = resolveThroughNpmShims(resolved);
+  if (!followed.ok) {
+    return {
+      ok: false,
+      reason: 'launcher-unresolved',
+      binaryPath: followed.declaredTarget ?? followed.shimPath,
+      shimPath: followed.shimPath,
+      declaredTarget: followed.declaredTarget,
+      detail: followed.detail,
+    };
+  }
+  resolved = followed.path;
   try {
     if (!statSync(resolved).isFile()) return { ok: false, reason: 'binary-not-found' };
   } catch {
@@ -515,6 +564,14 @@ export function resolveClaudeBinaryForPatch(): ClaudePatchTarget {
 
 /** Accurate, actionable message per failure reason — the two are NOT the same problem. */
 export function describePatchTargetFailure(target: Extract<ClaudePatchTarget, { ok: false }>): string {
+  if (target.reason === 'launcher-unresolved') {
+    return `${target.shimPath} starts Claude Code but is not Claude Code itself, and clodex could `
+      + `not follow it: ${target.detail}. clodex will not patch a launcher script — that fails with `
+      + '"Unable to detect installation type". Set CLODEX_CLAUDE_PATH to the Claude Code program '
+      + 'itself (for an npm install on Windows that is '
+      + 'node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe under the directory holding the '
+      + 'launcher), then run the command again.';
+  }
   return target.reason === 'binary-not-found'
     ? 'claude binary not found. Install Claude Code or set TWEAKCC_CC_INSTALLATION_PATH.'
     : `Could not determine the version of ${target.binaryPath} (\`claude --version\` failed). `
@@ -1007,6 +1064,14 @@ function runRestoreCommand(target: ClaudePatchTarget): number {
     p.log.error(describePatchTargetFailure(target));
     return 1;
   }
+  // A launcher clodex could not read names no program, so there is no path to
+  // look up in the manifest and nothing safe to restore over. Falling through
+  // would report a failed `claude --version` — the wrong cause, pointing the
+  // user at the wrong remedy — for a refusal that happens before any probe.
+  if (!target.ok && target.reason === 'launcher-unresolved' && target.declaredTarget === null) {
+    p.log.error(describePatchTargetFailure(target));
+    return 1;
+  }
   const binaryPath = target.binaryPath;
   const manifest = readPatchManifest();
 
@@ -1151,9 +1216,10 @@ export async function runLaunchPatchCheck(opts: { agentStdout?: boolean; dryRun?
     const target = resolveClaudeBinaryForPatch();
     if (!target.ok) {
       // A patch check must never break a launch. "Not found" is silent (the user
-      // may not use the patcher at all); an unreadable version is a real problem
-      // worth one dim line, since it also blocks `clodex patch`.
-      if (target.reason === 'version-unknown' && !opts.agentStdout) {
+      // may not use the patcher at all); an unreadable version or an unfollowable
+      // launcher is a real problem worth one dim line, since each also blocks
+      // `clodex patch`.
+      if (target.reason !== 'binary-not-found' && !opts.agentStdout) {
         console.error(pc.dim(`clodex: ${describePatchTargetFailure(target)}`));
       }
       return;
