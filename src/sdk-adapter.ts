@@ -19,6 +19,8 @@ import {
 } from './provider-factory.js';
 import { resolveUpstreamTools } from './tool-search.js';
 import { sanitizeToolInput } from './tool-input-sanitize.js';
+import { sanitizeToolSchema } from './tool-schema-sanitize.js';
+import { VERTEX_ANTHROPIC_NPM } from './constants.js';
 import type { AnthropicRequestMessage, AnthropicToolDefinition } from './proxy-types.js';
 import { anthropicErrorType, sdkUpstreamErrorDetails, upstreamHttpStatus } from './upstream-error.js';
 import { upstreamRequestBudget } from './upstream-retry.js';
@@ -456,12 +458,15 @@ function toolRequiredProps(tools?: SdkCallParams['tools']): Map<string, Readonly
 
 export function translateTools(anthropicTools?: AnthropicTool[], npm?: string): Record<string, ReturnType<typeof tool>> | undefined {
   if (!anthropicTools?.length) return undefined;
+  // Anthropic-format routes take Claude Code's ECMAScript patterns as written;
+  // every other provider validates them in a dialect that may not compile them.
+  const anthropicFormat = npm === '@ai-sdk/anthropic' || npm === VERTEX_ANTHROPIC_NPM;
   const tools: Record<string, ReturnType<typeof tool>> = {};
   for (const t of anthropicTools) {
     if (!t.name || !t.input_schema) continue;
     tools[t.name] = tool({
       description: t.description ?? '',
-      inputSchema: jsonSchema(t.input_schema),
+      inputSchema: jsonSchema(anthropicFormat ? t.input_schema : sanitizeToolSchema(t.input_schema)),
       strict: npm === '@ai-sdk/openai' ? false : undefined,
     });
   }

@@ -36,6 +36,14 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   change non-streaming responses' existing omission of reasoning, or the transport's prohibition
   on replaying already-emitted model output. The guarantee covers SDK-visible summary text,
   grouping and encrypted content, not output-only fields the SDK omits (such as `status`).
+- **A tool schema's `pattern` is dropped when Python's `re` cannot compile it**, on every route but
+  Anthropic-format ones (`src/tool-schema-sanitize.ts`). OpenAI validates each `pattern` with Python
+  — its 400 reads `'<pattern>' is not a 'regex'`, jsonschema's format-checker wording — while Claude
+  Code writes ECMAScript. Artifact's `field` constraint uses `\p{Cc}`, Python answers `bad escape
+  \p`, and since the tool ships on every request the session was dead from `hello` onward (#194).
+  The dialects agree on lookaround, so Artifact's `(?!...)` patterns are left alone; only `\p{}`,
+  `\P{}`, JS named groups and `\k<>` backreferences go. Losing the keyword loses a hint, not a
+  guard — Claude Code still validates tool input against its own schema before executing.
 - **Images in `tool_result` are lifted out of the text-only function-output channel** and delivered
   as real image parts on the following user message. Inline, a JSON.stringify'd base64 screenshot
   tokenizes at ~1.5 chars/token — 200k+ tokens per screenshot, killing agents with "Prompt is too
