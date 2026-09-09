@@ -110,6 +110,77 @@ describe('translateTools', () => {
     ]);
   });
 
+  it('sends Artifact without the pattern OpenAI cannot compile (#194)', async () => {
+    // Claude Code 2.1.266 sends this schema on every request; OpenAI compiles
+    // each `pattern` with Python's `re`, answers `bad escape \p`, and 400s the
+    // turn before the model sees it.
+    const fieldPattern = String.raw`^(?!__.*__$)[^\p{Cc}\p{Cf}\p{Zl}\p{Zp}"\\./[\]]{1,200}$`;
+    const collectionPattern = String.raw`^(?!\.\.?(?:\/|$))[A-Za-z0-9_\-.~:@+]{1,200}$`;
+    const requestBodies: unknown[] = [];
+    const provider = createOpenAI({
+      apiKey: 'synthetic-test-key',
+      fetch: async (_input, init) => {
+        requestBodies.push(JSON.parse(String(init?.body)));
+        return new Response(JSON.stringify({
+          id: 'resp_synthetic',
+          model: 'gpt-5.6-terra',
+          output: [],
+          usage: {
+            input_tokens: 1,
+            input_tokens_details: { cached_tokens: 0 },
+            output_tokens: 0,
+            output_tokens_details: { reasoning_tokens: 0 },
+          },
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      },
+    });
+    const params = translateRequest({
+      model: 'gpt-5.6-terra',
+      messages: [{ role: 'user', content: 'hello' }],
+      tools: [{
+        name: 'Artifact',
+        description: 'Render an HTML file to an Artifact',
+        input_schema: {
+          type: 'object',
+          properties: {
+            field: { type: 'string', pattern: fieldPattern },
+            collection: { type: 'string', pattern: collectionPattern },
+          },
+        },
+      }],
+    }, '@ai-sdk/openai', { openAiOAuth: true });
+
+    await generateAnthropicResponse(
+      provider.responses('gpt-5.6-terra'), params, 'gpt-5.6-terra');
+
+    expect(requestBodies).toEqual([
+      expect.objectContaining({
+        tools: [{
+          type: 'function',
+          name: 'Artifact',
+          description: 'Render an HTML file to an Artifact',
+          strict: false,
+          parameters: {
+            type: 'object',
+            properties: {
+              field: { type: 'string' },
+              collection: { type: 'string', pattern: collectionPattern },
+            },
+          },
+        }],
+      }),
+    ]);
+  });
+
+  it('leaves the pattern intact on an Anthropic-format route', () => {
+    const pattern = String.raw`^\p{L}+$`;
+    const input_schema = { type: 'object', properties: { field: { type: 'string', pattern } } };
+    for (const npm of ['@ai-sdk/anthropic', '@ai-sdk/google-vertex/anthropic']) {
+      const tools = translateTools([{ name: 'Artifact', input_schema }], npm);
+      expect((tools!.Artifact.inputSchema as { jsonSchema: unknown }).jsonSchema).toBe(input_schema);
+    }
+  });
+
   it('returns undefined for empty/missing tools', () => {
     expect(translateTools(undefined)).toBeUndefined();
     expect(translateTools([])).toBeUndefined();
