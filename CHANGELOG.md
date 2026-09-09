@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.11.5](https://github.com/bman654/clodex/compare/v2.11.4...v2.11.5) (2026-09-09)
+
+
+### Bug Fixes
+
+* **openai:** keep Artifact tools working on OpenAI models instead of failing every request ([#195](https://github.com/bman654/clodex/issues/195)) ([383729c](https://github.com/bman654/clodex/commit/383729c45b5ae4aedd5cf5429d8fe90c982aa6eb))
+* **patch:** patch Claude Code installed with npm on Windows, instead of failing to detect it ([#201](https://github.com/bman654/clodex/issues/201)) ([10a61f6](https://github.com/bman654/clodex/commit/10a61f607c78e0925c376094379eb6eed0caa193))
+
 ## [2.11.4](https://github.com/bman654/clodex/compare/v2.11.3...v2.11.4) (2026-09-08)
 
 
