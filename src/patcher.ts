@@ -510,14 +510,15 @@ export type ClaudePatchTarget =
  * symlink) → findClaudeBinary() PATH lookup.
  *
  * `%USERPROFILE%\.local\bin\claude.exe`, which the Windows native installer
- * writes, is deliberately NOT probed here. Adding it as a fallback made an
- * existing restore weakness reachable: `findClaudeBinary()` returns the same
- * null for "CLODEX_CLAUDE_PATH names a file that is gone" as for "nothing was
- * found", so a stale explicit override silently became that other install, and
- * `--restore` copied the missing install's pristine bytes over it and dropped
- * the manifest. Reproduced on real 2.1.266 binaries. It stays out until issue
- * #199 (restore picks a backup by version without proving it belongs to the
- * install being restored) is fixed.
+ * writes, is still NOT probed here. Adding it as a fallback made a restore
+ * weakness reachable: `findClaudeBinary()` returns the same null for
+ * "CLODEX_CLAUDE_PATH names a file that is gone" as for "nothing was found", so
+ * a stale explicit override silently became that other install, and `--restore`
+ * copied the missing install's pristine bytes over it and dropped the manifest.
+ * Reproduced on real 2.1.266 binaries. `--restore` now refuses when the manifest
+ * records another install rather than selecting a backup by version tag (issue
+ * #199), so this fallback can land — but as its own change with its own Windows
+ * evidence, and only once the no-manifest case is covered too.
  *
  * Whatever that finds is then followed through any npm launcher script to the
  * program it starts (see `npm-shim.ts`). `findBinaryOnPath` prefers
@@ -1170,6 +1171,12 @@ function runRestoreCommand(target: ClaudePatchTarget): number {
     return 1;
   }
   copyFileSync(plan.backupPath, binaryPath);
+  // Reaching here means the plan established these bytes as THIS install's
+  // pristine content, so the manifest being cleared is this install's own record
+  // that it was patched. A manifest recorded against a different install cannot
+  // get here: `selectRestoreSource` refuses that case outright rather than
+  // selecting a backup by version tag, which is what used to delete another
+  // install's only rescue record along with clobbering it (issue #199).
   try {
     unlinkSync(getPatchManifestPath());
   } catch {

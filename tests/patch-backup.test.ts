@@ -151,6 +151,8 @@ describe('isPatchedClaudeSource', () => {
 const PRISTINE = sha('pristine 2.1.220');
 const PATCHED = sha('patched 2.1.220');
 const OTHER_VERSION = sha('pristine 2.1.215');
+/** Same claude version, different artifact — an npm-platform binary next to a native one. */
+const OTHER_INSTALL_PRISTINE = sha('pristine 2.1.220 npm build');
 
 function candidate(overrides: Partial<BackupCandidate> = {}): BackupCandidate {
   return {
@@ -216,7 +218,7 @@ describe('planPristineSource', () => {
       },
     }));
     expect(plan.action).toBe('error');
-    expect((plan as { message: string }).message).toMatch(/no trustworthy pristine backup/);
+    expect((plan as { message: string }).message).toMatch(/as the pristine content of .*, and clodex cannot use it/);
   });
 
   it('asks for source inspection when the live bytes are unrecognized', () => {
@@ -294,5 +296,171 @@ describe('planRestoreOnly', () => {
 
   it('errors rather than restoring when nothing for this version is trustworthy', () => {
     expect(planRestoreOnly(facts()).action).toBe('error');
+  });
+
+  // Issue #199: a version tag is not install provenance. The npm platform package
+  // and the native installer ship different bytes under the SAME version, so a
+  // backup belonging to the install the manifest records must never be published
+  // over a different install just because the version tags agree.
+  describe('a manifest recorded against another install', () => {
+    const otherInstall = {
+      binaryPath: '/other-install/claude',
+      backupPath: candidate().path,
+      patchedSha256: sha('patched other install'),
+      pristineSha256: PRISTINE,
+    };
+
+    it('refuses instead of publishing that install\'s backup over this one', () => {
+      const plan = planRestoreOnly(facts({ backups: [candidate()], manifest: otherInstall }));
+      expect(plan.action).toBe('error');
+      expect((plan as { message: string }).message).toMatch(/records a different Claude Code install/);
+      expect((plan as { message: string }).message).toContain('/other-install/claude');
+    });
+
+    it('refuses on the patch path too, where the same selection seeds the candidate', () => {
+      const plan = planInspectedPristineSource(
+        facts({ backups: [candidate()], manifest: otherInstall }),
+        { patched: true },
+      );
+      expect(plan.action).toBe('error');
+      expect((plan as { message: string }).message).toMatch(/records a different Claude Code install/);
+    });
+
+    it('disqualifies the recorded backup by path when the manifest predates content addressing', () => {
+      const legacyRecord = { binaryPath: '/other-install/claude', backupPath: candidate().path };
+      const plan = planRestoreOnly(facts({ backups: [candidate()], manifest: legacyRecord }));
+      expect(plan.action).toBe('error');
+      expect((plan as { message: string }).message).toMatch(/records a different Claude Code install/);
+    });
+
+    it('refuses outright when the manifest identifies no backup to disqualify', () => {
+      const plan = planRestoreOnly(facts({
+        backups: [candidate()],
+        manifest: { binaryPath: '/other-install/claude' },
+      }));
+      expect(plan.action).toBe('error');
+      expect((plan as { message: string }).message).toMatch(/records a different Claude Code install/);
+    });
+
+    it('refuses even when a backup that install did NOT record is available', () => {
+      // Tempting to restore "the one it did not name" — and wrong. The manifest
+      // holds ONE install, so an unrecorded backup is just an install the manifest
+      // is silent about: this one, or a third one whose backup was never recorded.
+      // Nothing in the facts tells them apart, so selection here is a guess.
+      const unrecorded = candidate({
+        path: contentAddressedBackupPath('2.1.220', OTHER_INSTALL_PRISTINE, '/backups'),
+        sha256: OTHER_INSTALL_PRISTINE,
+      });
+      const plan = planRestoreOnly(facts({ backups: [candidate(), unrecorded], manifest: otherInstall }));
+      expect(plan.action).toBe('error');
+      expect((plan as { message: string }).message).toMatch(/records a different Claude Code install/);
+    });
+
+    it('refuses when a THIRD install is the target and the orphan is install A\'s', () => {
+      // Patch A (backup X, manifest→A), patch B (backup Y, manifest→B), then
+      // restore against C. Disqualifying only Y would leave X — install A's bytes
+      // — looking unanimous, and publish them over C.
+      const orphanOfA = candidate();
+      const recordedForB = candidate({
+        path: contentAddressedBackupPath('2.1.220', OTHER_INSTALL_PRISTINE, '/backups'),
+        sha256: OTHER_INSTALL_PRISTINE,
+      });
+      const plan = planRestoreOnly(facts({
+        binaryPath: '/third-install/claude',
+        backups: [orphanOfA, recordedForB],
+        manifest: { binaryPath: '/other-install/claude', backupPath: recordedForB.path, pristineSha256: OTHER_INSTALL_PRISTINE },
+      }));
+      expect(plan.action).toBe('error');
+    });
+
+    it('is not evidence about a version it was never written for', () => {
+      // Patch install A at 2.1.220, patch install B at 2.1.221, then restore A.
+      // B's manifest records a 2.1.221 backup, which is not even among 2.1.220's
+      // candidates — refusing here rejected a restore that was never in danger.
+      const plan = planRestoreOnly(facts({
+        backups: [candidate()],
+        manifest: { ...otherInstall, claudeVersion: '2.1.221' },
+      }));
+      expect(plan).toMatchObject({ action: 'restore', backupPath: candidate().path });
+      expect((plan as { notes: string[] }).notes.join(' ')).toMatch(/version tag alone/);
+    });
+
+    it('still refuses when it was written for the version being restored', () => {
+      const plan = planRestoreOnly(facts({
+        backups: [candidate()],
+        manifest: { ...otherInstall, claudeVersion: '2.1.220' },
+      }));
+      expect(plan.action).toBe('error');
+    });
+
+    it('reports the ordinary no-backup error when the version has no backups at all', () => {
+      const plan = planRestoreOnly(facts({ backups: [], manifest: otherInstall }));
+      expect(plan.action).toBe('error');
+      expect((plan as { message: string }).message).toMatch(/no trustworthy pristine backup/);
+    });
+  });
+
+  // The manifest records THIS install and names bytes that are gone. Its own
+  // testimony then says the same-version backups still on disk are some other
+  // install's — so falling back to them was never safe.
+  describe('a manifest whose recorded backup has been deleted', () => {
+    it('refuses instead of restoring a different backup with the same version tag', () => {
+      const orphan = candidate({
+        path: contentAddressedBackupPath('2.1.220', OTHER_INSTALL_PRISTINE, '/backups'),
+        sha256: OTHER_INSTALL_PRISTINE,
+      });
+      const plan = planRestoreOnly(facts({
+        backups: [orphan],
+        manifest: { binaryPath: '/install/claude', backupPath: candidate().path, pristineSha256: PRISTINE },
+      }));
+      expect(plan.action).toBe('error');
+      expect((plan as { message: string }).message).toMatch(/as the pristine content of .*, and clodex cannot use it/);
+    });
+
+    it('does not refuse when the manifest simply predates an upgrade', () => {
+      // The recorded backup is intact; it just belongs to the version this binary
+      // used to be. That is not a missing backup, and this version's own backup is
+      // still the only candidate.
+      const plan = planRestoreOnly(facts({
+        backups: [candidate()],
+        manifest: {
+          binaryPath: '/install/claude',
+          claudeVersion: '2.1.215',
+          backupPath: legacyBackupPath('2.1.215', '/backups'),
+          pristineSha256: OTHER_VERSION,
+        },
+      }));
+      expect(plan).toMatchObject({ action: 'restore', backupPath: candidate().path });
+    });
+
+    it('refuses a legacy orphan too, where only a version probe stood in the way', () => {
+      const legacyOrphan = candidate({
+        path: legacyBackupPath('2.1.220', '/backups'),
+        kind: 'legacy',
+        sha256: OTHER_INSTALL_PRISTINE,
+      });
+      const plan = planRestoreOnly(facts({
+        backups: [legacyOrphan],
+        manifest: { binaryPath: '/install/claude', backupPath: candidate().path },
+      }));
+      expect(plan.action).toBe('error');
+    });
+  });
+
+  describe('no manifest at all', () => {
+    it('still restores, and says the version tag is the only thing tying the backup to the install', () => {
+      const plan = planRestoreOnly(facts({ backups: [candidate()], manifest: null }));
+      expect(plan).toMatchObject({ action: 'restore', backupPath: candidate().path });
+      expect((plan as { notes: string[] }).notes.join(' ')).toMatch(/version tag alone/);
+    });
+
+    it('adds no such note when the manifest records THIS install', () => {
+      const plan = planRestoreOnly(facts({
+        backups: [candidate()],
+        manifest: { binaryPath: '/install/claude', backupPath: candidate().path, pristineSha256: PRISTINE },
+      }));
+      expect(plan).toMatchObject({ action: 'restore', backupPath: candidate().path });
+      expect((plan as { notes: string[] }).notes).toEqual([]);
+    });
   });
 });

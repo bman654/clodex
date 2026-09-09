@@ -614,7 +614,47 @@ tweakcc's own repack reads back as an ordinary module name.
   the version probed from the binary being patched, its hash must match its own name, and a legacy
   `claude-<ver>.orig` (no hash in the name, possibly mislabeled by an older clodex) must
   additionally report that version when executed (`verifyPristineSource`). Conflicting or
-  unverifiable backups produce a loud error, never a copy. This gate covers both consumers —
+  unverifiable backups produce a loud error, never a copy. **A matching version tag is not install
+  provenance**: the npm platform package and the native installer ship different files under the same
+  Claude Code version, and both are supported, so one machine can hold two same-version installs whose
+  bytes differ. The manifest is the only record of which install a backup was made for, and it holds
+  **one** install — so it can confirm a backup but can never rule one in by elimination. Two states
+  therefore refuse outright rather than fall through to version-tag selection (issue #199, reproduced
+  on real 2.1.266 binaries in issue #199, and again on real 2.1.263 bytes with a byte-differing
+  second copy standing in for the second install; the published 2.1.263 npm and native artifacts are
+  independently known to differ in both size and hash):
+  - the manifest records a **different** `binaryPath` than the resolved target — it vouches for
+    nothing in the backup directory, and the error names the install it does belong to;
+  - the manifest records **this** target but the pristine bytes it named are gone or corrupt — its own
+    testimony says the same-version backups still on disk were made for some other install.
+
+  A manifest speaks only for the `claudeVersion` it was written for. After an upgrade it records a
+  backup of the OLD version, which is not among the new version's candidates at all — so neither
+  refusal fires across a version change, and a restore that was never in danger is not rejected.
+
+  Disqualifying only the backup the manifest names is NOT sufficient and was rejected during review:
+  the manifest holds one install, so every earlier install's backup is an unrecorded orphan carrying
+  the same version tag, and "restore the one it did not name" hands a third install's bytes to the
+  target — turning a `conflicting pristine backups` refusal into a destructive copy. **What remains
+  unprotected is the no-manifest case**, and it is reachable by an ordinary sequence: a successful
+  `--restore` DELETES the manifest, so patch A → restore A → have the target resolve to install B →
+  restore again publishes A's pristine bytes over B, with only a warning. (`~/.clodex` wiped or a
+  different `CLODEX_HOME` get there too.) Selection there still rests on the version tag alone.
+  Worse, a user who answers the `conflicting pristine backups` refusal by deleting one file can
+  launder the wrong bytes into a manifest that the rules above then trust on sight — which is why
+  that message no longer says "remove the wrong one". Closing this needs provenance recorded per
+  backup rather than a single-slot manifest, or requiring `--restore` to see a `/*ccpatch:` marker in
+  the live binary before it copies anything (`clodex patch`'s implicit restore already inspects the
+  source; `--restore` never does). Tracked separately — do not read the rules above as a full
+  guarantee.
+
+  Path identity is plain string equality, so a manifest written under a different spelling of the
+  same path reads as another install and refuses — safe, but a false refusal, and it blocks
+  `clodex patch` as well as `--restore`. **This is not Windows-only**: APFS is case-insensitive and
+  the `fs.realpathSync` clodex uses preserves caller-supplied case (only `.native` corrects it), so a
+  hand-typed `TWEAKCC_CC_INSTALLATION_PATH` reaches it on macOS. `evaluatePatchState` compares the
+  same way. The message names the recorded path, so following its own
+  `TWEAKCC_CC_INSTALLATION_PATH=` advice recovers. This gate covers both consumers —
   `applyPatch` seeds its candidate from those bytes, and **`clodex patch --restore` copies straight
   over the live binary** (nothing to publish atomically), so an unverified backup would be a silent
   downgrade either way. An already-patched binary is never snapshotted as pristine. Legacy backups
@@ -625,15 +665,21 @@ tweakcc's own repack reads back as an ordinary module name.
   interrupted ~250 MB `copyFileSync` would leave a truncated file under a name asserting its content
   hash — the one corruption content-addressing cannot notice without re-hashing.
   `~/.tweakcc/native-binary.backup` is still mirrored from the pristine bytes for `tweakcc
-  --restore`.
+  --restore`. That mirror is a SINGLE slot holding whichever install clodex patched last, so on a
+  machine with two same-version installs `tweakcc --restore` performs exactly the copy the rules
+  above refuse. clodex writes the file but does not control that command.
 - **`clodex patch --restore` must work on a binary that no longer runs** — that is what a pristine
   backup is *for*. It resolves the version from `claude --version` when it can, and otherwise falls
   back to the manifest's `claudeVersion` when `manifest.binaryPath` matches the resolved install and
-  the live bytes could still be what clodex last wrote. An npm placeholder is the exception: it
-  proves a package manager replaced the target, so the old manifest is no longer authoritative for
-  that path even though the wrapper's `package.json` still reveals its version. The placeholder
-  refusal preserves both manifest and backups. Generic broken binaries retain manifest recovery;
-  the patch path keeps the hard `version-unknown` failure and names `--restore` as the recovery.
+  the live bytes could still be what clodex last wrote, establishing provenance without executing
+  anything. An npm placeholder is the exception: it proves a package manager replaced the target, so
+  the old manifest is no longer authoritative for that path even though the wrapper's `package.json`
+  still reveals its version. The placeholder refusal preserves both manifest and backups. Generic
+  broken binaries retain manifest recovery. A successful restore drops the manifest, which is sound
+  only because a manifest recorded against a different install can no longer reach the copy — it is
+  refused during selection, so the other install's rescue record is never deleted with it. The patch
+  path keeps the hard `version-unknown` failure (patching is elective; restoring is the way out), and
+  its error message names `--restore` as the recovery.
 - **Binary resolution bypasses PATH shims** (cmux installs a shim copy):
   `TWEAKCC_CC_INSTALLATION_PATH` → `~/.local/bin/claude` → `findClaudeBinary()`.
   **`~/.local/bin/claude.exe`, which the Windows native installer writes, is deliberately NOT
@@ -641,9 +687,10 @@ tweakcc's own repack reads back as an ordinary module name.
   `findClaudeBinary()` returns the same null for "`CLODEX_CLAUDE_PATH` names a file that is gone" as
   for "nothing found", so a stale explicit override silently became a DIFFERENT install, and
   `--restore` copied the missing install's pristine bytes over it and deleted the manifest —
-  reproduced on real 2.1.266 binaries, with the fallback deletion as the control. It stays out until
-  issue #199 (restore selects a backup by version without proving it belongs to the install being
-  restored) is fixed. **The version is
+  reproduced on real 2.1.266 binaries, with the fallback deletion as the control. The manifest half of that
+  weakness is fixed (see the provenance rule above), so the fallback can land — as its own change
+  carrying its own Windows evidence, not folded into the fix that unblocked it, and only once the
+  no-manifest case above is covered too. **The version is
   probed from that resolved binary** (`getClaudeVersionForBinary`), never from
   `getInstalledClaudeVersion()`, whose PATH lookup can land on a different install and whose
   `'2.1.183'` fallback is only safe for request metadata. The version names the backup that gets
