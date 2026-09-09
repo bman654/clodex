@@ -628,10 +628,12 @@ tweakcc's own repack reads back as an ordinary module name.
   --restore`.
 - **`clodex patch --restore` must work on a binary that no longer runs** — that is what a pristine
   backup is *for*. It resolves the version from `claude --version` when it can, and otherwise falls
-  back to the manifest's `claudeVersion` when `manifest.binaryPath` matches the resolved install,
-  establishing provenance without executing anything. The patch path keeps the hard `version-unknown`
-  failure (patching is elective; restoring is the way out), and its error message names `--restore`
-  as the recovery.
+  back to the manifest's `claudeVersion` when `manifest.binaryPath` matches the resolved install and
+  the live bytes could still be what clodex last wrote. An npm placeholder is the exception: it
+  proves a package manager replaced the target, so the old manifest is no longer authoritative for
+  that path even though the wrapper's `package.json` still reveals its version. The placeholder
+  refusal preserves both manifest and backups. Generic broken binaries retain manifest recovery;
+  the patch path keeps the hard `version-unknown` failure and names `--restore` as the recovery.
 - **Binary resolution bypasses PATH shims** (cmux installs a shim copy):
   `TWEAKCC_CC_INSTALLATION_PATH` → `~/.local/bin/claude` → `findClaudeBinary()`.
   **`~/.local/bin/claude.exe`, which the Windows native installer writes, is deliberately NOT
@@ -657,12 +659,21 @@ tweakcc's own repack reads back as an ordinary module name.
   dependencies leave that text in place, and executing it on Windows reports an invalid application
   while the patcher otherwise collapses it into `version-unknown`. Detection reads content only
   below a 64 KiB size ceiling and requires two independent signals from the shipped text; a real
-  binary is rejected by metadata without being read. `native-binary-missing` points to Anthropic's
-  install script or a reinstall without the two npm omission flags. Patch and restore both refuse
-  before any backup or candidate write, even when an old manifest matches the path: the npm
-  operation may have changed package versions, so restoring that manifest's bytes would guess.
-  Generic unprobeable binaries retain manifest-based recovery. Launch-time checking reports the
-  incomplete install without blocking launch.
+  binary is rejected by metadata without being read. Seven sampled native releases from 2.1.113
+  through 2.1.266 carry all three signals in byte-identical placeholders. Two-of-three is defensive
+  against a hypothetical future rewording, not a response to observed drift.
+
+  The detector derives the platform key with the same Android, musl and Rosetta rules as
+  Anthropic's `install.cjs`, then resolves that platform package from the wrapper package. When it
+  is present, `native-binary-missing` gives the absolute installer path. When it is absent,
+  `install.cjs` cannot download it, so the message recommends only a reinstall without the npm
+  omission flags. An unknown package layout names both options. Restore also names `--restore` as
+  the retry and the pristine-backup directory.
+
+  Patch and restore both refuse before any backup or candidate write, even when an old manifest
+  matches the path: the placeholder proves clodex was not the last writer, so the manifest fallback
+  is no longer authoritative. Generic unprobeable binaries retain manifest-based recovery.
+  Launch-time checking reports the incomplete install without blocking launch.
 - **An npm launcher is followed to the program it starts, on the patch path only** (`npm-shim.ts`).
   **This is a Windows install shape**: npm's `bin-links` writes a symlink for a package bin on
   POSIX and only calls `cmd-shim` on Windows, where it writes three launchers per bin —

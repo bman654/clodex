@@ -64,7 +64,10 @@ import { isRetainedOpenCodeGoProvider } from './registry/resolve-template.js';
 import { findModelsDevModel } from './registry/models-dev.js';
 import { findClaudeBinary, getClaudeVersionForBinary } from './launch.js';
 import { resolveThroughNpmShims } from './npm-shim.js';
-import { isClaudeNativeBinaryPlaceholder } from './claude-native-placeholder.js';
+import {
+  inspectClaudeNativeBinaryPlaceholder,
+  type ClaudeNativePackageState,
+} from './claude-native-placeholder.js';
 import {
   resignMachOBinary,
   restoreEntryModuleName,
@@ -478,7 +481,13 @@ export type ClaudePatchTarget =
   | { ok: true; binaryPath: string; version: string }
   | { ok: false; reason: 'binary-not-found' }
   | { ok: false; reason: 'version-unknown'; binaryPath: string }
-  | { ok: false; reason: 'native-binary-missing'; binaryPath: string }
+  | {
+      ok: false;
+      reason: 'native-binary-missing';
+      binaryPath: string;
+      nativePackageState: ClaudeNativePackageState;
+      installScriptPath: string | null;
+    }
   | {
       ok: false;
       reason: 'launcher-unresolved';
@@ -559,16 +568,34 @@ export function resolveClaudeBinaryForPatch(): ClaudePatchTarget {
   } catch {
     return { ok: false, reason: 'binary-not-found' };
   }
-  if (isClaudeNativeBinaryPlaceholder(resolved)) {
-    return { ok: false, reason: 'native-binary-missing', binaryPath: resolved };
+  const placeholder = inspectClaudeNativeBinaryPlaceholder(resolved);
+  if (placeholder) {
+    return {
+      ok: false,
+      reason: 'native-binary-missing',
+      binaryPath: resolved,
+      ...placeholder,
+    };
   }
   const version = getClaudeVersionForBinary(resolved);
   if (!version) return { ok: false, reason: 'version-unknown', binaryPath: resolved };
   return { ok: true, binaryPath: resolved, version };
 }
 
-/** Accurate, actionable message per failure reason — the two are NOT the same problem. */
-export function describePatchTargetFailure(target: Extract<ClaudePatchTarget, { ok: false }>): string {
+type PatchTargetCommand = 'patch' | 'restore' | 'launch';
+
+function installScriptCommand(path: string | null): string {
+  return path === null
+    ? '`node node_modules/@anthropic-ai/claude-code/install.cjs` '
+      + '(adjust the path for a local or global install)'
+    : `\`node "${path}"\``;
+}
+
+/** Accurate, actionable message per failure reason — the reasons are NOT interchangeable. */
+export function describePatchTargetFailure(
+  target: Extract<ClaudePatchTarget, { ok: false }>,
+  command: PatchTargetCommand = 'patch',
+): string {
   if (target.reason === 'launcher-unresolved') {
     return `${target.shimPath} starts Claude Code but is not Claude Code itself, and clodex could `
       + `not follow it: ${target.detail}. clodex will not patch a launcher script — that fails with `
@@ -578,10 +605,27 @@ export function describePatchTargetFailure(target: Extract<ClaudePatchTarget, { 
       + 'launcher), then run the command again.';
   }
   if (target.reason === 'native-binary-missing') {
-    return `${target.binaryPath} is Claude Code's npm placeholder, not its native binary, so the npm `
-      + 'install is incomplete. Run '
-      + '`node node_modules/@anthropic-ai/claude-code/install.cjs`, or reinstall Claude Code without '
-      + '`--ignore-scripts` / `--omit=optional`. Then run `clodex patch` again.';
+    const installer = installScriptCommand(target.installScriptPath);
+    const remedy = target.nativePackageState === 'present'
+      ? `The platform-native package is installed, so run ${installer} to finish the installation.`
+      : target.nativePackageState === 'missing'
+        ? 'The platform-native optional package is missing, so `install.cjs` cannot repair this '
+          + 'state. Reinstall Claude Code without `--ignore-scripts` / `--omit=optional`.'
+        : 'clodex could not determine whether the platform-native package is installed. If it is, '
+          + `run ${installer}; otherwise reinstall Claude Code without \`--ignore-scripts\` / `
+          + '`--omit=optional`.';
+    const retry = command === 'restore'
+      ? 'Then run `clodex patch --restore` again.'
+      : command === 'launch'
+        ? 'Then run the command again.'
+        : 'Then run `clodex patch` again.';
+    const restore = command === 'restore'
+      ? ` If you need to restore by hand, pristine backups are in ${backupDir()}.`
+      : '';
+    return `${target.binaryPath} is Claude Code's npm placeholder, not its native binary, so the `
+      + `npm install is incomplete. ${remedy} ${retry}${restore} If this is a custom wrapper `
+      + 'rather than the npm placeholder, set TWEAKCC_CC_INSTALLATION_PATH to the native Claude '
+      + 'Code binary.';
   }
   return target.reason === 'binary-not-found'
     ? 'claude binary not found. Install Claude Code or set TWEAKCC_CC_INSTALLATION_PATH.'
@@ -1068,17 +1112,18 @@ export async function applyPatch(
  * `claudeVersion`, `backupPath` and `pristineSha256` when the binary was patched,
  * which establishes provenance without executing anything.
  *
- * The npm placeholder is different: a package-manager operation has replaced the
- * target, and the package may no longer be the version recorded by an old manifest.
- * Restoring those bytes would guess. That state refuses above and points to npm's
- * installer; the manifest fallback remains for an otherwise unprobeable binary.
+ * The manifest fallback is sound only while clodex was the last writer of the
+ * unprobeable target — the bad-patch recovery case. An npm placeholder proves a
+ * package manager replaced those bytes, so that old manifest is no longer
+ * authoritative for this path even though the wrapper package version is readable.
+ * That state refuses above; generic unprobeable binaries retain manifest recovery.
  */
 function runRestoreCommand(target: ClaudePatchTarget): number {
   if (!target.ok && (
     target.reason === 'binary-not-found'
     || target.reason === 'native-binary-missing'
   )) {
-    p.log.error(describePatchTargetFailure(target));
+    p.log.error(describePatchTargetFailure(target, 'restore'));
     return 1;
   }
   // A launcher clodex could not read names no program, so there is no path to
@@ -1086,7 +1131,7 @@ function runRestoreCommand(target: ClaudePatchTarget): number {
   // would report a failed `claude --version` — the wrong cause, pointing the
   // user at the wrong remedy — for a refusal that happens before any probe.
   if (!target.ok && target.reason === 'launcher-unresolved' && target.declaredTarget === null) {
-    p.log.error(describePatchTargetFailure(target));
+    p.log.error(describePatchTargetFailure(target, 'restore'));
     return 1;
   }
   const binaryPath = target.binaryPath;
@@ -1233,11 +1278,10 @@ export async function runLaunchPatchCheck(opts: { agentStdout?: boolean; dryRun?
     const target = resolveClaudeBinaryForPatch();
     if (!target.ok) {
       // A patch check must never break a launch. "Not found" is silent (the user
-      // may not use the patcher at all); an unreadable version or an unfollowable
-      // launcher is a real problem worth one dim line, since each also blocks
-      // `clodex patch`.
+      // may not use the patcher at all); every other resolution failure is worth
+      // one dim line, since each also blocks `clodex patch`.
       if (target.reason !== 'binary-not-found' && !opts.agentStdout) {
-        console.error(pc.dim(`clodex: ${describePatchTargetFailure(target)}`));
+        console.error(pc.dim(`clodex: ${describePatchTargetFailure(target, 'launch')}`));
       }
       return;
     }
