@@ -36,14 +36,62 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   change non-streaming responses' existing omission of reasoning, or the transport's prohibition
   on replaying already-emitted model output. The guarantee covers SDK-visible summary text,
   grouping and encrypted content, not output-only fields the SDK omits (such as `status`).
-- **A tool schema's `pattern` is dropped when Python's `re` cannot compile it**, on every route but
-  Anthropic-format ones (`src/tool-schema-sanitize.ts`). OpenAI validates each `pattern` with Python
-  — its 400 reads `'<pattern>' is not a 'regex'`, jsonschema's format-checker wording — while Claude
-  Code writes ECMAScript. Artifact's `field` constraint uses `\p{Cc}`, Python answers `bad escape
-  \p`, and since the tool ships on every request the session was dead from `hello` onward (#194).
-  The dialects agree on lookaround, so Artifact's `(?!...)` patterns are left alone; only `\p{}`,
-  `\P{}`, JS named groups and `\k<>` backreferences go. Losing the keyword loses a hint, not a
-  guard — Claude Code still validates tool input against its own schema before executing.
+- **A tool schema's regexes are dropped when they hit a known Python incompatibility**, on every
+  route but Anthropic-format ones (`src/tool-schema-sanitize.ts`). OpenAI rejects the same
+  constructs python-jsonschema does — its 400 reads `'<pattern>' is not a 'regex'`, that library's
+  format-checker wording — while Claude Code's built-ins are written in ECMAScript. (That is
+  behaviour observed from outside, not knowledge of what OpenAI runs.) Artifact's `field` constraint
+  uses `\p{Cc}`, Python answers `bad escape \p`, and since Artifact ships on every request, every
+  request 400d and the session was dead from `hello` onward (#194).
+  Two positions are regex-valued and both are checked: the `pattern` keyword, and every **key** of
+  `patternProperties` (the 2020-12 applicator vocabulary gives `patternProperties.propertyNames`
+  `format: "regex"`; a bad key returns the same 400). An incompatible `patternProperties` key is
+  dropped with its subschema, since the key *is* the constraint. What goes: `\p{}`/`\P{}`,
+  `\u{}`/`\x{}`, JS named groups and `\k<>` backreferences.
+
+  **What a dropped constraint costs depends on the tool.** Claude Code runs `inputSchema.safeParse`
+  before executing, but only a built-in whose Zod schema carries the same constraint is still
+  guarded — Artifact's `field` is. A registered tool's `inputSchema` is `c({}).passthrough()` with
+  the real schema parked in `inputJSONSchema`, and the MCP path checks only that `required` keys are
+  present. So for an MCP or plugin tool the regex is a genuinely lost guard, not a lost hint. It is
+  still the better trade — the alternative is a 400 that kills the session — but it is why nothing
+  is dropped that does not have to be. (Verified in the 2.1.266 bundle, not inferred.)
+
+  **Sanitizing only ever loosens**, and `patternProperties` is the one place that needed care to
+  keep it that way. A dropped entry was the only thing *admitting* its keys, so with a sibling
+  `additionalProperties` or `unevaluatedProperties` the removal would turn those keys from permitted
+  into forbidden and the tool would stop accepting input it used to — verified with Ajv, not
+  reasoned about. So dropping an entry drops the sibling closure keyword too (`true` is already the
+  permissive default and is left alone). Nothing else in the walk can narrow: removing `pattern`
+  only widens, and no other keyword is edited.
+
+  The walk follows only **declared schema positions**. `const`, `enum`, `default` and `examples`
+  hold instance *data*, not rules, so they are opaque: inside `const` or `enum` a `pattern` member
+  is a value the schema requires and deleting it changes which instances validate, while `default`
+  and `examples` are annotations that simply must not be rewritten as schemas. This is also why a tool
+  parameter *named* `pattern` (Grep has one) needs no special case: it lives under `properties`,
+  whose keys the walk never inspects.
+
+  The walked keyword set is the **union across every draft**, not one of them: OpenAI's validator
+  compiled regexes under `$defs` (2019+), `prefixItems` (2020) and array-form `items` (<=2019) in
+  the same session, so a keyword left out is a regex that reaches the far side and 400s. That is not
+  hypothetical — an earlier revision of this walk omitted `dependencies` and `contentSchema`, and
+  both were confirmed live as 400s.
+
+  Known limits, all deliberate. **Variable-width lookbehind** — alternated (`(?<=a|bb)`) or
+  quantified (`(?<=a+)`) — is legal in ECMAScript and rejected by Python (`look-behind requires
+  fixed-width pattern`); recognising it needs a real regex parser, so it is not detected and would
+  still 400. The scanner is narrower than Python in a few other spots too (`[\w-.]`, the JS `[^]`
+  idiom, bare `\pL`, backreferences to a group that does not exist). Only 14 distinct `pattern`
+  values reach a built-in tool schema in 2.1.266 and none hits any of these — Artifact's `field` is
+  the sole Python-incompatible one — so they are reachable only from a hand-written MCP or plugin
+  schema. And OpenAI **does** reject lookaround outright on its strict
+  structured-output path (`vercel/ai#16021`, `SmartBear/smartbear-mcp#491` — reports, not verified
+  here; the vercel maintainers could not reproduce it synthetically). clodex does not meet that
+  path: `translateTools` sends `strict: false` on `@ai-sdk/openai`, covering both OpenAI routes, and
+  `@ai-sdk/openai-compatible` (OpenCode Go) goes to Chat Completions, non-strict by default. The
+  explicit opt-out is load-bearing for keeping Artifact's `collection` lookahead in the payload — if
+  it is ever removed, lookaround must be stripped here too.
 - **Images in `tool_result` are lifted out of the text-only function-output channel** and delivered
   as real image parts on the following user message. Inline, a JSON.stringify'd base64 screenshot
   tokenizes at ~1.5 chars/token — 200k+ tokens per screenshot, killing agents with "Prompt is too
