@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.11.6](https://github.com/bman654/clodex/compare/v2.11.5...v2.11.6) (2026-09-09)
+
+
+### Bug Fixes
+
+* **openai:** stop tools with unusual regexes from failing every request in the session ([#203](https://github.com/bman654/clodex/issues/203)) ([d8767b5](https://github.com/bman654/clodex/commit/d8767b5f33d19c826fc2ab5541f298d2f12c8c32))
+* **patch:** explain incomplete Claude Code installs so users can repair them ([#206](https://github.com/bman654/clodex/issues/206)) ([759ffff](https://github.com/bman654/clodex/commit/759ffff50831b0820d38643504ad2f6efcd14cdc))
+* **patch:** refuse to restore Claude Code from a backup that belongs to a different install ([2a511c4](https://github.com/bman654/clodex/commit/2a511c4f2035c94750659cfc2ed9ff58bdf2babe)), closes [#199](https://github.com/bman654/clodex/issues/199)
+
 ## [2.11.5](https://github.com/bman654/clodex/compare/v2.11.4...v2.11.5) (2026-09-09)
 
 
