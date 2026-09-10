@@ -253,6 +253,16 @@ extension's own code rather than observed failing:
 Re-running `clodex patch` after each Claude Code update is required regardless of the wrapper — the
 patch applies to a specific version of the binary.
 
+Keep the two versions aligned as well. With a wrapper set, the binary the extension launches is no
+longer the one it ships with, while the extension itself can still update from the marketplace — so
+the two can drift apart. Compare them if something starts behaving unexpectedly:
+
+```powershell
+(Get-ChildItem "$env:USERPROFILE\.vscode\extensions\anthropic.claude-code-*" -Directory |
+   Sort-Object Name | Select-Object -Last 1).Name
+claude --version
+```
+
 ## Troubleshooting
 
 **`spawn EINVAL`** — `claudeProcessWrapper` points at a `.cmd`, `.ps1`, or `.bat`. It must be an
