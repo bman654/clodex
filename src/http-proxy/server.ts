@@ -694,6 +694,13 @@ function forwardToAdapter(
         ...(typeof req.headers['x-claude-code-session-id'] === 'string'
           ? { 'x-claude-code-session-id': req.headers['x-claude-code-session-id'] }
           : {}),
+        // Subagent identity: the relay partitions ChatGPT WebSocket heads by it.
+        ...(typeof req.headers['x-claude-code-agent-id'] === 'string'
+          ? { 'x-claude-code-agent-id': req.headers['x-claude-code-agent-id'] }
+          : {}),
+        ...(typeof req.headers['x-claude-code-parent-agent-id'] === 'string'
+          ? { 'x-claude-code-parent-agent-id': req.headers['x-claude-code-parent-agent-id'] }
+          : {}),
         ...(lifecycle ? { 'x-relay-request-id': lifecycle.requestId } : {}),
       },
     }, upstreamRes => {

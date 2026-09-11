@@ -1003,6 +1003,8 @@ describe('selective HTTP proxy', () => {
     let adapterAuth: string | undefined;
     let adapterApiKey: string | undefined;
     let adapterClaudeSessionId: string | undefined;
+    let adapterClaudeAgentId: string | undefined;
+    let adapterClaudeParentAgentId: string | undefined;
     let adapterBody = '';
     let anthropicRequests = 0;
     let fallbackAuth: string | undefined;
@@ -1028,6 +1030,8 @@ describe('selective HTTP proxy', () => {
       adapterAuth = req.headers.authorization;
       adapterApiKey = req.headers['x-api-key'] as string | undefined;
       adapterClaudeSessionId = req.headers['x-claude-code-session-id'] as string | undefined;
+      adapterClaudeAgentId = req.headers['x-claude-code-agent-id'] as string | undefined;
+      adapterClaudeParentAgentId = req.headers['x-claude-code-parent-agent-id'] as string | undefined;
       adapterBody = Buffer.concat(chunks).toString();
       await new Promise(resolve => setTimeout(resolve, 35));
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Connection': 'close' });
@@ -1089,6 +1093,8 @@ describe('selective HTTP proxy', () => {
         'Host: api.anthropic.com',
         'Authorization: Bearer subscription-oauth-token',
         'X-Claude-Code-Session-Id: 11111111-1111-4111-8111-111111111111',
+        'X-Claude-Code-Agent-Id: agent-a1b2c3d4e5f60718',
+        'X-Claude-Code-Parent-Agent-Id: agent-main',
         'Content-Type: application/json',
         `Content-Length: ${Buffer.byteLength(body)}`,
         'Connection: close',
@@ -1102,6 +1108,10 @@ describe('selective HTTP proxy', () => {
       expect(adapterAuth).toBeUndefined();
       expect(adapterApiKey).toBe('adapter-local-token');
       expect(adapterClaudeSessionId).toBe('11111111-1111-4111-8111-111111111111');
+      // Subagent identity rides with the session id: the relay partitions
+      // ChatGPT WebSocket heads by it.
+      expect(adapterClaudeAgentId).toBe('agent-a1b2c3d4e5f60718');
+      expect(adapterClaudeParentAgentId).toBe('agent-main');
       expect(adapterBody).toBe(body);
       const relayEntries = readFileSync(inferenceLogPath, 'utf8').trim().split('\n').map(line => JSON.parse(line));
       const requestEntry = relayEntries.find(entry => !entry.event);

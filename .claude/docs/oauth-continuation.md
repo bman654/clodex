@@ -7,8 +7,8 @@
 `src/oauth/responses-websocket.ts`. **Do not restructure this file.**
 
 All ChatGPT/Codex OAuth Responses models use a persistent WebSocket transport. Connections are
-partitioned by provider, OAuth account, upstream model, normalized effort, and hashed Claude
-session. Completed responses become validated chain heads (exact text/tool/reasoning capture;
+partitioned by provider, OAuth account, upstream model, normalized effort, hashed Claude
+session, and — for an in-process subagent — the Claude agent id. Completed responses become validated chain heads (exact text/tool/reasoning capture;
 function-call args compared as canonical JSON). The next request picks the longest exact-prefix head
 and sends `previous_response_id` + incremental input; any mismatch, failure, or expiry falls back
 safely to full context. `previous_response_not_found` retries once with full context before anything
@@ -45,6 +45,27 @@ tested as the prefix of the request and never the reverse. `inFlight` and `curre
 type rather than a state this predicate is reachable with; it blocks rather than guesses. Both the
 arrival gate and the post-pacing re-check use the predicate, and the `ws_head_decision` records
 `isolatedByConnectionId` naming the head that decided it.
+
+### Subagents partition by agent id
+
+Claude Code 2.1.268 sends `x-claude-code-agent-id` (and `x-claude-code-parent-agent-id`) on every
+request from an in-process subagent and neither on the main agent's. The relay reads them in
+`proxy.ts` / `router.ts` (the MITM forwards them to the relay adapter alongside the session header),
+carries them through `withResponsesWebSocketDiagnosticContext`, and `responsesWebSocketPartitionKey`
+appends the agent id to the key material. `prompt_cache_key` is untouched, so siblings still share
+the server-side prefix cache; only the head lookup is per agent.
+
+The possible-parent gate above is deliberately conservative for a head that has committed nothing
+yet, and a parallel fan-out hits exactly that case: five siblings start within seconds, so siblings
+two to five each arrive while the first's initial response is still streaming and were isolated
+(no head retained), and their next turns were isolated by whichever sibling was on its first response
+then. Measured on one Opus main + five Luna subagents fixing a small Python project in parallel
+(53 Luna requests): shared partition 64.9% cached input, 10 `parallel_isolated` + 4
+`history_mismatch_new_head`; per-agent partitions 82.0% cached, 5 `new_partition_head` + 48
+`continuation` and nothing else. The remaining gap to the single-thread figure (92%) is the five
+unavoidable first turns plus a few server-side cache misses on genuine continuations. Giving each
+sibling its own `prompt_cache_key` as well was tried and measured 83.2% — not distinguishable — so
+the key stays shared.
 
 Gating instead on "any head in this partition is busy" is expensive *cumulatively*: an isolated socket
 retains no head, so the next turn of that same subagent isolated again for as long as anything in the

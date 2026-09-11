@@ -125,6 +125,27 @@ export function extractClaudeSessionId(
   return validClaudeSessionId(headerFallback);
 }
 
+const CLAUDE_AGENT_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
+
+/**
+ * Claude Code 2.1.268 marks every request from an in-process subagent with
+ * `x-claude-code-agent-id` (and its parent's id in `x-claude-code-parent-agent-id`);
+ * the main agent sends neither. The value is opaque, so only its shape is checked.
+ */
+export function extractClaudeAgentIds(
+  headers: Record<string, string | string[] | undefined>,
+): { claudeAgentId?: string; claudeParentAgentId?: string } {
+  const read = (name: string): string | undefined => {
+    const raw = headers[name];
+    const value = (Array.isArray(raw) ? raw[0] : raw)?.trim();
+    return value && CLAUDE_AGENT_ID_RE.test(value) ? value : undefined;
+  };
+  return {
+    claudeAgentId: read('x-claude-code-agent-id'),
+    claudeParentAgentId: read('x-claude-code-parent-agent-id'),
+  };
+}
+
 /** Opaque prompt-cache partition derived from a Claude session UUID. */
 export function claudeSessionPromptCacheKey(sessionId: string): string {
   return 'relay-session-' + createHash('sha256').update(sessionId).digest('hex').slice(0, 32);
