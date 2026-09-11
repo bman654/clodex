@@ -56,6 +56,7 @@ import {
   generateAnthropicResponse,
   silenceSdkWarnings,
   anthropicEffortFromRequest,
+  extractClaudeAgentIds,
   extractClaudeSessionId,
   isOpenAiOAuthRoute,
   oauthServiceTier,
@@ -286,6 +287,7 @@ async function handleAnthropicMessages(
     ? req.headers['x-claude-code-session-id'][0]
     : req.headers['x-claude-code-session-id'];
   const claudeSessionId = extractClaudeSessionId(body as AnthropicRequest, claudeSessionIdHeader);
+  const claudeAgentIds = extractClaudeAgentIds(req.headers);
   if (options.webSocketDiagnosticsLogPath) {
     writeWebSocketDiagnosticRequestLog(options.webSocketDiagnosticsLogPath, {
       requestId,
@@ -469,7 +471,7 @@ async function handleAnthropicMessages(
             res.write(chunk);
           };
           await withResponsesWebSocketDiagnosticContext(
-            { requestId, claudeSessionId },
+            { requestId, claudeSessionId, ...claudeAgentIds },
             () => streamAnthropicResponse(languageModel, params, responseModelId, writeStreamChunk, undefined, {
               abortSignal: clientAbort.signal,
               initialInputTokens: estimateAnthropicInputTokens(body),
@@ -488,7 +490,7 @@ async function handleAnthropicMessages(
           // returns text/event-stream unconditionally), so stream internally and
           // collect the result instead of issuing a non-streaming SDK request.
           const anthropicResponse = await withResponsesWebSocketDiagnosticContext(
-            { requestId, claudeSessionId },
+            { requestId, claudeSessionId, ...claudeAgentIds },
             () => generateAnthropicResponse(languageModel, params, responseModelId, {
               forceStream: openAiOAuth,
               abortSignal: clientAbort.signal,

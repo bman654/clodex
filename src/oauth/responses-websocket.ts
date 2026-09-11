@@ -103,16 +103,34 @@ export interface ResponsesWebSocketDiagnosticEvent extends Record<string, unknow
 export interface ResponsesWebSocketDiagnosticContext {
   requestId?: string;
   claudeSessionId?: string;
+  /**
+   * `x-claude-code-agent-id` from the inbound request: set only for an in-process
+   * Claude Code subagent, absent for the main agent and its auxiliary requests.
+   * Unlike the other fields this one is not just correlation — it joins the
+   * socket partition key (see `responsesWebSocketPartitionKey`).
+   */
+  claudeAgentId?: string;
+  /** `x-claude-code-parent-agent-id`, recorded in diagnostics only. */
+  claudeParentAgentId?: string;
 }
 
 const diagnosticContext = new AsyncLocalStorage<ResponsesWebSocketDiagnosticContext>();
 
-/** Correlate a gateway/proxy request with the lower-level SDK WebSocket fetch. */
+/**
+ * Correlate a gateway/proxy request with the lower-level SDK WebSocket fetch,
+ * and carry the request's Claude agent identity into the partition lookup. The
+ * fetch is built once per provider, so per-request facts arrive through here.
+ */
 export function withResponsesWebSocketDiagnosticContext<T>(
   context: ResponsesWebSocketDiagnosticContext,
   fn: () => T,
 ): T {
   return diagnosticContext.run(context, fn);
+}
+
+/** The context the current async chain runs under; lets a test observe what a caller plumbed. */
+export function responsesWebSocketDiagnosticContextForTests(): ResponsesWebSocketDiagnosticContext | undefined {
+  return diagnosticContext.getStore();
 }
 
 type JsonObject = Record<string, unknown>;
@@ -383,12 +401,25 @@ function instructionChangeSummary(previous: string | undefined, current: string 
  * separately before previous_response_id is used. The authorization fingerprint
  * prevents a refreshed credential from inheriting a socket authenticated with the
  * token that the upstream rejected.
+ *
+ * The Claude agent id separates in-process subagents that share their parent's
+ * session id (and so its `prompt_cache_key`). A sibling whose opening turn
+ * differs from the turn in flight already keeps its own head —
+ * `couldPrecedeThisRequest` compares against what the busy head is generating.
+ * A sibling whose opening turn is byte-identical to it cannot be told from a
+ * retry of that turn, so the gate must isolate it; the agent id is the only
+ * signal that distinguishes the two. Partitioning per agent keeps
+ * `prompt_cache_key` shared (the server-side prefix cache still spans the
+ * fan-out) while each sibling keeps its own chain. The main agent and its
+ * auxiliary requests carry no agent id and keep sharing the session partition,
+ * so the isolation they depend on is unchanged.
  */
 export function responsesWebSocketPartitionKey(
   wsUrl: string,
   payload: JsonObject,
   options: Pick<ResponsesWebSocketFetchOptions, 'providerId' | 'accountId'> = {},
   authorizationFingerprint = '',
+  claudeAgentId = '',
 ): string | undefined {
   const promptCacheKey = payload.prompt_cache_key;
   const model = payload.model;
@@ -405,6 +436,7 @@ export function responsesWebSocketPartitionKey(
     effort,
     promptCacheKey,
     authorizationFingerprint,
+    claudeAgentId,
   ].join('\x1f');
   return createHash('sha256').update(material).digest('hex');
 }
@@ -2155,16 +2187,18 @@ export function createResponsesWebSocketFetch(
     if (hasResponsesLiteHeader(headers)) payload = applyResponsesLiteShape(payload);
 
     const authorizationFingerprint = authorizationHeaderFingerprint(headers);
+    const diagnosticCorrelation = diagnosticContext.getStore();
+    const claudeAgentId = diagnosticCorrelation?.claudeAgentId ?? '';
     const partitionKey = responsesWebSocketPartitionKey(
       wsUrl,
       payload,
       options,
       authorizationFingerprint,
+      claudeAgentId,
     );
     const promptFingerprint = responsesWebSocketPromptFingerprint(payload);
     const promptFieldHashes = responsesWebSocketPromptFieldHashes(payload);
     const instructionsSnapshot = instructionsFromPayload(payload);
-    const diagnosticCorrelation = diagnosticContext.getStore();
     // Re-read after a pacing wait, so head ages stay comparable with the pool
     // counts reported alongside them.
     let now = resolvedOptions.now();
@@ -2518,6 +2552,8 @@ export function createResponsesWebSocketFetch(
           ? String((payload.reasoning as JsonObject).effort).trim().toLowerCase()
           : '',
         promptCacheKey: typeof payload.prompt_cache_key === 'string' ? payload.prompt_cache_key : undefined,
+        claudeAgentId: claudeAgentId || undefined,
+        claudeParentAgentId: diagnosticCorrelation?.claudeParentAgentId,
       },
       promptFingerprint,
       promptFieldHashes,

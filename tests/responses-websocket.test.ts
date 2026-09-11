@@ -3645,6 +3645,79 @@ describe('createResponsesWebSocketFetch', () => {
     await readAll(streaming);
   });
 
+  it('gives concurrent subagents their own heads when the request carries a Claude agent id', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-fanout',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const sendAs = (agent: string, input: unknown[]): Promise<Response> =>
+      withResponsesWebSocketDiagnosticContext(
+        { requestId: `req-${agent}`, claudeSessionId: 'shared-session', claudeAgentId: agent, claudeParentAgentId: 'main' },
+        () => wsFetch('https://x', { method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)) }),
+      );
+    const decisions = (): ResponsesWebSocketDiagnosticEvent[] =>
+      diagnostics.filter(event => event.event === 'ws_head_decision');
+
+    // Both siblings share the parent's session (and so its prompt_cache_key) and
+    // start at the same moment: A's first response is still streaming when B's
+    // first request arrives. In one partition B would be isolated by A's
+    // uncommitted head; per-agent partitions let each keep a chain.
+    const aUser = { role: 'user', content: [{ type: 'input_text', text: 'sibling A brief' }] };
+    const bUser = { role: 'user', content: [{ type: 'input_text', text: 'sibling B brief' }] };
+    const aTurnOne = await sendAs('agent-a', [aUser]);
+    const aSocket = lastSocket();
+    aSocket.emit('open');
+    const bTurnOne = await sendAs('agent-b', [bUser]);
+    const bSocket = lastSocket();
+    expect(bSocket).not.toBe(aSocket);
+    bSocket.emit('open');
+    expect(decisions().map(event => event.decision)).toEqual(['new_partition_head', 'new_partition_head']);
+    expect(decisions()[1]).toMatchObject({
+      createdGeneration: 'nursery',
+      keyTuple: expect.objectContaining({
+        promptCacheKey: 'relay-session-abc',
+        claudeAgentId: 'agent-b',
+        claudeParentAgentId: 'main',
+      }),
+    });
+    expect(decisions()[0]!.partitionKey).not.toBe(decisions()[1]!.partitionKey);
+
+    emitTextResponse(bSocket, 'resp_b1', 'B answer');
+    await readAll(bTurnOne);
+    emitTextResponse(aSocket, 'resp_a1', 'A answer');
+    await readAll(aTurnOne);
+
+    // Each sibling's second turn continues its own head with only the delta.
+    const bTurnTwo = await sendAs('agent-b', [
+      bUser,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'B answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'B next' }] },
+    ]);
+    expect(lastSocket()).toBe(bSocket);
+    const bSent = JSON.parse(bSocket.send.mock.calls.at(-1)![0] as string) as { previous_response_id?: string; input: unknown[] };
+    expect(bSent.previous_response_id).toBe('resp_b1');
+    expect(bSent.input).toHaveLength(1);
+    emitTextResponse(bSocket, 'resp_b2', 'B again');
+    await readAll(bTurnTwo);
+
+    const socketsBeforeATurnTwo = fakeSockets.length;
+    const aTurnTwo = await sendAs('agent-a', [
+      aUser,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'A answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'A next' }] },
+    ]);
+    expect(fakeSockets.length).toBe(socketsBeforeATurnTwo);
+    const aSent = JSON.parse(aSocket.send.mock.calls.at(-1)![0] as string) as { previous_response_id?: string };
+    expect(aSent.previous_response_id).toBe('resp_a1');
+    emitTextResponse(aSocket, 'resp_a2', 'A again');
+    await readAll(aTurnTwo);
+
+    expect(decisions().map(event => event.decision)).toEqual([
+      'new_partition_head', 'new_partition_head', 'continuation', 'continuation',
+    ]);
+  });
+
   it('still isolates a parallel request when the busy head could still be its parent', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
@@ -4596,6 +4669,20 @@ describe('createResponsesWebSocketFetch', () => {
       instructions: 'changed',
       tools: [{ type: 'function', name: 'Write' }],
     }, options, 'credential-a'));
+  });
+
+  it('partitions in-process subagents by Claude agent id while keeping the prompt cache key', () => {
+    const payload = sessionPayload([]);
+    const options = { providerId: 'openai', accountId: 'a' };
+    const main = responsesWebSocketPartitionKey(WS_URL, payload, options, 'credential-a');
+    const agentA = responsesWebSocketPartitionKey(WS_URL, payload, options, 'credential-a', 'agent-a');
+    const agentB = responsesWebSocketPartitionKey(WS_URL, payload, options, 'credential-a', 'agent-b');
+    expect(agentA).not.toBe(main);
+    expect(agentB).not.toBe(main);
+    expect(agentA).not.toBe(agentB);
+    // No agent id is the main agent, whatever form the absence takes.
+    expect(responsesWebSocketPartitionKey(WS_URL, payload, options, 'credential-a', '')).toBe(main);
+    expect(responsesWebSocketPartitionKey(WS_URL, payload, options, 'credential-a', 'agent-a')).toBe(agentA);
   });
 
   it('canonicalizes object key ordering in prompt fingerprints', () => {
