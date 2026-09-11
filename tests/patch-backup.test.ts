@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -10,6 +10,9 @@ import {
   isPatchedClaudeSource,
   looksLikeLegacyClodexPatch,
   legacyBackupPath,
+  installProvenancePath,
+  readInstallProvenance,
+  recordBackupProvenance,
   planInspectedPristineSource,
   planPristineSource,
   planRestoreOnly,
@@ -83,6 +86,196 @@ describe('scanPristineBackups', () => {
 
   it('returns nothing when the backup directory does not exist', () => {
     expect(scanPristineBackups('2.1.220', join(dir, 'missing'))).toEqual({ valid: [], corrupt: [] });
+  });
+
+  it('reports the installs each backup is recorded for', () => {
+    const bytes = 'pristine 2.1.220';
+    const path = store(`claude-2.1.220-${sha(bytes).slice(0, BACKUP_SHA_PREFIX_LENGTH)}.orig`, bytes);
+    const unrecorded = store('claude-2.1.220.orig', bytes);
+    recordBackupProvenance(path, '/install/native', { assumed: false });
+    recordBackupProvenance(path, '/install/npm', { assumed: false });
+
+    const scan = scanPristineBackups('2.1.220', dir);
+    expect(scan.valid.find(candidate => candidate.path === path)?.installs)
+      .toEqual(['/install/native', '/install/npm']);
+    expect(scan.valid.find(candidate => candidate.path === unrecorded)?.installs).toEqual([]);
+  });
+
+  it('keeps an assumed record out of the established installs', () => {
+    const bytes = 'pristine 2.1.220';
+    const path = store(`claude-2.1.220-${sha(bytes).slice(0, BACKUP_SHA_PREFIX_LENGTH)}.orig`, bytes);
+    recordBackupProvenance(path, '/install/guessed', { assumed: true });
+
+    const scan = scanPristineBackups('2.1.220', dir);
+    expect(scan.valid[0]?.installs).toEqual([]);
+    expect(scan.valid[0]?.damagedProvenance).toEqual([]);
+  });
+
+  it('reports a provenance record it cannot read instead of ignoring it', () => {
+    const bytes = 'pristine 2.1.220';
+    const path = store(`claude-2.1.220-${sha(bytes).slice(0, BACKUP_SHA_PREFIX_LENGTH)}.orig`, bytes);
+    const record = installProvenancePath(path, '/install/claude');
+    writeFileSync(record, '{"install": "/install/cla');
+
+    const scan = scanPristineBackups('2.1.220', dir);
+    expect(scan.valid[0]?.installs).toEqual([]);
+    expect(scan.valid[0]?.damagedProvenance).toEqual([record]);
+  });
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'treats a record it cannot open as damaged, not as absent',
+    () => {
+      // The name is right there in the directory listing, so this is not "no record":
+      // it is one that exists and cannot be read. Reading it as absent is what let the
+      // version-tag fallback run on a backup another install had already claimed.
+      const bytes = 'pristine 2.1.220';
+      const path = store(`claude-2.1.220-${sha(bytes).slice(0, BACKUP_SHA_PREFIX_LENGTH)}.orig`, bytes);
+      const record = installProvenancePath(path, '/install/claude');
+      writeFileSync(record, JSON.stringify({ install: '/install/claude', assumed: false }));
+      chmodSync(record, 0o000);
+      try {
+        const scan = scanPristineBackups('2.1.220', dir);
+        expect(scan.valid[0]?.installs).toEqual([]);
+        expect(scan.valid[0]?.damagedProvenance).toEqual([record]);
+      } finally {
+        chmodSync(record, 0o600);
+      }
+    },
+  );
+
+  it('treats a record whose name does not match the install it holds as damaged', () => {
+    // The name is derived from the install path, so a mismatch means one of the two
+    // is wrong — including a hash-prefix collision that would otherwise let a record
+    // be selected for an install it was not written for.
+    const bytes = 'pristine 2.1.220';
+    const path = store(`claude-2.1.220-${sha(bytes).slice(0, BACKUP_SHA_PREFIX_LENGTH)}.orig`, bytes);
+    const record = installProvenancePath(path, '/install/claude');
+    writeFileSync(record, JSON.stringify({ install: '/somewhere/else/claude', assumed: false }));
+
+    const scan = scanPristineBackups('2.1.220', dir);
+    expect(scan.valid[0]?.installs).toEqual([]);
+    expect(scan.valid[0]?.damagedProvenance).toEqual([record]);
+  });
+
+  it('does not mistake a provenance record for a backup', () => {
+    const bytes = 'pristine 2.1.220';
+    const path = store(`claude-2.1.220-${sha(bytes).slice(0, BACKUP_SHA_PREFIX_LENGTH)}.orig`, bytes);
+    recordBackupProvenance(path, '/install/claude', { assumed: false });
+
+    const scan = scanPristineBackups('2.1.220', dir);
+    expect(scan.valid.map(candidate => candidate.path)).toEqual([path]);
+    expect(scan.corrupt).toEqual([]);
+  });
+
+  it('reads only the records belonging to its own backup', () => {
+    const bytes = 'pristine 2.1.220';
+    const mine = store(`claude-2.1.220-${sha(bytes).slice(0, BACKUP_SHA_PREFIX_LENGTH)}.orig`, bytes);
+    const other = store('claude-2.1.220.orig', bytes);
+    recordBackupProvenance(other, '/install/other', { assumed: false });
+
+    const scan = scanPristineBackups('2.1.220', dir);
+    expect(scan.valid.find(candidate => candidate.path === mine)?.installs).toEqual([]);
+    expect(scan.valid.find(candidate => candidate.path === other)?.installs).toEqual(['/install/other']);
+  });
+});
+
+describe('backup provenance records', () => {
+  let dir: string;
+  let backup: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'clodex-backup-prov-'));
+    backup = join(dir, 'claude-2.1.220-abcdef0123456789.orig');
+    writeFileSync(backup, 'pristine');
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reads nothing for a backup that has no record', () => {
+    expect(readInstallProvenance(installProvenancePath(backup, '/install/native'))).toBeNull();
+  });
+
+  it('gives each install its own file, so no merge can lose one', () => {
+    recordBackupProvenance(backup, '/install/native', { assumed: false });
+    recordBackupProvenance(backup, '/install/npm', { assumed: false });
+    expect(readInstallProvenance(installProvenancePath(backup, '/install/native')))
+      .toEqual({ install: '/install/native', assumed: false });
+    expect(readInstallProvenance(installProvenancePath(backup, '/install/npm')))
+      .toEqual({ install: '/install/npm', assumed: false });
+  });
+
+  it('is idempotent, so repeated patches rewrite nothing', () => {
+    recordBackupProvenance(backup, '/install/native', { assumed: false });
+    const before = readFileSync(installProvenancePath(backup, '/install/native'), 'utf8');
+    recordBackupProvenance(backup, '/install/native', { assumed: false });
+    expect(readFileSync(installProvenancePath(backup, '/install/native'), 'utf8')).toBe(before);
+  });
+
+  it('never downgrades an established record to a guess', () => {
+    // Callers ask for the confidence THIS run can prove. One that can prove less
+    // than an earlier run must not erase what the earlier one knew.
+    recordBackupProvenance(backup, '/install/npm', { assumed: false });
+    expect(recordBackupProvenance(backup, '/install/npm', { assumed: true })).toBe('established');
+    expect(readInstallProvenance(installProvenancePath(backup, '/install/npm')))
+      .toEqual({ install: '/install/npm', assumed: false });
+  });
+
+  it('promotes a guess when the caller has independent evidence', () => {
+    // A fresh snapshot inspects the install's own bytes, which no guess produces —
+    // refusing to promote there would let one old guess suppress the proof forever.
+    // Keeping a guess a guess is the CALLER's job: it passes `assumed` whenever its
+    // evidence is derived from an earlier one.
+    recordBackupProvenance(backup, '/install/npm', { assumed: true });
+    expect(recordBackupProvenance(backup, '/install/npm', { assumed: false })).toBe('established');
+    expect(readInstallProvenance(installProvenancePath(backup, '/install/npm')))
+      .toEqual({ install: '/install/npm', assumed: false });
+  });
+
+  it('reports the confidence that stands on disk', () => {
+    expect(recordBackupProvenance(backup, '/install/npm', { assumed: true })).toBe('assumed');
+    expect(recordBackupProvenance(backup, '/install/npm', { assumed: true })).toBe('assumed');
+    expect(recordBackupProvenance(backup, '/install/native', { assumed: false })).toBe('established');
+  });
+
+  it('rejects a record whose assumed flag is not a boolean', () => {
+    // It would read as `false` — the ESTABLISHED value — so a damaged former guess
+    // would become the strongest evidence in the directory.
+    const record = installProvenancePath(backup, '/install/native');
+    writeFileSync(record, JSON.stringify({ install: '/install/native', assumed: 'true' }));
+    expect(readInstallProvenance(record)).toBe('damaged');
+  });
+
+  it('still records an established install beside an assumed one', () => {
+    recordBackupProvenance(backup, '/install/npm', { assumed: true });
+    recordBackupProvenance(backup, '/install/native', { assumed: false });
+    expect(readInstallProvenance(installProvenancePath(backup, '/install/native')))
+      .toEqual({ install: '/install/native', assumed: false });
+  });
+
+  it('reports an unreadable record as damaged rather than as absent', () => {
+    const record = installProvenancePath(backup, '/install/native');
+    writeFileSync(record, '{"install": "/install/nat');
+    expect(readInstallProvenance(record)).toBe('damaged');
+  });
+
+  it('reports a record that names no install as damaged', () => {
+    const record = installProvenancePath(backup, '/install/native');
+    writeFileSync(record, JSON.stringify({ assumed: false }));
+    expect(readInstallProvenance(record)).toBe('damaged');
+  });
+
+  it('replaces a damaged record on the next patch', () => {
+    const record = installProvenancePath(backup, '/install/native');
+    writeFileSync(record, 'not json');
+    recordBackupProvenance(backup, '/install/native', { assumed: false });
+    expect(readInstallProvenance(record)).toEqual({ install: '/install/native', assumed: false });
+  });
+
+  it('leaves no temp file behind', () => {
+    recordBackupProvenance(backup, '/install/native', { assumed: false });
+    expect(readdirSync(dir).filter(name => name.includes('.tmp-'))).toEqual([]);
   });
 });
 
@@ -159,6 +352,9 @@ function candidate(overrides: Partial<BackupCandidate> = {}): BackupCandidate {
     path: contentAddressedBackupPath('2.1.220', PRISTINE, '/backups'),
     kind: 'content-addressed',
     sha256: PRISTINE,
+    installs: [],
+    assumedInstalls: [],
+    damagedProvenance: [],
     ...overrides,
   };
 }
@@ -248,7 +444,7 @@ describe('planInspectedPristineSource', () => {
   it('NEVER snapshots a patched binary — it errors instead', () => {
     const plan = planInspectedPristineSource(facts(), { patched: true });
     expect(plan.action).toBe('error');
-    expect((plan as { message: string }).message).toMatch(/already patched and no trustworthy pristine backup/);
+    expect((plan as { message: string }).message).toMatch(/holds no pristine backup of claude 2\.1\.220 it can attribute to/);
   });
 
   it('restores the version\'s backup when the binary is patched', () => {
@@ -396,7 +592,7 @@ describe('planRestoreOnly', () => {
     it('reports the ordinary no-backup error when the version has no backups at all', () => {
       const plan = planRestoreOnly(facts({ backups: [], manifest: otherInstall }));
       expect(plan.action).toBe('error');
-      expect((plan as { message: string }).message).toMatch(/no trustworthy pristine backup/);
+      expect((plan as { message: string }).message).toMatch(/holds no pristine backup of claude 2\.1\.220 it can attribute to/);
     });
   });
 
@@ -450,7 +646,7 @@ describe('planRestoreOnly', () => {
   describe('no manifest at all', () => {
     it('still restores, and says the version tag is the only thing tying the backup to the install', () => {
       const plan = planRestoreOnly(facts({ backups: [candidate()], manifest: null }));
-      expect(plan).toMatchObject({ action: 'restore', backupPath: candidate().path });
+      expect(plan).toMatchObject({ action: 'restore', backupPath: candidate().path, assumedForThisInstall: true });
       expect((plan as { notes: string[] }).notes.join(' ')).toMatch(/version tag alone/);
     });
 
@@ -459,8 +655,178 @@ describe('planRestoreOnly', () => {
         backups: [candidate()],
         manifest: { binaryPath: '/install/claude', backupPath: candidate().path, pristineSha256: PRISTINE },
       }));
-      expect(plan).toMatchObject({ action: 'restore', backupPath: candidate().path });
+      expect(plan).toMatchObject({ action: 'restore', backupPath: candidate().path, assumedForThisInstall: false });
       expect((plan as { notes: string[] }).notes).toEqual([]);
+    });
+  });
+
+  // Issue #204. A successful restore deletes the manifest and the manifest holds
+  // one install, so it cannot be the only record of which install a backup belongs
+  // to. Each backup carries its own.
+  describe('provenance recorded beside the backup', () => {
+    const mine = () => candidate({ installs: ['/install/claude'] });
+    const theirs = () => candidate({
+      path: contentAddressedBackupPath('2.1.220', OTHER_INSTALL_PRISTINE, '/backups'),
+      sha256: OTHER_INSTALL_PRISTINE,
+      installs: ['/other-install/claude'],
+    });
+
+    it('refuses a backup recorded for another install when no manifest survives', () => {
+      const plan = planRestoreOnly(facts({ backups: [theirs()], manifest: null }));
+      expect(plan.action).toBe('error');
+      expect((plan as { message: string }).message)
+        .toMatch(/recorded as the pristine content of \/other-install\/claude, not of \/install\/claude/);
+    });
+
+    it('restores this install\'s own backup while another install\'s sits beside it', () => {
+      const plan = planRestoreOnly(facts({ backups: [mine(), theirs()], manifest: null }));
+      expect(plan).toMatchObject({
+        action: 'restore',
+        backupPath: mine().path,
+        pristineSha256: PRISTINE,
+        assumedForThisInstall: false,
+      });
+      expect((plan as { notes: string[] }).notes).toEqual([]);
+    });
+
+    it('outranks a manifest that records some other install', () => {
+      // The manifest is about a different install, and used to be reason enough to
+      // refuse. A record naming THIS install is direct evidence, so it decides.
+      const plan = planRestoreOnly(facts({
+        backups: [mine(), theirs()],
+        manifest: { binaryPath: '/other-install/claude', backupPath: theirs().path, pristineSha256: OTHER_INSTALL_PRISTINE },
+      }));
+      expect(plan).toMatchObject({ action: 'restore', backupPath: mine().path });
+    });
+
+    it('restores bytes recorded for both installs at once', () => {
+      // Content-addressed: two installs whose pristine bytes are identical share
+      // one backup file, and it is correct for either of them.
+      const shared = candidate({ installs: ['/other-install/claude', '/install/claude'] });
+      const plan = planRestoreOnly(facts({ backups: [shared], manifest: null }));
+      expect(plan).toMatchObject({ action: 'restore', backupPath: shared.path, assumedForThisInstall: false });
+    });
+
+    it('prefers a self-validating name over a legacy one recorded for the same install', () => {
+      const legacy = candidate({
+        path: legacyBackupPath('2.1.220', '/backups'),
+        kind: 'legacy',
+        installs: ['/install/claude'],
+      });
+      const plan = planRestoreOnly(facts({ backups: [legacy, mine()], manifest: null }));
+      expect(plan).toMatchObject({ action: 'restore', backupPath: mine().path, probeVersion: false });
+    });
+
+    it('refuses when the manifest and a record disagree about this install\'s bytes', () => {
+      // Nothing dates either one, so "the manifest is newer" is an assumption. The
+      // state is reachable by replacing the executable at one path with a different
+      // build of the same claude version, where the MANIFEST is the stale one.
+      const contradicting = candidate({
+        path: contentAddressedBackupPath('2.1.220', OTHER_INSTALL_PRISTINE, '/backups'),
+        sha256: OTHER_INSTALL_PRISTINE,
+        installs: ['/install/claude'],
+      });
+      const plan = planRestoreOnly(facts({
+        backups: [contradicting, mine()],
+        manifest: { binaryPath: '/install/claude', backupPath: mine().path, pristineSha256: PRISTINE },
+      }));
+      expect(plan.action).toBe('error');
+      expect((plan as { message: string }).message).toMatch(/holds different bytes/);
+    });
+
+    it('still lets the manifest decide when the records agree with it', () => {
+      const plan = planRestoreOnly(facts({
+        backups: [mine()],
+        manifest: { binaryPath: '/install/claude', backupPath: mine().path, pristineSha256: PRISTINE },
+      }));
+      expect(plan).toMatchObject({ action: 'restore', backupPath: mine().path, assumedForThisInstall: false });
+    });
+
+    it('carries a guessing run\'s manifest forward as a guess', () => {
+      // The manifest a guessing run wrote is the guess, written down. Reading it as
+      // independent proof is what promoted the guess on the next run.
+      const plan = planRestoreOnly(facts({
+        backups: [candidate()],
+        manifest: {
+          binaryPath: '/install/claude',
+          backupPath: candidate().path,
+          pristineSha256: PRISTINE,
+          pristineProvenance: 'assumed',
+        },
+      }));
+      expect(plan).toMatchObject({ action: 'restore', assumedForThisInstall: true });
+    });
+
+    it('refuses the fallback for an install these bytes were never guessed onto', () => {
+      // The first guess proves nothing about ownership, but running the fallback a
+      // SECOND time is how one install's bytes reach two.
+      const guessedElsewhere = candidate({ assumedInstalls: ['/other-install/claude'] });
+      const plan = planRestoreOnly(facts({ backups: [guessedElsewhere], manifest: null }));
+      expect(plan.action).toBe('error');
+      expect((plan as { message: string }).message).toMatch(/have already been restored onto/);
+    });
+
+    it('still repeats the fallback for the install it already guessed for', () => {
+      // Same decision, being made again — refusing here would strand the ordinary
+      // single-install machine on its second restore.
+      const guessedForMe = candidate({ assumedInstalls: ['/install/claude'] });
+      const plan = planRestoreOnly(facts({ backups: [guessedForMe], manifest: null }));
+      expect(plan).toMatchObject({ action: 'restore', assumedForThisInstall: true });
+    });
+
+    it('refuses when two records for this install disagree about its bytes', () => {
+      const contradiction = candidate({
+        path: contentAddressedBackupPath('2.1.220', OTHER_INSTALL_PRISTINE, '/backups'),
+        sha256: OTHER_INSTALL_PRISTINE,
+        installs: ['/install/claude'],
+      });
+      const plan = planRestoreOnly(facts({ backups: [mine(), contradiction], manifest: null }));
+      expect(plan.action).toBe('error');
+      expect((plan as { message: string }).message).toMatch(/cannot tell which one that install holds now/);
+    });
+
+    it('keeps restoring a backup from before sidecars existed', () => {
+      // Refusing here would strand every backup written by an earlier clodex, so
+      // the version-tag fallback survives for records that do not exist at all —
+      // and only for those. The plan still says the association is assumed.
+      const plan = planRestoreOnly(facts({ backups: [candidate({ installs: [] })], manifest: null }));
+      expect(plan).toMatchObject({ action: 'restore', assumedForThisInstall: true });
+    });
+
+    it('refuses when only SOME of the backups carry a record, none of them this install\'s', () => {
+      const unrecorded = candidate({
+        path: contentAddressedBackupPath('2.1.220', sha('third install pristine'), '/backups'),
+        sha256: sha('third install pristine'),
+      });
+      const plan = planRestoreOnly(facts({ backups: [theirs(), unrecorded], manifest: null }));
+      expect(plan.action).toBe('error');
+      // Specifically the provenance refusal, not the conflicting-backups one: with
+      // two backups on disk both messages are available, and only this one names the
+      // install the bytes DO belong to.
+      expect((plan as { message: string }).message)
+        .toMatch(/recorded as the pristine content of \/other-install\/claude, not of \/install\/claude/);
+    });
+
+    it('refuses the version-tag fallback when a record beside the backup is damaged', () => {
+      // Something recorded which install those bytes belong to and the record cannot
+      // be read. Treating that as "never recorded" is what would let the fallback run
+      // on a backup that had already been claimed.
+      const plan = planRestoreOnly(facts({
+        backups: [candidate({ damagedProvenance: ['/backups/claude-2.1.220-x.orig.for-abc.json'] })],
+        manifest: null,
+      }));
+      expect(plan.action).toBe('error');
+      expect((plan as { message: string }).message).toMatch(/provenance record that clodex cannot read/);
+    });
+
+    it('still restores on a record for this install even when another backup\'s record is damaged', () => {
+      const damaged = candidate({
+        path: contentAddressedBackupPath('2.1.220', OTHER_INSTALL_PRISTINE, '/backups'),
+        sha256: OTHER_INSTALL_PRISTINE,
+        damagedProvenance: ['/backups/other.for-abc.json'],
+      });
+      const plan = planRestoreOnly(facts({ backups: [mine(), damaged], manifest: null }));
+      expect(plan).toMatchObject({ action: 'restore', backupPath: mine().path });
     });
   });
 });

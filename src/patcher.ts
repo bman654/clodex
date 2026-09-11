@@ -90,11 +90,15 @@ import {
   backupDir,
   collectPristineFacts,
   contentAddressedBackupPath,
+  installProvenancePath,
   isPatchedClaudeSource,
+  legacyBackupPath,
   looksLikeLegacyClodexPatch,
   planInspectedPristineSource,
   planPristineSource,
   planRestoreOnly,
+  readInstallProvenance,
+  recordBackupProvenance,
   sha256File,
   tweakccMirrorBackupPath,
   type PristineFacts,
@@ -142,6 +146,13 @@ export interface PatchManifest {
    * treat it as optional.
    */
   pristineSha256?: string;
+  /**
+   * `assumed` when this run tied `backupPath` to `binaryPath` by the claude version
+   * in a file name alone, rather than by a record or an earlier manifest. Absent
+   * means established. Without it, the next run reads a guessing run's manifest as
+   * independent proof and promotes the guess (issue #204).
+   */
+  pristineProvenance?: 'assumed';
   patchedAt: string;
 }
 
@@ -887,6 +898,8 @@ export async function applyPatch(
   let patchedSha256: string;
   let backup: string;
   let pristineSha256: string;
+  /** What tied `backup` to this install, carried into the manifest. */
+  const pristine: { provenance: 'established' | 'assumed' } = { provenance: 'established' };
   try {
     mkdirSync(backupDir(), { recursive: true });
 
@@ -990,6 +1003,52 @@ export async function applyPatch(
     // poisoned backup must not be laundered into a content-addressed name (which
     // later runs then trust without a probe), and must not clobber the tweakcc
     // mirror on its way to failing.
+    // A guessed association is recorded AS a guess rather than skipped: the record
+    // is what stops a later run from promoting it (the live bytes now match the
+    // backup because the guess put them there, and the manifest this run writes was
+    // itself derived from it). It never selects and never refuses.
+    //
+    // Every plan INHERITS the confidence already recorded for these bytes. `reuse`
+    // matches bytes a guess may have put there; canonicalizing a legacy backup would
+    // otherwise launder a guess through a filename change; and a `snapshot` is no
+    // exception either, even though it inspected the live bytes itself — if a guess
+    // restored those very bytes onto this install, "the install holds them" is a fact
+    // the guess created, so establishing on it would hand these bytes' true owner a
+    // refusal. Nothing promotes a guess. The protection a promotion was supposed to
+    // buy is already provided by refusing the fallback for an install these bytes were
+    // guessed onto.
+    //
+    // Confidence belongs to the CONTENT, not to a filename. Asking only about the name
+    // this plan chose left a third name carrying the guess: restore B from a legacy
+    // backup by version tag, patch A so the legacy file is adopted under its content
+    // address, then patch B — which picks the canonical name, finds no record of B
+    // beside it, and established what the legacy name still called a guess. So every
+    // alias of these exact bytes is consulted, and the two names a record can sit
+    // beside while its backup is gone (the content address and the legacy name) are
+    // read directly, because the scan only finds records next to an existing `.orig`.
+    const inheritsAGuess = (path: string): boolean => {
+      const existing = readInstallProvenance(installProvenancePath(path, binaryPath));
+      return existing === 'damaged' || (existing !== null && existing.assumed);
+    };
+    const provenanceAssumed = (plan.action === 'restore' && plan.assumedForThisInstall)
+      || inheritsAGuess(plan.backupPath)
+      || inheritsAGuess(contentAddressedBackupPath(version, plan.pristineSha256))
+      || inheritsAGuess(legacyBackupPath(version))
+      || facts.backups.some(
+        candidate => candidate.sha256 === plan.pristineSha256
+          && candidate.assumedInstalls.includes(binaryPath),
+      );
+    // From what the write LEFT on disk, not from what it asked for. The two agree
+    // today — an established request promotes, so the writer never answers `assumed`
+    // to one — but the manifest is the next run's evidence, and reading it from the
+    // result rather than the intent means that stays true without depending on the
+    // writer's promotion rule.
+    const recordProvenance = (path: string) => {
+      if (recordBackupProvenance(path, binaryPath, { assumed: provenanceAssumed }) === 'assumed') {
+        pristine.provenance = 'assumed';
+      }
+    };
+
     if (!loaded) {
       loaded = await seedCandidate(backup);
       if (isPatchedClaudeSource(loaded.source)) {
@@ -1015,6 +1074,12 @@ export async function applyPatch(
           + `to publish it as ${plan.backupPath}`,
         );
       }
+      // Record BEFORE the backup becomes visible. A published `.orig` with no record
+      // beside it is exactly the unattributed same-version file this exists to
+      // prevent, and a crash or a full disk between the two writes would leave one
+      // for good. The reverse order is safe: a record whose backup never appeared is
+      // inert, because scanning starts from the `.orig` files.
+      recordProvenance(plan.backupPath);
       publishFileByRename(candidatePath, plan.backupPath);
     }
 
@@ -1028,6 +1093,10 @@ export async function applyPatch(
     // is absent from it and gets replaced rather than adopted and published.
     const canonical = contentAddressedBackupPath(version, pristineSha256);
     if (canonical !== backup) {
+      // Both names first, for the same reason the snapshot path records before it
+      // publishes: whichever file exists must already say whose bytes it holds.
+      recordProvenance(backup);
+      recordProvenance(canonical);
       const alreadyStored = facts.backups.some(
         candidate => candidate.path === canonical && candidate.sha256 === pristineSha256,
       );
@@ -1038,6 +1107,18 @@ export async function applyPatch(
     // Mirror the pristine copy to tweakcc's restore location (always from the
     // backup, never the live binary — so it stays pristine after patching).
     publishFileByRename(backup, tweakccMirrorBackupPath());
+
+    // Record which install these bytes are the pristine content of, beside the
+    // backup itself. The manifest written at the end of this function says the same
+    // thing, but it holds one install and `--restore` deletes it, so this is what
+    // still answers "whose bytes are these?" on a later run — and refuses to hand
+    // them to a different install (issue #204). Both names are recorded when a
+    // legacy backup was adopted under its content address: the legacy file is left
+    // on disk deliberately, for `tweakcc --restore` and older clodex, so leaving it
+    // unattributed would leave the one file this change cannot speak for.
+    // Idempotent, so repeating the snapshot path's write costs nothing.
+    recordProvenance(backup);
+    if (plan.backupPath !== backup) recordProvenance(plan.backupPath);
 
     const builtIn = applyClodexPatches(loaded.source, desired.config);
     results = builtIn.results;
@@ -1163,6 +1244,7 @@ export async function applyPatch(
     patchedSha256,
     backupPath: backup,
     pristineSha256,
+    ...(pristine.provenance === 'assumed' ? { pristineProvenance: 'assumed' as const } : {}),
     patchedAt: new Date().toISOString(),
   };
   writePatchManifest(manifest);
@@ -1254,6 +1336,63 @@ function runRestoreCommand(target: ClaudePatchTarget): number {
     p.log.error(verified.message);
     return 1;
   }
+  // Record what this restore knows BEFORE the binary changes and before the manifest
+  // is cleared.
+  //
+  // Before the copy, because a version-tag guess changes the live bytes to the
+  // backup's: once that has happened, "the live bytes match this backup" is no
+  // longer independent evidence, so the record saying it was a guess has to already
+  // be on disk. If it cannot be, the guess is refused — it is the optional
+  // compatibility path, and skipping it costs the user nothing but a message.
+  //
+  // Before the manifest is cleared, because the manifest may be the ONLY thing tying
+  // that backup to this install — an upgrading user's backup predates these records
+  // — and clearing it without writing one leaves the backup unattributed for good,
+  // which is the state issue #204 turns destructive on a second install.
+  // A manifest for this same path but a DIFFERENT claude version is about an older
+  // install of Claude Code whose backup is still on disk, and clearing it below would
+  // leave that backup unattributed. `clodex patch` migrates the same case.
+  if (manifest && manifest.backupPath && manifest.binaryPath === binaryPath
+    && manifest.claudeVersion !== version && manifest.backupPath !== plan.backupPath) {
+    try {
+      if (existsSync(manifest.backupPath)) {
+        recordBackupProvenance(manifest.backupPath, manifest.binaryPath, {
+          assumed: manifest.pristineProvenance === 'assumed',
+        });
+      }
+    } catch (err) {
+      p.log.warn(
+        `Could not record in ${backupDir()} that ${manifest.backupPath} holds the pristine bytes of `
+        + `claude ${manifest.claudeVersion} at ${manifest.binaryPath} `
+        + `(${err instanceof Error ? err.message : String(err)}). That version may need to be `
+        + 'reinstalled rather than restored.',
+      );
+    }
+  }
+
+  let recorded: 'established' | 'assumed' | 'failed';
+  try {
+    recorded = recordBackupProvenance(plan.backupPath, binaryPath, { assumed: plan.assumedForThisInstall });
+  } catch (err) {
+    recorded = 'failed';
+    const detail = err instanceof Error ? err.message : String(err);
+    if (plan.assumedForThisInstall) {
+      p.log.error(
+        `Refusing to restore ${binaryPath} from ${plan.backupPath}: nothing but the claude `
+        + `${version} version tag ties those bytes to this install, and clodex cannot record that in `
+        + `${backupDir()} (${detail}). Writing them without that record would leave the machine unable `
+        + 'to tell afterwards that the match was a guess. Fix the backup directory, or reinstall '
+        + 'Claude Code to make this install pristine.',
+      );
+      return 1;
+    }
+    p.log.warn(
+      `Could not record in ${backupDir()} that ${plan.backupPath} holds the pristine bytes of `
+      + `${binaryPath} (${detail}). Restoring anyway and keeping the patch manifest, so that record `
+      + 'is not lost — a later restore would otherwise have nothing tying that backup to this install.',
+    );
+  }
+
   // Keep the live binary's own permissions: `copyFileSync` would hand it the
   // backup file's instead, and a non-executable claude is a worse outcome than
   // the one being fixed.
@@ -1279,16 +1418,22 @@ function runRestoreCommand(target: ClaudePatchTarget): number {
     );
     copyFileSync(plan.backupPath, binaryPath);
   }
-  // Reaching here means the plan established these bytes as THIS install's
-  // pristine content, so the manifest being cleared is this install's own record
-  // that it was patched. A manifest recorded against a different install cannot
-  // get here: `selectRestoreSource` refuses that case outright rather than
-  // selecting a backup by version tag, which is what used to delete another
-  // install's only rescue record along with clobbering it (issue #199).
-  try {
-    unlinkSync(getPatchManifestPath());
-  } catch {
-    // no manifest to remove
+
+  // The manifest records ONE install, and clearing it is meant to say "this install
+  // is no longer patched". Two things must hold first. Only this install's own
+  // record may be cleared: a provenance record lets a restore succeed while the
+  // manifest still holds a DIFFERENT install (both are recorded, so each can be
+  // restored), and deleting the manifest there would throw away the other install's
+  // only rescue record — the damage issue #199 named, arrived at from the other
+  // direction. And an ESTABLISHED record must now stand in its place: a manifest is
+  // stronger evidence than a guess, so dropping it in exchange for one destroys
+  // testimony rather than migrating it.
+  if (recorded === 'established' && (!manifest || manifest.binaryPath === binaryPath)) {
+    try {
+      unlinkSync(getPatchManifestPath());
+    } catch {
+      // no manifest to remove
+    }
   }
   p.log.success(`Restored pristine claude ${version} from ${plan.backupPath}.`);
   return 0;
@@ -1358,6 +1503,29 @@ export async function runPatchCommand(opts: {
   if (!release) {
     p.log.warn('Another clodex process is patching the claude binary right now — skipped.');
     return 1;
+  }
+
+  // This run is about to REPLACE the manifest, which holds one install. When the one
+  // it holds is a different install (or this install at a different claude version),
+  // that manifest is the only thing attributing its backup — an upgrading user's
+  // backup predates the per-install records — so migrate its testimony first or
+  // patching one install silently strips the other's rescue record (issue #204).
+  if (manifest && manifest.backupPath
+    && (manifest.binaryPath !== binaryPath || manifest.claudeVersion !== version)) {
+    try {
+      if (existsSync(manifest.backupPath)) {
+        recordBackupProvenance(manifest.backupPath, manifest.binaryPath, {
+          assumed: manifest.pristineProvenance === 'assumed',
+        });
+      }
+    } catch (err) {
+      p.log.warn(
+        `Could not record in ${backupDir()} that ${manifest.backupPath} holds the pristine bytes of `
+        + `${manifest.binaryPath} before replacing the patch manifest `
+        + `(${err instanceof Error ? err.message : String(err)}). That install may need to be `
+        + 'reinstalled rather than restored.',
+      );
+    }
   }
 
   try {
