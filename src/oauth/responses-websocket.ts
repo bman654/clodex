@@ -90,6 +90,15 @@ interface RequestContext {
   controller: ReadableStreamDefaultController<Uint8Array>;
   encoder: TextEncoder;
   originalPayload: JsonObject;
+  /**
+   * Memoized canonical items of `originalPayload`, for comparing an arriving
+   * request against the turn this response is generating. `originalPayload` is
+   * assigned once at construction and never reassigned — a transport retry resets
+   * `sendPayload` back to it and reuses this same context — so the memo cannot go
+   * stale, and it keeps a wide fan-out from re-serializing every in-flight
+   * conversation once per arriving sibling.
+   */
+  canonicalInput?: string[];
   sendPayload: JsonObject;
   promptFieldHashes: Record<string, string>;
   instructionsSnapshot?: string;
@@ -796,13 +805,21 @@ function canonicalItemStrings(items: unknown[]): string[] {
   return items.map(item => canonicalJson(normalizeToolCallJson([item])));
 }
 
-/** True when `head` is a strict prefix of `client`. Exits at the first difference. */
-function isStrictPrefix(head: string[], client: string[]): boolean {
-  if (client.length <= head.length) return false;
+/**
+ * True when `head` is a prefix of `client`, counting the two being identical.
+ * Exits at the first difference.
+ */
+function isPrefixOrEqual(head: string[], client: string[]): boolean {
+  if (client.length < head.length) return false;
   for (let index = 0; index < head.length; index += 1) {
     if (head[index] !== client[index]) return false;
   }
   return true;
+}
+
+/** True when `head` is a strict prefix of `client` — equal histories do not count. */
+function isStrictPrefix(head: string[], client: string[]): boolean {
+  return client.length > head.length && isPrefixOrEqual(head, client);
 }
 
 function continuationMatch(
@@ -2138,14 +2155,30 @@ export function createResponsesWebSocketFetch(
      * session id, so one partition holds many unrelated conversations at once —
      * and a head busy on one of them says nothing about where another belongs.
      *
-     * Conservative wherever it cannot tell. A head that has committed nothing yet
-     * (its very first response is still streaming) has no history to diverge
-     * from, so it keeps blocking — which is the case the auxiliary-request
-     * isolation depends on.
+     * A head that has committed nothing yet — its very first response is still
+     * streaming — has no stored history to diverge from, but it is not unknowable:
+     * `current` holds the conversation it is generating for right now, and this
+     * request can only be a later turn of that response if it carries those items
+     * as a prefix. Comparing against them is what keeps a fan-out of subagents
+     * that all start at once from isolating every sibling's opening turn.
+     *
+     * Conservative only where there is genuinely nothing to compare.
      */
-    const couldPrecedeThisRequest = (entry: ConnectionEntry): boolean =>
-      !entry.responseId || !entry.requestInput || !entry.expectedAssistant
-      || continuationMatch(entry, payload, clientItems()) !== undefined;
+    const couldPrecedeThisRequest = (entry: ConnectionEntry): boolean => {
+      if (entry.responseId && entry.requestInput && entry.expectedAssistant) {
+        return continuationMatch(entry, payload, clientItems()) !== undefined;
+      }
+      const streaming = entry.current;
+      // `inFlight` and `current` are set together, so a candidate this predicate is
+      // asked about always has one. Block rather than guess if that ever changes.
+      if (!streaming) return true;
+      // Equality counts, hence `isPrefixOrEqual` rather than the strict form the
+      // continuation check uses: a client that re-sent the same turn is a duplicate
+      // of the response in flight, not a branch off it, and must not be stitched
+      // onto a turn whose output it has never seen.
+      streaming.canonicalInput ??= canonicalItemStrings(inputArray(streaming.originalPayload));
+      return isPrefixOrEqual(streaming.canonicalInput, clientItems());
+    };
     /** The in-flight head that forced isolation, for the diagnostic. */
     const blockingHead = (entries: ConnectionEntry[]): ConnectionEntry | undefined =>
       entries.find(entry => entry.inFlight && couldPrecedeThisRequest(entry));
