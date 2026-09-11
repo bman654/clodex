@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.12.0](https://github.com/bman654/clodex/compare/v2.11.7...v2.12.0) (2026-09-11)
+
+
+### Features
+
+* **oauth:** keep prompt caching when several subagents are given the same prompt ([#215](https://github.com/bman654/clodex/issues/215)) ([2967c95](https://github.com/bman654/clodex/commit/2967c9532196c519529f34793928bf473f39a805))
+
 ## [2.11.7](https://github.com/bman654/clodex/compare/v2.11.6...v2.11.7) (2026-09-11)
 
 
