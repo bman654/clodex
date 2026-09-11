@@ -113,9 +113,19 @@ turn still opens its own socket; only a LATER turn of that conversation can reus
 primary connection-creation decisions in the ledger above, 3,611 had final diagnostics in which every
 recorded busy candidate showed a `user`-to-`user` divergence. Those are candidates for a different
 decision, not proof that 3,611 live isolations are replaced — the diagnostic reflects mutable entry
-state at emission time. Of the remaining 384, 319 recorded at least one busy strict-prefix candidate
-and still isolate by design; 65 had no busy candidate left in the final diagnostic and cannot be
-classified from this snapshot.
+state at emission time. Of the remaining 384, 65 had no busy candidate left in the final diagnostic
+and cannot be classified from this snapshot.
+
+**An earlier revision said the other 319 "recorded at least one busy strict-prefix candidate and
+still isolate by design". That was a misreading of the field, not a traffic shape.** A head that has
+committed nothing has an EMPTY stored prefix, and an empty prefix is trivially a prefix of anything,
+so those 319 read as strict-prefix candidates while actually being uncommitted heads — exactly the
+case the lineage gate fixed. Re-mined properly: across all 3,995 isolations in that ledger, **zero**
+had a busy candidate whose items were a prefix of, or equal to, the arriving request. Every one
+diverged at the very first item. So a same-partition fan-out sharing an opening turn did not occur in
+this account's traffic at all; that shape is what the agent-id partition handles, and it is real for
+consensus-style fan-outs rather than common. When reading `heads[]`, check whether a candidate is
+committed before believing a prefix relation.
 
 An isolated socket is never registered, so it never evicts anything, while a retained one runs
 `evictOldestIdleGeneration` first, **so a newly retained sibling can displace an older idle head that
@@ -133,7 +143,8 @@ concurrency rather than on any observed loss — see the sizing discussion below
 **On a fresh pool, and for a fan-out whose members have distinguishable opening turns, it opened
 fewer sockets** — it reuses instead of dialing. That is not a general result: a warmed pool whose
 older conversations return is the case that can lose a head, and siblings that share an opening turn
-still isolate by design. Four single-purpose servers built from pinned commits (endpoint mode,
+are separated by agent id instead of by this gate. Four single-purpose servers built from pinned
+commits (endpoint mode,
 `--no-discovery`, own port, freshly started, one leg at a time so each leg had the upstream account to
 itself), 16 conversations x 4 turns started simultaneously against a real ChatGPT-OAuth model,
 2026-09-11. `baseline` is 9bd5205, the commit that introduced the gate for *committed* heads;
