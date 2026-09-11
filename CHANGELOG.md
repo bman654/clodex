@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.11.7](https://github.com/bman654/clodex/compare/v2.11.6...v2.11.7) (2026-09-11)
+
+
+### Bug Fixes
+
+* **oauth:** keep more cached conversations alive when many subagents run at once ([#221](https://github.com/bman654/clodex/issues/221)) ([a8b7fd8](https://github.com/bman654/clodex/commit/a8b7fd81f76df00244db45d533b8b871485f5ca8))
+* **oauth:** keep prompt caching when many subagents start at the same moment ([#219](https://github.com/bman654/clodex/issues/219)) ([50f8dd3](https://github.com/bman654/clodex/commit/50f8dd38aba58e616c87314cfd98c6a693ea8079)), closes [#209](https://github.com/bman654/clodex/issues/209)
+* **oauth:** restore prompt caching for parallel subagents on ChatGPT models ([#211](https://github.com/bman654/clodex/issues/211)) ([9bd5205](https://github.com/bman654/clodex/commit/9bd5205fe87c45be0e8739f57928f64260819a8a))
+
 ## [2.11.6](https://github.com/bman654/clodex/compare/v2.11.5...v2.11.6) (2026-09-09)
 
 
