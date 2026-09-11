@@ -3339,6 +3339,358 @@ describe('createResponsesWebSocketFetch', () => {
     await readAll(next);
   });
 
+  it('keeps a parallel conversation on its own chain while an unrelated head streams', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-subagent-fanout',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const send = (input: unknown[]): Promise<Response> => wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const decisions = (): ResponsesWebSocketDiagnosticEvent[] =>
+      diagnostics.filter(event => event.event === 'ws_head_decision');
+
+    // Conversation A earns a committed head by completing a turn, so its stored
+    // history is something a later request can be compared against.
+    const aFirstUser = { role: 'user', content: [{ type: 'input_text', text: 'conversation A' }] };
+    const aTurnOne = await send([aFirstUser]);
+    const aSocket = lastSocket();
+    aSocket.emit('open');
+    emitTextResponse(aSocket, 'resp_a1', 'A answer');
+    await readAll(aTurnOne);
+
+    // ...and is mid-response on its NEXT turn when the sibling arrives, which is
+    // what a real tool loop looks like. The head is in flight with a committed
+    // prefix — the shape no other test covers.
+    const aTurnTwo = await send([
+      aFirstUser,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'A answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'A again' }] },
+    ]);
+    expect(lastSocket()).toBe(aSocket);
+    expect(decisions().at(-1)).toMatchObject({ decision: 'continuation' });
+
+    // Conversation B is a different Claude Code subagent. It inherits the parent's
+    // session id, so it lands in A's partition, but its history diverges from A's
+    // at the very first item: A can never become B's parent.
+    const bFirstUser = { role: 'user', content: [{ type: 'input_text', text: 'conversation B' }] };
+    const bTurnOne = await send([bFirstUser]);
+    const bSocket = lastSocket();
+    expect(bSocket).not.toBe(aSocket);
+    expect(decisions().at(-1)).toMatchObject({ decision: 'history_mismatch_new_head' });
+    bSocket.emit('open');
+    emitTextResponse(bSocket, 'resp_b1', 'B answer');
+    await readAll(bTurnOne);
+
+    emitTextResponse(aSocket, 'resp_a2', 'A answer again');
+    await readAll(aTurnTwo);
+
+    // The payoff: B's second turn continues B's chain instead of resending the
+    // whole conversation on yet another throwaway socket.
+    const bNextUser = { role: 'user', content: [{ type: 'input_text', text: 'B again' }] };
+    const bTurnTwo = await send([
+      bFirstUser,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'B answer' }] },
+      bNextUser,
+    ]);
+    expect(lastSocket()).toBe(bSocket);
+    const sent = JSON.parse(bSocket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_b1');
+    expect(sent.input).toEqual([bNextUser]);
+    emitTextResponse(bSocket, 'resp_b2', 'B answer again');
+    await readAll(bTurnTwo);
+
+    // A's own chain is untouched by any of it.
+    expect(aSocket.close).not.toHaveBeenCalled();
+    expect(decisions().map(event => event.decision)).toEqual([
+      'new_partition_head', 'continuation', 'history_mismatch_new_head', 'continuation',
+    ]);
+  });
+
+  it('still isolates a parallel request when the busy head could still be its parent', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-ambiguous-parent',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const send = (input: unknown[]): Promise<Response> => wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const lastDecision = (): ResponsesWebSocketDiagnosticEvent | undefined =>
+      diagnostics.filter(event => event.event === 'ws_head_decision').at(-1);
+
+    const firstUser = { role: 'user', content: [{ type: 'input_text', text: 'shared root' }] };
+    const turnOne = await send([firstUser]);
+    const socket = lastSocket();
+    socket.emit('open');
+    emitTextResponse(socket, 'resp_1', 'answer');
+    await readAll(turnOne);
+
+    const turnTwo = await send([
+      firstUser,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'second' }] },
+    ]);
+    expect(lastSocket()).toBe(socket);
+
+    // A request that EXTENDS the busy head's committed history could still be a
+    // later turn of the response it is generating, so it must not fork a head.
+    const overlapping = await send([
+      firstUser,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'a different second' }] },
+    ]);
+    const isolatedSocket = lastSocket();
+    expect(isolatedSocket).not.toBe(socket);
+    expect(lastDecision()).toMatchObject({
+      decision: 'parallel_isolated',
+      createdGeneration: 'isolated',
+      isolatedByConnectionId: 1,
+    });
+    isolatedSocket.emit('open');
+    emitTextResponse(isolatedSocket, 'resp_isolated', 'isolated answer');
+    await readAll(overlapping);
+    expect(isolatedSocket.close).toHaveBeenCalled();
+
+    emitTextResponse(socket, 'resp_2', 'second answer');
+    await readAll(turnTwo);
+  });
+
+  it('does not continue a head whose history differs only at the root item', async () => {
+    // The length guard returns early whenever the client history is SHORTER than
+    // the stored prefix, so a divergence test that relies on a short history never
+    // compares item 0 at all. This one is long enough to reach the comparison: B
+    // matches A's stored prefix everywhere EXCEPT the root. Continuing A here
+    // would hand B someone else's `previous_response_id` and drop B's own root
+    // from the delta entirely.
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-root-only-divergence' });
+    const send = (input: unknown[]): Promise<Response> => wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const sharedReply = { role: 'assistant', content: [{ type: 'output_text', text: 'same answer' }] };
+
+    const aTurnOne = await send([{ role: 'user', content: [{ type: 'input_text', text: 'root A' }] }]);
+    const aSocket = lastSocket();
+    aSocket.emit('open');
+    emitTextResponse(aSocket, 'resp_a1', 'same answer');
+    await readAll(aTurnOne);
+
+    // Stored prefix is [root A, assistant]; this is [root B, assistant, user] —
+    // longer, and identical from item 1 onward.
+    const bTurnOne = await send([
+      { role: 'user', content: [{ type: 'input_text', text: 'root B' }] },
+      sharedReply,
+      { role: 'user', content: [{ type: 'input_text', text: 'B continues' }] },
+    ]);
+    expect(fakeSockets).toHaveLength(2);
+    const bSocket = lastSocket();
+    expect(bSocket).not.toBe(aSocket);
+    // A's head was not touched: no second send, so no chain was hijacked.
+    expect(aSocket.send).toHaveBeenCalledTimes(1);
+    bSocket.emit('open');
+    const sent = JSON.parse(bSocket.send.mock.calls[0]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    expect(sent.input).toHaveLength(3);
+    emitTextResponse(bSocket, 'resp_b1', 'B answer');
+    await readAll(bTurnOne);
+  });
+
+  it('keeps a chain that shares a parent preamble but diverges inside assistant history', async () => {
+    // Subagents fanned out from one Claude session open with the SAME inherited
+    // preamble, so a lineage test that only compares the first item — or that
+    // compares only the head's own request input and ignores the output it
+    // produced — cannot tell these two conversations apart.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-shared-preamble',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const send = (input: unknown[]): Promise<Response> => wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const preamble = { role: 'user', content: [{ type: 'input_text', text: 'shared parent preamble' }] };
+
+    const aTurnOne = await send([preamble]);
+    const aSocket = lastSocket();
+    aSocket.emit('open');
+    emitTextResponse(aSocket, 'resp_a1', 'A answer');
+    await readAll(aTurnOne);
+
+    // A is mid-response on its next turn, holding a committed prefix of
+    // [preamble] + [assistant "A answer"].
+    const aTurnTwo = await send([
+      preamble,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'A answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'A again' }] },
+    ]);
+    expect(lastSocket()).toBe(aSocket);
+
+    // B shares item 0 with A and first differs at the ASSISTANT item, which sits
+    // in the region A produced rather than the region A was sent.
+    const bPrefix = [
+      preamble,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'B answer' }] },
+    ];
+    const bTurnOne = await send([...bPrefix, { role: 'user', content: [{ type: 'input_text', text: 'B follows' }] }]);
+    const bSocket = lastSocket();
+    expect(bSocket).not.toBe(aSocket);
+    bSocket.emit('open');
+    emitTextResponse(bSocket, 'resp_b1', 'B second answer');
+    await readAll(bTurnOne);
+    emitTextResponse(aSocket, 'resp_a2', 'A answer again');
+    await readAll(aTurnTwo);
+
+    // B kept a head, so its next turn continues instead of resending.
+    const bNextUser = { role: 'user', content: [{ type: 'input_text', text: 'B again' }] };
+    const bTurnTwo = await send([
+      ...bPrefix,
+      { role: 'user', content: [{ type: 'input_text', text: 'B follows' }] },
+      { role: 'assistant', content: [{ type: 'output_text', text: 'B second answer' }] },
+      bNextUser,
+    ]);
+    expect(fakeSockets).toHaveLength(2); // no third socket was constructed
+    const sent = JSON.parse(bSocket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_b1');
+    expect(sent.input).toEqual([bNextUser]);
+    expect(bSocket.close).not.toHaveBeenCalled();
+    emitTextResponse(bSocket, 'resp_b2', 'B third answer');
+    await readAll(bTurnTwo);
+  });
+
+  it('isolates a parallel request whose only possible parent matches by omitted reasoning', async () => {
+    // Claude does not always echo a stored reasoning item back. Such a request is
+    // still a descendant of the busy head, so the lineage test has to accept
+    // `continuationMatch`'s omitted-reasoning mode, not exact prefixes only.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-omitted-reasoning-parent',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const send = (input: unknown[]): Promise<Response> => wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const lastDecision = (): ResponsesWebSocketDiagnosticEvent | undefined =>
+      diagnostics.filter(event => event.event === 'ws_head_decision').at(-1);
+    const firstUser = { role: 'user', content: [{ type: 'input_text', text: 'inspect the file' }] };
+
+    const turnOne = await send([firstUser]);
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_1' } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.added', output_index: 0,
+      item: { type: 'reasoning', id: 'rs_1' },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'reasoning', id: 'rs_1', encrypted_content: 'enc_1', summary: [] },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 1,
+      item: { type: 'function_call', id: 'fc_1', call_id: 'call_1', name: 'Read', arguments: '{}', status: 'completed' },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_1' } })));
+    await readAll(turnOne);
+
+    // The tool result comes back WITHOUT the reasoning item, so this continues
+    // through the omitted-reasoning mode and leaves the head in flight.
+    const echoed = [
+      firstUser,
+      { type: 'function_call', call_id: 'call_1', name: 'Read', arguments: '{}' },
+      { type: 'function_call_output', call_id: 'call_1', output: 'contents' },
+    ];
+    const turnTwo = await send(echoed);
+    expect(lastSocket()).toBe(socket);
+    expect(lastDecision()).toMatchObject({ continuationMatchMode: 'omitted_reasoning' });
+
+    // Another request extending that same reasoning-omitting history could be a
+    // later turn of the response still streaming, so it must not fork a head.
+    const overlapping = await send([...echoed, { role: 'user', content: [{ type: 'input_text', text: 'and again' }] }]);
+    const isolatedSocket = lastSocket();
+    expect(isolatedSocket).not.toBe(socket);
+    expect(lastDecision()).toMatchObject({
+      decision: 'parallel_isolated',
+      createdGeneration: 'isolated',
+      isolatedByConnectionId: 1,
+    });
+    isolatedSocket.emit('open');
+    emitTextResponse(isolatedSocket, 'resp_isolated', 'isolated answer');
+    await readAll(overlapping);
+    expect(isolatedSocket.close).toHaveBeenCalled();
+
+    emitTextResponse(socket, 'resp_2', 'second answer');
+    await readAll(turnTwo);
+  });
+
+  it('finds the possible parent among several busy heads and names it', async () => {
+    // The partition holds an unrelated busy head FIRST and the possible parent
+    // second, so stopping at the first busy candidate reaches the wrong verdict
+    // and the reported connection id is the only thing that proves which head
+    // actually decided the isolation.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-two-busy-heads',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const send = (input: unknown[]): Promise<Response> => wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const lastDecision = (): ResponsesWebSocketDiagnosticEvent | undefined =>
+      diagnostics.filter(event => event.event === 'ws_head_decision').at(-1);
+    const turn = (text: string) => ({ role: 'user', content: [{ type: 'input_text', text }] });
+    const reply = (text: string) => ({ role: 'assistant', content: [{ type: 'output_text', text }] });
+
+    // Head 1: unrelated conversation, committed.
+    const aRoot = turn('conversation A root');
+    const aOne = await send([aRoot]);
+    const aSocket = lastSocket();
+    aSocket.emit('open');
+    emitTextResponse(aSocket, 'resp_a1', 'A answer');
+    await readAll(aOne);
+
+    // Head 2: a different conversation, committed. Registered after head 1, so it
+    // is the second candidate the scan walks.
+    const bRoot = turn('conversation B root');
+    const bOne = await send([bRoot]);
+    const bSocket = lastSocket();
+    expect(bSocket).not.toBe(aSocket);
+    bSocket.emit('open');
+    emitTextResponse(bSocket, 'resp_b1', 'B answer');
+    await readAll(bOne);
+
+    // Both heads go in flight, A first. Each continues on its own socket, so no
+    // new socket is constructed for either.
+    const aTwo = await send([aRoot, reply('A answer'), turn('A again')]);
+    expect(fakeSockets).toHaveLength(2);
+    expect(aSocket.send).toHaveBeenCalledTimes(2);
+    const bPrefix = [bRoot, reply('B answer')];
+    const bTwo = await send([...bPrefix, turn('B again')]);
+    expect(fakeSockets).toHaveLength(2);
+    expect(bSocket.send).toHaveBeenCalledTimes(2);
+
+    // A request that extends B — and nothing about A — must isolate, and must say
+    // it was B that blocked it.
+    const overlapping = await send([...bPrefix, turn('B a different way')]);
+    const isolatedSocket = lastSocket();
+    expect(isolatedSocket).not.toBe(aSocket);
+    expect(isolatedSocket).not.toBe(bSocket);
+    expect(lastDecision()).toMatchObject({
+      decision: 'parallel_isolated',
+      createdGeneration: 'isolated',
+      isolatedByConnectionId: 2,
+    });
+    isolatedSocket.emit('open');
+    emitTextResponse(isolatedSocket, 'resp_isolated', 'isolated answer');
+    await readAll(overlapping);
+    expect(isolatedSocket.close).toHaveBeenCalled();
+
+    emitTextResponse(aSocket, 'resp_a2', 'A answer again');
+    emitTextResponse(bSocket, 'resp_b2', 'B answer again');
+    await readAll(aTwo);
+    await readAll(bTwo);
+  });
+
   it('retains the main head when a completed auxiliary request starts another branch', async () => {
     const input = [{ role: 'user', content: [{ type: 'input_text', text: 'main' }] }];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-hidden-branch' });
@@ -4111,6 +4463,9 @@ describe('new-connection pacing', () => {
       // It waited, so it re-scanned; the sibling head it found was in flight,
       // so the demotion is still what decided this.
       pacingRescanOutcome: 'parallel_isolated',
+      // The post-pacing demotion must attribute itself to the head it found,
+      // not leave the field to the arrival scan that saw an empty partition.
+      isolatedByConnectionId: 1,
     });
 
     for (const socket of fakeSockets) socket.emit('open');
@@ -4611,6 +4966,10 @@ describe('new-connection pacing', () => {
     // back rather than delaying whoever asks next.
     expect(releaseToken).toHaveBeenCalledTimes(1);
     expect((decision as { createdConnectionId?: number }).createdConnectionId).toBeUndefined();
+    // This request WAS blocked by a possible parent on arrival, then continued it
+    // after the wait. A turn that ends up perfectly cached must not be labelled
+    // with the head that briefly blocked it, or the ledger reads as an isolation.
+    expect(decision).not.toHaveProperty('isolatedByConnectionId');
     expect(debug).toContain('ws: continuing a chain head that freed up during the pacing wait');
 
     emitTextResponse(siblingSocket, 'resp_rematch_2', 'done');

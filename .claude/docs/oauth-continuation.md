@@ -23,11 +23,79 @@ but omitted from comparison, matching the existing expected-assistant snapshot. 
 accepts legacy histories that omitted earlier summaries when the encrypted content matches; this
 compatibility rule is not permission to rewrite summaries in new upstream requests.
 
+### Only a possible parent may force a request onto an isolated socket
+
+An in-process Claude Code subagent forks the session and keeps the root session identity, so it sends
+its parent's id in `X-Claude-Code-Session-Id` (verified in the 2.1.267 bundle; a separately launched
+process has its own). One partition therefore holds many unrelated conversations at once. A request that matches no idle head is pushed to `parallel_isolated` — full
+context, no head retained — only when some **in-flight** head could still turn out to be its parent:
+`couldPrecedeThisRequest`, which is `continuationMatch` against the busy head plus a conservative
+`true` for a head that has committed nothing yet (its first response is still streaming, so there is
+no history to diverge from). Both the arrival gate and the post-pacing re-check use it, and the
+`ws_head_decision` records `isolatedByConnectionId` naming the head that decided it.
+
+Gating instead on "any head in this partition is busy" is expensive *cumulatively*: an isolated socket
+retains no head, so the next turn of that same subagent isolated again for as long as anything in the
+partition was in flight. In one frozen local ledger — 13,530 head decisions spanning
+2026-09-10T03:17Z to 2026-09-11T06:53Z across 20 recorded Claude session ids — 3,995 decisions
+(29.5%) were `parallel_isolated`. Their 3,775 recorded responses reported 202.7M uncached input
+tokens, 96.9% of their input, against 4.2% for responses on continuation decisions. In **3,611 of
+those decisions (90.4%) every recorded busy candidate diverged from the request in a `user`-to-`user`
+comparison** — all 4,983 such comparisons — and those responses account for 196.0M of the uncached tokens. Multiple
+heads per partition were already routine, and an idle head is already continued while a sibling
+streams, so an unrelated busy head was never a reason to give up a chain.
+
+That is observed traffic on one account, not a counterfactual: it does not say 3,611 isolations would
+be *prevented*, nor that their tokens would be saved. A retained head cannot help the turn that
+opened it, only a later turn of the same conversation.
+
+Two measurement traps this section has already fallen into. **Freeze the file before counting** — it
+is appended to live, and an earlier revision mixed figures read minutes apart into a ratio that did
+not divide. **Count each response once**: 254 request ids here carry more than one head decision
+(retries), so joining usage per decision double-counts the successful attempt and inflated these very
+numbers by ~2.3M tokens.
+
 **Connection pools are process-wide, not per-partition:** `maxConnections` (established, default 32)
-and `maxNurseryConnections` (default 8). A head starts in the nursery and is promoted only when
-successfully continued — so a workload fanning out into many concurrent subagent conversations (all
-inheriting the parent's Claude session id, therefore sharing one partition) can evict heads before
-their next turn and lose the continuation. Override via `CLODEX_WS_MAX_CONNECTIONS` /
+and `maxNurseryConnections` (default 8). A head starts in the nursery and is promoted when selected
+for its first continuation, before that continuation is known to succeed — so a workload whose
+concurrent subagents inherit the parent's Claude session id, and therefore share one partition, can
+lose heads before their next turn and with them the continuation.
+
+**Keeping a fan-out's chains alive trades throwaway sockets for retained heads, and that trade can go
+either way.** The mismatching turn still opens its own socket; only a LATER turn of that conversation
+can reuse it. Of the 4,934 primary connection-creation decisions in the ledger above, 3,611 had final
+diagnostics in which every recorded busy candidate showed a `user`-to-`user` divergence. Those are
+candidates for a different decision under this gate, not proof that 3,611 live isolations are replaced
+— the diagnostic reflects mutable entry state at emission time. Of the remaining 384, 319 recorded at
+least one busy strict-prefix candidate and still isolate by design; 65 had no busy candidate left in
+the final diagnostic and cannot be classified from this snapshot. But an isolated socket is never registered, so it
+never evicts anything, while a retained one runs `evictOldestIdleGeneration` first.
+**Eviction pressure is retained arrivals measured against free capacity — both terms matter, neither
+alone.** Seven free nursery slots absorb a width-1 fan-out with no eviction and lose one head to a
+width-8 one; at the cap, width decides whether one head or eight are evicted. A worked sequence goes
+the wrong way: eight idle nursery heads, one
+long-running established head in the target partition, and eight staggered siblings that each diverge
+from it. Retaining all eight evicts all eight older heads, so resuming those conversations inside the
+5-minute nursery TTL needs eight fresh upgrades — 16 rather than 8.
+
+**Cap enforcement touches BOTH pools, at two different moments.** Creating a retained head calls
+`evictOldestIdleGeneration('nursery', maxNurseryConnections, 'nursery_lru_cap')` first; when that head
+is later selected for its first continuation, `continueOnHead` calls
+`evictOldestIdleGeneration('established', maxConnections, 'established_lru_cap')` before promoting it.
+Either call removes an entry only when that generation is at or above its cap AND has an idle entry —
+neither is an unconditional eviction. So this change can raise established-pool pressure as newly
+retained heads are later selected, and the entry displaced is the oldest idle established one, which
+may be a large long-lived conversation that then resends full context. The ledger does not establish
+that established eviction actually becomes more common. Watch `established_lru_cap` alongside
+`nursery_lru_cap`.
+
+An idle nursery head is exposed until its connection is **selected** for its first continuation, which
+is when promotion happens — before that continuation is known to succeed. Nursery membership is a
+property of the current connection's reuse history, not of the conversation's age: a long conversation
+that just took a replacement head after a mismatch or an expiry is in the nursery too (this ledger
+holds 58 new nursery heads whose input already carried several user messages, the largest 529 items).
+Note also that eviction only considers IDLE entries, so while every nursery head is busy the cap
+cannot be enforced immediately. Override via `CLODEX_WS_MAX_CONNECTIONS` /
 `CLODEX_WS_MAX_NURSERY_CONNECTIONS` (integer 1–1024; malformed values are logged and ignored). An
 explicit programmatic option outranks the environment so tests are never perturbed. Eviction reasons
 (`nursery_lru_cap`, `established_lru_cap`, `idle_ttl`, `nursery_idle_ttl`, `hard_ttl`) appear in the
@@ -196,13 +264,16 @@ through the shipped bucket predicts 1,686 waits and 1,590 refusals in one of tho
 **Boundary, deliberate:** the second scan cannot undo an ARRIVAL-time `parallel_isolated` demotion
 when the partition simply goes quiet during the wait. Such a request already has `persistent` false
 and, absent a re-match, keeps it, so it opens an isolated socket that retains no head at all.
-Isolated sockets are 35-38% of decisions in busy diagnostics files — a larger share of the same
-harm than the case this closes.
+Isolated sockets were 30-38% of decisions in busy diagnostics files before the lineage gate above
+narrowed which of them qualify — a larger share of the same harm than the case this closes.
 
 Failing a re-match, an admitted request still demotes itself to `parallel_isolated` if a
-same-partition request went in flight meanwhile — otherwise two requests would each register a
-persistent nursery head for one key and a fan-out would evict other conversations' heads. That check
-is unconditional; only the re-match is gated on having been queued.
+same-partition request that could be its parent went in flight meanwhile — otherwise two requests
+would each register a persistent nursery head for one key and a fan-out would evict other
+conversations' heads. The duplicate this guards against is a second head for ONE conversation, which
+is what `couldPrecedeThisRequest` describes; a head busy on a different conversation is not a
+duplicate of anything, and a brand-new sibling head has committed nothing and so still blocks. That
+check is unconditional; only the re-match is gated on having been queued.
 
 Diagnostics: a `ws_new_connection_paced` event (`outcome` of `admitted`, `refused`, or `aborted`,
 with `waitedMs` / `requiredWaitMs` / `retryAfterSeconds`) and `pacingWaitedMs` on the same request's
@@ -309,6 +380,14 @@ genuine rewind or branch regenerates the call under a new one. These record
   filler the shared rule removes: if either side strips *more* than the rule does — a snapshot or a
   client over-stripping — the two remain unequal after it runs and land in the silent `false` bucket. The `parallel_isolated` arm does not
   warn. **Treat a quiet terminal as weak evidence, not proof.**
+- **A turn that reaches the mismatch branch rather than `parallel_isolated` passes every abandoned head
+  through the canary** — including other conversations' heads once a fan-out keeps them. The identity
+  gates still apply: a tool warning needs both items to be `function_call` with the same non-empty
+  `call_id`, the same string-valued `name`, and `equalAfterStrip === true`; a reasoning warning needs two
+  reasoning items with the same non-empty `encrypted_content` plus a remaining normalized difference.
+  Where independently generated items carry distinct identities these gates exclude them, which reduces
+  unrelated-head noise — but that is **not** proof against a false warning, because a shared or copied
+  history can carry one item identity into more than one request. No such occurrence has been observed.
 - `false` means the difference is one the rule cannot explain — a scalar/array/malformed `arguments`
   that `sanitizedCallArguments` deliberately passes through, a divergence in another field, or a
   genuinely different value — indistinguishable from legitimate divergence, so counted and never
