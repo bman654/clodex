@@ -85,6 +85,101 @@ CANARY_PARTIAL_RETRY_HOURS="${CANARY_PARTIAL_RETRY_HOURS:-6}"
 # A background session in one of these states is finished; anything else is still working.
 TERMINAL_AGENT_STATES="done stopped failed error cancelled"
 
+# The "Worth knowing" list, minus whatever the action line at the top of the notification already
+# said. Printing "Docker was not available" three paragraphs below "start Docker Desktop" is what
+# turns a one-line instruction into something that reads as filler and gets skipped. Display only —
+# the note stays in full in the state record either way.
+# One disclosure line, appended to SOFT_NOTES. Both notifications render that list.
+add_soft() { SOFT_NOTES="$SOFT_NOTES- $1
+"; }
+
+# Every disclosure of reduced coverage this run owes the reader, gathered into SOFT_NOTES: legs
+# that errored, legs downgraded to a probe, and a --platforms subset. Both notifications render it,
+# so a note that never makes it in here is disclosed nowhere at all. A function rather than a run of
+# top-level statements because that is the only way the self-test can prove a producer is still
+# wired to it — the subset note was once added to the script and to the tests independently, and
+# deleting the production wiring left every case green.
+#
+# Sets: SOFT_NOTES (appended via add_soft), DOWNGRADE_NOTES and SUBSET_NOTE, which the pass
+# notification reads again to avoid repeating itself.
+collect_soft_notes() {
+  local all line
+  # Separate assignments, not one interpolation: with several substitutions in a single assignment
+  # only the last one's failure is visible to errexit, so a jq fault in an earlier one would
+  # silently drop the very notes that disclose reduced coverage.
+  ERROR_NOTES="$(matrix_error_notes)"
+  DOWNGRADE_NOTES="$(matrix_downgrade_notes)"
+  SUBSET_NOTE="$(subset_note)"
+  all="$ERROR_NOTES
+$DOWNGRADE_NOTES
+$SUBSET_NOTE"
+  while IFS= read -r line; do
+    [ -n "$line" ] && add_soft "${line#- }"
+  done <<EOF
+$all
+EOF
+  return 0
+}
+
+# A --platforms run tested a subset, so every count in either message — "breaks on 1 of 1 builds" —
+# is out of that subset and not out of the release. The pass path also says so in its action line;
+# the failure path has no action line at all, so this note is the only place it is disclosed there.
+# Empty for a normal full run, which is every scheduled one.
+subset_note() {
+  [ -n "${opt_platforms:-}" ] || return 0
+  # A selection is only a subset if it is SMALLER than what is published. `--platforms` naming all
+  # eight covers the release completely, and telling the reader the other builds went untested when
+  # there are no other builds is a false disclosure, which costs the true ones their credibility.
+  local selected published
+  selected="$(platform_names | awk 'NF' | wc -l | tr -d ' ')" || return 1
+  published="$(printf '%s\n' "$CANARY_PLATFORM_TABLE" | awk -F'|' 'NF' | wc -l | tr -d ' ')"
+  [ "$selected" -lt "$published" ] || return 0
+  printf '%s' "- this run was limited to $opt_platforms by \`--platforms\`, so every count here is out of that subset and the other published builds were not tested at all"
+}
+
+notes_for_display() { # notes_for_display <all-notes> [note-already-covered...]
+  local all="$1" kept pats=() note
+  shift
+  for note in "$@"; do
+    # -e for every pattern: each note begins with "- ", and without it grep reads the pattern as
+    # flags, fails, and the `|| true` below swallows that — dropping the entire list and silently
+    # taking every unrelated note, including the reduced-coverage disclosures, with it.
+    [ -z "$note" ] || pats+=(-e "$note")
+  done
+  [ "${#pats[@]}" -gt 0 ] || { printf '%s' "$all"; return 0; }
+  kept="$(printf '%s' "$all" | grep -vxF "${pats[@]}" || true)"
+  [ -z "$kept" ] || kept="$kept
+"
+  printf '%s' "$kept"
+}
+
+# The write that records a release's verdict. Held here rather than inlined at its call site so the
+# self-test can drive the real expression: the test used to carry its own transcription of it, and a
+# transcription is a copy that stops matching the moment one of the two is edited.
+#
+# `.baseline` is what each platform looked like the last time IT came out clean, merged so that a
+# leg which could not run this time keeps its old entry instead of being forgotten while a leg that
+# did run still advances — one permanently unavailable platform cannot freeze regression detection
+# for the other seven.
+#
+# The merge is `+`, NOT `*`. `*` merges recursively, so a platform's new entry would inherit `sites`
+# keys from the entry it replaced. That silently defeats the leg-mode guard in the comparison above:
+# a host/container leg records `probe:PATCH …` names that a probe-only leg never emits, so after one
+# Docker outage the fresh probe entry carried the container run's leftover names, the guard saw two
+# matching `probe` modes and compared anyway, and the next run announced all eleven leftover names
+# as checks that were "not attempted at all this time". A leg's record must be exactly what that leg
+# observed.
+#
+# `.lastCompleteVersion` is the last release that came out clean on EVERY build. It is the only
+# thing entitled to be quoted as "last known good", so it is the only thing gated on `pass`.
+CANARY_VERDICT_FILTER='.versions[$v] = {status: $st, at: $t, atEpoch: $te, clodexSha: $sha, log: $l,
+                                        notes: $n, platforms: $pstatus}
+                       | .baseline = {version: $v, at: $t, clodexSha: $sha, configFingerprint: $fp,
+                                      platforms: ((.baseline.platforms // {}) + $base)}
+                       | (if $st == "pass" then .lastCompleteVersion = $v else . end)
+                       | .deferred = ((.deferred // {}) | del(.[$v]))
+                       | .pending = ((.pending // {}) | del(.[$v]))'
+
 opt_status=0 opt_force=0 opt_launch=1 opt_slack=1 opt_keep=0 opt_version="" opt_retriage=""
 opt_platforms="" opt_container=1
 
@@ -971,6 +1066,156 @@ inflight_status() {
   echo working
 }
 
+# The pass/partial notification, composed rather than posted, so the self-test can read the
+# bytes this actually sends. Assembled inline at the call site, the only things a test could
+# reach were the pieces: deleting the action line from the message left every assertion green.
+#
+# Reads the run's globals: VERSION, INSTALLED_VERSION, HOST_PLATFORM, HOST_STATUS, TOTAL_COUNT,
+# COVERAGE, COVERAGE_COMPLETE, SOFT_NOTES, DOWNGRADE_NOTES, SUBSET_NOTE, MAIN_SHA, REPO_DIR,
+# and $MATRIX.
+pass_notification_text() {
+  # Only the host leg can license an update, so only a host leg that passed may recommend one.
+  # Saying "nothing was established for you" and "the update is yours to take" in one message is
+  # worse than saying neither.
+  if [ "$HOST_STATUS" != "pass" ]; then
+    UPDATE_LINE="Because this Mac's leg did not complete, whether $VERSION patches *here* is unknown — hold off until a run covers it."
+  elif [ "$INSTALLED_VERSION" = "$VERSION" ]; then
+    UPDATE_LINE="You are already on $VERSION — nothing to do."
+  else
+    UPDATE_LINE="You are on $INSTALLED_VERSION, so the update is yours to take whenever you like. Re-run \`clodex patch\` afterwards to re-apply your aliases."
+  fi
+  # What was actually established, in the words of what was actually run. The probe applies every
+  # patch transform to extracted JavaScript but never runs the real `clodex patch` command or starts
+  # its result, so "clodex patch applies cleanly" is still true only of host and container legs.
+  FULL_LEGS="$(jq -s -r 'map(select(.status == "pass" and (.mode == "host" or .mode == "container")) | .platform) | join(", ")' "$MATRIX")" || return 1
+  FULL_COUNT="$(jq -s -r 'map(select(.status == "pass" and (.mode == "host" or .mode == "container"))) | length' "$MATRIX")" || return 1
+  PROBE_COUNT="$(jq -s -r 'map(select(.status == "pass" and .mode == "probe")) | length' "$MATRIX")" || return 1
+  UNTESTED_COUNT="$(jq -s -r 'map(select(.status != "pass" and .status != "fail")) | length' "$MATRIX")" || return 1
+  HOST_APPLIED="$(matrix_applied_sites "$HOST_PLATFORM")" || return 1
+  HOST_TOTAL="$(matrix_total_sites "$HOST_PLATFORM")" || return 1
+  # Only say the binary ran if the leg that runs it actually finished. This sentence asserted it
+  # unconditionally and would state it after a host leg that errored before patching anything.
+  if [ "$HOST_STATUS" = "pass" ]; then
+    HOST_LINE="on this Mac $HOST_APPLIED of $HOST_TOTAL patch sites applied and the patched binary runs and reports $VERSION"
+  else
+    HOST_LINE="*this Mac was not among them* — its leg reported $HOST_STATUS, so nothing was established for you"
+  fi
+  UNTESTED_LINE=""
+  [ "$UNTESTED_COUNT" -eq 0 ] ||
+    UNTESTED_LINE="
+$UNTESTED_COUNT build(s) could not be tested at all this run — they are marked below and are the reason this is not an all-clear."
+
+  # The action comes FIRST, before any of the evidence. A reader who sees ":warning: not a full
+  # all-clear" wants to know what to do about it, and making them infer that from a per-platform
+  # list they have to read to the bottom is how a fixable one-command problem (Docker Desktop is
+  # quit) reads as an unexplained wall of text and gets ignored.
+  ACTION_LINE=""
+  if [ "$COVERAGE_COMPLETE" -eq 1 ]; then
+    PASS_HEAD=":white_check_mark: *Claude Code $VERSION — safe to update.*"
+  else
+    # Deliberately NOT a green tick. Nothing proved this release broken, but the coverage it was
+    # judged on has a hole in it, and a hole reported as a clean pass is the original incident.
+    PASS_HEAD=":warning: *Claude Code $VERSION — nothing broke, but this is not a full all-clear.*"
+    GAP_ACTION="$(coverage_gap_action "$HOST_PLATFORM" "$CANARY_PARTIAL_RETRY_HOURS")" || return 1
+    [ -z "$GAP_ACTION" ] || ACTION_LINE="
+
+:point_right: *To close this out:*
+$GAP_ACTION"
+  fi
+  # Only when there IS an action line: with no action shown, the downgrade note is the only place
+  # the reduced coverage is disclosed at all.
+  DISPLAY_NOTES="$SOFT_NOTES"
+  [ -z "$ACTION_LINE" ] ||
+    DISPLAY_NOTES="$(notes_for_display "$SOFT_NOTES" "$DOWNGRADE_NOTES" "$SUBSET_NOTE")" || return 1
+  # Only mention the bundle-level tier when something is actually in it. "0 got the bundle-level
+  # check only" next to five untested builds reads as a contradiction.
+  PROBE_LINE=""
+  [ "$PROBE_COUNT" -eq 0 ] || PROBE_LINE="
+$PROBE_COUNT got the bundle-level check only: every clodex patch site applied to their own bundle and the repack round-tripped, but no patched binary was started there."
+  printf '%s\n' "$PASS_HEAD$ACTION_LINE
+The real \`clodex patch\` ran on $FULL_COUNT of $TOTAL_COUNT builds ($FULL_LEGS): $HOST_LINE.$PROBE_LINE$UNTESTED_LINE
+Tested against clodex origin/main \`${MAIN_SHA:0:8}\` (not the published $(node -p "require('$REPO_DIR/package.json').version" 2>/dev/null || echo release)), so this is a verdict on main.
+$UPDATE_LINE$( [ -n "$DISPLAY_NOTES" ] && printf '\n\n:information_source: Worth knowing:\n%s' "$DISPLAY_NOTES" )$( [ "$COVERAGE_COMPLETE" -eq 1 ] || printf '\n\n%s' "$COVERAGE" )"
+}
+
+# The failure notification, composed rather than posted, for the same reason as its pass-path
+# twin: a test can then read the bytes that are actually sent instead of the pieces they are
+# built from.
+#
+# Reads: VERSION, INSTALLED_VERSION, HOST_STATUS, TOTAL_COUNT, FAILED_PLATFORMS, REASONS,
+# NEXT_STEP, SOFT_NOTES, BASE_VERSION, COMPACT_PROMPT_DRIFT_ONLY, MAIN_SHA, MAIN_SUBJECT,
+# RUN_LOG, WORK and $MATRIX.
+fail_notification_text() {
+  local HEADLINE="${HEADLINE:-}"
+  # Which platforms broke changes what you should DO, so it leads. A break that spares this Mac is
+  # still a break you ship to everyone else, and a break that includes this Mac is also a "do not
+  # update" for you personally — those are different messages and must not be blurred together.
+  # Note the ordering: "the host passed" is a stronger claim than "the host did not fail", and only
+  # the first justifies telling someone their machine is fine.
+  # Not $BASE_VERSION: the baseline advances per platform, so its version is the last release that
+  # passed SOMETHING. Only .lastCompleteVersion means "clean on every build".
+  LAST_COMPLETE="$(state_read | jq -r '.lastCompleteVersion // empty')" || return 1
+  LAST_GOOD=""
+  [ -z "$LAST_COMPLETE" ] || LAST_GOOD="
+Last release that came out clean on every build: *$LAST_COMPLETE*."
+  if [ "$COMPACT_PROMPT_DRIFT_ONLY" -eq 1 ]; then
+    HEADLINE="$(compact_prompt_drift_headline "$VERSION" "$(matrix_count fail)" "$TOTAL_COUNT")" || return 1
+    IMPACT="$(compact_prompt_drift_impact)$LAST_GOOD"
+  elif [ "$HOST_STATUS" = "fail" ] && [ "$INSTALLED_VERSION" = "$VERSION" ]; then
+    IMPACT="*You are already ON $VERSION and it cannot be patched* — your aliases and effort settings are off until this is fixed. Roll back, or wait for the fix.$LAST_GOOD"
+  elif [ "$HOST_STATUS" = "fail" ]; then
+    IMPACT="*Do not update Claude Code yet* — you are on $INSTALLED_VERSION and patching $VERSION fails on this Mac. Your current patched install keeps working; the risk is only at update time.$LAST_GOOD"
+  elif [ "$HOST_STATUS" != "pass" ]; then
+    IMPACT="*Your Mac was NOT tested this run* (its leg reported $HOST_STATUS), so treat $VERSION as unknown rather than safe for you.$LAST_GOOD"
+  elif [ -n "$FAILED_PLATFORMS" ]; then
+    IMPACT="*Your own Mac is fine* — $VERSION patches cleanly here, so you can update. But clodex is broken on $(printf '%s' "$FAILED_PLATFORMS" | tr ' ' ',' | sed 's/,/, /g'), and Claude Code auto-updates, so users there are being broken as they update.$LAST_GOOD"
+  else
+    HEADLINE=":warning: *Claude Code $VERSION patches, but not the way it used to*"
+    IMPACT="*You can install it — but something clodex used to do no longer applies.* Patching succeeds; a check that passed on $BASE_VERSION now reports differently, which usually means an anchor drifted and a feature is quietly off. Stay on $INSTALLED_VERSION until this is diagnosed if you rely on it."
+  fi
+  [ -n "${HEADLINE:-}" ] ||
+    HEADLINE=":rotating_light: *clodex patch canary: Claude Code $VERSION breaks \`clodex patch\`* on $(matrix_count fail) of $TOTAL_COUNT builds"
+
+  # Reasons and the next step come before the matrix: with eight platforms the matrix alone pushes
+  # everything actionable below the fold on a phone.
+  printf '%s\n' "$HEADLINE
+$IMPACT
+Tested against clodex origin/main \`${MAIN_SHA:0:8}\` — $MAIN_SUBJECT
+
+$REASONS
+$NEXT_STEP
+
+Nothing on your machine was patched or installed. Log: \`$RUN_LOG\` · sandbox: \`$WORK\` · reproduce any leg: \`$WORK/repro.sh <platform>\`
+
+$(matrix_coverage_brief)$( [ -n "$SOFT_NOTES" ] && printf '\n\n:information_source: Also worth knowing:\n%s' "$SOFT_NOTES" )"
+}
+
+# Which notification goes out. One line each way, but it is the seam where a composer is wired to
+# the posting: with the choice inlined in the main flow, a test could prove both composers correct
+# and still not notice that neither was reaching Slack. An empty $REASONS means nothing was proved
+# broken, which is the pass/partial message; anything else is the failure alert.
+announce_verdict() {
+  local text
+  # Composed first, posted second, and NOT in one expression. `slack ... || true` must keep a
+  # Slack outage from taking the canary down, but with the rendering inside that same expression
+  # the `|| true` also swallowed a jq fault in the renderer: the run carried on and posted a
+  # "safe to update" headline over a body whose counts had rendered empty. Composition failing is
+  # a broken canary and has to be fatal; only the transport is allowed to fail quietly.
+  #
+  # The composers signal a render failure by returning non-zero, and each of their own command
+  # substitutions carries `|| return 1` to make that happen, because `set -e` does NOT fire for a
+  # failing assignment inside a function that is itself running in a command substitution — proven
+  # by a fault injected into one of the renderer's jq calls, which shipped a "safe to update"
+  # headline over a body with empty counts.
+  if [ -z "$REASONS" ]; then
+    text="$(pass_notification_text)" || die "could not compose the $VERSION notification — refusing to post a partial one"
+  else
+    text="$(fail_notification_text)" || die "could not compose the $VERSION failure alert — refusing to post a partial one"
+  fi
+  slack "$text" || true
+}
+
+
 # ------------------------------------------------------------------------ main
 
 # Sourcing the script gives you the helpers above and nothing else — that is how the self-test
@@ -1197,8 +1442,6 @@ printf '%s\n' "-----------------------"
 # Without that split, one favourites edit would fail every future release forever, because the
 # baseline only refreshes on a pass.
 SOFT_NOTES=""
-add_soft() { SOFT_NOTES="$SOFT_NOTES- $1
-"; }
 EXTRA_REASONS=""
 
 BASE_CONFIG_FP="$(state_read | jq -r '.baseline.configFingerprint // ""')"
@@ -1269,15 +1512,7 @@ fi
 # Two assignments, not one interpolation: with both substitutions in a single assignment only the
 # last one's failure is visible to errexit, so a jq fault in the first would silently drop the very
 # notes that disclose reduced coverage.
-ERROR_NOTES="$(matrix_error_notes)"
-DOWNGRADE_NOTES="$(matrix_downgrade_notes)"
-ERROR_NOTES="$ERROR_NOTES
-$DOWNGRADE_NOTES"
-while IFS= read -r _line; do
-  [ -n "$_line" ] && add_soft "${_line#- }"
-done <<EOF
-$ERROR_NOTES
-EOF
+collect_soft_notes
 
 if [ "$FINGERPRINT_BEFORE" != "$FINGERPRINT_AFTER" ]; then
   log "WARN: real Claude Code / clodex / tweakcc state changed during the run"
@@ -1327,22 +1562,8 @@ if [ -z "$REASONS" ]; then
   else
     # Only a fully covered run may set the baseline or close the version. Anything less is
     # recorded as `partial`: honest in --status, and re-tried later rather than filed forever.
-    # Two separate ideas, kept separate on purpose:
-    #   .baseline           what each platform looked like the last time IT came out clean. Merged,
-    #                       so a leg that could not run this time keeps its old entry instead of
-    #                       being forgotten, and a leg that did run still advances. A permanently
-    #                       unavailable platform can no longer freeze regression detection for the
-    #                       seven that are fine.
-    #   .lastCompleteVersion the last release that came out clean on EVERY build. That is the only
-    #                       thing entitled to be quoted as "last known good", so it is the only
-    #                       thing gated on complete coverage.
-    state_update '.versions[$v] = {status: $st, at: $t, atEpoch: $te, clodexSha: $sha, log: $l,
-                                   notes: $n, platforms: $pstatus}
-                  | .baseline = {version: $v, at: $t, clodexSha: $sha, configFingerprint: $fp,
-                                 platforms: (((.baseline.platforms // {}) * $base))}
-                  | (if $st == "pass" then .lastCompleteVersion = $v else . end)
-                  | .deferred = ((.deferred // {}) | del(.[$v]))
-                  | .pending = ((.pending // {}) | del(.[$v]))' \
+    # What the filter does, and why each clause is shaped the way it is, is at its definition.
+    state_update "$CANARY_VERDICT_FILTER" \
       --arg v "$VERSION" --arg t "$(now_iso)" --argjson te "$(now_epoch)" --arg sha "$MAIN_SHA" \
       --arg l "$RUN_LOG" --arg fp "$CONFIG_FP" --arg n "$SOFT_NOTES" \
       --arg st "$( [ "$COVERAGE_COMPLETE" -eq 1 ] && echo pass || echo partial )" \
@@ -1350,53 +1571,7 @@ if [ -z "$REASONS" ]; then
   fi
   KEEP_WORK="$opt_keep"
 
-  # Only the host leg can license an update, so only a host leg that passed may recommend one.
-  # Saying "nothing was established for you" and "the update is yours to take" in one message is
-  # worse than saying neither.
-  if [ "$HOST_STATUS" != "pass" ]; then
-    UPDATE_LINE="Because this Mac's leg did not complete, whether $VERSION patches *here* is unknown — hold off until a run covers it."
-  elif [ "$INSTALLED_VERSION" = "$VERSION" ]; then
-    UPDATE_LINE="You are already on $VERSION — nothing to do."
-  else
-    UPDATE_LINE="You are on $INSTALLED_VERSION, so the update is yours to take whenever you like. Re-run \`clodex patch\` afterwards to re-apply your aliases."
-  fi
-  # What was actually established, in the words of what was actually run. The probe applies every
-  # patch transform to extracted JavaScript but never runs the real `clodex patch` command or starts
-  # its result, so "clodex patch applies cleanly" is still true only of host and container legs.
-  FULL_LEGS="$(jq -s -r 'map(select(.status == "pass" and (.mode == "host" or .mode == "container")) | .platform) | join(", ")' "$MATRIX")"
-  FULL_COUNT="$(jq -s -r 'map(select(.status == "pass" and (.mode == "host" or .mode == "container"))) | length' "$MATRIX")"
-  PROBE_COUNT="$(jq -s -r 'map(select(.status == "pass" and .mode == "probe")) | length' "$MATRIX")"
-  UNTESTED_COUNT="$(jq -s -r 'map(select(.status != "pass" and .status != "fail")) | length' "$MATRIX")"
-  HOST_APPLIED="$(matrix_applied_sites "$HOST_PLATFORM")"
-  HOST_TOTAL="$(matrix_total_sites "$HOST_PLATFORM")"
-  # Only say the binary ran if the leg that runs it actually finished. This sentence asserted it
-  # unconditionally and would state it after a host leg that errored before patching anything.
-  if [ "$HOST_STATUS" = "pass" ]; then
-    HOST_LINE="on this Mac $HOST_APPLIED of $HOST_TOTAL patch sites applied and the patched binary runs and reports $VERSION"
-  else
-    HOST_LINE="*this Mac was not among them* — its leg reported $HOST_STATUS, so nothing was established for you"
-  fi
-  UNTESTED_LINE=""
-  [ "$UNTESTED_COUNT" -eq 0 ] ||
-    UNTESTED_LINE="
-$UNTESTED_COUNT build(s) could not be tested at all this run — they are marked below and are the reason this is not an all-clear."
-
-  if [ "$COVERAGE_COMPLETE" -eq 1 ]; then
-    PASS_HEAD=":white_check_mark: *Claude Code $VERSION — safe to update.*"
-  else
-    # Deliberately NOT a green tick. Nothing proved this release broken, but the coverage it was
-    # judged on has a hole in it, and a hole reported as a clean pass is the original incident.
-    PASS_HEAD=":warning: *Claude Code $VERSION — nothing broke, but this is not a full all-clear.*"
-  fi
-  # Only mention the bundle-level tier when something is actually in it. "0 got the bundle-level
-  # check only" next to five untested builds reads as a contradiction.
-  PROBE_LINE=""
-  [ "$PROBE_COUNT" -eq 0 ] || PROBE_LINE="
-$PROBE_COUNT got the bundle-level check only: every clodex patch site applied to their own bundle and the repack round-tripped, but no patched binary was started there."
-  slack "$PASS_HEAD
-The real \`clodex patch\` ran on $FULL_COUNT of $TOTAL_COUNT builds ($FULL_LEGS): $HOST_LINE.$PROBE_LINE$UNTESTED_LINE
-Tested against clodex origin/main \`${MAIN_SHA:0:8}\` (not the published $(node -p "require('$REPO_DIR/package.json').version" 2>/dev/null || echo release)), so this is a verdict on main.
-$UPDATE_LINE$( [ -n "$SOFT_NOTES" ] && printf '\n\n:information_source: Worth knowing:\n%s' "$SOFT_NOTES" )$( [ "$COVERAGE_COMPLETE" -eq 1 ] || printf '\n\n%s' "$COVERAGE" )" || true
+  announce_verdict
 else
   if [ "$COMPACT_PROMPT_DRIFT_ONLY" -eq 1 ]; then
     log "FAIL: Claude Code $VERSION changed the compaction prompt clodex recognizes:"
@@ -1421,14 +1596,19 @@ else
   # the after-the-fact check meaningless.
   # A failure found by a --platforms run IS real and worth alerting on, but it still did not test
   # the rest, so it may not close the version off either.
+  # `notes` as well as `reasons`: a failing run can ALSO have lost coverage (Docker down, a subset,
+  # an unpublished build), and without this the failure record showed a downgraded leg as a plain
+  # "pass" with nothing in `--status` saying its patched binary was never started. Slack disclosed
+  # it; the stored verdict did not, and that is the record anyone reads afterwards.
   state_update '.versions[$v] = {status: $st, at: $t, atEpoch: $te, clodexSha: $sha, log: $l,
-                                 sandbox: $w, reasons: $r, platforms: $pstatus,
+                                 sandbox: $w, reasons: $r, notes: $n, platforms: $pstatus,
                                  investigation: $inv}
                 | .deferred = ((.deferred // {}) | del(.[$v]))
                 | .pending = ((.pending // {}) | del(.[$v]))
                 | (if $inv == "started" then .realStateAtInvestigation = $fp else . end)' \
     --arg v "$VERSION" --arg t "$(now_iso)" --argjson te "$(now_epoch)" --arg sha "$MAIN_SHA" \
     --arg l "$RUN_LOG" --arg w "$WORK" --arg r "$REASONS" --arg fp "$FINGERPRINT_AFTER" \
+    --arg n "$SOFT_NOTES" \
     --arg st "$( [ -n "$opt_platforms" ] && echo partial || echo fail )" \
     --arg inv "$INVESTIGATION_STATUS" --argjson pstatus "$PLATFORM_STATUS_JSON"
 
@@ -1441,47 +1621,7 @@ else
     NEXT_STEP=":bangbang: *The investigation could NOT be started* — see the log. Nobody is working on this; it is yours to pick up."
   fi
 
-  # Which platforms broke changes what you should DO, so it leads. A break that spares this Mac is
-  # still a break you ship to everyone else, and a break that includes this Mac is also a "do not
-  # update" for you personally — those are different messages and must not be blurred together.
-  # Note the ordering: "the host passed" is a stronger claim than "the host did not fail", and only
-  # the first justifies telling someone their machine is fine.
-  # Not $BASE_VERSION: the baseline advances per platform, so its version is the last release that
-  # passed SOMETHING. Only .lastCompleteVersion means "clean on every build".
-  LAST_COMPLETE="$(state_read | jq -r '.lastCompleteVersion // empty')"
-  LAST_GOOD=""
-  [ -z "$LAST_COMPLETE" ] || LAST_GOOD="
-Last release that came out clean on every build: *$LAST_COMPLETE*."
-  if [ "$COMPACT_PROMPT_DRIFT_ONLY" -eq 1 ]; then
-    HEADLINE="$(compact_prompt_drift_headline "$VERSION" "$(matrix_count fail)" "$TOTAL_COUNT")"
-    IMPACT="$(compact_prompt_drift_impact)$LAST_GOOD"
-  elif [ "$HOST_STATUS" = "fail" ] && [ "$INSTALLED_VERSION" = "$VERSION" ]; then
-    IMPACT="*You are already ON $VERSION and it cannot be patched* — your aliases and effort settings are off until this is fixed. Roll back, or wait for the fix.$LAST_GOOD"
-  elif [ "$HOST_STATUS" = "fail" ]; then
-    IMPACT="*Do not update Claude Code yet* — you are on $INSTALLED_VERSION and patching $VERSION fails on this Mac. Your current patched install keeps working; the risk is only at update time.$LAST_GOOD"
-  elif [ "$HOST_STATUS" != "pass" ]; then
-    IMPACT="*Your Mac was NOT tested this run* (its leg reported $HOST_STATUS), so treat $VERSION as unknown rather than safe for you.$LAST_GOOD"
-  elif [ -n "$FAILED_PLATFORMS" ]; then
-    IMPACT="*Your own Mac is fine* — $VERSION patches cleanly here, so you can update. But clodex is broken on $(printf '%s' "$FAILED_PLATFORMS" | tr ' ' ',' | sed 's/,/, /g'), and Claude Code auto-updates, so users there are being broken as they update.$LAST_GOOD"
-  else
-    HEADLINE=":warning: *Claude Code $VERSION patches, but not the way it used to*"
-    IMPACT="*You can install it — but something clodex used to do no longer applies.* Patching succeeds; a check that passed on $BASE_VERSION now reports differently, which usually means an anchor drifted and a feature is quietly off. Stay on $INSTALLED_VERSION until this is diagnosed if you rely on it."
-  fi
-  [ -n "${HEADLINE:-}" ] ||
-    HEADLINE=":rotating_light: *clodex patch canary: Claude Code $VERSION breaks \`clodex patch\`* on $(matrix_count fail) of $TOTAL_COUNT builds"
-
-  # Reasons and the next step come before the matrix: with eight platforms the matrix alone pushes
-  # everything actionable below the fold on a phone.
-  slack "$HEADLINE
-$IMPACT
-Tested against clodex origin/main \`${MAIN_SHA:0:8}\` — $MAIN_SUBJECT
-
-$REASONS
-$NEXT_STEP
-
-Nothing on your machine was patched or installed. Log: \`$RUN_LOG\` · sandbox: \`$WORK\` · reproduce any leg: \`$WORK/repro.sh <platform>\`
-
-$(matrix_coverage_brief)$( [ -n "$SOFT_NOTES" ] && printf '\n\n:information_source: Also worth knowing:\n%s' "$SOFT_NOTES" )" || true
+  announce_verdict
 fi
 
 log "done"

@@ -778,14 +778,21 @@ STATE_DIR="$TMP"
 state_set() { printf '%s\n' "$1" > "$STATE_FILE"; }
 state_get() { state_read | jq -r "$1"; }
 
+# Every one of these goes through $CANARY_VERDICT_FILTER, the expression the script itself writes
+# verdicts with. Transcribing the clause under test into the case instead is how the real filter got
+# changed with all of these still green.
+record_verdict() { # record_verdict <version> <status> <baseline-platforms-json>
+  state_update "$CANARY_VERDICT_FILTER" \
+    --arg v "$1" --arg st "$2" --argjson base "$3" \
+    --arg t "" --argjson te 0 --arg sha "" --arg l "" --arg fp "" --arg n "" --argjson pstatus '{}'
+}
+
 # A platform that could not run this time must keep the baseline it had. Replacing rather than
 # merging is how one Docker outage used to erase a platform's history.
 state_set '{"versions":{},"baseline":{"version":"1.0.0","platforms":{
   "linux-x64":{"mode":"probe","sites":{"a":"OK"},"version":"1.0.0"},
   "win32-x64":{"mode":"probe","sites":{"b":"OK"},"version":"1.0.0"}}},"pending":{},"deferred":{}}'
-state_update '.baseline = {version: $v, platforms: ((.baseline.platforms // {}) * $base)}' \
-  --arg v "2.0.0" \
-  --argjson base '{"linux-x64":{"mode":"probe","sites":{"a":"OK"},"version":"2.0.0"}}'
+record_verdict "2.0.0" "pass" '{"linux-x64":{"mode":"probe","sites":{"a":"OK"},"version":"2.0.0"}}'
 matrix_check "a platform that ran advances its baseline" "2.0.0" "$(state_get '.baseline.platforms["linux-x64"].version')"
 matrix_check "a platform that did not run keeps its baseline" "1.0.0" "$(state_get '.baseline.platforms["win32-x64"].version')"
 matrix_check "no platform is dropped from the baseline" "linux-x64 win32-x64" \
@@ -793,9 +800,9 @@ matrix_check "no platform is dropped from the baseline" "linux-x64 win32-x64" \
 
 # "Last release clean on every build" may only be claimed by a fully covered run.
 state_set '{"versions":{},"baseline":null,"pending":{},"deferred":{}}'
-state_update '(if $st == "pass" then .lastCompleteVersion = $v else . end)' --arg v "3.0.0" --arg st "partial"
+record_verdict "3.0.0" "partial" '{}'
 matrix_check "a partial run claims no known-good release" "" "$(state_get '.lastCompleteVersion // ""')"
-state_update '(if $st == "pass" then .lastCompleteVersion = $v else . end)' --arg v "3.0.1" --arg st "pass"
+record_verdict "3.0.1" "pass" '{}'
 matrix_check "a complete run does claim one" "3.0.1" "$(state_get '.lastCompleteVersion')"
 
 # --retriage must re-open a version WITHOUT throwing away the evidence pointers, because the run
@@ -930,6 +937,382 @@ if launch_investigation 9.9.9 "r" "$TMP/x.log" >/dev/null 2>&1; then
 else
   case "$LAST_SLACK" in *"NO PROMPT"*) pass=$((pass + 1)); printf 'ok   %s\n' "an idle session is treated as a failed launch" ;;
     *) fail=$((fail + 1)); printf 'FAIL %s — slack said: %s\n' "an idle session is treated as a failed launch" "$LAST_SLACK" ;; esac
+fi
+
+
+# ---------------------------------------------------------------- coverage_gap_action
+#
+# A run short of full coverage must open with what to DO about it. The first version of the
+# notification reported the hole (":warning: not a full all-clear" plus an eight-line platform
+# table) without ever saying that Docker Desktop being quit was the whole cause, so the same
+# fixable problem read as an unexplained wall of text twice in one evening.
+
+MATRIX="$TMP/matrix.jsonl"
+# reasons matters: a leg that could not run always carries one in production, and
+# matrix_error_notes reads the disclosure out of it rather than out of the status.
+leg_row() { # leg_row <platform> <mode> <status> <downgraded> [reasons]
+  jq -n -c --arg p "$1" --arg m "$2" --arg s "$3" --argjson d "$4" --arg r "${5:-}" \
+    '{platform: $p, mode: $m, status: $s, reasons: $r, downgraded: $d, sites: {}, markers: []}' >> "$MATRIX"
+}
+gap_check() { # gap_check <name> <expected-substring-or-EMPTY>
+  local name="$1" want="$2" got
+  got="$(coverage_gap_action darwin-arm64 6)"
+  if [ "$want" = "EMPTY" ]; then
+    if [ -z "$got" ]; then pass=$((pass + 1)); printf 'ok   %s\n' "$name"
+    else fail=$((fail + 1)); printf 'FAIL %s — expected no action, got:\n%s\n' "$name" "$got"; fi
+  else
+    case "$got" in
+      *"$want"*) pass=$((pass + 1)); printf 'ok   %s\n' "$name" ;;
+      *) fail=$((fail + 1)); printf 'FAIL %s — expected to contain %s, got:\n%s\n' "$name" "$want" "$got" ;;
+    esac
+  fi
+}
+
+# Docker quit: the two Linux legs with container images fall back to a probe.
+: > "$MATRIX"; opt_platforms=""; opt_container=1
+leg_row darwin-arm64 host pass false
+leg_row linux-arm64 probe pass true
+leg_row linux-arm64-musl probe pass true
+gap_check "a Docker outage says to start Docker Desktop" "Start Docker Desktop"
+gap_check "a Docker outage names the platforms it cost" "linux-arm64 and linux-arm64-musl"
+gap_check "a Docker outage quotes the retry cadence" "every 6h"
+
+# Full coverage: nothing to do, and nothing must be invented.
+: > "$MATRIX"; opt_platforms=""; opt_container=1
+leg_row darwin-arm64 host pass false
+leg_row linux-arm64 container pass false
+gap_check "a fully covered run has no action" EMPTY
+
+# --no-container is the operator's own doing, not a daemon that needs starting.
+: > "$MATRIX"; opt_platforms=""; opt_container=0
+leg_row darwin-arm64 host pass false
+leg_row linux-arm64 probe pass true
+gap_check "--no-container is reported as the cause it is" "\`--no-container\` was passed"
+case "$(coverage_gap_action darwin-arm64 6)" in
+  *"Start Docker Desktop"*) fail=$((fail + 1)); printf 'FAIL %s\n' "--no-container does not blame Docker" ;;
+  *) pass=$((pass + 1)); printf 'ok   %s\n' "--no-container does not blame Docker" ;;
+esac
+
+# A host leg that did not pass is the one hole that must not be buried under the others.
+: > "$MATRIX"; opt_platforms=""; opt_container=1
+leg_row darwin-arm64 host error false
+leg_row linux-arm64 probe pass true
+gap_check "a broken host leg is called out" "nothing was established for your machine"
+gap_check "a broken host leg does not hide the Docker cause" "Start Docker Desktop"
+
+# A platform package that has not published yet is an untested leg, not a downgrade.
+: > "$MATRIX"; opt_platforms=""; opt_container=1
+leg_row darwin-arm64 host pass false
+leg_row win32-arm64 none error false
+gap_check "an untested leg names the platform" "win32-arm64"
+gap_check "an untested leg is not blamed on the release" "not the release"
+
+# A --platforms run tested almost nothing; saying "not a full all-clear" without saying why is
+# actively misleading, because it reads as a problem with the release.
+: > "$MATRIX"; opt_platforms="darwin-arm64"; opt_container=1
+leg_row darwin-arm64 host pass false
+gap_check "a --platforms debug run says so" "debug run"
+opt_platforms=""
+
+# ---------------------------------------------------------------- the notification itself
+#
+# Through pass_notification_text, the function the script actually posts, rather than through the
+# pieces it is built from. A review found that deleting the action line from the message left all
+# of the component-level cases green, which is exactly the "tests do not discriminate" failure the
+# pr-verification gate puts first.
+
+msg_setup() { # msg_setup <host-status> <linux-legs-downgraded> [extra-soft-note]
+  MATRIX="$TMP/msgmatrix.jsonl"; : > "$MATRIX"
+  opt_platforms=""; opt_container=1
+  # Production shapes only. `downgraded` is not free-form: run_platform_matrix sets it exactly when
+  # a platform that HAS a container image was tested by the probe instead, so the container-capable
+  # Linux rows must move between container/false and probe/true together. Writing probe+false there
+  # staged a "full coverage" matrix the canary can never actually produce, and any assertion about
+  # full coverage made against it was about nothing.
+  local linux_mode=container
+  [ "$2" = true ] && linux_mode=probe
+  leg_row darwin-arm64 host "$1" false
+  leg_row darwin-x64 probe pass false
+  leg_row linux-x64 probe pass false
+  leg_row linux-arm64 "$linux_mode" pass "$2"
+  leg_row linux-x64-musl probe pass false
+  leg_row linux-arm64-musl "$linux_mode" pass "$2"
+  leg_row win32-x64 probe pass false
+  leg_row win32-arm64 probe pass false
+  VERSION=2.1.268; INSTALLED_VERSION=2.1.267; HOST_PLATFORM=darwin-arm64
+  MAIN_SHA=665c9a0b5d4ce3137f42812ea45309293c468dcd; REPO_DIR="$PWD"
+  HOST_STATUS="$(matrix_status_of "$HOST_PLATFORM")"
+  TOTAL_COUNT="$(matrix_total)"; COVERAGE="$(matrix_coverage_line)"
+  COVERAGE_COMPLETE=0; coverage_is_complete "$HOST_PLATFORM" && COVERAGE_COMPLETE=1
+  DOWNGRADE_NOTES="$(matrix_downgrade_notes)"
+  SUBSET_NOTE=""
+  SOFT_NOTES=""
+  [ -z "${3:-}" ] || SOFT_NOTES="$3
+"
+  [ -z "$DOWNGRADE_NOTES" ] || SOFT_NOTES="$SOFT_NOTES$DOWNGRADE_NOTES
+"
+  MSG="$(pass_notification_text)"
+}
+msg_has() { # msg_has <name> <substring>
+  case "$MSG" in *"$2"*) pass=$((pass + 1)); printf 'ok   %s\n' "$1" ;;
+    *) fail=$((fail + 1)); printf 'FAIL %s — message was:\n%s\n' "$1" "$MSG" ;; esac
+}
+msg_lacks() { # msg_lacks <name> <substring>
+  case "$MSG" in *"$2"*) fail=$((fail + 1)); printf 'FAIL %s — message was:\n%s\n' "$1" "$MSG" ;;
+    *) pass=$((pass + 1)); printf 'ok   %s\n' "$1" ;; esac
+}
+
+# Docker quit — the 2.1.268 run that was announced twice with no stated cause.
+msg_setup pass true "- linux-arm64 was tested as a probe leg this time and a container leg on 2.1.267."
+msg_has "the posted message says what to do" "To close this out:"
+msg_has "the posted message names Docker Desktop" "Start Docker Desktop"
+msg_lacks "the posted message does not claim an all-clear" "safe to update"
+# The action line replaces the duplicate, it does not replace the disclosure: both the per-platform
+# table and the unrelated note still have to survive into what is actually sent.
+msg_has "the posted message still shows the per-platform coverage" ":warning: *linux-arm64*"
+msg_has "the posted message keeps notes the action did not cover" "container leg on 2.1.267"
+# Not anchored to where the note would appear: it must not be anywhere in the message, whatever
+# order the notes happen to be in. The action line says "Start Docker Desktop", never this phrase,
+# so any occurrence at all is the duplicate coming back.
+msg_lacks "the posted message does not repeat the Docker note" "Docker was not available"
+
+# Full coverage — the action machinery must stay entirely out of a green message.
+msg_setup pass false ""
+msg_has "a fully covered run is announced as safe" "safe to update"
+msg_lacks "a fully covered run offers no action" "To close this out:"
+
+# A host leg that did not pass may never be dressed up as a release you can take.
+msg_setup error true ""
+msg_has "a broken host leg withholds the update recommendation" "hold off until a run covers it"
+msg_has "a broken host leg says nothing was established" "nothing was established for you"
+
+# A --platforms run tested a subset, so every count in the message is out of that subset. The pass
+# path says so in its action line; the FAILURE path has no action line, and a review found it
+# announcing "breaks `clodex patch` on 1 of 1 builds" with nothing anywhere saying the other seven
+# published builds were never looked at.
+msg_setup pass false ""
+opt_platforms="darwin-arm64"
+SUBSET_NOTE="$(subset_note)"          # computed, not staged: staging it made the case vacuous
+SOFT_NOTES="$SUBSET_NOTE
+"
+MSG="$(pass_notification_text)"
+msg_has "a subset run discloses the subset" "limited to darwin-arm64"
+msg_has "a subset run says the other builds went untested" "not tested at all"
+opt_platforms=""
+matrix_check "a normal full run adds no subset note" "" "$(subset_note)"
+# --platforms naming every published build covers the release, so it is not a subset run.
+opt_platforms="$(printf '%s\n' "$CANARY_PLATFORM_TABLE" | awk -F'|' 'NF{printf "%s,", $1}' | sed 's/,$//')"
+matrix_check "--platforms naming every build adds no subset note" "" "$(subset_note)"
+opt_platforms="darwin-arm64,linux-x64"
+case "$(subset_note)" in *"limited to"*) pass=$((pass + 1)); printf 'ok   %s\n' "a genuine subset still says so" ;;
+  *) fail=$((fail + 1)); printf 'FAIL %s\n' "a genuine subset still says so" ;; esac
+opt_platforms=""
+SUBSET_NOTE=""
+
+# ---------------------------------------------------------------- wiring
+#
+# The seams between the helpers and the run, which is where the previous round of cases stopped. A
+# review proved that disconnecting the subset note from the production note list, or either composer
+# from the posting, left all of the helper-level assertions green.
+
+# collect_soft_notes is the only producer of SOFT_NOTES. A disclosure that does not make it in here
+# is disclosed in neither notification.
+: > "$MATRIX"; opt_platforms=""; opt_container=1
+leg_row darwin-arm64 host pass false
+leg_row linux-arm64 probe pass true
+leg_row win32-arm64 none error false \
+  "- claude-code-win32-arm64 has still not published 2.1.268 130 minutes after the other platforms did, so it was not tested
+"
+SOFT_NOTES=""
+collect_soft_notes
+soft_has() { case "$SOFT_NOTES" in *"$2"*) pass=$((pass + 1)); printf 'ok   %s\n' "$1" ;;
+  *) fail=$((fail + 1)); printf 'FAIL %s — SOFT_NOTES was:\n%s\n' "$1" "$SOFT_NOTES" ;; esac; }
+soft_has "the run's notes disclose a downgraded leg" "Docker was not available"
+soft_has "the run's notes disclose a leg that could not be tested" "win32-arm64"
+
+# ...including the subset note, which is the failure alert's ONLY disclosure that most of the
+# matrix was skipped.
+opt_platforms="darwin-arm64"; SOFT_NOTES=""
+collect_soft_notes
+soft_has "the run's notes disclose a --platforms subset" "limited to darwin-arm64"
+opt_platforms=""; SOFT_NOTES=""
+collect_soft_notes
+case "$SOFT_NOTES" in *"limited to"*) fail=$((fail + 1)); printf 'FAIL %s\n' "a normal run adds no subset note to the run's notes" ;;
+  *) pass=$((pass + 1)); printf 'ok   %s\n' "a normal run adds no subset note to the run's notes" ;; esac
+
+# announce_verdict is the seam between a composed message and Slack. Both branches must post, and
+# must post what their own composer produced.
+POSTED=""
+slack() { POSTED="$1"; }
+msg_setup pass true ""
+REASONS=""
+announce_verdict
+case "$POSTED" in *"To close this out:"*) pass=$((pass + 1)); printf 'ok   %s\n' "a clean run posts the pass notification" ;;
+  *) fail=$((fail + 1)); printf 'FAIL %s — posted:\n%s\n' "a clean run posts the pass notification" "$POSTED" ;; esac
+
+POSTED=""
+FAILED_PLATFORMS="linux-x64"; REASONS="- PATCH 5 failed on linux-x64"; NEXT_STEP=":mag: investigating"
+BASE_VERSION=2.1.267; COMPACT_PROMPT_DRIFT_ONLY=0; MAIN_SUBJECT="subj"; RUN_LOG="$TMP/r.log"; WORK="$TMP/w"
+announce_verdict
+case "$POSTED" in *"breaks"*) pass=$((pass + 1)); printf 'ok   %s\n' "a broken release posts the failure alert" ;;
+  *) fail=$((fail + 1)); printf 'FAIL %s — posted:\n%s\n' "a broken release posts the failure alert" "$POSTED" ;; esac
+case "$POSTED" in *"To close this out:"*) fail=$((fail + 1)); printf 'FAIL %s\n' "the failure alert is not the pass notification" ;;
+  *) pass=$((pass + 1)); printf 'ok   %s\n' "the failure alert is not the pass notification" ;; esac
+
+# The failure alert carries the run's notes, which is where a subset or a downgrade is disclosed on
+# that path — it has no action line to carry them.
+POSTED=""; SOFT_NOTES="- linux-arm64 got the probe instead.
+"
+announce_verdict
+case "$POSTED" in *"linux-arm64 got the probe instead"*) pass=$((pass + 1)); printf 'ok   %s\n' "the failure alert discloses reduced coverage" ;;
+  *) fail=$((fail + 1)); printf 'FAIL %s — posted:\n%s\n' "the failure alert discloses reduced coverage" "$POSTED" ;; esac
+REASONS=""; SOFT_NOTES=""
+
+# Duplicate --platforms names must not reach the published-platform count and buy a green tick.
+: > "$MATRIX"; opt_platforms="darwin-arm64,darwin-arm64"
+matrix_check "duplicate --platforms names select one platform" "darwin-arm64" "$(platform_names | tr '\n' ' ' | sed 's/ *$//')"
+for _i in 1 2 3 4 5 6 7 8; do leg_row darwin-arm64 host pass false; done
+if coverage_is_complete darwin-arm64; then
+  fail=$((fail + 1)); printf 'FAIL %s\n' "eight rows for one platform is not full coverage"
+else
+  pass=$((pass + 1)); printf 'ok   %s\n' "eight rows for one platform is not full coverage"
+fi
+opt_platforms=""
+
+# ---------------------------------------------------------------- failing under a broken jq
+#
+# Both of these are about which way the canary breaks when a tool it depends on fails mid-run. It
+# may refuse to answer; it may never answer "everything is fine" because it could not tell.
+
+# coverage_is_complete decided the downgrade question with `[ -z "$(jq ...)" ]`, which reads a jq
+# that FAILED — no output — as "nothing was downgraded", and returns full coverage. That is a green
+# tick issued because the check broke, which is the one direction this function may never fail in.
+: > "$MATRIX"; opt_platforms=""; opt_container=1
+leg_row darwin-arm64 host pass false
+leg_row darwin-x64 probe pass false
+leg_row linux-x64 probe pass false
+leg_row linux-arm64 probe pass true
+leg_row linux-x64-musl probe pass false
+leg_row linux-arm64-musl probe pass true
+leg_row win32-x64 probe pass false
+leg_row win32-arm64 probe pass false
+if coverage_is_complete darwin-arm64; then
+  fail=$((fail + 1)); printf 'FAIL %s\n' "downgraded legs are not full coverage"
+else pass=$((pass + 1)); printf 'ok   %s\n' "downgraded legs are not full coverage"; fi
+
+jq() { case "$*" in *downgraded*) return 4 ;; *) command jq "$@" ;; esac; }
+if coverage_is_complete darwin-arm64; then
+  fail=$((fail + 1)); printf 'FAIL %s\n' "a jq that fails cannot buy an all-clear"
+else pass=$((pass + 1)); printf 'ok   %s\n' "a jq that fails cannot buy an all-clear"; fi
+unset -f jq
+
+# announce_verdict composes and posts in one expression no longer: the `|| true` that keeps a Slack
+# outage from killing the canary used to swallow a failure in the RENDERER too, and shipped a
+# "safe to update" headline over a body whose counts had come out empty. set -e does not catch it —
+# a failing assignment inside a function running in a command substitution does not trip errexit —
+# so the composers return non-zero explicitly and this refuses to post rather than post rubbish.
+msg_setup pass false ""
+REASONS=""
+POSTED_FILE="$TMP/posted.txt"; : > "$POSTED_FILE"
+(
+  slack() { printf '%s' "$1" > "$POSTED_FILE"; }
+  jq() { case "$*" in *'.mode == "host"'*) return 4 ;; *) command jq "$@" ;; esac; }
+  announce_verdict
+) >/dev/null 2>&1 && RC=0 || RC=$?
+if [ "$RC" -ne 0 ]; then pass=$((pass + 1)); printf 'ok   %s\n' "a broken renderer fails the run"
+else fail=$((fail + 1)); printf 'FAIL %s — announce_verdict returned 0\n' "a broken renderer fails the run"; fi
+if [ ! -s "$POSTED_FILE" ]; then pass=$((pass + 1)); printf 'ok   %s\n' "a broken renderer posts nothing at all"
+else fail=$((fail + 1)); printf 'FAIL %s — it posted:\n%s\n' "a broken renderer posts nothing at all" "$(cat "$POSTED_FILE")"; fi
+
+# ...while a Slack outage on its own must still NOT take the canary down: that is what the `|| true`
+# is for, and tightening the renderer must not have tightened the transport with it.
+: > "$POSTED_FILE"
+(
+  slack() { return 1; }
+  announce_verdict
+) >/dev/null 2>&1 && RC=0 || RC=$?
+if [ "$RC" -eq 0 ]; then pass=$((pass + 1)); printf 'ok   %s\n' "a Slack outage alone does not fail the run"
+else fail=$((fail + 1)); printf 'FAIL %s — announce_verdict returned %s\n' "a Slack outage alone does not fail the run" "$RC"; fi
+
+# ---------------------------------------------------------------- notes_for_display
+#
+# The notification says what to do at the top; the "Worth knowing" list below it must not repeat it.
+
+DOWNGRADE='- Docker was not available, so linux-arm64 got the probe instead.'
+OTHER='- linux-arm64 was tested as a probe leg this time and a container leg on 2.1.267.'
+
+# Both sides through $(...), which strips trailing newlines, so the case is about which notes
+# survive and not about a trailing blank line the caller's own substitution discards anyway.
+notes_check() { # notes_check <name> <all> <covered> <expected>
+  local got want
+  got="$(notes_for_display "$2" "$3")"
+  want="$(printf '%s' "$4")"
+  if [ "$got" = "$want" ]; then pass=$((pass + 1)); printf 'ok   %s\n' "$1"
+  else fail=$((fail + 1)); printf 'FAIL %s\n  want %s\n  got  %s\n' "$1" "$(printf '%s' "$want" | tr '\n' '|')" "$(printf '%s' "$got" | tr '\n' '|')"; fi
+}
+
+notes_check "the note the action line already made is dropped" "$DOWNGRADE
+" "$DOWNGRADE" ""
+
+# The footgun this exists to pin: every note starts with "- ", so an unanchored grep pattern is read
+# as flags. grep then fails and the `|| true` swallows it, taking every unrelated note with it —
+# the reduced-coverage disclosures this canary exists to make.
+notes_check "an unrelated note survives the trim" "$OTHER
+$DOWNGRADE
+" "$DOWNGRADE" "$OTHER
+"
+
+notes_check "nothing is dropped when there is nothing to drop" "$OTHER
+" "" "$OTHER
+"
+
+# Whole-line, not substring: a longer note that quotes the covered one is a different note and has
+# its own thing to say.
+notes_check "a note that merely contains the covered one is kept" "$DOWNGRADE plus a detail
+" "$DOWNGRADE" "$DOWNGRADE plus a detail
+"
+
+# ---------------------------------------------------------------- baseline merge
+#
+# A platform's baseline entry must be exactly what its last passing leg observed. The merge used
+# jq's `*`, which recurses, so a new entry inherited `sites` keys from the entry it replaced. A
+# host/container leg records `probe:PATCH …` names that a probe-only leg never emits, so after one
+# Docker outage the fresh probe entry carried the container run's leftover names, the leg-mode
+# guard saw two matching `probe` modes and compared anyway, and the next run reported all eleven
+# leftover names as checks that had been "not attempted at all this time".
+
+# Driven through $CANARY_VERDICT_FILTER, the script's own expression, rather than a copy of it
+# here: the copy is what let the real filter be edited without any test noticing. The stub installed
+# for the launch_investigation cases above has to go first, or this writes nothing and every
+# assertion below reads back the fixture it started from and passes for free.
+unset -f state_update
+CANARY_STATE_DIR="$TMP/basemerge" CANARY_SOURCE_ONLY=1 . "$CANARY"
+STATE_DIR="$TMP/basemerge"; mkdir -p "$STATE_DIR"; STATE_FILE="$STATE_DIR/state.json"
+jq -n '{versions: {}, inflight: null, deferred: {}, pending: {},
+        baseline: {version: "2.1.267", platforms: {
+          "linux-arm64": {mode: "container",
+                          sites: {"PATCH 1: enum": "OK", "probe:PATCH 1: enum": "OK"}},
+          "win32-x64":   {mode: "probe", sites: {"PATCH 1: enum": "OK"}}}}}' > "$STATE_FILE"
+
+# The next release: linux-arm64 gets the probe (Docker is down), win32-x64 is not in this run.
+record_verdict 2.1.268 partial '{"linux-arm64": {"mode": "probe", "sites": {"PATCH 1: enum": "OK"}}}'
+
+GOT="$(jq -c '.baseline.platforms["linux-arm64"].sites | keys' "$STATE_FILE")"
+if [ "$GOT" = '["PATCH 1: enum"]' ]; then
+  pass=$((pass + 1)); printf 'ok   %s\n' "a probe entry does not inherit the container entry's probe: names"
+else
+  fail=$((fail + 1))
+  printf 'FAIL %s — want ["PATCH 1: enum"], got %s\n' "a probe entry does not inherit the container entry's probe: names" "$GOT"
+fi
+
+# The whole point of merging rather than replacing: a leg that did not run this time keeps its
+# record, so one permanently unavailable platform cannot freeze regression detection for the rest.
+GOT="$(jq -r '.baseline.platforms["win32-x64"].mode // "GONE"' "$STATE_FILE")"
+if [ "$GOT" = "probe" ]; then
+  pass=$((pass + 1)); printf 'ok   %s\n' "a platform absent from this run keeps its previous baseline entry"
+else
+  fail=$((fail + 1))
+  printf 'FAIL %s — win32-x64 mode is %s\n' "a platform absent from this run keeps its previous baseline entry" "$GOT"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
