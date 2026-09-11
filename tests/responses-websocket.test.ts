@@ -4382,6 +4382,130 @@ describe('createResponsesWebSocketFetch', () => {
     (diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!.evictions ?? []) as
       Record<string, unknown>[];
 
+  it('reports the shipped pool caps when nothing overrides them', async () => {
+    // The defaults are the deliverable of the sizing change, and they reach behaviour
+    // only through option resolution — so read them back off a decision made by a
+    // fetch constructed the way production constructs one, not off the constants.
+    // The env overrides must be cleared: a developer who exports them for their own
+    // server would otherwise have this test confirm THEIR caps as the shipped ones.
+    const saved = [
+      process.env.CLODEX_WS_MAX_CONNECTIONS,
+      process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS,
+    ];
+    delete process.env.CLODEX_WS_MAX_CONNECTIONS;
+    delete process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS;
+    try {
+      const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-default-caps',
+        onDiagnostic: event => diagnostics.push(event),
+      });
+      const response = await wsFetch('https://x', {
+        method: 'POST', headers: {},
+        body: JSON.stringify(sessionPayload([
+          { role: 'user', content: [{ type: 'input_text', text: 'default caps' }] },
+        ])),
+      });
+      lastSocket().emit('open');
+      emitTextResponse(lastSocket(), 'resp_default_caps', 'ok');
+      await readAll(response);
+      expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+        .toMatchObject({ maxConnections: 64, maxNurseryConnections: 48 });
+    } finally {
+      if (saved[0] !== undefined) process.env.CLODEX_WS_MAX_CONNECTIONS = saved[0];
+      if (saved[1] !== undefined) process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS = saved[1];
+    }
+  });
+
+  it('says how long an evicted head had been idle, in the log and the ledger', async () => {
+    // Whether a cap is costing anything turns entirely on the victim's idle age. A cap
+    // eviction used to log nothing that NAMED it as one — the socket close left a line,
+    // but nothing said a cap had displaced a reusable head, unlike the TTL path beside
+    // it — so the only record of the cause needed --ws-diagnostics and a JSONL trawl.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const debug: string[] = [];
+    let clock = 1_000;
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, message => debug.push(message), {
+      accountId: 'acct-eviction-idle-age',
+      maxNurseryConnections: 1,
+      now: () => clock,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const send = (text: string): Promise<Response> => wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([{ role: 'user', content: [{ type: 'input_text', text }] }])),
+    });
+
+    const first = await send('first conversation');
+    const firstSocket = lastSocket();
+    firstSocket.emit('open');
+    // Spend time BEFORE the head goes idle, so that an idle age computed from
+    // `createdAt` instead of `lastUsedAt` would read 9,000ms rather than 7,000.
+    clock += 2_000;
+    emitTextResponse(firstSocket, 'resp_evicted', 'ok');
+    await readAll(first);
+
+    // The head goes idle here, and sits idle for a measurable stretch.
+    clock += 7_000;
+    const second = await send('second conversation');
+    expect(firstSocket.close).toHaveBeenCalled();
+
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+      .toMatchObject({ evictions: [{ reason: 'nursery_lru_cap', idleMs: 7_000 }] });
+    expect(debug).toContain(
+      'ws: evicting the oldest idle nursery connection to stay within its cap: '
+      + 'connection=1 idle_ms=7000 cap=1 reason=nursery_lru_cap',
+    );
+
+    lastSocket().emit('open');
+    emitTextResponse(lastSocket(), 'resp_second', 'ok');
+    await readAll(second);
+  });
+
+  it('evicts the least recently used idle head, not merely any idle one', async () => {
+    // The whole sizing argument rests on the victim being the LEAST recently used: that
+    // is what makes an evicted head one whose conversation has plausibly finished. With
+    // a cap of 1 and a single idle head, order cannot be observed, so nothing pinned it
+    // and reversing the sort passed the entire file.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    let clock = 1_000;
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-lru-order',
+      maxNurseryConnections: 2,
+      now: () => clock,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const turn = (text: string): Promise<Response> => wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([{ role: 'user', content: [{ type: 'input_text', text }] }])),
+    });
+
+    // Two heads go idle at known, different times: connection 1 first, then 2.
+    for (const [index, text] of ['older conversation', 'newer conversation'].entries()) {
+      const response = await turn(text);
+      const socket = lastSocket();
+      socket.emit('open');
+      clock += 1_000 * (index + 1);
+      emitTextResponse(socket, `resp_lru_${index}`, 'ok');
+      await readAll(response);
+    }
+    const [olderSocket, newerSocket] = fakeSockets;
+
+    clock += 5_000;
+    const third = await turn('third conversation');
+
+    // Connection 1 went idle at 2,000 and connection 2 at 4,000; it is now 9,000, so
+    // connection 1 has been idle 7,000ms against connection 2's 5,000ms and must go.
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+      .toMatchObject({ evictions: [{ connectionId: 1, reason: 'nursery_lru_cap', idleMs: 7_000 }] });
+    expect(olderSocket!.close).toHaveBeenCalled();
+    expect(newerSocket!.close).not.toHaveBeenCalled();
+
+    lastSocket().emit('open');
+    emitTextResponse(lastSocket(), 'resp_lru_third', 'ok');
+    await readAll(third);
+  });
+
   it('honors CLODEX_WS_MAX_NURSERY_CONNECTIONS', async () => {
     process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS = '1';
     try {
@@ -4395,7 +4519,7 @@ describe('createResponsesWebSocketFetch', () => {
   it('ignores a malformed connection cap rather than reinterpreting it', async () => {
     process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS = 'lots';
     try {
-      // Falls back to the default of 8, so two heads coexist without eviction.
+      // Falls back to the shipped nursery default, so two heads coexist without eviction.
       expect(lastEvictions(await fillTwoNurseryHeads('acct-env-nursery-bad'))).toEqual([]);
     } finally {
       delete process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS;

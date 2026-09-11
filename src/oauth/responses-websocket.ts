@@ -35,8 +35,49 @@ const FAILURE_EVENT_TYPES = new Set(['error', 'response.failed', 'response.incom
 export const RESPONSES_WS_HARD_TTL_MS = 55 * 60_000;
 export const RESPONSES_WS_IDLE_TTL_MS = 30 * 60_000;
 export const RESPONSES_WS_NURSERY_IDLE_TTL_MS = 5 * 60_000;
-export const RESPONSES_WS_MAX_CONNECTIONS = 32;
-export const RESPONSES_WS_MAX_NURSERY_CONNECTIONS = 8;
+/**
+ * Pool caps. An unused slot costs nothing — the caps are read only by the `>=`
+ * comparison in `evictOldestIdleGeneration`, nothing is preallocated, and the
+ * registry is sized by live entries — while hitting a cap discards a reusable
+ * conversation whose next turn then pays a full uncached prompt plus a fresh
+ * upgrade. The asymmetry is the whole argument: size these above demand, because
+ * unused capacity is free and a cap that binds is not.
+ *
+ * The two numbers rest on different strengths of evidence. Say so before changing
+ * either.
+ *
+ * `maxConnections` (established) 32 -> 64 is demand-driven. In a 27.6-hour local
+ * ledger the established gauge peaked at 28 against the old cap of 32 — 88% of it —
+ * in ORGANIC traffic, and replaying that ledger with the turns it used to isolate
+ * keeping heads of their own puts the peak at 46. 32 was genuinely tight.
+ *
+ * `maxNurseryConnections` 8 -> 48 is a deliberately generous safety valve, NOT a
+ * measured requirement. Organic nursery occupancy in that ledger was 1-4 for 22 of
+ * 24 hours; a 16-conversation lab fan-out reached 11; the only readings near 24 came
+ * from a single hour of upstream auth failures and its aftermath. 48 covers a
+ * fan-out several times larger than anything observed, and is chosen because
+ * overshoot is free rather than because demand was seen at that level.
+ *
+ * DO NOT re-derive these from eviction victim ages, and distrust any replay that
+ * says you should. An earlier attempt did and was wrong three ways: it fed every
+ * head decision into the pool including ~3,880 `parallel_isolated` ones that are
+ * never registered in a pool at all; it never tore down heads whose request FAILED,
+ * though `failContext` ends in `deleteEntry`, so 84% of its eviction "victims" could
+ * not exist; and it compared idle time against request-start-to-request-start gaps,
+ * which include generation time. The check that catches all of it: that model
+ * predicted 231 nursery cap evictions at the cap this ledger actually ran, which
+ * recorded 10. Measured from completion, the real idle horizon is p50 0.1s / p90
+ * 0.8s / p99 22.2s, and the 10 real cap evictions displaced heads idle 217-284s —
+ * at the 5-minute nursery TTL, costing nothing.
+ *
+ * Neither cap is a hard ceiling: only IDLE entries are evictable, so a generation
+ * can exceed its cap while every head is busy, and isolated sockets are never
+ * registered and never counted. The cost that scales with these numbers is memory —
+ * each retained head holds its conversation plus a canonical copy for prefix
+ * comparison — plus held descriptors, and there is no EMFILE handling on this path.
+ */
+export const RESPONSES_WS_MAX_CONNECTIONS = 64;
+export const RESPONSES_WS_MAX_NURSERY_CONNECTIONS = 48;
 
 export interface ResponsesWebSocketFetchOptions {
   providerId?: string;
@@ -162,7 +203,7 @@ interface ConnectionEntry {
 // conversation prefix instead of letting the newest branch replace the rest.
 // New heads live in a separately capped nursery LRU until their first reuse;
 // established heads therefore never consume nursery capacity, and one-shot
-// nursery traffic never consumes the established LRU's 32 reserved slots.
+// nursery traffic never consumes the established LRU's reserved slots.
 const connections = new Map<string, Set<ConnectionEntry>>();
 let nextConnectionDebugId = 1;
 
@@ -1497,11 +1538,21 @@ function evictOldestIdleGeneration(
   while (connectionCountByGeneration(generation) >= maxConnections && idle.length) {
     const oldest = idle.shift();
     if (oldest) {
+      // Idle age is a MARGIN indicator, not a cost: a victim idle for seconds was
+      // plausibly about to be reused, one idle for minutes was not, and neither
+      // says what the eviction actually cost. Log it as well as recording it,
+      // because the diagnostic ledger needs `--ws-diagnostics` and this does not.
+      const idleMs = Math.max(0, oldest.options.now() - oldest.lastUsedAt);
+      oldest.debug(
+        `evicting the oldest idle ${generation} connection to stay within its cap: `
+        + `connection=${oldest.debugId} idle_ms=${idleMs} cap=${maxConnections} reason=${reason}`,
+      );
       evictions.push({
         connectionId: oldest.debugId,
         partitionKey: oldest.key,
         generation: oldest.generation,
         reason,
+        idleMs,
       });
       deleteEntry(oldest);
     }

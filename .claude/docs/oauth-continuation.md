@@ -67,8 +67,8 @@ not divide. **Count each response once**: 254 request ids here carry more than o
 (retries), so joining usage per decision double-counts the successful attempt and inflated these very
 numbers by ~2.3M tokens.
 
-**Connection pools are process-wide, not per-partition:** `maxConnections` (established, default 32)
-and `maxNurseryConnections` (default 8). A head starts in the nursery and is promoted when selected
+**Connection pools are process-wide, not per-partition:** `maxConnections` (established, default 64)
+and `maxNurseryConnections` (default 48). A head starts in the nursery and is promoted when selected
 for its first continuation, before that continuation is known to succeed — so a workload whose
 concurrent subagents inherit the parent's Claude session id, and therefore share one partition, can
 lose heads before their next turn and with them the continuation.
@@ -84,14 +84,16 @@ classified from this snapshot.
 
 An isolated socket is never registered, so it never evicts anything, while a retained one runs
 `evictOldestIdleGeneration` first, **so a newly retained sibling can displace an older idle head that
-its own conversation was going to come back for.** That is reachable at the default nursery cap of 8:
+its own conversation was going to come back for.** That was reachable at a nursery cap of 8, the
+default when this was written:
 seven idle heads from finished turns, an eighth conversation streaming its first response, and one
 divergent sibling in that partition — the sibling is retained, the oldest idle head is evicted, and
 resuming that conversation costs a fresh upgrade and a full-context resend. Constructed and observed
 through the transport (nine sockets before this change, ten after), so the mechanism is established;
 its frequency in ordinary traffic is not, and the cap replay below finds no eviction-caused loss
-across the ledger's 27.6 hours — while also showing that at the default nursery cap the evicted head
-had often been idle for only seconds.
+across the ledger's 27.6 hours: the ten real cap evictions displaced heads that had been idle 217-284
+seconds, already at the nursery TTL. The caps were nonetheless raised, on headroom over observed
+concurrency rather than on any observed loss — see the sizing discussion below.
 
 **On a fresh pool, and for a fan-out whose members have distinguishable opening turns, it opened
 fewer sockets** — it reuses instead of dialing. That is not a general result: a warmed pool whose
@@ -104,7 +106,7 @@ itself), 16 conversations x 4 turns started simultaneously against a real ChatGP
 
 | leg | uncached input | client-visible failures | sockets opened | paced: admitted / refused | gauge peak nursery/established | `*_lru_cap` evictions | `parallel_isolated` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| baseline, caps 32/8 | 74.8% | 1 (pacer 429) | 50 | 38 / 36 | 1/6 | 0 | 42 of 61 |
+| baseline, caps 32/8 (the defaults at the time) | 74.8% | 1 (pacer 429) | 50 | 38 / 36 | 1/6 | 0 | 42 of 61 |
 | this change, caps 32/8 | 47.6% | 0 | 17 | 6 / 1 | 11/16 | 0 | **0 of 65** |
 | baseline, caps 64/24 | 82.0% | 0 | 52 | 42 / 35 | 1/6 | 0 | 44 of 64 |
 | this change, caps 64/24 | 32.8% | 0 | 16 | 6 / 1 | 11/16 | 0 | **0 of 64** |
@@ -158,29 +160,38 @@ neither is an unconditional eviction. The entry displaced is the oldest idle one
 which could be a large long-lived conversation that then resends full context. Watch
 `established_lru_cap` alongside `nursery_lru_cap`.
 
-**No cap setting changed head reuse in this ledger, but the margin at the default is thin.**
-Replaying the ledger's decisions through a pool model — one head per *content key* (partition plus
-first-input-item hash, which is a transport-and-content heuristic, NOT a conversation id), promoted
-on first reuse — gives **92.9% key recurrence (12,307 of 13,245) at every cap pair tested**, from
-8/32 to unlimited. Misses are 938: 935 keys seen for the first time, which have no head by
-definition, plus 3 returning after a TTL expiry. **No miss at any tested cap was caused by an
-eviction.** Collapse the 285 duplicate decisions that retried request ids contribute before counting
-any of this — the undeduplicated figures are 91.8% and 1,111, and this document warns about exactly
-that trap two sections above.
+**Pool caps are sized from peak OCCUPANCY, and a replay that reasons from eviction victim ages will
+mislead you.** The two shipped caps rest on very different evidence and should be changed separately.
 
-What the model does show is how little headroom the default leaves. The LRU victim is the oldest
-IDLE entry, and at nursery 8 it had been idle a median of 26 seconds and as little as **8 seconds**,
-against an inter-turn gap distribution of p50 5s / p90 20s / p99 63s. 85 of the 268 nursery
-evictions displaced a head idle for less than the p90 gap. None of them was in fact reused, so this
-ledger records no loss — but "was not reused" at 8 seconds idle is luck, not margin. Raising the
-nursery cap moves the victim out of that distribution: at 16 no victim is below the p90 gap, and at
-48 none is below the p99 gap.
+The established cap went 32 -> 64 on demand: this ledger's established gauge peaked at 28 against the
+old cap of 32, in ORGANIC traffic, and replaying it with the turns it used to isolate keeping heads of
+their own puts the peak at 46. The nursery cap went 8 -> 48 as a safety valve, not a measured
+requirement: organic nursery occupancy was 1-4 for 22 of 24 hours, a 16-conversation lab fan-out
+reached 11, and the only readings near 24 came from one hour of upstream auth failures and its
+aftermath. 48 is generous on purpose, because an empty slot is free.
 
-Counts and reasons at 8/32 are 268 nursery plus 53 established evictions; at 24/64, 231 nursery and
-none established; at unlimited, none. Only cap pairs were simulated, not measured, and the model
-cuts both ways rather than being uniformly conservative: it lets in-flight heads be evicted, which
-the real pool forbids, but it also assumes every attempt yields an immediately reusable head and
-collapses a conversation's branches into one key.
+**Three modelling traps, all of which this document previously fell into.** A replay of this ledger
+produced a confident story — "at a nursery cap of 8 the evicted head had been idle a median of 26s and
+as little as 8s" — and every part of it was an artifact:
+
+1. It fed EVERY head decision into the pool, including ~3,880 `parallel_isolated` ones. Isolated
+   sockets are never registered, so most modelled victims could not exist.
+2. It never tore down heads whose request FAILED, though `failContext` ends in `deleteEntry`. **84% of
+   its eviction victims were heads that had already failed and been deleted.**
+3. It measured idle time as request-start to request-start, which includes generation time. From
+   completion, the real horizon is p50 0.1s / p90 0.8s / p99 22.2s — far shorter.
+
+**The calibration check that catches all three: that model predicted 231 nursery cap evictions at the
+cap this ledger actually ran under, which recorded 10.** Run that check before trusting any replay
+here. Reasoning from victim age is also degenerate on its own terms — victim age rises monotonically
+with the cap and saturates at the nursery TTL, so the criterion reduces to arrival-rate times window
+and mostly encodes whatever retry storm dominates the sample.
+
+**What the ledger does establish, from its own gauges rather than a model:** 10 real `nursery_lru_cap`
+evictions and zero `established_lru_cap` ones; the nursery victims had been idle 217-284s, already at
+the 5-minute nursery TTL, so no recorded cap eviction cost a reusable conversation. Head reuse was
+cap-invariant across every setting replayed, including unlimited. The case for raising a cap is
+headroom over concurrency, never an observed loss.
 
 **What that ledger's own gauges looked like, pre-change, on caps of 64/24:** pooled connections p50
 16, p90 23, p99 27, max 31 (unweighted per decision); nursery peaked at 24, its cap, with 10
@@ -210,7 +221,35 @@ property of the current connection's reuse history, not of the conversation's ag
 that just took a replacement head after a mismatch or an expiry is in the nursery too (this ledger
 holds 58 new nursery heads whose input already carried several user messages, the largest 529 items).
 Note also that eviction only considers IDLE entries, so while every nursery head is busy the cap
-cannot be enforced immediately. Override via `CLODEX_WS_MAX_CONNECTIONS` /
+cannot be enforced immediately. **Every cap eviction is logged** — `evicting the oldest idle
+<generation> connection to stay within its cap`, with the displaced connection id, the cap, and
+`idle_ms` — and `idleMs` appears on the matching entry in the `evictions` array. Read it as a MARGIN
+indicator, not a cost: a two-second-old victim that never returns cost nothing, and a twenty-minute-old
+one that does return costs a full resend. What it tells you is how close the cap is running to the
+reuse window. Before that, a cap eviction logged nothing that NAMED it as
+one: the socket close left its usual line, but nothing said a cap had displaced a reusable head, so
+identifying the cause needed `--ws-diagnostics` and a JSONL trawl. Watch `idle_ms`, not the eviction
+count: an eviction whose victim had been idle for minutes cost nothing, and one at a few seconds is
+the signal that a cap is too small.
+
+**An empty slot is free, so treat the caps as safety valves rather than tuning knobs.** They are read
+only by the `>=` comparison in `evictOldestIdleGeneration` and echoed into diagnostics; nothing is
+preallocated and the registry is a `Map` of `Set`s sized by live entries, so unused capacity costs
+zero bytes and zero cycles, and eviction's sort is over actual entries. The caps also do not govern
+dial rate — the pacer does. A cap should therefore sit above plausible concurrent demand, because
+hitting one is the expensive event: a reusable conversation is discarded and its next turn pays a full
+uncached prompt plus a fresh upgrade. The pool size a workload actually needs is a property of how
+many agents are running, and churning connections underneath that number costs more than holding them.
+
+What a larger cap does raise is the ceiling on sockets HELD at once — 40 idle heads to 112 — each
+holding its conversation plus the canonical copy memoized for prefix comparison (roughly twice the
+context; 16 in-flight heads measured 11.7MB), bounded in practice by the 5- and 30-minute idle TTLs.
+**File descriptors are the real ceiling and the reason not to go much higher.** 112 is under half the
+256-descriptor soft limit a stock macOS shell commonly carries, and there is no `EMFILE` handling on
+this path, so exceeding a user's limit is an unhandled failure rather than a degraded mode. Check that
+before raising these again. The edge's own per-account connection limit is separate and not known; the
+44 upgrade rejections in this ledger are the only evidence about it.
+Override via `CLODEX_WS_MAX_CONNECTIONS` /
 `CLODEX_WS_MAX_NURSERY_CONNECTIONS` (integer 1–1024; malformed values are logged and ignored). An
 explicit programmatic option outranks the environment so tests are never perturbed. Eviction reasons
 (`nursery_lru_cap`, `established_lru_cap`, `idle_ttl`, `nursery_idle_ttl`, `hard_ttl`) appear in the
