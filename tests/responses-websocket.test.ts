@@ -597,7 +597,7 @@ describe('createResponsesWebSocketFetch', () => {
     await readAll(continued);
   });
 
-  it('keeps a retried parallel auxiliary request isolated from reusable heads', async () => {
+  it('leaves a reusable head behind when a parallel request had to be retried', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
       accountId: 'acct-parallel-transport',
@@ -644,17 +644,22 @@ describe('createResponsesWebSocketFetch', () => {
       headers: {},
       body: JSON.stringify(sessionPayload(nextAuxiliaryInput)),
     });
-    expect(fakeSockets).toHaveLength(4);
-    const nextAuxiliarySocket = lastSocket();
-    expect(nextAuxiliarySocket).not.toBe(auxiliaryReplacement);
-    nextAuxiliarySocket.emit('open');
-    emitTextResponse(nextAuxiliarySocket, 'resp_auxiliary_next', 'done');
+    // No fourth socket. The parallel request ran beside a head that was serving a
+    // different conversation, so it kept a head of its own and this turn continues
+    // it — the cost the old blanket isolation imposed was exactly here, on every
+    // later turn of a conversation that once started beside a busy sibling.
+    expect(fakeSockets).toHaveLength(3);
+    expect(lastSocket()).toBe(auxiliaryReplacement);
+    const continued = JSON.parse(auxiliaryReplacement.send.mock.calls[1]![0] as string);
+    expect(continued.previous_response_id).toBe('resp_auxiliary');
+    expect(continued.input).toEqual([nextAuxiliaryInput[2]]);
+    emitTextResponse(auxiliaryReplacement, 'resp_auxiliary_next', 'done');
     await readAll(nextAuxiliary);
 
     expect(diagnostics).toContainEqual(expect.objectContaining({
       event: 'ws_transport_retry',
       outcome: 'recovered',
-      generation: 'isolated',
+      generation: 'nursery',
     }));
   });
 
@@ -3408,6 +3413,238 @@ describe('createResponsesWebSocketFetch', () => {
     ]);
   });
 
+  it('keeps a simultaneous sibling on its own chain while a first-ever response streams', async () => {
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const debug: string[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, message => debug.push(message), {
+      accountId: 'acct-simultaneous-fanout',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const send = (input: unknown[]): Promise<Response> => wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+    const decisions = (): ResponsesWebSocketDiagnosticEvent[] =>
+      diagnostics.filter(event => event.event === 'ws_head_decision');
+
+    // A swarm of subagents starting at the same moment: conversation A's very
+    // FIRST response is still streaming, so its head has committed nothing — no
+    // response id, no stored history, nothing a prefix check can run against.
+    const aFirstUser = { role: 'user', content: [{ type: 'input_text', text: 'conversation A' }] };
+    const aTurnOne = await send([aFirstUser]);
+    const aSocket = lastSocket();
+    aSocket.emit('open');
+    expect(decisions().at(-1)).toMatchObject({ decision: 'new_partition_head' });
+
+    // There is still something to compare against: the items A is generating FOR.
+    // B diverges from them at the first item, so A can never become B's parent.
+    const bFirstUser = { role: 'user', content: [{ type: 'input_text', text: 'conversation B' }] };
+    const bTurnOne = await send([bFirstUser]);
+    const bSocket = lastSocket();
+    expect(bSocket).not.toBe(aSocket);
+    expect(decisions().at(-1)).toMatchObject({
+      decision: 'history_mismatch_new_head',
+      createdGeneration: 'nursery',
+    });
+    expect(decisions().at(-1)).not.toHaveProperty('isolatedByConnectionId');
+    expect(debug).not.toContain('ws: parallel request using an isolated socket');
+    bSocket.emit('open');
+    emitTextResponse(bSocket, 'resp_b1', 'B answer');
+    await readAll(bTurnOne);
+    emitTextResponse(aSocket, 'resp_a1', 'A answer');
+    await readAll(aTurnOne);
+
+    // The payoff: B's head survived, so B's second turn sends one item instead of
+    // resending its whole history on yet another throwaway socket.
+    const bNextUser = { role: 'user', content: [{ type: 'input_text', text: 'B again' }] };
+    const bTurnTwo = await send([
+      bFirstUser,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'B answer' }] },
+      bNextUser,
+    ]);
+    expect(fakeSockets).toHaveLength(2);
+    expect(lastSocket()).toBe(bSocket);
+    const sent = JSON.parse(bSocket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_b1');
+    expect(sent.input).toEqual([bNextUser]);
+    emitTextResponse(bSocket, 'resp_b2', 'B answer again');
+    await readAll(bTurnTwo);
+  });
+
+  it('does not continue a committed head on a request that adds no new turn', async () => {
+    // Equality is not a continuation: the delta would be empty, so the head would
+    // be asked to produce a second response for a turn it has already answered.
+    // `isStrictPrefix` rejects it, and this is the only test that says so.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-no-new-turn',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const firstUser = { role: 'user', content: [{ type: 'input_text', text: 'opening turn' }] };
+    const send = (input: unknown[]): Promise<Response> => wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+
+    const first = await send([firstUser]);
+    const headSocket = lastSocket();
+    headSocket.emit('open');
+    emitTextResponse(headSocket, 'resp_committed', 'the answer');
+    await readAll(first);
+
+    // Exactly the stored prefix — the client's own turn plus the answer it got —
+    // and nothing after it.
+    const echoed = await send([
+      firstUser,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'the answer' }] },
+    ]);
+    expect(fakeSockets).toHaveLength(2);
+    const ownSocket = lastSocket();
+    expect(ownSocket).not.toBe(headSocket);
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+      .toMatchObject({ decision: 'history_mismatch_new_head', matchingCandidateCount: 0 });
+    ownSocket.emit('open');
+    expect(JSON.parse(ownSocket.send.mock.calls[0]![0] as string).previous_response_id)
+      .toBeUndefined();
+    emitTextResponse(ownSocket, 'resp_no_new_turn', 'again');
+    await readAll(echoed);
+  });
+
+  it('isolates a request that repeats the turn a head is generating right now', async () => {
+    // The retry case. A second copy of the same turn is not a branch off the
+    // response in flight, it IS that response — asking the head to continue it
+    // would ask it to extend a turn it has not finished. The uncommitted head has
+    // no stored history, so equality against what it is generating is the only
+    // signal there is, and it has to count as "could be this request".
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const debug: string[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, message => debug.push(message), {
+      accountId: 'acct-duplicate-inflight',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const turn = [{ role: 'user', content: [{ type: 'input_text', text: 'one turn' }] }];
+    const send = (): Promise<Response> => wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(turn)),
+    });
+
+    const first = await send();
+    const firstSocket = lastSocket();
+    firstSocket.emit('open');
+
+    const duplicate = await send();
+    expect(fakeSockets).toHaveLength(2);
+    const duplicateSocket = lastSocket();
+    expect(duplicateSocket).not.toBe(firstSocket);
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+      .toMatchObject({
+        decision: 'parallel_isolated',
+        createdGeneration: 'isolated',
+        isolatedByConnectionId: 1,
+      });
+    expect(debug).toContain('ws: parallel request using an isolated socket');
+
+    duplicateSocket.emit('open');
+    expect(JSON.parse(duplicateSocket.send.mock.calls[0]![0] as string).previous_response_id)
+      .toBeUndefined();
+    emitTextResponse(duplicateSocket, 'resp_duplicate', 'answer');
+    await readAll(duplicate);
+    emitTextResponse(firstSocket, 'resp_first', 'answer');
+    await readAll(first);
+  });
+
+  it('keeps its own head when its history is shorter than the turn in flight', async () => {
+    // A rewind or an abandoned branch: fewer items than the response being
+    // generated. A LATER turn of that response is necessarily longer, so a shorter
+    // history can never be its child and there is nothing to be confused with —
+    // which is why `isPrefixOrEqual` is asked whether the IN-FLIGHT items are the
+    // prefix, not the other way round.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const debug: string[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, message => debug.push(message), {
+      accountId: 'acct-shorter-than-inflight',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const history = Array.from({ length: 5 }, (_, index) => (
+      index % 2 === 0
+        ? { role: 'user', content: [{ type: 'input_text', text: `turn ${index}` }] }
+        : { role: 'assistant', content: [{ type: 'output_text', text: `answer ${index}` }] }
+    ));
+    const send = (input: unknown[]): Promise<Response> => wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+
+    const streaming = await send(history);
+    const streamingSocket = lastSocket();
+    streamingSocket.emit('open');
+
+    const rewound = history.slice(0, 3);
+    const branch = await send(rewound);
+    expect(fakeSockets).toHaveLength(2);
+    const branchSocket = lastSocket();
+    expect(branchSocket).not.toBe(streamingSocket);
+    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1);
+    // Persistent, so the rewound conversation's NEXT turn can continue this head.
+    expect(decision).toMatchObject({
+      decision: 'history_mismatch_new_head',
+      createdGeneration: 'nursery',
+    });
+    expect(decision).not.toHaveProperty('isolatedByConnectionId');
+    expect(debug).not.toContain('ws: parallel request using an isolated socket');
+
+    branchSocket.emit('open');
+    const sent = JSON.parse(branchSocket.send.mock.calls[0]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    expect(sent.input).toEqual(rewound);
+    emitTextResponse(branchSocket, 'resp_branch', 'branch answer');
+    await readAll(branch);
+    emitTextResponse(streamingSocket, 'resp_streaming_long', 'long answer');
+    await readAll(streaming);
+  });
+
+  it('isolates a request that extends the turn a head is generating right now', async () => {
+    // Indistinguishable from the next turn of that very response arriving before
+    // it finished: the items in flight are a prefix of this request. Until the
+    // head commits there is no way to tell a branch from a lineage, so this
+    // request gets its own socket rather than risk being stitched onto a turn
+    // whose output it has not seen.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-extends-inflight',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const firstUser = { role: 'user', content: [{ type: 'input_text', text: 'opening turn' }] };
+    const send = (input: unknown[]): Promise<Response> => wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input)),
+    });
+
+    const streaming = await send([firstUser]);
+    const streamingSocket = lastSocket();
+    streamingSocket.emit('open');
+
+    const extension = [
+      firstUser,
+      { role: 'assistant', content: [{ type: 'output_text', text: 'guessed answer' }] },
+      { role: 'user', content: [{ type: 'input_text', text: 'follow-up' }] },
+    ];
+    const extended = await send(extension);
+    expect(fakeSockets).toHaveLength(2);
+    const extendedSocket = lastSocket();
+    expect(extendedSocket).not.toBe(streamingSocket);
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+      .toMatchObject({
+        decision: 'parallel_isolated',
+        createdGeneration: 'isolated',
+        isolatedByConnectionId: 1,
+      });
+
+    extendedSocket.emit('open');
+    const sent = JSON.parse(extendedSocket.send.mock.calls[0]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    expect(sent.input).toEqual(extension);
+    emitTextResponse(extendedSocket, 'resp_extended', 'answer');
+    await readAll(extended);
+    emitTextResponse(streamingSocket, 'resp_streaming', 'answer');
+    await readAll(streaming);
+  });
+
   it('still isolates a parallel request when the busy head could still be its parent', async () => {
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
@@ -4415,11 +4652,11 @@ describe('new-connection pacing', () => {
     );
   });
 
-  it('does not open a second persistent head for a partition that filled up during the wait', async () => {
-    // The head scan runs before the wait. A same-partition request that starts
-    // while this one is queued would otherwise leave BOTH registering
-    // persistent nursery heads for one key, filling the nursery with
-    // duplicates and evicting other conversations' reusable heads.
+  it('does not open a second persistent head for a turn already in flight when it was queued', async () => {
+    // The head scan runs before the wait. A request that is overtaken during the
+    // wait by an identical turn — the same conversation arriving twice, which a
+    // client retry produces — would otherwise leave BOTH registering persistent
+    // nursery heads for one chain: two sockets generating the same response.
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     let releaseQueued: (() => void) | undefined;
     const queued = new Promise<void>(resolve => { releaseQueued = resolve; });
@@ -4444,11 +4681,11 @@ describe('new-connection pacing', () => {
     ));
 
     // Classified with an empty partition, then held inside the pacer.
-    const held = wsFetch('https://x', { method: 'POST', headers: {}, body: body('held') });
+    const held = wsFetch('https://x', { method: 'POST', headers: {}, body: body('one turn') });
     await isQueued;
 
-    // A second request for the same partition gets in and goes in flight.
-    const overtaking = await wsFetch('https://x', { method: 'POST', headers: {}, body: body('overtaking') });
+    // The SAME turn gets in and goes in flight while this one is still queued.
+    const overtaking = await wsFetch('https://x', { method: 'POST', headers: {}, body: body('one turn') });
     lastSocket().emit('open');
 
     releaseQueued!();
@@ -4476,9 +4713,10 @@ describe('new-connection pacing', () => {
   });
 
   it('asks the pacer for every shape of primary new connection', async () => {
-    // Four shapes reach the creation path. The parallel one dominates real
-    // traffic (2,844 of 2,987 observed upgrades), so none of them may be left
-    // on prose.
+    // Four shapes reach the creation path, and none of them may be left on prose.
+    // The parallel one is now the rare shape — it fires only where the busy head
+    // cannot be told apart from this request — so it is also the easiest to break
+    // without noticing.
     const pacer = recordingPacer();
     const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
     const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
@@ -4513,8 +4751,10 @@ describe('new-connection pacing', () => {
     expect(lastDecision()).toMatchObject({ decision: 'history_mismatch_new_head' });
     expect(pacer.admit).toHaveBeenCalledTimes(3);
 
-    // 4. parallel_isolated — same partition while that one is still in flight.
-    const parallel = await send(sessionPayload(turn('a third root')));
+    // 4. parallel_isolated — the same turn again while that one is still in
+    // flight, so nothing distinguishes this request from the response being
+    // generated and it may not branch off it.
+    const parallel = await send(sessionPayload(turn('a different root')));
     expect(lastDecision()).toMatchObject({ decision: 'parallel_isolated' });
     expect(pacer.admit).toHaveBeenCalledTimes(4);
 
@@ -4590,7 +4830,7 @@ describe('new-connection pacing', () => {
     await readAll(second);
   });
 
-  it('demotes a concurrent sibling even when neither request waited', async () => {
+  it('demotes a concurrent duplicate even when neither request waited', async () => {
     // `admit` is async, so even an immediate admission resumes a microtask
     // later and BOTH requests classify themselves against an empty partition
     // before either registers. Gating the re-check on having waited would let
@@ -4638,15 +4878,16 @@ describe('new-connection pacing', () => {
     await readAll(warmup);
     barrierArmed = true;
 
-    const [alpha, beta] = await Promise.all([send('alpha'), send('beta')]);
+    // The same turn twice — what a client retry looks like from here.
+    const [alpha, beta] = await Promise.all([send('one turn'), send('one turn')]);
 
     // The warmup produced a decision of its own; the pair is the last two.
     const decisions = diagnostics.filter(event => event.event === 'ws_head_decision').slice(-2);
     expect(decisions).toHaveLength(2);
     // Both were classified against an empty partition — the race is real...
     expect(decisions.map(event => event.candidateCount)).toEqual([0, 0]);
-    // ...but only one of them may end up holding a persistent head for it.
-    // Without the demotion both are 'nursery': two persistent heads, one key.
+    // ...but only one of them may end up holding a persistent head for this chain.
+    // Without the demotion both are 'nursery': two heads generating one response.
     expect(decisions.map(event => event.createdGeneration).sort())
       .toEqual(['isolated', 'nursery']);
     expect(debug).toContain('ws: parallel request using an isolated socket after pacing');
@@ -5020,11 +5261,13 @@ describe('new-connection pacing', () => {
 
     const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1);
     expect(decision).toMatchObject({
-      decision: 'parallel_isolated',
+      decision: 'history_mismatch_new_head',
       pacingWaitedMs: 4_000,
       pacingRescanOutcome: 'no_change',
       createdConnectionId: 2,
-      createdGeneration: 'isolated',
+      // Persistent, not isolated: an unrelated conversation is entitled to a head
+      // of its own even though a sibling happened to be busy when it arrived.
+      createdGeneration: 'nursery',
     });
     expect((decision as { selectedConnectionId?: number }).selectedConnectionId).toBeUndefined();
     expect(debug).not.toContain('ws: continuing a chain head that freed up during the pacing wait');
@@ -5247,7 +5490,7 @@ describe('new-connection pacing', () => {
     expect(sent.previous_response_id).toBeUndefined();
     expect(sent.input).toEqual(divergent);
     expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
-      .toMatchObject({ pacingRescanOutcome: 'no_change', createdGeneration: 'isolated' });
+      .toMatchObject({ pacingRescanOutcome: 'no_change', createdGeneration: 'nursery' });
     expect(debug).not.toContain('ws: continuing a chain head that freed up during the pacing wait');
     expect(releaseToken).not.toHaveBeenCalled();
 

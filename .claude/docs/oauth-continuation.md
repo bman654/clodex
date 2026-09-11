@@ -29,10 +29,22 @@ An in-process Claude Code subagent forks the session and keeps the root session 
 its parent's id in `X-Claude-Code-Session-Id` (verified in the 2.1.267 bundle; a separately launched
 process has its own). One partition therefore holds many unrelated conversations at once. A request that matches no idle head is pushed to `parallel_isolated` — full
 context, no head retained — only when some **in-flight** head could still turn out to be its parent:
-`couldPrecedeThisRequest`, which is `continuationMatch` against the busy head plus a conservative
-`true` for a head that has committed nothing yet (its first response is still streaming, so there is
-no history to diverge from). Both the arrival gate and the post-pacing re-check use it, and the
-`ws_head_decision` records `isolatedByConnectionId` naming the head that decided it.
+`couldPrecedeThisRequest`. A head that has committed a response is tested with `continuationMatch`.
+A head still streaming its very first response has no stored history, but it is not unknowable:
+`entry.current.originalPayload` is the conversation it is generating *for*, and this request can only
+be a later turn of that response if it carries those items as a prefix — `isPrefixOrEqual`, the
+non-strict form, because a client that re-sent the identical turn is a duplicate of the response in
+flight rather than a branch off it and must not be stitched onto a turn whose output it has never
+seen. Two shapes therefore still isolate against an uncommitted head: an exact repeat of the turn
+being generated (a client retry), and a request that extends it. Everything else — the sibling
+subagent whose history diverges at the first item, which is what a fan-out produces — is no longer
+blocked by THIS head, though pacing refusal or a transport failure can still cost it one. Note which
+side is the candidate prefix: a request holding FEWER items than the turn in
+flight, a rewind or an abandoned branch, cannot be a later turn of it, so the in-flight items are
+tested as the prefix of the request and never the reverse. `inFlight` and `current` are set together at dispatch, so the `!current` fallback is for the
+type rather than a state this predicate is reachable with; it blocks rather than guesses. Both the
+arrival gate and the post-pacing re-check use the predicate, and the `ws_head_decision` records
+`isolatedByConnectionId` naming the head that decided it.
 
 Gating instead on "any head in this partition is busy" is expensive *cumulatively*: an isolated socket
 retains no head, so the next turn of that same subagent isolated again for as long as anything in the
@@ -61,33 +73,133 @@ for its first continuation, before that continuation is known to succeed — so 
 concurrent subagents inherit the parent's Claude session id, and therefore share one partition, can
 lose heads before their next turn and with them the continuation.
 
-**Keeping a fan-out's chains alive trades throwaway sockets for retained heads, and that trade can go
-either way.** The mismatching turn still opens its own socket; only a LATER turn of that conversation
-can reuse it. Of the 4,934 primary connection-creation decisions in the ledger above, 3,611 had final
-diagnostics in which every recorded busy candidate showed a `user`-to-`user` divergence. Those are
-candidates for a different decision under this gate, not proof that 3,611 live isolations are replaced
-— the diagnostic reflects mutable entry state at emission time. Of the remaining 384, 319 recorded at
-least one busy strict-prefix candidate and still isolate by design; 65 had no busy candidate left in
-the final diagnostic and cannot be classified from this snapshot. But an isolated socket is never registered, so it
-never evicts anything, while a retained one runs `evictOldestIdleGeneration` first.
-**Eviction pressure is retained arrivals measured against free capacity — both terms matter, neither
-alone.** Seven free nursery slots absorb a width-1 fan-out with no eviction and lose one head to a
-width-8 one; at the cap, width decides whether one head or eight are evicted. A worked sequence goes
-the wrong way: eight idle nursery heads, one
-long-running established head in the target partition, and eight staggered siblings that each diverge
-from it. Retaining all eight evicts all eight older heads, so resuming those conversations inside the
-5-minute nursery TTL needs eight fresh upgrades — 16 rather than 8.
+**Keeping a fan-out's chains alive trades throwaway sockets for retained heads.** The mismatching
+turn still opens its own socket; only a LATER turn of that conversation can reuse it. Of the 4,934
+primary connection-creation decisions in the ledger above, 3,611 had final diagnostics in which every
+recorded busy candidate showed a `user`-to-`user` divergence. Those are candidates for a different
+decision, not proof that 3,611 live isolations are replaced — the diagnostic reflects mutable entry
+state at emission time. Of the remaining 384, 319 recorded at least one busy strict-prefix candidate
+and still isolate by design; 65 had no busy candidate left in the final diagnostic and cannot be
+classified from this snapshot.
+
+An isolated socket is never registered, so it never evicts anything, while a retained one runs
+`evictOldestIdleGeneration` first, **so a newly retained sibling can displace an older idle head that
+its own conversation was going to come back for.** That is reachable at the default nursery cap of 8:
+seven idle heads from finished turns, an eighth conversation streaming its first response, and one
+divergent sibling in that partition — the sibling is retained, the oldest idle head is evicted, and
+resuming that conversation costs a fresh upgrade and a full-context resend. Constructed and observed
+through the transport (nine sockets before this change, ten after), so the mechanism is established;
+its frequency in ordinary traffic is not, and the cap replay below finds no eviction-caused loss
+across the ledger's 27.6 hours — while also showing that at the default nursery cap the evicted head
+had often been idle for only seconds.
+
+**On a fresh pool, and for a fan-out whose members have distinguishable opening turns, it opened
+fewer sockets** — it reuses instead of dialing. That is not a general result: a warmed pool whose
+older conversations return is the case that can lose a head, and siblings that share an opening turn
+still isolate by design. Four single-purpose servers built from pinned commits (endpoint mode,
+`--no-discovery`, own port, freshly started, one leg at a time so each leg had the upstream account to
+itself), 16 conversations x 4 turns started simultaneously against a real ChatGPT-OAuth model,
+2026-09-11. `baseline` is 9bd5205, the commit that introduced the gate for *committed* heads;
+`this change` extends it to uncommitted ones:
+
+| leg | uncached input | client-visible failures | sockets opened | paced: admitted / refused | gauge peak nursery/established | `*_lru_cap` evictions | `parallel_isolated` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| baseline, caps 32/8 | 74.8% | 1 (pacer 429) | 50 | 38 / 36 | 1/6 | 0 | 42 of 61 |
+| this change, caps 32/8 | 47.6% | 0 | 17 | 6 / 1 | 11/16 | 0 | **0 of 65** |
+| baseline, caps 64/24 | 82.0% | 0 | 52 | 42 / 35 | 1/6 | 0 | 44 of 64 |
+| this change, caps 64/24 | 32.8% | 0 | 16 | 6 / 1 | 11/16 | 0 | **0 of 64** |
+
+Sixteen conversations, sixteen sockets, one head each; all 48 later turns continued. Zero
+`*_lru_cap` evictions on any leg. **Read the socket and decision columns, not the token
+percentages** — an earlier run of the same four legs gave 78.5 / 40.2 / 73.0 / 31.1, and the two
+cap settings differ by 9 points on identical workloads, so the token share carries upstream
+cache variance this experiment does not control. The decision counts are a consequence of the
+code AND of the workload's shape: these 16 conversations had distinct opening turns, which is
+what makes them distinguishable; 16 siblings sharing one opening turn would still isolate, by
+design.
+
+Two things the table must not be read as saying. The baseline's single client-visible 429 is one
+observation in one cell — the baseline's other leg had none despite 35 refusals — so it does not
+establish that this change removes 429s, only that this change asked the pacer for an order of
+magnitude less. And the gauge columns are the counts recorded *in* the decision diagnostic, which
+is emitted before the new entry registers; actual nursery occupancy peaked one higher (4, 11, 2, 11).
+Note nursery reaching 11 against a cap of 8 at all: eviction only considers IDLE entries, so a cap
+is not a ceiling while every head in that generation is busy.
+
+Legs were run one at a time on freshly started servers so that no other *diagnostics-enabled*
+clodex process was competing for the account; an external client or a process without diagnostics
+would be invisible to that check.
+
+**A retraction, because this section previously predicted the opposite.** An earlier run of the
+lineage gate recorded 14 `established_lru_cap` evictions, every one on a promoting decision with
+`establishedConnectionCount` at exactly the cap — which reads as the change causing eviction
+pressure. That server had accumulated 30 established heads from four prior runs still inside their
+30-minute idle TTL. On a fresh process at the same caps there are none. Long-lived servers do
+accumulate, but do not read a cap-sized pool at the start of a measurement as a result of it.
+
+**Comparing against an in-flight turn is memoized per response, not per lookup.** Canonicalizing a
+whole conversation is the one cost this check adds, and a wide fan-out would otherwise pay it once per
+arriving sibling per busy head — measured at 13.6ms per arrival across 16 in-flight heads holding
+11.7MB, against 0.4ms memoized. `RequestContext.canonicalInput` caches it; `originalPayload` is
+assigned once at construction and never reassigned (a transport retry resets `sendPayload` back to it
+and reuses the same context), so the memo has no reachable staleness. The cost it trades for is
+retained size: the canonical strings run about as large as the payload, so an in-flight head holds
+roughly twice its context until the response completes. This mirrors `canonicalPrefix` on the
+committed path, which has the same property. A stale memo could only mis-decide isolate versus
+don't-isolate — the committed history that drives `previous_response_id` is recomputed from
+`originalPayload` and never reads it.
 
 **Cap enforcement touches BOTH pools, at two different moments.** Creating a retained head calls
 `evictOldestIdleGeneration('nursery', maxNurseryConnections, 'nursery_lru_cap')` first; when that head
 is later selected for its first continuation, `continueOnHead` calls
 `evictOldestIdleGeneration('established', maxConnections, 'established_lru_cap')` before promoting it.
 Either call removes an entry only when that generation is at or above its cap AND has an idle entry —
-neither is an unconditional eviction. So this change can raise established-pool pressure as newly
-retained heads are later selected, and the entry displaced is the oldest idle established one, which
-may be a large long-lived conversation that then resends full context. The ledger does not establish
-that established eviction actually becomes more common. Watch `established_lru_cap` alongside
-`nursery_lru_cap`.
+neither is an unconditional eviction. The entry displaced is the oldest idle one in that generation,
+which could be a large long-lived conversation that then resends full context. Watch
+`established_lru_cap` alongside `nursery_lru_cap`.
+
+**No cap setting changed head reuse in this ledger, but the margin at the default is thin.**
+Replaying the ledger's decisions through a pool model — one head per *content key* (partition plus
+first-input-item hash, which is a transport-and-content heuristic, NOT a conversation id), promoted
+on first reuse — gives **92.9% key recurrence (12,307 of 13,245) at every cap pair tested**, from
+8/32 to unlimited. Misses are 938: 935 keys seen for the first time, which have no head by
+definition, plus 3 returning after a TTL expiry. **No miss at any tested cap was caused by an
+eviction.** Collapse the 285 duplicate decisions that retried request ids contribute before counting
+any of this — the undeduplicated figures are 91.8% and 1,111, and this document warns about exactly
+that trap two sections above.
+
+What the model does show is how little headroom the default leaves. The LRU victim is the oldest
+IDLE entry, and at nursery 8 it had been idle a median of 26 seconds and as little as **8 seconds**,
+against an inter-turn gap distribution of p50 5s / p90 20s / p99 63s. 85 of the 268 nursery
+evictions displaced a head idle for less than the p90 gap. None of them was in fact reused, so this
+ledger records no loss — but "was not reused" at 8 seconds idle is luck, not margin. Raising the
+nursery cap moves the victim out of that distribution: at 16 no victim is below the p90 gap, and at
+48 none is below the p99 gap.
+
+Counts and reasons at 8/32 are 268 nursery plus 53 established evictions; at 24/64, 231 nursery and
+none established; at unlimited, none. Only cap pairs were simulated, not measured, and the model
+cuts both ways rather than being uniformly conservative: it lets in-flight heads be evicted, which
+the real pool forbids, but it also assumes every attempt yields an immediately reusable head and
+collapses a conversation's branches into one key.
+
+**What that ledger's own gauges looked like, pre-change, on caps of 64/24:** pooled connections p50
+16, p90 23, p99 27, max 31 (unweighted per decision); nursery peaked at 24, its cap, with 10
+`nursery_lru_cap` evictions; established peaked at 28 of 64 with **zero** `established_lru_cap`
+evictions. So in this ledger the pressured pool was the nursery, not the established one.
+`activeConnectionCount` equals nursery plus established on all 13,530 records, so isolated sockets
+are invisible in it and the true socket count was higher whenever one was open.
+
+**Held connections do NOT have an established relationship with upstream errors here, and an earlier
+revision of this section claimed they did.** Bucketing the ledger's 13,524 upstream-attempt outcomes
+by the pooled-connection count at the nearest preceding head decision gives 2.96% / 3.29% / 3.34%
+below 25 connections and 114 of 630 at 25 or more. That last bucket is one incident: all 114 errors
+fall inside a **5.8-minute window**, where the rate was 114/147; across the other 483 outcomes at 25+
+connections the rate was **zero**. The errors also began below 25 connections and preceded the pool
+climb. Treat the gradient as an artifact of that incident, not a cost of holding connections. (The
+join is also a global latest-gauge proxy rather than a per-request measurement.) What does survive:
+41 of the 44 upgrade rejections — HTTP 429 at the upgrade, from 13 request ids, all of which later
+succeeded — occurred at 20-24 pooled connections, so *dialing* under load is throttled, which is
+what the pacer is for and which this change reduces.
 
 An idle nursery head is exposed until its connection is **selected** for its first continuation, which
 is when promotion happens — before that continuation is known to succeed. Nursery membership is a
@@ -265,15 +377,21 @@ through the shipped bucket predicts 1,686 waits and 1,590 refusals in one of tho
 when the partition simply goes quiet during the wait. Such a request already has `persistent` false
 and, absent a re-match, keeps it, so it opens an isolated socket that retains no head at all.
 Isolated sockets were 30-38% of decisions in busy diagnostics files before the lineage gate above
-narrowed which of them qualify — a larger share of the same harm than the case this closes.
+narrowed which of them qualify — a larger share of the same harm than the case this closes. Under
+that gate a simultaneous 16-way fan-out produced none at all, so what remains of this boundary is
+the retry and extension shapes rather than ordinary fan-out traffic.
 
 Failing a re-match, an admitted request still demotes itself to `parallel_isolated` if a
 same-partition request that could be its parent went in flight meanwhile — otherwise two requests
-would each register a persistent nursery head for one key and a fan-out would evict other
-conversations' heads. The duplicate this guards against is a second head for ONE conversation, which
-is what `couldPrecedeThisRequest` describes; a head busy on a different conversation is not a
-duplicate of anything, and a brand-new sibling head has committed nothing and so still blocks. That
-check is unconditional; only the re-match is gated on having been queued.
+would each register two retained heads for one chain — the invariant being kept is one head per
+chain, not one socket per response. The
+duplicate this guards against is a second head for ONE conversation, which is what
+`couldPrecedeThisRequest` describes. A head busy on a different conversation is not a duplicate of
+anything and does not demote — including a brand-new sibling that has committed nothing, whose
+in-flight items are compared instead. What reaches this branch is a request that exactly repeats or
+strictly extends the turn being generated; an exact repeat is what a client retry produces, though
+the shape alone does not establish the cause. That check is unconditional; only the re-match is gated
+on having been queued.
 
 Diagnostics: a `ws_new_connection_paced` event (`outcome` of `admitted`, `refused`, or `aborted`,
 with `waitedMs` / `requiredWaitMs` / `retryAfterSeconds`) and `pacingWaitedMs` on the same request's
