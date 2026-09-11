@@ -84,7 +84,10 @@ platform_names() {
     wanted="$wanted$known
 "
   done
-  printf '%s' "$wanted"
+  # Deduplicated, because coverage_is_complete counts matrix rows against published platforms:
+  # `--platforms darwin-arm64,darwin-arm64,...` repeated eight times would otherwise reach the
+  # published-platform count with one build tested, and be announced as "safe to update".
+  printf '%s' "$wanted" | awk 'NF && !seen[$0]++'
 }
 
 # Called from the main flow, NOT from a `$(...)`: `platform_names` is always read through a command
@@ -830,15 +833,62 @@ matrix_coverage_brief() {
 coverage_is_complete() { # coverage_is_complete <host-platform>
   # Not "did the platforms in the matrix pass" but "was every published platform in it". A
   # --platforms subset run passes every other test in here while having tested almost nothing.
-  [ "$(matrix_total)" -eq "$(printf '%s\n' "$CANARY_PLATFORM_TABLE" | awk -F'|' 'NF' | wc -l | tr -d ' ')" ] || return 1
+  # Each jq's STATUS is checked, not just its output. Testing `[ -z "$(jq ...)" ]` reads a failed
+  # jq — no output — as "nothing was downgraded" and returns full coverage: the one direction this
+  # function may never fail in, since its whole job is to withhold a green tick it cannot justify.
+  local distinct downgraded
+  distinct="$(jq -s -r '[.[].platform] | unique | length' "$MATRIX")" || return 1
+  # Distinct names on both sides, never row counts: equal counts and equal coverage are not the
+  # same claim, and the gap between them is a green tick over seven builds nobody looked at.
+  [ "$distinct" \
+      -eq "$(printf '%s\n' "$CANARY_PLATFORM_TABLE" | awk -F'|' 'NF' | wc -l | tr -d ' ')" ] || return 1
   [ "$(matrix_status_of "$1")" = "pass" ] || return 1
   [ "$(matrix_count error)" -eq 0 ] || return 1
-  [ -z "$(jq -s -r 'map(select(.downgraded == true) | .platform) | join(", ")' "$MATRIX")" ] || return 1
+  downgraded="$(jq -s -r 'map(select(.downgraded == true) | .platform) | join(", ")' "$MATRIX")" || return 1
+  [ -z "$downgraded" ] || return 1
   return 0
 }
 
 matrix_mode_of() { # matrix_mode_of <platform>
   jq -r -s --arg p "$1" 'map(select(.platform == $p) | .mode) | last // "none"' "$MATRIX"
+}
+
+# The one thing to DO about a run that fell short of full coverage — printed at the top of the
+# notification, before any of the detail. A message that reports a hole without naming the hole's
+# cause makes the reader re-derive it from the per-platform list every time, and the cause is
+# almost always "Docker Desktop is quit", which is fixable in one action.
+#
+# Mirrors coverage_is_complete's checks in the same order, and names EVERY cause that applies, not
+# just the first: fixing Docker while a host leg is also broken would otherwise leave the next run
+# short for a reason nobody was told about.
+coverage_gap_action() { # coverage_gap_action <host-platform> <retry-hours>
+  local host="$1" retry_h="$2" acts="" downgraded errors
+  downgraded="$(jq -s -r 'map(select(.downgraded == true) | .platform) | join(" and ")' "$MATRIX")"
+  errors="$(jq -s -r 'map(select(.status != "pass" and .status != "fail") | .platform) | join(", ")' "$MATRIX")"
+
+  if [ -n "${opt_platforms:-}" ]; then
+    acts="$acts
+- This was a \`--platforms\` debug run, so most of the matrix was never tested and no verdict was recorded. Run the canary without \`--platforms\` for a real answer."
+  fi
+  if [ -n "$downgraded" ]; then
+    if [ "${opt_container:-1}" -eq 1 ]; then
+      acts="$acts
+- *Start Docker Desktop.* That is the whole fix: $downgraded can only be patched for real inside a container, and with the daemon down they fall back to a bundle-only probe. The canary re-tries a partly covered release every ${retry_h}h, so the next run after Docker is up should clear this by itself — or run \`clodex-patch-canary.sh --force\` to settle it now."
+    else
+      acts="$acts
+- \`--no-container\` was passed, so $downgraded were never patched for real. Re-run without it."
+    fi
+  fi
+  if [ "$(matrix_status_of "$host")" != "pass" ]; then
+    acts="$acts
+- *This Mac's own leg reported $(matrix_status_of "$host"), so nothing was established for your machine.* Read the run log before updating Claude Code."
+  fi
+  if [ -n "$errors" ]; then
+    acts="$acts
+- $errors could not be tested at all (canary infrastructure or a platform package that has not published yet — not the release). Read the run log; if a package is simply not out yet, the next run picks it up."
+  fi
+  printf '%s' "${acts#
+}"
 }
 
 # How many patch sites actually applied, as opposed to how many were reported on: a SKIP is a site
