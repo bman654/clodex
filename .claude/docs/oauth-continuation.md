@@ -197,9 +197,12 @@ fall inside a **5.8-minute window**, where the rate was 114/147; across the othe
 connections the rate was **zero**. The errors also began below 25 connections and preceded the pool
 climb. Treat the gradient as an artifact of that incident, not a cost of holding connections. (The
 join is also a global latest-gauge proxy rather than a per-request measurement.) What does survive:
-41 of the 44 upgrade rejections — HTTP 429 at the upgrade, from 13 request ids, all of which later
-succeeded — occurred at 20-24 pooled connections, so *dialing* under load is throttled, which is
-what the pacer is for and which this change reduces.
+41 of the 44 upgrade rejections — **HTTP 403** from the edge, from 13 request ids, all of which later
+succeeded — occurred at 20-24 pooled connections, so *dialing* under load is throttled, which is what
+the pacer is for and which this change reduces. Read `httpStatusCode` for the status the edge
+actually returned: `mappedStatusCode` is the DOWNSTREAM status clodex reports to the client, and on
+the throttle branch it is the literal 429 that branch always sets, so it says nothing about what the
+edge sent. A 503 at the upgrade appears too.
 
 An idle nursery head is exposed until its connection is **selected** for its first continuation, which
 is when promotion happens — before that continuation is known to succeed. Nursery membership is a
