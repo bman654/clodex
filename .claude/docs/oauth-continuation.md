@@ -48,24 +48,38 @@ arrival gate and the post-pacing re-check use the predicate, and the `ws_head_de
 
 ### Subagents partition by agent id
 
-Claude Code 2.1.268 sends `x-claude-code-agent-id` (and `x-claude-code-parent-agent-id`) on every
-request from an in-process subagent and neither on the main agent's. The relay reads them in
-`proxy.ts` / `router.ts` (the MITM forwards them to the relay adapter alongside the session header),
-carries them through `withResponsesWebSocketDiagnosticContext`, and `responsesWebSocketPartitionKey`
-appends the agent id to the key material. `prompt_cache_key` is untouched, so siblings still share
-the server-side prefix cache; only the head lookup is per agent.
+Claude Code sends `x-claude-code-agent-id` (and `x-claude-code-parent-agent-id`) on every request
+from an in-process subagent and neither on the main agent's — present in every bundle checked back
+to 2.1.238, so nothing here is gated on a client version. The relay reads them in `proxy.ts` /
+`router.ts` (the MITM forwards them to the relay adapter alongside the session header), carries them
+through `withResponsesWebSocketDiagnosticContext`, and `responsesWebSocketPartitionKey` appends the
+agent id to the key material. `prompt_cache_key` is untouched, so siblings still share the
+server-side prefix cache; only the head lookup is per agent.
 
-The possible-parent gate above is deliberately conservative for a head that has committed nothing
-yet, and a parallel fan-out hits exactly that case: five siblings start within seconds, so siblings
-two to five each arrive while the first's initial response is still streaming and were isolated
-(no head retained), and their next turns were isolated by whichever sibling was on its first response
-then. Measured on one Opus main + five Luna subagents fixing a small Python project in parallel
-(53 Luna requests): shared partition 64.9% cached input, 10 `parallel_isolated` + 4
-`history_mismatch_new_head`; per-agent partitions 82.0% cached, 5 `new_partition_head` + 48
-`continuation` and nothing else. The remaining gap to the single-thread figure (92%) is the five
-unavoidable first turns plus a few server-side cache misses on genuine continuations. Giving each
-sibling its own `prompt_cache_key` as well was tried and measured 83.2% — not distinguishable — so
-the key stays shared.
+**What this closes is the one shape the gate above cannot.** A sibling whose opening turn differs
+from the turn in flight already keeps its own head — that is the gate's job. A sibling whose opening
+turn is BYTE-IDENTICAL to the turn in flight is indistinguishable from a retry of that turn, so the
+gate must isolate it; the agent id is the only signal that tells the two apart. Measured on fresh
+single-purpose servers, one leg at a time, decision mix read from each server's own diagnostics:
+
+| siblings' opening turns | shared partition | per-agent partition |
+| --- | --- | --- |
+| distinct (5 x 4 turns) | 0 isolated, 5 sockets | 0 isolated, 5 sockets — identical |
+| identical (5 x 4, two trials) | 8 of 20 isolated, 13 sockets | 0, 5 sockets |
+| identical (8 x 3) | 8 of 24 isolated, 16 sockets | 0, 8 sockets |
+| identical, staggered 1.5s (4 x 3) | 3 of 12 isolated | 0 |
+| identical, headers stripped (control) | 8 of 20 | — (equals shared) |
+
+The control leg shows the difference is the header, not the build. The structural cost on a shared
+partition is N-1 extra full-context sends per same-prompt fan-out, more when first answers coincide
+or a late sibling's first response is still streaming. Per-agent partitions also remove a
+cross-sibling stitch the shared partition permits when visible histories coincide.
+
+**Calibration:** in the 27.6-hour ledger cited above, 0 of 3,995 isolations had a prefix-or-equal
+busy candidate — every one diverged at item 0 — so this shape did not occur in that account's
+traffic at all. It is real for redundancy and consensus fan-outs that hand every sibling the same
+prompt; it is not a common case. Giving each sibling its own `prompt_cache_key` as well was tried
+and was not distinguishable from sharing it, so the key stays shared.
 
 Gating instead on "any head in this partition is busy" is expensive *cumulatively*: an isolated socket
 retains no head, so the next turn of that same subagent isolated again for as long as anything in the
@@ -138,8 +152,8 @@ percentages** — an earlier run of the same four legs gave 78.5 / 40.2 / 73.0 /
 cap settings differ by 9 points on identical workloads, so the token share carries upstream
 cache variance this experiment does not control. The decision counts are a consequence of the
 code AND of the workload's shape: these 16 conversations had distinct opening turns, which is
-what makes them distinguishable; 16 siblings sharing one opening turn would still isolate, by
-design.
+what makes them distinguishable; siblings sharing one opening turn are told apart by agent id
+instead (next section), and only a genuine retry of the turn in flight still isolates.
 
 Two things the table must not be read as saying. The baseline's single client-visible 429 is one
 observation in one cell — the baseline's other leg had none despite 35 refusals — so it does not

@@ -403,15 +403,16 @@ function instructionChangeSummary(previous: string | undefined, current: string 
  * token that the upstream rejected.
  *
  * The Claude agent id separates in-process subagents that share their parent's
- * session id (and so its `prompt_cache_key`). Without it, a fan-out's siblings
- * all land in one partition and each one's first turn arrives while another
- * sibling's first response is still streaming — a head that has committed
- * nothing yet, which `couldPrecedeThisRequest` conservatively treats as a
- * possible parent — so every sibling but the first is isolated and retains no
- * head. Partitioning per agent keeps `prompt_cache_key` shared (the server-side
- * prefix cache still spans the fan-out) while each sibling keeps its own chain.
- * The main agent and its auxiliary requests carry no agent id and keep sharing
- * the session partition, so the isolation they depend on is unchanged.
+ * session id (and so its `prompt_cache_key`). A sibling whose opening turn
+ * differs from the turn in flight already keeps its own head —
+ * `couldPrecedeThisRequest` compares against what the busy head is generating.
+ * A sibling whose opening turn is byte-identical to it cannot be told from a
+ * retry of that turn, so the gate must isolate it; the agent id is the only
+ * signal that distinguishes the two. Partitioning per agent keeps
+ * `prompt_cache_key` shared (the server-side prefix cache still spans the
+ * fan-out) while each sibling keeps its own chain. The main agent and its
+ * auxiliary requests carry no agent id and keep sharing the session partition,
+ * so the isolation they depend on is unchanged.
  */
 export function responsesWebSocketPartitionKey(
   wsUrl: string,
