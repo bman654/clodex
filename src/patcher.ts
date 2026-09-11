@@ -20,6 +20,7 @@
 
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdtempSync,
@@ -697,10 +698,20 @@ function verifyPristineSource(
  * `rename` within one directory is atomic, so a backup file is either absent or
  * complete — never half-written.
  */
-function publishBackupFile(from: string, to: string): void {
+/**
+ * Copy `from` over `to` by writing a temp file beside it and renaming, so `to` is
+ * replaced as a whole new inode rather than rewritten underneath anything holding
+ * it. Used for backup files, and for the live binary on `--restore`.
+ *
+ * `mode` is applied to the temp file before the rename. `copyFileSync` takes the
+ * SOURCE's mode, not the destination's, so a rename without this would publish a
+ * binary carrying whatever permissions the backup file happened to have.
+ */
+function publishFileByRename(from: string, to: string, mode?: number): void {
   const temp = `${to}.tmp-${process.pid}-${Date.now().toString(36)}`;
   try {
     copyFileSync(from, temp);
+    if (mode !== undefined) chmodSync(temp, mode);
     renameSync(temp, to);
   } catch (err) {
     try {
@@ -941,7 +952,7 @@ export async function applyPatch(
           + `to publish it as ${plan.backupPath}`,
         );
       }
-      publishBackupFile(candidatePath, plan.backupPath);
+      publishFileByRename(candidatePath, plan.backupPath);
     }
 
     // Adopt a legacy `claude-<ver>.orig` under its content address so later runs
@@ -957,13 +968,13 @@ export async function applyPatch(
       const alreadyStored = facts.backups.some(
         candidate => candidate.path === canonical && candidate.sha256 === pristineSha256,
       );
-      if (!alreadyStored) publishBackupFile(backup, canonical);
+      if (!alreadyStored) publishFileByRename(backup, canonical);
       backup = canonical;
     }
 
     // Mirror the pristine copy to tweakcc's restore location (always from the
     // backup, never the live binary — so it stays pristine after patching).
-    publishBackupFile(backup, tweakccMirrorBackupPath());
+    publishFileByRename(backup, tweakccMirrorBackupPath());
 
     const builtIn = applyClodexPatches(loaded.source, desired.config);
     results = builtIn.results;
@@ -1157,8 +1168,15 @@ function runRestoreCommand(target: ClaudePatchTarget): number {
     return 1;
   }
 
-  // Unlike the patch path, this copies straight over the live binary — there is
-  // nothing to publish atomically — so it carries the full provenance check.
+  // Publish the same way the patch path does. Rewriting a binary IN PLACE leaves
+  // it on the same inode, and macOS caches a code signature per vnode for a
+  // binary that has been executed — an in-place overwrite invalidates the pages
+  // under that cache and has been reported to leave every later launch killed
+  // with `Code Signature Invalid` (issue #216) until the file was replaced
+  // through a new inode. The earlier reasoning here was that a restore has
+  // "nothing to publish atomically", which is true and beside the point: what
+  // matters is inode identity, not atomicity. This path still carries the full
+  // provenance check.
   const plan = planRestoreOnly(collectPristineFacts({ version, binaryPath, manifest }));
   if (plan.action === 'error') {
     p.log.error(plan.message);
@@ -1170,7 +1188,31 @@ function runRestoreCommand(target: ClaudePatchTarget): number {
     p.log.error(verified.message);
     return 1;
   }
-  copyFileSync(plan.backupPath, binaryPath);
+  // Keep the live binary's own permissions: `copyFileSync` would hand it the
+  // backup file's instead, and a non-executable claude is a worse outcome than
+  // the one being fixed.
+  let publishedMode: number | undefined;
+  try {
+    publishedMode = statSync(binaryPath).mode;
+  } catch {
+    // The target is gone between the plan and the write; let the rename create it
+    // with the backup's mode rather than refuse a rescue this late.
+  }
+  try {
+    publishFileByRename(plan.backupPath, binaryPath, publishedMode);
+  } catch (err) {
+    // A rename can fail where the old in-place copy would have worked — Windows
+    // refuses to replace a file another process holds open, and a temp file beside
+    // the binary needs a writable directory. This is a rescue command, so fall back
+    // to the in-place write rather than leave a broken install unrestored; the user
+    // is told, because on macOS that write is the fault this path exists to avoid.
+    p.log.warn(
+      `Could not replace ${binaryPath} through a new file (${err instanceof Error ? err.message : String(err)}); `
+      + 'writing the pristine bytes in place instead. If claude then fails to start with a code-signing '
+      + 'error, copy the backup to a new file and move it over the binary by hand.',
+    );
+    copyFileSync(plan.backupPath, binaryPath);
+  }
   // Reaching here means the plan established these bytes as THIS install's
   // pristine content, so the manifest being cleared is this install's own record
   // that it was patched. A manifest recorded against a different install cannot
