@@ -31,6 +31,16 @@ export function contextResolver(modelParam: string, windowParam: string): string
     + `if(EHi(${modelParam},${windowParam}))return Dve;return $Ac(${modelParam},${windowParam})}`;
 }
 
+/**
+ * The object feeding Claude Code's env_info identity sentence ("You are powered by the model
+ * named <marketing name>. The exact model ID is <id>."), as 2.1.268 spells it. PATCH 11 keys on
+ * it. The marketing-name lookup answers only for native models, so a custom model is otherwise
+ * told nothing but its short alias.
+ */
+export const IDENTITY_SITE =
+  'function Ot(e){return{modelId:e,marketingName:Bu(e)??null,knowledgeCutoff:Lc(e)}}'
+  + 'function Bu(e){return e==="claude-opus-5"?"Opus 5":void 0}function Lc(e){return null}';
+
 export const CLAUDE_CORE_FIXTURE = [
   ENUM_AND_DESCRIPTION,
   'var KNOWN=["sonnet","opus","haiku","fable","opusplan"];',
@@ -38,6 +48,7 @@ export const CLAUDE_CORE_FIXTURE = [
   'function opts(e,t,r){let n=cur(),o=(n==="opus"||n==="sonnet")&&n!==r?[n,r]:[r];for(let i of o)Dlh(e,i,t);return e}',
   CONTEXT_RESOLVER,
   'function cwdOf(){let p=process.env.PWD;return p}',
+  IDENTITY_SITE,
   'function childEnv(){let e=extra(),t=Object.keys(e).length>0,n=Object.keys(e).length>0,s=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};let o=[process.env.CLAUDE_CODE_OAUTH_TOKEN,process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE,process.env.CLAUDE_BG_PTY_AUTH,"OTEL_",process.env.CLAUDE_CODE_OTEL_DIAG_STDERR],u=["CLAUDE_CODE_OAUTH_TOKEN"];if(!t&&!n&&!o[0])return process.env;let v={...process.env,...e,...s};for(let k of u)delete v[k],delete v[`INPUT_${k}`];return v}function mcpAllow(){let e=process.env.CLAUDE_CODE_MCP_ALLOWLIST_ENV;return e}',
 ].join('\n');
 

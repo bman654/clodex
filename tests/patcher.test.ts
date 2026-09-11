@@ -8,6 +8,7 @@ import {
   CLAUDE_SPLIT_MODULES,
   CONTEXT_RESOLVER,
   contextResolver,
+  IDENTITY_SITE,
 } from './fixtures/claude-bundle.js';
 import {
   buildFakeElfClaude,
@@ -588,8 +589,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 12,
-      digest: 'd9dff2594fc60dcae83fb34846c681ee75fb3b0d7f49e5c26cb1c3c415cbcc4c',
+      version: 13,
+      digest: '745929da01e2e7e67c1f7db53e76eb1078eceade571e36ca173f938accb22b04',
     });
   });
 });
@@ -2722,6 +2723,53 @@ describe('patch script identity naming', () => {
       + 'clodex:openai:mystery = Mystery (OpenAI).');
   });
 
+  const identityOf = (source: string, model: string): { modelId: string; marketingName: string | null } =>
+    new Function(source.split('\n').filter(line => line.includes('knowledgeCutoff:')).join('\n')
+      + ';return Ot(' + JSON.stringify(model) + ')')();
+
+  it('PATCH 11 gives a routed model its real name and upstream id in the identity line', () => {
+    const result = applyClodexPatches(CLAUDE_FIXTURE, {
+      'clodex:openai-oauth:gpt-5.6-luna': { alias: 'luna', context: 272_000, display: 'GPT-5.6 Luna (OpenAI (ChatGPT))' },
+      'clodex:opencode-go:deepseek-v4.1-flash': { alias: 'flash', display: 'DeepSeek V4.1 Flash (OpenCode Go)' },
+    });
+    expect(result.results.find(r => r.name === 'PATCH 11: model self-identity')!.status).toBe('OK');
+    const want = 'GPT-5.6 Luna (OpenAI (ChatGPT)); upstream model id gpt-5.6-luna, served through Clodex';
+    // Reached by the alias Claude Code sends AND by the full clodex: id, case-insensitively.
+    expect(identityOf(result.content, 'luna').marketingName).toBe(want);
+    expect(identityOf(result.content, 'LUNA').marketingName).toBe(want);
+    expect(identityOf(result.content, 'clodex:openai-oauth:gpt-5.6-luna').marketingName).toBe(want);
+    expect(identityOf(result.content, 'flash').marketingName)
+      .toBe('DeepSeek V4.1 Flash (OpenCode Go); upstream model id deepseek-v4.1-flash, served through Clodex');
+    // Native models keep the native answer; unknown ids stay null.
+    expect(identityOf(result.content, 'claude-opus-5').marketingName).toBe('Opus 5');
+    expect(identityOf(result.content, 'some-other-model').marketingName).toBeNull();
+  });
+
+  it('PATCH 11 falls back to the upstream id when no display label is known, and refreshes in place', () => {
+    const first = applyClodexPatches(CLAUDE_FIXTURE, {
+      'clodex:openai-oauth:gpt-6-astra': { alias: 'astra' },
+    });
+    expect(identityOf(first.content, 'astra').marketingName)
+      .toBe('gpt-6-astra; upstream model id gpt-6-astra, served through Clodex');
+    // Re-patching an already-patched source replaces the table rather than stacking a second one.
+    const second = applyClodexPatches(first.content, {
+      'clodex:openai-oauth:gpt-6-astra': { alias: 'astra', display: 'GPT-6 Astra (OpenAI (ChatGPT))' },
+    });
+    expect(second.content.split('/*ccpatch:identity*/').length).toBe(2);
+    expect(identityOf(second.content, 'astra').marketingName)
+      .toBe('GPT-6 Astra (OpenAI (ChatGPT)); upstream model id gpt-6-astra, served through Clodex');
+  });
+
+  it('PATCH 11 is best-effort: a bundle without the identity site still patches', () => {
+    const withoutSite = CLAUDE_FIXTURE.replace(IDENTITY_SITE, 'function Ot(e){return e}');
+    expect(withoutSite).not.toBe(CLAUDE_FIXTURE);
+    const result = applyClodexPatches(withoutSite, {
+      'clodex:openai-oauth:gpt-5.6-luna': { alias: 'luna' },
+    });
+    expect(result.results.find(r => r.name === 'PATCH 11: model self-identity')!.status).not.toBe('OK');
+    expect(result.content).not.toContain('/*ccpatch:identity*/');
+  });
+
   it('falls back to the old "Custom model (id)" description when no label is known', () => {
     const out = runPatchScript({ 'clodex:openai-oauth:gpt-5.6-sol': { alias: 'sol', context: 272_000 } });
     expect(out).toContain('{value:"sol",label:"Sol",description:"Custom model (clodex:openai-oauth:gpt-5.6-sol)"}');
@@ -2933,6 +2981,7 @@ describe('patch script identity naming', () => {
       ['PATCH 6: alias resolver switch', 'OK'],
       ['PATCH 5: model picker options', 'OK'],
       ['PATCH 4: Agent tool model description', 'OK'],
+      ['PATCH 11: model self-identity', 'OK'],
       ['PATCH 7: per-model context window', 'OK'],
       ['PATCH 8a: effort capability', 'OK'],
       ['PATCH 8b: xhigh effort capability', 'OK'],
@@ -2947,8 +2996,9 @@ describe('patch script identity naming', () => {
       ['PATCH 6: alias resolver switch', 'SKIP'],
       ['PATCH 5: model picker options', 'SKIP'],
       ['PATCH 4: Agent tool model description', 'SKIP'],
-      // PATCH 7 re-runs through the in-place refresh path; an unchanged config
-      // rewrites the identical table, which reports as already patched.
+      // PATCH 7 and PATCH 11 re-run through their in-place refresh paths; an
+      // unchanged config rewrites the identical table, which reports as already patched.
+      ['PATCH 11: model self-identity (refresh)', 'SKIP'],
       ['PATCH 7: per-model context window (refresh)', 'SKIP'],
       ['PATCH 8a: effort capability (refresh)', 'SKIP'],
       ['PATCH 8b: xhigh effort capability (refresh)', 'SKIP'],
@@ -3094,15 +3144,16 @@ describe('patch script identity naming', () => {
 
     expect(patched.content).toContain('.enum(["sonnet","opus","haiku","fable","sol","clodex:openai:mystery"])');
     expect(patched.content).toContain('/*ccpatch:ctx*/');
-    expect(patched.results.slice(0, 6).map(result => [result.name, result.status])).toEqual([
+    expect(patched.results.slice(0, 7).map(result => [result.name, result.status])).toEqual([
       ['PATCH 1: Agent tool model enum', 'OK'],
       ['PATCH 3: known-alias validator list', 'OK'],
       ['PATCH 6: alias resolver switch', 'OK'],
       ['PATCH 5: model picker options', 'OK'],
       ['PATCH 4: Agent tool model description', 'OK'],
+      ['PATCH 11: model self-identity', 'OK'],
       ['PATCH 7: per-model context window', 'OK'],
     ]);
-    expect(patched.results.slice(6, -1)).toEqual([
+    expect(patched.results.slice(7, -1)).toEqual([
       { status: 'FAIL', name: 'PATCH 8a: effort capability', extra: 'anchor not found' },
       { status: 'FAIL', name: 'PATCH 8b: xhigh effort capability', extra: 'anchor not found' },
       { status: 'FAIL', name: 'PATCH 8c: max effort capability', extra: 'anchor not found' },

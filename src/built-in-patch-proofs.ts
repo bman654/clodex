@@ -167,6 +167,10 @@ export function captureBuiltInPatchProofs(
     /\/\*ccpatch:default-effort\*\/var _cce=Object\.assign\(Object\.create\(null\),\{[^{}]*\}\)\[String\([\w$]+\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_cce!==void 0\)return _cce;/,
   );
   addPattern(
+    'PATCH 11: model self-identity',
+    /\/\*ccpatch:identity\*\/\(\{[^{}]*\}\)\[String\([\w$]+\|\|""\)\.trim\(\)\.toLowerCase\(\)\]/,
+  );
+  addPattern(
     'PATCH 10: child network environment',
     /\/\*ccpatch:child-network-env\*\/let _clodexChildEnv=process\.env,[\s\S]*?catch\(_clodexError\)\{\}\}/,
   );

@@ -86,8 +86,13 @@ import {
  * bumped because the rule above says a changed anchor is bumped — an install
  * patched by an older clodex is not wrong, but it was produced by a transform set
  * whose anchors are narrower, so it re-reads as stale rather than current.
+ *
+ * 13 — PATCH 11 added: a custom model's identity line in the system prompt now
+ * carries its real label and upstream model id instead of only its short alias.
+ * An install without it still routes correctly; it re-reads as stale so the next
+ * patch run gives routed models their names.
  */
-export const PATCH_TRANSFORMS_VERSION = 12;
+export const PATCH_TRANSFORMS_VERSION = 13;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -517,6 +522,60 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
           : body! + ' Additional custom models: ' + listing + '.' + close!,
       { required: false, noopIsSkip: true }
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 11 — the model's own identity line in the system prompt.
+  //
+  // Claude Code tells every model what it is in the env_info section: "You are
+  // powered by the model named <marketing name>. The exact model ID is <id>."
+  // when its catalog knows the id, and only "You are powered by the model <id>."
+  // when it does not. A custom model's id is its short alias, so without this a
+  // routed model is told it is "luna" or "flash" and nothing else: asked what it
+  // is, it answers with the alias, and it cannot tie itself to the "Additional
+  // custom models" listing PATCH 4 writes (measured on 2.1.268: a Flash session
+  // quoted that listing and still called itself "flash").
+  //
+  // We extend the marketing-name lookup with a baked table, so a configured model
+  // renders the first sentence with its real label and upstream model id. Only
+  // the object that feeds that sentence is touched; every other caller of the
+  // marketing-name function keeps its native answer.
+  //
+  // Anchor: the object literal `{modelId:X,marketingName:F(X)??null,
+  // knowledgeCutoff:G(X)}`, every identifier wildcarded and the parameter tied
+  // together by back-reference. Best-effort (cosmetic), like PATCH 4.
+  // ---------------------------------------------------------------------------
+  {
+    const IDENTITY_MARKER = '/*ccpatch:identity*/';
+    const NAME_BY_KEY: Record<string, string> = Object.create(null);
+    for (const [id, value] of Object.entries(MODEL_CONFIG)) {
+      const spec: PatchScriptModelEntry = value && typeof value === 'object' ? value : { alias: value as unknown as string };
+      const segments = String(id).split(':');
+      const upstream = (segments.length >= 3 ? segments.slice(2).join(':') : String(id))
+        .replace(/\[1m\]$/i, '');
+      const label = spec.display ? String(spec.display) : upstream;
+      const name = label + '; upstream model id ' + upstream + ', served through Clodex';
+      if (spec.alias !== undefined) NAME_BY_KEY[String(spec.alias).trim().toLowerCase()] = name;
+      NAME_BY_KEY[String(id).trim().toLowerCase()] = name;
+    }
+    const lookupFor = (modelParam: string) =>
+      IDENTITY_MARKER + '(' + JSON.stringify(NAME_BY_KEY) + ')[String(' + modelParam + '||"").trim().toLowerCase()]';
+
+    if (js.includes(IDENTITY_MARKER)) {
+      applyOnce(
+        'PATCH 11: model self-identity (refresh)',
+        /\/\*ccpatch:identity\*\/\(\{[^{}]*\}\)\[String\(([\w$]+)\|\|""\)\.trim\(\)\.toLowerCase\(\)\]/,
+        (_m, modelParam) => lookupFor(modelParam!),
+        { required: false, noopIsSkip: true }
+      );
+    } else {
+      applyOnce(
+        'PATCH 11: model self-identity',
+        /(\{modelId:([\w$]+),marketingName:[\w$]+\(\2\))(\?\?null,knowledgeCutoff:[\w$]+\(\2\)\})/,
+        (_m, head, modelParam, tail) => head! + '??' + lookupFor(modelParam!) + tail!,
+        { required: false }
+      );
+    }
   }
 
   // ---------------------------------------------------------------------------
