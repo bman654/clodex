@@ -59,6 +59,7 @@ import {
   estimateAnthropicInputTokens,
 } from './anthropic-endpoints.js';
 import { withResponsesWebSocketDiagnosticContext } from './oauth/responses-websocket.js';
+import { openCodeGoSessionHeaders } from './data/opencode-go-models.js';
 import { resolveContextWindow } from './context-window.js';
 import { listenTcpServer } from './listener-ready.js';
 import type { ModelRuntimeCompatibility } from './model-runtime-compatibility.js';
@@ -537,6 +538,14 @@ export async function startProxyCatalog(
 
         let effectiveBeta = inboundBeta;
         let claudeCodeSessionId: string | undefined;
+        const inboundSessionRaw = req.headers['x-claude-code-session-id'];
+        const goSessionHeaders = openCodeGoSessionHeaders(
+          { providerId: route.providerId, baseUrl: upstreamUrl },
+          extractClaudeSessionId(
+            anthropicBody,
+            Array.isArray(inboundSessionRaw) ? inboundSessionRaw[0] : inboundSessionRaw,
+          ),
+        );
         if (isOAuth) {
           // Identity injection and beta selection for Claude Code OAuth.
           const seed = route.providerId ?? route.realModelId;
@@ -556,7 +565,7 @@ export async function startProxyCatalog(
             authType: routeAuthType,
             log: message => plog(message),
             claudeCodeSessionId,
-            extraHeaders: route.headers,
+            extraHeaders: { ...route.headers, ...goSessionHeaders },
             refreshToken: route.refreshToken,
             onTokenRefreshed: refreshed => { route.apiKey = refreshed; },
             signal: clientAbort.signal,
@@ -627,6 +636,11 @@ export async function startProxyCatalog(
               upstreamModelId: route.realModelId,
             },
           });
+          const goSdkSessionHeaders = openCodeGoSessionHeaders(
+            { providerId: route.providerId, baseUrl: route.baseURL },
+            claudeSessionId,
+          );
+          if (goSdkSessionHeaders) params.headers = { ...params.headers, ...goSdkSessionHeaders };
           plog(() =>
             `sdk: npm=${route.npm} model=${route.realModelId}, stream=${clientWantsStream}, ` +
             `tools=${anthropicBody.tools?.length ?? 0}, msgs=${params.messages.length}`,

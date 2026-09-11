@@ -19,6 +19,8 @@ The provider uses one credential with two upstream wire protocols:
 
 The selective proxy diverts only explicit `clodex:opencode-go:...` model ids or saved aliases. Ordinary Claude model traffic remains on Claude Code's native Anthropic connection.
 
+Both endpoints require an `x-opencode-session` header and answer `MissingSessionID` without one. Clodex sends Claude Code's own session id on every Go request (proxy and API-server modes, both wire protocols), so Go can keep a conversation on one backend; a request with no client session id gets one stable per-process id instead.
+
 ## Supported transport scope
 
 The upstream OpenCode Go catalog also contains Responses-API models. Clodex intentionally excludes those entries from this provider (currently Grok and mainline GPT; other unmapped ids are reported by the updater until their transport is verified). The supported catalog contains only Anthropic Messages and Chat Completions models.

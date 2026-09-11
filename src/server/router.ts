@@ -63,6 +63,7 @@ import {
   type AnthropicRequest,
 } from '../sdk-adapter.js';
 import { withResponsesWebSocketDiagnosticContext } from '../oauth/responses-websocket.js';
+import { openCodeGoSessionHeaders } from '../data/opencode-go-models.js';
 import { listenTcpServer, tcpListenerUrlHost } from '../listener-ready.js';
 
 export interface ServerOptions {
@@ -326,6 +327,7 @@ async function handleAnthropicMessages(
     const forwardBody: Record<string, unknown> = { ...body, model: upstreamModelId(model) };
     const authType = model.authType ?? 'api';
     const isOAuth = authType === 'oauth';
+    const goSessionHeaders = openCodeGoSessionHeaders(model, claudeSessionId);
 
     auditInference(options, {
       requestId,
@@ -362,7 +364,7 @@ async function handleAnthropicMessages(
         authType,
         log: message => plog(message),
         claudeCodeSessionId,
-        extraHeaders: model.headers,
+        extraHeaders: { ...model.headers, ...goSessionHeaders },
         refreshToken,
         onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
         signal: clientAbort.signal,
@@ -440,6 +442,8 @@ async function handleAnthropicMessages(
       maxTools: npmMaxTools,
       log: plog,
     });
+    const goSdkSessionHeaders = openCodeGoSessionHeaders(model, claudeSessionId);
+    if (goSdkSessionHeaders) params.headers = { ...params.headers, ...goSdkSessionHeaders };
     const clientWantsStream = Boolean(body.stream);
     // Use the display name in the response model field when masking is on — Claude
     // Desktop shows the response model field in its status bar chip, so this surfaces

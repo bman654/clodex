@@ -1,12 +1,12 @@
 [
   {
     "id": "deepseek-v4-flash",
-    "name": "DeepSeek V4 Flash (2x usage)",
+    "name": "DeepSeek V4 Flash",
     "contextWindow": 1000000,
     "cost": {
-      "input": 0.07,
-      "output": 0.14,
-      "cache_read": 0.0014
+      "input": 0.15,
+      "output": 0.6,
+      "cache_read": 0.003
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",
@@ -34,12 +34,12 @@
   },
   {
     "id": "deepseek-v4-pro",
-    "name": "DeepSeek V4 Pro",
+    "name": "DeepSeek V4 Pro (New)",
     "contextWindow": 1000000,
     "cost": {
-      "input": 0.435,
-      "output": 0.87,
-      "cache_read": 0.003625
+      "input": 0.66,
+      "output": 1.98,
+      "cache_read": 0.022
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",
@@ -66,6 +66,30 @@
     "family": "deepseek"
   },
   {
+    "id": "deepseek-v4.1-flash",
+    "name": "DeepSeek V4.1 Flash",
+    "contextWindow": 1000000,
+    "cost": {
+      "input": 0.15,
+      "output": 0.6,
+      "cache_read": 0.003
+    },
+    "modelFormat": "anthropic",
+    "npm": "@ai-sdk/anthropic",
+    "apiUrl": "https://opencode.ai/zen/go",
+    "reasoning": true,
+    "modalities": [
+      "text",
+      "image"
+    ],
+    "compatibility": {
+      "supportsCountTokens": false,
+      "supportsReasoningEffort": false
+    },
+    "upstreamModelId": "deepseek-v4.1-flash",
+    "family": "deepseek"
+  },
+  {
     "id": "glm-5.1",
     "name": "GLM-5.1",
     "contextWindow": 202752,
@@ -82,10 +106,10 @@
       "text"
     ],
     "compatibility": {
+      "supportsReasoningEffort": false,
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens",
-      "supportsReasoningEffort": false
+      "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "glm-5.1",
     "family": "glm"
@@ -125,13 +149,13 @@
   },
   {
     "id": "gpt-5.6-luna",
-    "name": "GPT-5.6 Luna (2x usage)",
+    "name": "GPT-5.6 Luna",
     "contextWindow": 1050000,
     "cost": {
-      "input": 0.1,
-      "output": 0.6,
-      "cache_read": 0.01,
-      "cache_write": 0.125
+      "input": 0.2,
+      "output": 1.2,
+      "cache_read": 0.02,
+      "cache_write": 0.25
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",
@@ -141,8 +165,6 @@
       "text",
       "image"
     ],
-    "upstreamModelId": "gpt-5.6-luna",
-    "family": "gpt",
     "compatibility": {
       "reasoningEffortMap": {
         "off": "none",
@@ -156,7 +178,9 @@
       "supportsStore": false,
       "supportsDeveloperRole": false,
       "maxTokensField": "max_tokens"
-    }
+    },
+    "upstreamModelId": "gpt-5.6-luna",
+    "family": "gpt"
   },
   {
     "id": "hy3",
@@ -242,10 +266,10 @@
       "image"
     ],
     "compatibility": {
+      "supportsReasoningEffort": false,
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens",
-      "supportsReasoningEffort": false
+      "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "kimi-k2.7-code",
     "family": "kimi"
@@ -302,10 +326,10 @@
       "image"
     ],
     "compatibility": {
+      "supportsReasoningEffort": false,
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens",
-      "supportsReasoningEffort": false
+      "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "mimo-v2.5",
     "family": "mimo"
@@ -327,10 +351,10 @@
       "text"
     ],
     "compatibility": {
+      "supportsReasoningEffort": false,
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens",
-      "supportsReasoningEffort": false
+      "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "mimo-v2.5-pro",
     "family": "mimo"
@@ -352,10 +376,10 @@
       "text"
     ],
     "compatibility": {
+      "supportsReasoningEffort": false,
       "supportsStore": false,
       "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens",
-      "supportsReasoningEffort": false
+      "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "minimax-m2.7",
     "family": "minimax"
@@ -377,12 +401,12 @@
       "text",
       "image"
     ],
-    "upstreamModelId": "minimax-m3",
-    "family": "minimax",
     "compatibility": {
       "supportsCountTokens": false,
       "supportsReasoningEffort": false
-    }
+    },
+    "upstreamModelId": "minimax-m3",
+    "family": "minimax"
   },
   {
     "id": "qwen3.6-plus",
@@ -403,10 +427,6 @@
       "image"
     ],
     "compatibility": {
-      "supportsStore": false,
-      "supportsDeveloperRole": false,
-      "thinkingFormat": "qwen",
-      "maxTokensField": "max_tokens",
       "reasoningEffortMap": {
         "low": "low",
         "medium": "medium",
@@ -415,7 +435,11 @@
         "max": "max",
         "minimal": null,
         "off": null
-      }
+      },
+      "supportsStore": false,
+      "supportsDeveloperRole": false,
+      "thinkingFormat": "qwen",
+      "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "qwen3.6-plus",
     "family": "qwen3.6"
@@ -437,12 +461,12 @@
     "modalities": [
       "text"
     ],
-    "upstreamModelId": "qwen3.7-max",
-    "family": "qwen3.7",
     "compatibility": {
       "supportsCountTokens": false,
       "supportsReasoningEffort": false
-    }
+    },
+    "upstreamModelId": "qwen3.7-max",
+    "family": "qwen3.7"
   },
   {
     "id": "qwen3.7-plus",
@@ -462,12 +486,12 @@
       "text",
       "image"
     ],
-    "upstreamModelId": "qwen3.7-plus",
-    "family": "qwen3.7",
     "compatibility": {
       "supportsCountTokens": false,
       "supportsReasoningEffort": false
-    }
+    },
+    "upstreamModelId": "qwen3.7-plus",
+    "family": "qwen3.7"
   },
   {
     "id": "qwen3.8-max",
@@ -487,11 +511,11 @@
       "text",
       "image"
     ],
-    "upstreamModelId": "qwen3.8-max",
-    "family": "qwen3.8",
     "compatibility": {
       "supportsCountTokens": false,
       "supportsReasoningEffort": false
-    }
+    },
+    "upstreamModelId": "qwen3.8-max",
+    "family": "qwen3.8"
   }
 ]
