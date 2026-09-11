@@ -2102,6 +2102,12 @@ export function createResponsesWebSocketFetch(
     let now = resolvedOptions.now();
     const evictions = cleanupExpiredConnections(now);
 
+    // Canonicalize the incoming conversation at most ONCE per request. Both head
+    // scans and the in-flight lineage test below need it, and none of them needs
+    // it when the partition holds nothing to compare against.
+    let canonicalClientItems: string[] | undefined;
+    const clientItems = (): string[] => (canonicalClientItems ??= canonicalItemStrings(inputArray(payload)));
+
     // Hoisted verbatim so the SAME scan can run a second time after a pacing
     // wait: same expressions, same ordering, same tie-breaks. Nothing here is
     // re-tuned — a difference between the two scans could only come from the
@@ -2113,19 +2119,37 @@ export function createResponsesWebSocketFetch(
     } => {
       const scanned = partitionKey ? connectionEntries(partitionKey) : [];
       const idle = scanned.filter(entry => !entry.inFlight);
-      // Canonicalize the incoming conversation ONCE, not once per candidate head.
-      const clientItems = idle.length ? canonicalItemStrings(inputArray(payload)) : [];
+      const canonical = idle.length ? clientItems() : [];
       return {
         candidates: scanned,
         idleCandidates: idle,
         matches: idle
-          .map(entry => ({ entry, match: continuationMatch(entry, payload, clientItems) }))
+          .map(entry => ({ entry, match: continuationMatch(entry, payload, canonical) }))
           .filter((candidate): candidate is { entry: ConnectionEntry; match: ContinuationMatch } => candidate.match !== undefined)
           // Prefer the longest matching history, which produces the smallest delta.
           .sort((left, right) => left.match.delta.length - right.match.delta.length
             || (left.match.mode === right.match.mode ? 0 : left.match.mode === 'exact' ? -1 : 1)),
       };
     };
+    /**
+     * Could this request still turn out to be a later turn of what `entry` is
+     * generating right now? Only a head that could is allowed to push the request
+     * onto an isolated socket. Every Claude Code subagent inherits its parent's
+     * session id, so one partition holds many unrelated conversations at once —
+     * and a head busy on one of them says nothing about where another belongs.
+     *
+     * Conservative wherever it cannot tell. A head that has committed nothing yet
+     * (its very first response is still streaming) has no history to diverge
+     * from, so it keeps blocking — which is the case the auxiliary-request
+     * isolation depends on.
+     */
+    const couldPrecedeThisRequest = (entry: ConnectionEntry): boolean =>
+      !entry.responseId || !entry.requestInput || !entry.expectedAssistant
+      || continuationMatch(entry, payload, clientItems()) !== undefined;
+    /** The in-flight head that forced isolation, for the diagnostic. */
+    const blockingHead = (entries: ConnectionEntry[]): ConnectionEntry | undefined =>
+      entries.find(entry => entry.inFlight && couldPrecedeThisRequest(entry));
+
     let { candidates, idleCandidates, matches } = scanForHeads();
     let selected: ConnectionEntry | undefined = matches[0]?.entry;
     let selectedMatch = matches[0]?.match;
@@ -2182,11 +2206,23 @@ export function createResponsesWebSocketFetch(
       return 'continuation';
     };
 
+    let arrivalBlockingHead = selected ? undefined : blockingHead(candidates);
     if (selected && selectedDelta) {
       decision = continueOnHead(selected, selectedMatch);
-    } else if (candidates.some(entry => entry.inFlight)) {
+    } else if (arrivalBlockingHead) {
       // Claude auxiliary requests can share a session id. Never multiplex or
       // queue a request whose lineage cannot yet include the active response.
+      //
+      // Only a head that could still BE this request's parent counts. Gating on
+      // "any head in the partition is busy" instead cost most of the caching on
+      // every parallel fan-out: subagents share their parent's session id, so one
+      // busy subagent sent every other subagent's turn down this branch, and
+      // `persistent = false` meant none of them left a head behind — so the next
+      // turn resent the whole conversation too, for as long as anything was in
+      // flight. Multiple heads per partition are already routine (see the
+      // mismatch branch below) and an idle one is already continued while a
+      // sibling streams, so an unrelated busy head is no reason to give up a
+      // chain.
       selected = undefined;
       persistent = false;
       decision = 'parallel_isolated';
@@ -2336,17 +2372,25 @@ export function createResponsesWebSocketFetch(
       // forcing the full-context resends that open still more connections. An
       // overlap like this takes an isolated socket today; keep that.
       //
+      // Same lineage test as on arrival, and for the same reason: the duplicate
+      // this guards against is a second head for ONE conversation, which is what
+      // a head that could still be this request's parent describes. A head busy
+      // on a different conversation is not a duplicate of anything.
+      //
       // Unconditional, NOT gated on having waited: `admit` is async, so even an
       // immediate admission resumes a microtask later, and two same-partition
       // requests arriving in one tick both resume having waited zero. The head
       // scan above ran before that yield either way. It yields to a head this
       // request can continue, exactly as the arrival-time chain does.
-      if (!selected && persistent && partitionKey
-        && connectionEntries(partitionKey).some(entry => entry.inFlight)) {
-        persistent = false;
-        decision = 'parallel_isolated';
-        debug('parallel request using an isolated socket after pacing');
-        if (pacingRescanOutcome === 'no_change') pacingRescanOutcome = 'parallel_isolated';
+      if (!selected && persistent && partitionKey) {
+        const blocked = blockingHead(connectionEntries(partitionKey));
+        if (blocked) {
+          arrivalBlockingHead = blocked;
+          persistent = false;
+          decision = 'parallel_isolated';
+          debug('parallel request using an isolated socket after pacing');
+          if (pacingRescanOutcome === 'no_change') pacingRescanOutcome = 'parallel_isolated';
+        }
       }
     }
 
@@ -2414,6 +2458,12 @@ export function createResponsesWebSocketFetch(
       createdConnectionId: selected ? undefined : nextConnectionDebugId,
       ...(pacingWaitedMs !== undefined ? { pacingWaitedMs } : {}),
       ...(pacingRescanOutcome !== undefined ? { pacingRescanOutcome } : {}),
+      // Which busy head this request could not be told apart from. Without it an
+      // isolated turn reads as unexplained, and isolation is the single largest
+      // source of uncached prompt tokens on this transport.
+      ...(decision === 'parallel_isolated' && arrivalBlockingHead
+        ? { isolatedByConnectionId: arrivalBlockingHead.debugId }
+        : {}),
       ...(suppressedMismatchWarnings !== undefined ? { suppressedMismatchWarnings } : {}),
       createdGeneration: selected ? undefined : persistent ? 'nursery' : 'isolated',
       incrementalInputItems: selectedDelta?.length,
