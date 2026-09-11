@@ -183,6 +183,61 @@ afterEach(() => {
   rmSync(home, { recursive: true, force: true });
 });
 
+describe('runPatchCommand patch-target overrides', () => {
+  // Issue #217. CLODEX_CLAUDE_PATH is documented as overriding binary discovery and
+  // does so for LAUNCH, but the patch target is TWEAKCC_CC_INSTALLATION_PATH — on
+  // purpose, because a CLODEX_CLAUDE_PATH aimed at a wrapper shim would have the
+  // patcher rewrite the wrapper. Undocumented, it reads as the override silently
+  // patching a different Claude Code than the one named, so say it out loud.
+  it('says so when CLODEX_CLAUDE_PATH is set but does not choose the patch target', async () => {
+    const real = installClaude('2.1.220');
+    const shim = join(home, 'shim', 'claude');
+    writeFakeClaude(shim, '2.1.215');
+    process.env.CLODEX_CLAUDE_PATH = shim;
+
+    expect(await runPatchCommand({})).toBe(0);
+
+    expect(readPatchManifest()?.binaryPath).toBe(real);
+    const output = logs.join('\n');
+    expect(output).toMatch(/CLODEX_CLAUDE_PATH is set to/);
+    expect(output).toContain(shim);
+    expect(output).toMatch(/set TWEAKCC_CC_INSTALLATION_PATH to patch a specific install/);
+  });
+
+  it('stays quiet when CLODEX_CLAUDE_PATH names the install being patched', async () => {
+    const real = installClaude('2.1.220');
+    // Through a SYMLINK, which is how a native install is normally named
+    // (`~/.local/bin/claude` is one). Comparing the raw value instead of the
+    // resolved program would warn here, on the common case, about nothing.
+    const link = join(home, 'link-to-claude');
+    symlinkSync(real, link);
+    process.env.CLODEX_CLAUDE_PATH = link;
+
+    expect(await runPatchCommand({})).toBe(0);
+
+    expect(readPatchManifest()?.binaryPath).toBe(real);
+    expect(logs.join('\n')).not.toMatch(/does not choose what gets patched/);
+  });
+
+  // A stale explicit target used to report that no Claude Code was found, while one
+  // was installed — and must never fall back to a different install, which is how
+  // #199's restore published one install's pristine bytes over another's.
+  it('refuses a TWEAKCC_CC_INSTALLATION_PATH that is gone instead of finding another install', async () => {
+    const real = installClaude('2.1.220');
+    const pristineBytes = readFileSync(real);
+    process.env.TWEAKCC_CC_INSTALLATION_PATH = join(home, 'gone', 'claude');
+
+    expect(await runPatchCommand({})).toBe(1);
+    expect(await runPatchCommand({ restore: true })).toBe(1);
+
+    expect(readFileSync(real)).toEqual(pristineBytes);
+    expect(readPatchManifest()).toBeNull();
+    const output = logs.join('\n');
+    expect(output).toMatch(/TWEAKCC_CC_INSTALLATION_PATH is set to/);
+    expect(output).toMatch(/will not look for another Claude Code instead/);
+  });
+});
+
 describe('runPatchCommand version resolution', () => {
   it('patches the resolved install and never downgrades it to a PATH shim\'s version', async () => {
     // The reproduced failure: `claude` on PATH is a wrapper shim reporting an
@@ -599,7 +654,7 @@ describe('runPatchCommand npm launcher resolution', () => {
     expect(await runPatchCommand({})).toBe(1);
 
     expect(logs.join('\n')).toMatch(/does not exist/);
-    expect(logs.join('\n')).toMatch(/CLODEX_CLAUDE_PATH/);
+    expect(logs.join('\n')).toMatch(/TWEAKCC_CC_INSTALLATION_PATH/);
     expect(readFileSync(launchers.cmd)).toEqual(launcherBytes);
     expect(backupFiles()).toEqual([]);
     expect(readPatchManifest()).toBeNull();
@@ -615,7 +670,7 @@ describe('runPatchCommand npm launcher resolution', () => {
     expect(await runPatchCommand({})).toBe(1);
 
     expect(logs.join('\n')).toMatch(/could not read which file it starts/);
-    expect(logs.join('\n')).toMatch(/CLODEX_CLAUDE_PATH/);
+    expect(logs.join('\n')).toMatch(/TWEAKCC_CC_INSTALLATION_PATH/);
     expect(backupFiles()).toEqual([]);
     expect(readPatchManifest()).toBeNull();
     expect(candidateDirsIn(binDir)).toEqual([]);
@@ -630,7 +685,7 @@ describe('runPatchCommand npm launcher resolution', () => {
 
     await expect(runLaunchPatchCheck({})).resolves.toBeUndefined();
 
-    expect(stderr.mock.calls.flat().join('\n')).toMatch(/CLODEX_CLAUDE_PATH/);
+    expect(stderr.mock.calls.flat().join('\n')).toMatch(/TWEAKCC_CC_INSTALLATION_PATH/);
     expect(readPatchManifest()).toBeNull();
   });
 
@@ -673,7 +728,7 @@ describe('runPatchCommand npm launcher resolution', () => {
     expect(await runPatchCommand({})).toBe(1);
 
     expect(logs.join('\n')).toMatch(/names more than one program/);
-    expect(logs.join('\n')).toMatch(/CLODEX_CLAUDE_PATH/);
+    expect(logs.join('\n')).toMatch(/TWEAKCC_CC_INSTALLATION_PATH/);
     expect(readFileSync(program)).toEqual(programBytes);
     expect(backupFiles()).toEqual([]);
     expect(readPatchManifest()).toBeNull();
@@ -692,7 +747,7 @@ describe('runPatchCommand npm launcher resolution', () => {
     expect(await runPatchCommand({ restore: true })).toBe(1);
 
     expect(logs.join('\n')).toMatch(/could not read which file it starts/);
-    expect(logs.join('\n')).toMatch(/CLODEX_CLAUDE_PATH/);
+    expect(logs.join('\n')).toMatch(/TWEAKCC_CC_INSTALLATION_PATH/);
     expect(logs.join('\n')).not.toMatch(/claude --version` failed/);
     expect(backupFiles()).toEqual([]);
   });

@@ -680,6 +680,19 @@ tweakcc's own repack reads back as an ordinary module name.
   refused during selection, so the other install's rescue record is never deleted with it. The patch
   path keeps the hard `version-unknown` failure (patching is elective; restoring is the way out), and
   its error message names `--restore` as the recovery.
+- **`CLODEX_CLAUDE_PATH` does not choose the patch target, and that is deliberate.** It selects the
+  claude that gets LAUNCHED; the patch target override is `TWEAKCC_CC_INSTALLATION_PATH`. Honouring
+  the launch override here would hand the patcher a wrapper shim whenever a user points it at one
+  for launching — `resolveThroughNpmShims` follows npm launchers, not arbitrary wrappers — which is
+  issue #193's "Unable to detect installation type", with the shim's older version then selecting
+  the wrong pristine backup. A committed end-to-end test pins that (`patches the resolved install
+  and never downgrades it to a PATH shim's version`), so an attempt to "fix" the precedence turns
+  red rather than shipping. Issue #217 asked for the precedence to change; what it was right about is
+  that the behaviour was undocumented and that the refusal advice named the variable that cannot
+  work. `clodex patch` now warns when a `CLODEX_CLAUDE_PATH` is set and something else decided the
+  target, and a `TWEAKCC_CC_INSTALLATION_PATH` naming a file that is gone is refused by name rather
+  than falling through to another install.
+
 - **Binary resolution bypasses PATH shims** (cmux installs a shim copy):
   `TWEAKCC_CC_INSTALLATION_PATH` → `~/.local/bin/claude` → `findClaudeBinary()`.
   **`~/.local/bin/claude.exe`, which the Windows native installer writes, is deliberately NOT
@@ -747,7 +760,7 @@ tweakcc's own repack reads back as an ordinary module name.
   is the refusal, not a wrong guess, and closing it properly would mean parsing three shells.
   Resolution failure (a launcher whose program is gone, a `.cmd`/`.ps1` whose program cannot be
   read, two programs named) is a refusal *before* any candidate, backup or manifest write, naming
-  `CLODEX_CLAUDE_PATH` as the way out — never a fallback to patching the launcher, which is what
+  `TWEAKCC_CC_INSTALLATION_PATH` as the way out — never a fallback to patching the launcher, which is what
   produced issue #193's
   "Unable to detect installation type from path ...\\.clodex-patch-XXXX\\claude.cmd". When the
   program's path could be read but the file is gone, that path is what the failure carries, so a

@@ -480,6 +480,16 @@ export function tryAcquirePatchLock(
 export type ClaudePatchTarget =
   | { ok: true; binaryPath: string; version: string }
   | { ok: false; reason: 'binary-not-found' }
+  | {
+      ok: false;
+      /**
+       * TWEAKCC_CC_INSTALLATION_PATH names a file that is not there. Distinct from
+       * `binary-not-found` so the message can say which variable to fix rather
+       * than report that no Claude Code was found while one is installed.
+       */
+      reason: 'patch-target-missing';
+      declaredPath: string;
+    }
   | { ok: false; reason: 'version-unknown'; binaryPath: string }
   | {
       ok: false;
@@ -509,6 +519,19 @@ export type ClaudePatchTarget =
  * TWEAKCC_CC_INSTALLATION_PATH → ~/.local/bin/claude (stable native-install
  * symlink) → findClaudeBinary() PATH lookup.
  *
+ * **The patch target override is TWEAKCC_CC_INSTALLATION_PATH, not
+ * CLODEX_CLAUDE_PATH.** The latter governs which claude gets LAUNCHED and is only
+ * reached here through `findClaudeBinary()`, i.e. last — deliberately. A user
+ * whose CLODEX_CLAUDE_PATH points at a wrapper shim needs that for launching, and
+ * honouring it here patches the wrapper instead of Claude Code: `resolveThroughNpmShims`
+ * follows npm launchers, not arbitrary wrappers, so the wrapper is what would be
+ * handed to tweakcc — issue #193's "Unable to detect installation type", with a
+ * shim's older version selecting the wrong pristine backup on top (the version
+ * note below). Issue #217 asked for it to be honoured; that is why it is not.
+ * What #217 was right about is that the behaviour was undocumented and that the
+ * remedy printed for an unfollowable launcher named the wrong variable — both
+ * fixed, and `clodex patch` now says when it is ignoring a CLODEX_CLAUDE_PATH.
+ *
  * `%USERPROFILE%\.local\bin\claude.exe`, which the Windows native installer
  * writes, is still NOT probed here. Adding it as a fallback made a restore
  * weakness reachable: `findClaudeBinary()` returns the same null for
@@ -535,10 +558,27 @@ export type ClaudePatchTarget =
  * another install publishes those other bytes over the user's Claude Code. There
  * is no fallback version for the same reason: an unprobeable binary is an error.
  */
+/**
+ * Set by the last `resolveClaudeBinaryForPatch` when CLODEX_CLAUDE_PATH was set and
+ * something else decided the patch target. Reported by the command, so the warning
+ * lands next to the target it chose rather than from inside a pure resolver.
+ */
+let ignoredLaunchOverride: { used: string; ignored: string } | null = null;
+
+/** The ignored CLODEX_CLAUDE_PATH the last resolve saw, if any. Clears on read. */
+export function takeIgnoredLaunchOverride(): { used: string; ignored: string } | null {
+  const ignored = ignoredLaunchOverride;
+  ignoredLaunchOverride = null;
+  return ignored;
+}
+
 export function resolveClaudeBinaryForPatch(): ClaudePatchTarget {
-  const envOverride = process.env['TWEAKCC_CC_INSTALLATION_PATH'];
+  const envOverride = process.env['TWEAKCC_CC_INSTALLATION_PATH']?.trim() || null;
   const nativeSymlink = join(homedir(), '.local', 'bin', 'claude');
-  const source = envOverride?.trim()
+  if (envOverride && !existsSync(envOverride)) {
+    return { ok: false, reason: 'patch-target-missing', declaredPath: envOverride };
+  }
+  const source = envOverride
     || (existsSync(nativeSymlink) ? nativeSymlink : null)
     || findClaudeBinary();
   if (!source) return { ok: false, reason: 'binary-not-found' };
@@ -564,6 +604,23 @@ export function resolveClaudeBinaryForPatch(): ClaudePatchTarget {
     };
   }
   resolved = followed.path;
+  // A CLODEX_CLAUDE_PATH that is set but did not decide this is worth one line: it
+  // is documented as overriding discovery, and for the patch target it does not.
+  // Compare the fully resolved program, so naming the install by its symlink or by
+  // the launcher in front of it counts as naming it and says nothing.
+  const launchOverride = process.env['CLODEX_CLAUDE_PATH']?.trim() || null;
+  let launchOverrideResolved: string | null = null;
+  if (launchOverride) {
+    try {
+      const followedOverride = resolveThroughNpmShims(realpathSync(launchOverride));
+      launchOverrideResolved = followedOverride.ok ? followedOverride.path : realpathSync(launchOverride);
+    } catch {
+      launchOverrideResolved = launchOverride;
+    }
+  }
+  ignoredLaunchOverride = launchOverrideResolved && launchOverrideResolved !== resolved
+    ? { used: resolved, ignored: launchOverride as string }
+    : null;
   try {
     if (!statSync(resolved).isFile()) return { ok: false, reason: 'binary-not-found' };
   } catch {
@@ -600,8 +657,8 @@ export function describePatchTargetFailure(
   if (target.reason === 'launcher-unresolved') {
     return `${target.shimPath} starts Claude Code but is not Claude Code itself, and clodex could `
       + `not follow it: ${target.detail}. clodex will not patch a launcher script — that fails with `
-      + '"Unable to detect installation type". Set CLODEX_CLAUDE_PATH to the Claude Code program '
-      + 'itself (for an npm install on Windows that is '
+      + '"Unable to detect installation type". Set TWEAKCC_CC_INSTALLATION_PATH to the Claude Code '
+      + 'program itself (for an npm install on Windows that is '
       + 'node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe under the directory holding the '
       + 'launcher), then run the command again.';
   }
@@ -627,6 +684,12 @@ export function describePatchTargetFailure(
       + `npm install is incomplete. ${remedy} ${retry}${restore} If this is a custom wrapper `
       + 'rather than the npm placeholder, set TWEAKCC_CC_INSTALLATION_PATH to the native Claude '
       + 'Code binary.';
+  }
+  if (target.reason === 'patch-target-missing') {
+    return `TWEAKCC_CC_INSTALLATION_PATH is set to ${target.declaredPath}, which does not exist. `
+      + 'clodex will not look for another Claude Code instead — patching or restoring a different '
+      + 'install than the one you named is how one install\'s pristine bytes end up over another\'s. '
+      + 'Point it at the Claude Code program, or unset it to let clodex find your install.';
   }
   return target.reason === 'binary-not-found'
     ? 'claude binary not found. Install Claude Code or set TWEAKCC_CC_INSTALLATION_PATH.'
@@ -1122,6 +1185,9 @@ export async function applyPatch(
 function runRestoreCommand(target: ClaudePatchTarget): number {
   if (!target.ok && (
     target.reason === 'binary-not-found'
+    // A named path that is not there names no program to restore over, and looking
+    // for another install is exactly what must not happen here.
+    || target.reason === 'patch-target-missing'
     || target.reason === 'native-binary-missing'
   )) {
     p.log.error(describePatchTargetFailure(target, 'restore'));
@@ -1192,6 +1258,14 @@ export async function runPatchCommand(opts: {
   localPatches?: boolean;
 } = {}): Promise<number> {
   const target = resolveClaudeBinaryForPatch();
+  const ignoredOverride = takeIgnoredLaunchOverride();
+  if (ignoredOverride) {
+    p.log.warn(
+      `CLODEX_CLAUDE_PATH is set to ${ignoredOverride.ignored}, but it does not choose what gets `
+      + `patched — ${ignoredOverride.used} does. CLODEX_CLAUDE_PATH selects the claude that gets `
+      + 'LAUNCHED; set TWEAKCC_CC_INSTALLATION_PATH to patch a specific install.',
+    );
+  }
 
   // Handled BEFORE the patch path's version check, because `--restore` has its
   // own rules: it must still work on a binary that no longer runs.
