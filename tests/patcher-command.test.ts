@@ -1092,6 +1092,35 @@ describe('runPatchCommand legacy backup compatibility', () => {
 });
 
 describe('runPatchCommand --restore', () => {
+  // Issue #216. Rewriting the binary IN PLACE leaves it on the same inode, and
+  // macOS caches a code signature per vnode once a binary has run — an in-place
+  // overwrite was reported to leave every later launch killed with `Code Signature
+  // Invalid` until the file was replaced through a new inode. The patch path has
+  // always published by rename; this asserts the restore path does too.
+  it('publishes the restored binary as a new inode, not over the old one', async () => {
+    const real = installClaude('2.1.220');
+    const pristineBytes = readFileSync(real);
+    const pristineMode = statSync(real).mode;
+    expect(await runPatchCommand({})).toBe(0);
+    const patchedInode = statSync(real).ino;
+
+    // Take the executable bit off the BACKUP file. Publishing by rename hands the
+    // destination whatever mode the temp copy carries, so without an explicit
+    // chmod this is how a restore produces a claude that cannot be executed —
+    // a worse outcome than the code-signature fault being fixed.
+    const backupPath = readPatchManifest()?.backupPath;
+    expect(backupPath).toBeTruthy();
+    chmodSync(backupPath!, 0o600);
+
+    expect(await runPatchCommand({ restore: true })).toBe(0);
+
+    expect(readFileSync(real)).toEqual(pristineBytes);
+    expect(statSync(real).ino).not.toBe(patchedInode);
+    expect(statSync(real).mode).toBe(pristineMode);
+    // No temp file is left beside it for the backup scanner to trip over.
+    expect(readdirSync(dirname(real)).filter(name => name.includes('.tmp-'))).toEqual([]);
+  });
+
   it('restores the pristine binary and drops the manifest', async () => {
     const real = installClaude('2.1.220');
     const pristineBytes = readFileSync(real);
@@ -1102,6 +1131,34 @@ describe('runPatchCommand --restore', () => {
     expect(readFileSync(real)).toEqual(pristineBytes);
     expect(readPatchManifest()).toBeNull();
   });
+
+  // The rescue path the rename introduces. Creating the temp file needs write
+  // permission on the DIRECTORY; overwriting the existing binary needs it only on
+  // the FILE — so a read-only directory fails the rename publish while leaving the
+  // in-place write available, which is the shape Windows hits when another process
+  // holds the binary open. A restore is a rescue command, so it must still finish.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'falls back to writing in place when it cannot publish a new file',
+    async () => {
+      const real = installClaude('2.1.220');
+      const pristineBytes = readFileSync(real);
+      expect(await runPatchCommand({})).toBe(0);
+      expect(readFileSync(real)).not.toEqual(pristineBytes);
+
+      const dir = dirname(real);
+      const dirMode = statSync(dir).mode;
+      chmodSync(dir, 0o555);
+      try {
+        expect(await runPatchCommand({ restore: true })).toBe(0);
+      } finally {
+        chmodSync(dir, dirMode);
+      }
+
+      expect(readFileSync(real)).toEqual(pristineBytes);
+      expect(readPatchManifest()).toBeNull();
+      expect(logs.join('\n')).toMatch(/writing the pristine bytes in place instead/);
+    },
+  );
 
   // Issue #199. Two supported installs of ONE Claude Code version are different
   // files (npm platform package vs native installer), so "same version tag" was
