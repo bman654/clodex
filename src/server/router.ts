@@ -684,6 +684,15 @@ async function handleOpenAIChatCompletions(
   const model = lookupModel(res, options.catalog, body.model);
   if (!model) return;
 
+  // An OpenAI-format body carries no Claude metadata block, so the session id can
+  // only come from the header Claude Code sends. Absent one, openCodeGoSessionHeaders
+  // falls back to its stable per-process id — Go rejects a request with no session
+  // header at all, on this route exactly as on /v1/messages.
+  const openAiSessionIdHeader = Array.isArray(req.headers['x-claude-code-session-id'])
+    ? req.headers['x-claude-code-session-id'][0]
+    : req.headers['x-claude-code-session-id'];
+  const goSessionHeaders = openCodeGoSessionHeaders(model, openAiSessionIdHeader);
+
   if (supportsDirectOpenAIChatCompletions(model)) {
     if (model.completionsUrl && !/^https?:\/\//i.test(model.completionsUrl)) {
       sendJson(res, 400, { error: { message: `Invalid provider completionsUrl: must be http:// or https://` } });
@@ -724,7 +733,7 @@ async function handleOpenAIChatCompletions(
     try {
       await relayAnthropicMessages(res, completionsUrl, forwardBody, apiKey, Boolean(body.stream), {
         authType: model.authType ?? 'api',
-        extraHeaders: model.headers,
+        extraHeaders: { ...model.headers, ...goSessionHeaders },
         refreshToken,
         onTokenRefreshed: refreshed => { model.apiKey = refreshed; },
         signal: clientAbort.signal,
@@ -772,6 +781,7 @@ async function handleOpenAIChatCompletions(
   const baseURL = model.modelFormat === 'anthropic' ? model.baseUrl : model.apiBaseUrl;
   const openAiOAuth = isOpenAiOAuthRoute(model);
   const params = translateOpenAiRequest(body as unknown as OpenAiRequest, { openAiOAuth });
+  if (goSessionHeaders) params.headers = { ...params.headers, ...goSessionHeaders };
   const clientWantsStream = Boolean(body.stream);
   const responseModelId = getResponseModelId(body.model, model, options);
 

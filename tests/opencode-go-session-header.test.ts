@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { openCodeGoSessionHeaders, OPENCODE_GO_ANTHROPIC_BASE_URL } from '../src/data/opencode-go-models.js';
 import { createLanguageModel } from '../src/provider-factory.js';
 import { generateAnthropicResponse } from '../src/sdk-adapter.js';
+import { generateOpenAiResponse } from '../src/openai-adapter.js';
 import { startProxyCatalog, type ProxyRoute } from '../src/proxy.js';
 import { createGatewayModelCatalog } from '../src/server/models.js';
 import { startServer, type ServerHandle } from '../src/server/router.js';
@@ -25,6 +26,21 @@ vi.mock('../src/sdk-adapter.js', async importOriginal => {
       content: [{ type: 'text', text: 'sdk ok' }],
       stop_reason: 'end_turn',
       usage: { input_tokens: 1, output_tokens: 1 },
+    })),
+  };
+});
+
+vi.mock('../src/openai-adapter.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/openai-adapter.js')>();
+  return {
+    ...actual,
+    generateOpenAiResponse: vi.fn(async (_model: unknown, _params: unknown, modelId: string) => ({
+      id: 'chatcmpl-sdk',
+      object: 'chat.completion',
+      created: 0,
+      model: modelId,
+      choices: [{ index: 0, message: { role: 'assistant', content: 'sdk ok' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
     })),
   };
 });
@@ -92,10 +108,8 @@ function post(
 const messagesBody = { max_tokens: 100, messages: [{ role: 'user', content: 'hi' }], stream: false };
 
 describe('openCodeGoSessionHeaders', () => {
-  it('names Go by provider id, by trimmed-fork backend, or by base URL, and nothing else', () => {
+  it('names Go by provider id or by base URL, and nothing else', () => {
     expect(openCodeGoSessionHeaders({ providerId: 'opencode-go' }, SESSION_ID))
-      .toEqual({ 'x-opencode-session': SESSION_ID });
-    expect(openCodeGoSessionHeaders({ sourceBackend: 'opencode-go' }, SESSION_ID))
       .toEqual({ 'x-opencode-session': SESSION_ID });
     expect(openCodeGoSessionHeaders({ providerId: 'custom', baseUrl: OPENCODE_GO_ANTHROPIC_BASE_URL }, SESSION_ID))
       .toEqual({ 'x-opencode-session': SESSION_ID });
@@ -106,6 +120,22 @@ describe('openCodeGoSessionHeaders', () => {
       .toBeUndefined();
     expect(openCodeGoSessionHeaders({ providerId: 'custom', baseUrl: 'https://opencode.ai.example/zen/go' }, SESSION_ID))
       .toBeUndefined();
+  });
+
+  // The runtime ServerModelInfo carries the openai-compatible URL as `apiBaseUrl`
+  // (server/models.ts, built in provider-catalog.ts), and an imported or migrated
+  // provider can carry a drifted id — resolve-template.ts supports that shape — so
+  // the URL is then the only signal there is. Reading `baseUrl ?? apiUrl` alone
+  // missed exactly this case.
+  it('names Go from the production URL field even when the provider id has drifted', () => {
+    expect(openCodeGoSessionHeaders(
+      { providerId: 'opencode-go-imported-2', apiBaseUrl: 'https://opencode.ai/zen/go/v1' },
+      SESSION_ID,
+    )).toEqual({ 'x-opencode-session': SESSION_ID });
+    expect(openCodeGoSessionHeaders(
+      { providerId: 'kilo', apiBaseUrl: 'https://api.kilo.ai/api/gateway' },
+      SESSION_ID,
+    )).toBeUndefined();
   });
 
   it('falls back to one stable per-process id when the client sent no session', () => {
@@ -232,6 +262,7 @@ describe('API server sends x-opencode-session to OpenCode Go', () => {
   afterEach(async () => {
     vi.mocked(createLanguageModel).mockClear();
     vi.mocked(generateAnthropicResponse).mockClear();
+    vi.mocked(generateOpenAiResponse).mockClear();
     while (handles.length) await handles.pop()!.close();
   });
 
@@ -288,5 +319,90 @@ describe('API server sends x-opencode-session to OpenCode Go', () => {
     expect(generateAnthropicResponse).toHaveBeenCalledOnce();
     const params = vi.mocked(generateAnthropicResponse).mock.calls[0]![1] as { headers?: Record<string, string> };
     expect(params.headers).toEqual({ 'x-opencode-session': SESSION_ID });
+  });
+
+  // /openai/v1/chat/completions is advertised to OpenAI-compatible clients, so it is
+  // production-reachable for every Go model — and it has two branches, neither of which
+  // used to send the session header. One test per branch.
+  it('on the OpenAI-compatible route, raw-relay branch, as seen on the wire', async () => {
+    const upstream = await startUpstream();
+    handles.push(upstream);
+    const server: ServerHandle = await startServer({
+      host: '127.0.0.1',
+      port: 0,
+      apiKey: 'go-key',
+      serverPassword: null,
+      catalog: createGatewayModelCatalog([{
+        id: 'deepseek-v4.1-flash',
+        name: 'DeepSeek V4.1 Flash',
+        isFree: false,
+        brand: 'Other',
+        providerId: 'opencode-go',
+        sourceBackend: 'opencode-go',
+        modelFormat: 'openai',
+        completionsUrl: `${upstream.baseUrl}/v1/chat/completions`,
+      }]),
+    });
+    handles.push(server);
+    const res = await post(new URL(server.url).port as unknown as number, '/openai/v1/chat/completions', {
+      model: 'deepseek-v4.1-flash', messages: [{ role: 'user', content: 'hi' }], stream: false,
+    }, { 'x-claude-code-session-id': SESSION_ID });
+    expect(res.status, res.body).toBe(200);
+    expect(upstream.sessions).toEqual([SESSION_ID]);
+  });
+
+  it('on the OpenAI-compatible route, SDK-translation branch', async () => {
+    const server: ServerHandle = await startServer({
+      host: '127.0.0.1',
+      port: 0,
+      apiKey: 'go-key',
+      serverPassword: null,
+      catalog: createGatewayModelCatalog([{
+        id: 'deepseek-v4.1-flash',
+        name: 'DeepSeek V4.1 Flash',
+        isFree: false,
+        brand: 'Other',
+        providerId: 'opencode-go',
+        sourceBackend: 'opencode-go',
+        modelFormat: 'anthropic',
+        npm: '@ai-sdk/openai-compatible',
+        baseUrl: 'https://opencode.ai/zen/go',
+      }]),
+    });
+    handles.push(server);
+    const res = await post(new URL(server.url).port as unknown as number, '/openai/v1/chat/completions', {
+      model: 'deepseek-v4.1-flash', messages: [{ role: 'user', content: 'hi' }], stream: false,
+    }, { 'x-claude-code-session-id': SESSION_ID });
+    expect(res.status, res.body).toBe(200);
+    expect(generateOpenAiResponse).toHaveBeenCalledOnce();
+    const params = vi.mocked(generateOpenAiResponse).mock.calls[0]![1] as { headers?: Record<string, string> };
+    expect(params.headers).toEqual({ 'x-opencode-session': SESSION_ID });
+  });
+
+  it('not on a non-Go model through the OpenAI-compatible route', async () => {
+    const server: ServerHandle = await startServer({
+      host: '127.0.0.1',
+      port: 0,
+      apiKey: 'kilo-key',
+      serverPassword: null,
+      catalog: createGatewayModelCatalog([{
+        id: 'tencent/hy3',
+        name: 'Tencent Hy3',
+        isFree: false,
+        brand: 'Other',
+        providerId: 'kilo',
+        sourceBackend: 'kilo',
+        modelFormat: 'anthropic',
+        npm: '@ai-sdk/openai-compatible',
+        baseUrl: 'https://api.kilo.ai/api/gateway',
+      }]),
+    });
+    handles.push(server);
+    const res = await post(new URL(server.url).port as unknown as number, '/openai/v1/chat/completions', {
+      model: 'tencent/hy3', messages: [{ role: 'user', content: 'hi' }], stream: false,
+    }, { 'x-claude-code-session-id': SESSION_ID });
+    expect(res.status, res.body).toBe(200);
+    const params = vi.mocked(generateOpenAiResponse).mock.calls[0]![1] as { headers?: Record<string, string> };
+    expect(params.headers).toBeUndefined();
   });
 });

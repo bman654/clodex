@@ -38,17 +38,23 @@ const OPENCODE_GO_FALLBACK_SESSION_ID = randomUUID();
  * to one backend and keep its prefix cache warm, so forward Claude Code's own
  * session id where one is known and fall back to a stable per-process id.
  *
- * A model counts as Go by provider id, by the trimmed-fork `sourceBackend`
- * spelling, or by pointing at the Go base URL, so a custom-endpoint entry that
- * targets Go directly is covered too.
+ * A model counts as Go by provider id or by pointing at the Go base URL. The
+ * URL arm is what covers an imported or migrated provider whose id has drifted
+ * from the canonical `opencode-go` (a shape `registry/resolve-template.ts`
+ * supports): there the URL is the only remaining signal. It therefore has to
+ * read every field a Go entry can carry its URL in — `apiBaseUrl` is the one
+ * the runtime `ServerModelInfo` actually populates for openai-compatible
+ * providers (`server/models.ts`, built in `provider-catalog.ts`), and
+ * `baseUrl` is the anthropic-format sibling; `apiUrl` is the cached-registry
+ * spelling.
  */
 export function openCodeGoSessionHeaders(
-  model: { providerId?: string; sourceBackend?: unknown; apiUrl?: string; baseUrl?: string },
+  model: { providerId?: string; apiUrl?: string; baseUrl?: string; apiBaseUrl?: string },
   claudeSessionId: string | undefined,
 ): Record<string, string> | undefined {
+  const url = String(model.apiBaseUrl ?? model.baseUrl ?? model.apiUrl ?? '');
   const isGo = model.providerId === OPENCODE_GO_PROVIDER_ID
-    || String(model.sourceBackend) === OPENCODE_GO_PROVIDER_ID
-    || /^https:\/\/opencode\.ai\/zen\/go(\/|$)/.test(String(model.baseUrl ?? model.apiUrl ?? ''));
+    || /^https:\/\/opencode\.ai\/zen\/go(\/|$)/.test(url);
   if (!isGo) return undefined;
   return { 'x-opencode-session': claudeSessionId ?? OPENCODE_GO_FALLBACK_SESSION_ID };
 }

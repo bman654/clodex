@@ -19,7 +19,7 @@ The provider uses one credential with two upstream wire protocols:
 
 The selective proxy diverts only explicit `clodex:opencode-go:...` model ids or saved aliases. Ordinary Claude model traffic remains on Claude Code's native Anthropic connection.
 
-Both endpoints require an `x-opencode-session` header and answer `MissingSessionID` without one. Clodex sends Claude Code's own session id on every Go request (proxy and API-server modes, both wire protocols), so Go can keep a conversation on one backend; a request with no client session id gets one stable per-process id instead.
+Both endpoints require an `x-opencode-session` header and answer `MissingSessionID` without one. Clodex sends Claude Code's own session id on every Go request — proxy mode, the API server's `/anthropic/v1/messages`, and both branches of its `/openai/v1/chat/completions` — so Go can keep a conversation on one backend. A request with no client session id gets one stable per-process id instead. Note what that fallback means for a shared `clodex server`: every session-less client of one server process presents the same id to Go, which lets Go correlate those requests with each other. It discloses no content, and a header is required either way, so the alternative would be a fresh id per request and no prefix-cache locality at all.
 
 ## Supported transport scope
 

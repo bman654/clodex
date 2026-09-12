@@ -7,6 +7,7 @@ import {
   OPENCODE_GO_COMPLETIONS_BASE_URL,
   OPENCODE_GO_PROVIDER_ID,
   OPENCODE_GO_PROVIDER_NAME,
+  openCodeGoSessionHeaders,
 } from './data/opencode-go-models.js';
 
 export type ProviderAuthType = 'api' | 'oauth' | 'none';
@@ -81,6 +82,11 @@ export async function verifyOpenCodeGoCredential(apiKey: string): Promise<string
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
+        // Go answers `MissingSessionID` to any request without a session header,
+        // and whether it validates the key BEFORE that check is not something we
+        // have observed. Sending the header removes the question: the probe then
+        // cannot mistake a missing-session rejection for a verdict on the key.
+        ...openCodeGoSessionHeaders({ providerId: OPENCODE_GO_PROVIDER_ID }, undefined),
       },
       body: JSON.stringify({ model: model.upstreamModelId ?? model.id }),
       // This is the FIRST thing a user hits after pasting a key, and it runs
