@@ -2100,20 +2100,17 @@ describe('createResponsesWebSocketFetch', () => {
   });
 
   it('does not let one client\'s tool schema decide another client\'s continuation', async () => {
-    // The defaults map used to be process-global and keyed only by tool name, so
-    // whichever client declared `Edit` last decided how every other client's
-    // history was normalized — and `entry.canonicalPrefix` caches the head side
-    // permanently under whatever the map held at the instant it was first built.
-    // Three requests, one process, NO reset between them (the reset in beforeEach
-    // is what hid this):
+    // Defaults are per request so client B's schema cannot affect client A. The
+    // prefix memo is also keyed because A's own requests can change tool lists.
+    // Four requests, one process, NO reset between them (the reset in beforeEach
+    // is what hid the process-global map):
     //   1. client A establishes a head whose call carries replace_all EXPLICITLY,
     //      under a schema declaring default false — so both sides strip it;
     //   2. client B runs a turn declaring the same tool with default TRUE;
-    //   3. a second request in A's own partition whose tools do NOT include Edit
-    //      (a title generation, a subagent) scans A's idle head and caches its
-    //      canonical prefix — under B's schema, with a shared map;
-    //   4. A's next real turn then strips its echo client-side while the cached
-    //      head keeps it, so A loses a chain it should have kept.
+    //   3. a main-agent auxiliary request in A's partition omits Edit and scans
+    //      A's idle head, caching its prefix under the empty defaults map;
+    //   4. A's next real turn restores Edit, so keyed invalidation must rebuild
+    //      the head under the same map that strips its client-side echo.
     const toolsWithDefault = (value: boolean) => [{
       type: 'function', name: 'Edit',
       parameters: {
@@ -2188,6 +2185,241 @@ describe('createResponsesWebSocketFetch', () => {
     expect(continuation.input).toEqual([toolOutput]);
     emitTextResponse(socketA, 'resp_a_done', 'done');
     await readAll(secondA);
+  });
+
+  it('recomputes an omitted-reasoning prefix memo when tool defaults change', async () => {
+    const toolsWithDefault = [{
+      type: 'function', name: 'MemoTool',
+      parameters: {
+        type: 'object',
+        properties: { a: { type: 'number', default: 1 } },
+      },
+    }];
+    const toolsWithoutDefault = [{
+      type: 'function', name: 'MemoTool',
+      parameters: {
+        type: 'object',
+        properties: { a: { type: 'number' } },
+      },
+    }];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'run it' }] }];
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_memo', name: 'MemoTool', arguments: '{"a":1}',
+    };
+    const output = { type: 'function_call_output', call_id: 'call_memo', output: 'done' };
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-echoable-memo',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, { tools: toolsWithDefault })),
+    });
+    const headSocket = lastSocket();
+    headSocket.emit('open');
+    headSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.created', response: { id: 'resp_memo_head' },
+    })));
+    headSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'reasoning', id: 'rs_memo', encrypted_content: 'enc_memo', summary: [] },
+    })));
+    headSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 1,
+      item: {
+        type: 'function_call', id: 'fc_memo', call_id: 'call_memo', name: 'MemoTool',
+        arguments: '{"a":1}', status: 'completed',
+      },
+    })));
+    headSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.completed', response: { id: 'resp_memo_head' },
+    })));
+    await readAll(first);
+
+    // Populate both prefix memos while `a: 1` is a declared default.
+    const side = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload(
+        [{ role: 'user', content: [{ type: 'input_text', text: 'unrelated side turn' }] }],
+        { tools: toolsWithDefault },
+      )),
+    });
+    const sideSocket = lastSocket();
+    if (sideSocket !== headSocket) sideSocket.emit('open');
+    emitTextResponse(sideSocket, 'resp_memo_side', 'done');
+    await readAll(side);
+
+    // Claude omits reasoning but echoes the call. Under the current schema `a: 1`
+    // is not filler, so the echoable prefix must be rebuilt with it retained.
+    const socketsBefore = socketCount();
+    const continuation = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload(
+        [...input, echoedCall, output],
+        { tools: toolsWithoutDefault },
+      )),
+    });
+    expect(socketCount()).toBe(socketsBefore);
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)).toMatchObject({
+      decision: 'continuation',
+      continuationMatchMode: 'omitted_reasoning',
+    });
+    const sent = headSocket.send.mock.calls.map(call => JSON.parse(call[0] as string))
+      .find(message => message.previous_response_id === 'resp_memo_head');
+    expect(sent?.input).toEqual([output]);
+    emitTextResponse(headSocket, 'resp_memo_done', 'done');
+    await readAll(continuation);
+  });
+
+  it('recomputes an in-flight input memo when an arriving request changes tool defaults', async () => {
+    const toolsWithDefault = [{
+      type: 'function', name: 'InFlightTool',
+      parameters: {
+        type: 'object',
+        properties: { a: { type: 'number', default: 1 } },
+      },
+    }];
+    const toolsWithoutDefault = [{
+      type: 'function', name: 'InFlightTool',
+      parameters: {
+        type: 'object',
+        properties: { a: { type: 'number' } },
+      },
+    }];
+    const user = { role: 'user', content: [{ type: 'input_text', text: 'run it' }] };
+    const originalCall = {
+      type: 'function_call', call_id: 'call_inflight', name: 'InFlightTool', arguments: '{"a":1}',
+    };
+    const rewrittenCall = {
+      type: 'function_call', call_id: 'call_inflight', name: 'InFlightTool', arguments: '{}',
+    };
+    const output = { type: 'function_call_output', call_id: 'call_inflight', output: 'done' };
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-inflight-memo',
+      onDiagnostic: event => diagnostics.push(event),
+    });
+
+    // Keep the first turn in flight. Its RequestContext owns the canonical-input memo.
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([user, originalCall], { tools: toolsWithDefault })),
+    });
+    const originalSocket = lastSocket();
+    originalSocket.emit('open');
+
+    // Build the in-flight memo under default a=1; both call arguments normalize to {}.
+    const firstArrival = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload(
+        [user, rewrittenCall, output],
+        { tools: toolsWithDefault },
+      )),
+    });
+    const isolatedSocket = lastSocket();
+    isolatedSocket.emit('open');
+    emitTextResponse(isolatedSocket, 'resp_inflight_isolated', 'done');
+    await readAll(firstArrival);
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)?.decision)
+      .toBe('parallel_isolated');
+
+    // With no declared default, a=1 and {} differ. The in-flight turn is unrelated,
+    // so this request must retain a new head instead of isolating.
+    const secondArrival = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload(
+        [user, rewrittenCall, output],
+        { tools: toolsWithoutDefault },
+      )),
+    });
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)?.decision)
+      .toBe('history_mismatch_new_head');
+    const retainedSocket = lastSocket();
+    retainedSocket.emit('open');
+    emitTextResponse(retainedSocket, 'resp_inflight_retained', 'done');
+    await readAll(secondArrival);
+
+    emitTextResponse(originalSocket, 'resp_inflight_original', 'done');
+    await readAll(first);
+  });
+
+  it('distinguishes default maps whose old delimiter-joined fingerprints collided', async () => {
+    const toolsA = [{
+      type: 'function', name: 'CollisionTool',
+      parameters: {
+        type: 'object',
+        properties: {
+          a: { type: 'number', default: 1 },
+          b: { type: 'number', default: 2 },
+        },
+      },
+    }];
+    // The old fingerprint joined properties as `prop=value` with commas, so this
+    // distinct map and toolsA both serialized as `a=1,b=2` before hashing.
+    const toolsB = [{
+      type: 'function', name: 'CollisionTool',
+      parameters: {
+        type: 'object',
+        properties: { 'a=1,b': { type: 'number', default: 2 } },
+      },
+    }];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'run it' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-default-fingerprint-collision',
+    });
+
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, { tools: toolsA })),
+    });
+    const headSocket = lastSocket();
+    headSocket.emit('open');
+    headSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.created', response: { id: 'resp_collision_head' },
+    })));
+    headSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: {
+        type: 'function_call', call_id: 'call_collision', name: 'CollisionTool',
+        arguments: '{"a":1,"b":2}',
+      },
+    })));
+    headSocket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.completed', response: { id: 'resp_collision_head' },
+    })));
+    await readAll(first);
+
+    // Cache the head under toolsA, where both arguments strip to {}.
+    const side = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload(
+        [{ role: 'user', content: [{ type: 'input_text', text: 'unrelated side turn' }] }],
+        { tools: toolsA },
+      )),
+    });
+    const sideSocket = lastSocket();
+    if (sideSocket !== headSocket) sideSocket.emit('open');
+    emitTextResponse(sideSocket, 'resp_collision_side', 'done');
+    await readAll(side);
+
+    // Under toolsB, a and b are not defaults. A distinct fingerprint must rebuild
+    // the cached head so the unchanged call still matches the unchanged echo.
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_collision', name: 'CollisionTool',
+      arguments: '{"a":1,"b":2}',
+    };
+    const output = { type: 'function_call_output', call_id: 'call_collision', output: 'done' };
+    const socketsBefore = socketCount();
+    const continuation = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([...input, echoedCall, output], { tools: toolsB })),
+    });
+    expect(socketCount()).toBe(socketsBefore);
+    const sent = headSocket.send.mock.calls.map(call => JSON.parse(call[0] as string))
+      .find(message => message.previous_response_id === 'resp_collision_head');
+    expect(sent?.input).toEqual([output]);
+    emitTextResponse(headSocket, 'resp_collision_done', 'done');
+    await readAll(continuation);
   });
 
   it('still starts a new chain when the echoed value differs from the schema default', async () => {
@@ -2860,8 +3092,9 @@ describe('createResponsesWebSocketFetch', () => {
     return (decision.heads as { mismatch: Record<string, unknown> }[])[0]!.mismatch;
   }
 
-  // Drives one mismatch between a stored function_call and the call Claude echoes
-  // back.
+  // Drives one comparison between a stored function_call and the call Claude
+  // echoes back. Most callers exercise a mismatch; the schema-default diagnostic
+  // case exercises the normalized match.
   //
   // The stored call is emitted BY UPSTREAM, so it reaches the head through
   // `response.output_item.done` → `expectedAssistantItems` → `sanitizedCallArguments`
@@ -2956,6 +3189,85 @@ describe('createResponsesWebSocketFetch', () => {
     },
   };
 
+  it('records the full matched prefix after a schema-default continuation', async () => {
+    const tools = [{
+      type: 'function', name: 'Edit',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string' },
+          old_string: { type: 'string' },
+          new_string: { type: 'string' },
+          replace_all: { type: 'boolean', default: false },
+        },
+        required: ['file_path', 'old_string', 'new_string'],
+      },
+    }];
+    const { diagnostics } = await runToolArgumentMismatch({
+      accountId: 'acct-schema-default-diagnostic',
+      responseId: 'resp_schema_default_diagnostic',
+      tools,
+      upstreamCall: {
+        type: 'function_call', call_id: 'call_edit_diagnostic', name: 'Edit',
+        arguments: '{"file_path":"a.py","old_string":"x","new_string":"y"}',
+      },
+      echoedCall: {
+        type: 'function_call', call_id: 'call_edit_diagnostic', name: 'Edit',
+        arguments: '{"file_path":"a.py","old_string":"x","new_string":"y","replace_all":false}',
+      },
+    });
+
+    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
+    expect(decision).toMatchObject({
+      decision: 'continuation',
+      continuationMatchMode: 'exact',
+    });
+    const mismatch = firstHeadMismatch(diagnostics);
+    expect(mismatch).toMatchObject({
+      fullItems: 3,
+      expectedPrefixItems: 2,
+      firstMismatch: 2,
+      expectedKind: 'none',
+      actualKind: 'function_call_output',
+      actualHash: expect.stringMatching(/^[0-9a-f]{16}$/),
+    });
+    expect(mismatch).not.toHaveProperty('expectedHash');
+    expect(mismatch).not.toHaveProperty('toolArgumentNormalizationGap');
+  });
+
+  it('preserves an undefaulted false argument beside a declared default', async () => {
+    const tools = [{
+      type: 'function', name: 'Edit',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string' },
+          replace_all: { type: 'boolean', default: false },
+          dry_run: { type: 'boolean' },
+        },
+        required: ['file_path'],
+      },
+    }];
+    const { diagnostics } = await runToolArgumentMismatch({
+      accountId: 'acct-schema-undefaulted-false',
+      responseId: 'resp_schema_undefaulted_false',
+      tools,
+      upstreamCall: {
+        type: 'function_call', call_id: 'call_edit_false', name: 'Edit',
+        arguments: '{"file_path":"a.py"}',
+      },
+      echoedCall: {
+        type: 'function_call', call_id: 'call_edit_false', name: 'Edit',
+        arguments: '{"file_path":"a.py","dry_run":false}',
+      },
+    });
+
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)).toMatchObject({
+      decision: 'history_mismatch_new_head',
+      matchingCandidateCount: 0,
+    });
+  });
+
   it('warns on stderr when the filler-strip rule has forked', async () => {
     const { stderr, diagnostics } = await runToolArgumentMismatch({
       accountId: 'acct-tool-gap-forked',
@@ -2973,6 +3285,44 @@ describe('createResponsesWebSocketFetch', () => {
     expect(decision.decision).toBe('history_mismatch_new_head');
     expect(firstHeadMismatch(diagnostics))
       .toMatchObject({ toolArgumentNormalizationGap: { tool: 'Grep', equalAfterStrip: true } });
+  });
+
+  it('warns when a filler-strip gap accompanies a schema-default echo', async () => {
+    const tools = [{
+      type: 'function', name: 'Edit',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string' },
+          old_string: { type: 'string' },
+          new_string: { type: 'string' },
+          glob: { type: 'string' },
+          replace_all: { type: 'boolean', default: false },
+        },
+        required: ['file_path', 'old_string', 'new_string'],
+      },
+    }];
+    const { stderr, diagnostics } = await runToolArgumentMismatch({
+      accountId: 'acct-tool-gap-default',
+      responseId: 'resp_tool_gap_default',
+      tools,
+      upstreamCall: {
+        type: 'function_call', id: 'fc_1', call_id: 'call_edit', name: 'Edit',
+        arguments: '{"file_path":"a.py","old_string":"x","new_string":"y"}',
+        status: 'completed',
+      },
+      echoedCall: {
+        type: 'function_call', call_id: 'call_edit', name: 'Edit',
+        arguments: '{"file_path":"a.py","old_string":"x","new_string":"y","glob":null,"replace_all":false}',
+      },
+    });
+
+    expect(stderr.join('')).toContain('filler-strip rule is applied');
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+      .toMatchObject({ decision: 'history_mismatch_new_head' });
+    expect(firstHeadMismatch(diagnostics)).toMatchObject({
+      toolArgumentNormalizationGap: { tool: 'Edit', equalAfterStrip: true },
+    });
   });
 
   it('routes the tool-argument canary through the channel launchClaude leaves open', async () => {

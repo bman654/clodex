@@ -574,14 +574,16 @@ declared default still diverge, as before.
 
 The map is per-request and pure, for the same reason `headRequiredToolProps` snapshots `required`
 from the head's own turn. A process-global map keyed only by tool name is last-writer-wins across
-every client, partition and session one `clodex server` handles, and `entry.canonicalPrefix` caches
-the head side permanently under whatever the map held when it was first built — so another client's
-schema can flip the verdict in either direction: under-stripping costs a chain that should have
-continued (the everyday parent-then-subagent sequence), over-stripping continues on a history that
-genuinely changed. Both were reproduced through the real WebSocket transport. The two prefix memos
-and the in-flight `canonicalInput` memo are therefore keyed on a fingerprint of the defaults map they
-were built under, and recomputed when it changes; within one client that fingerprint is constant, so
-the memos still do their job.
+every client, partition and session one `clodex server` handles. Independently, a request in the same
+partition can carry a different tool list — for example, a main-agent auxiliary request or a
+mid-session tool-list change — and populate a head memo under a map the next request no longer uses.
+An in-process subagent has its own partition because `responsesWebSocketPartitionKey` includes
+`x-claude-code-agent-id`, so it never scans its parent's heads. Without keyed invalidation,
+under-stripping costs a chain that should have continued and over-stripping can continue changed
+history. The two prefix memos and the in-flight `canonicalInput` memo are therefore keyed on a
+fingerprint of the defaults map they were built under and recomputed when it changes. While a
+request's tool defaults are unchanged, the fingerprint is stable and the memos still do their job;
+when the tool list changes, keyed invalidation recomputes them.
 
 Trade-off: a request whose `tools` omit a tool that appears in its own history gets no stripping for
 that tool, which is the pre-fix behaviour. Subagent histories never contain the parent's calls, so
@@ -592,6 +594,9 @@ the residual is narrow.
 On a history mismatch the head-decision log includes `expected_hash`/`actual_hash` (SHA-256 of each
 side's canonical item bytes) whenever at least one side has an item at the divergent index, so
 same-kind mismatches are diagnosable without exposing content; `none` marks an unavailable side.
+The mismatch index, hashes, tool-argument gap check, and opt-in dump all use the same per-request
+tool-defaults map as head matching, so a default-stripped continuation records the full matched
+prefix instead of a misleading normalization gap.
 
 `CLODEX_MISMATCH_DUMP=1` additionally writes both divergent items' canonical bytes (capped per line,
 `(absent)` past a history's end) into the adapter debug log. **Privacy tradeoff:** the dump contains
@@ -609,9 +614,9 @@ genuine rewind or branch regenerates the call under a new one. These record
 `toolArgumentNormalizationGap` (`tool`, `equalAfterStrip`) on the head-decision diagnostic.
 
 - **Only `equalAfterStrip: true` warns on stderr**, deduplicated by tool and hard-capped (the
-  terminal is shared with Claude Code's UI). It means the two items are identical once the shared
-  filler-strip rule is applied to `arguments` — nothing but filler stood between the head and its
-  own echo.
+  terminal is shared with Claude Code's UI). It means the two items are identical once head
+  matching's schema-default normalization and the shared filler-strip rule are both applied to
+  `arguments` — nothing but filler stood between the head and its own echo.
 - **Coverage is narrower than it looks, in two directions.** It fires only when the divergent
   `function_call` is the *first* divergent item, with one alignment: a stored reasoning item Claude
   legitimately omitted (`continuationMatch`'s omitted-reasoning mode) shifts divergence onto a

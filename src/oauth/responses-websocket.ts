@@ -472,10 +472,11 @@ function inputArray(payload: JsonObject): unknown[] {
  * snapshots `required` from the head's own turn: a process-global map keyed only
  * by tool name is last-writer-wins across every client, partition and session a
  * `clodex server` handles, and reading another client's schema can flip the
- * verdict in either direction with no code change — under-stripping (a cached
- * head keeps a property the client strips, so an ordinary parent-then-subagent
- * sequence loses its chain) or over-stripping (a genuine history change compares
- * equal). Both were reproduced through the real WebSocket transport.
+ * verdict in either direction with no code change. A request in the same
+ * partition can also carry a different tool list — for example, a main-agent
+ * auxiliary request or a mid-session tool-list change — and populate a memo
+ * under a map that the next request no longer uses. Without keyed invalidation,
+ * under-stripping loses a chain and over-stripping can accept changed history.
  */
 type ToolSchemaDefaults = Map<string, Map<string, string>>;
 
@@ -510,20 +511,19 @@ export function toolSchemaDefaults(payload: JsonObject): ToolSchemaDefaults {
  *
  * `entry.canonicalPrefix` is memoized across requests, so the head side must not
  * keep bytes that were normalized under a different map than the client side is
- * being normalized under right now. Within one client the map is constant and the
- * memo still holds; when it changes, the fingerprint changes and the prefix is
- * recomputed.
+ * being normalized under right now. While a request's tool defaults are unchanged,
+ * the fingerprint is stable and the memo still holds; when the tool list changes,
+ * keyed invalidation recomputes the prefix.
  */
 function toolSchemaDefaultsFingerprint(defaults: ToolSchemaDefaults): string {
   if (!defaults.size) return 'none';
-  const parts: string[] = [];
-  for (const name of [...defaults.keys()].sort()) {
-    const perTool = defaults.get(name)!;
-    const props = [...perTool.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([prop, value]) => `${prop}=${value}`).join(',');
-    parts.push(`${name}:${props}`);
-  }
-  return createHash('sha256').update(parts.join(';')).digest('hex').slice(0, 16);
+  const tuples = [...defaults.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([name, perTool]) => [
+      name,
+      [...perTool.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    ] as const);
+  return createHash('sha256').update(JSON.stringify(tuples)).digest('hex').slice(0, 16);
 }
 
 function stripSchemaDefaults(name: unknown, args: unknown, defaults: ToolSchemaDefaults | undefined): unknown {
@@ -540,7 +540,7 @@ function stripSchemaDefaults(name: unknown, args: unknown, defaults: ToolSchemaD
   return out;
 }
 
-function normalizeToolCallJson(value: unknown, defaults?: ToolSchemaDefaults): unknown {
+function normalizeToolCallJson(value: unknown, defaults: ToolSchemaDefaults): unknown {
   if (Array.isArray(value)) return value.map(item => normalizeToolCallJson(item, defaults));
   if (!value || typeof value !== 'object') return value;
   const record = value as JsonObject;
@@ -586,8 +586,9 @@ function normalizeToolCallJson(value: unknown, defaults?: ToolSchemaDefaults): u
   return out;
 }
 
-function arraysEqual(left: unknown[], right: unknown[]): boolean {
-  return canonicalJson(normalizeToolCallJson(left)) === canonicalJson(normalizeToolCallJson(right));
+function arraysEqual(left: unknown[], right: unknown[], defaults: ToolSchemaDefaults): boolean {
+  return canonicalJson(normalizeToolCallJson(left, defaults))
+    === canonicalJson(normalizeToolCallJson(right, defaults));
 }
 
 type ContinuationMatchMode = 'exact' | 'omitted_reasoning';
@@ -605,8 +606,11 @@ function conversationItemKind(value: unknown): string {
   return 'object';
 }
 
-function conversationItemHash(value: unknown): string {
-  return createHash('sha256').update(canonicalJson(normalizeToolCallJson(value))).digest('hex').slice(0, 16);
+function conversationItemHash(value: unknown, defaults: ToolSchemaDefaults): string {
+  return createHash('sha256')
+    .update(canonicalJson(normalizeToolCallJson(value, defaults)))
+    .digest('hex')
+    .slice(0, 16);
 }
 
 /**
@@ -620,7 +624,11 @@ function conversationItemHash(value: unknown): string {
  * fresh turn) and the mismatch is correct, not a defect — reporting those would
  * bury the signal in noise.
  */
-function reasoningNormalizationGap(expected: unknown, actual: unknown): string[] | undefined {
+function reasoningNormalizationGap(
+  expected: unknown,
+  actual: unknown,
+  defaults: ToolSchemaDefaults,
+): string[] | undefined {
   if (conversationItemKind(expected) !== 'reasoning' || conversationItemKind(actual) !== 'reasoning') return undefined;
   const left = expected as JsonObject;
   const right = actual as JsonObject;
@@ -628,8 +636,8 @@ function reasoningNormalizationGap(expected: unknown, actual: unknown): string[]
   if (typeof blob !== 'string' || !blob || blob !== right.encrypted_content) return undefined;
   // Diff the NORMALIZED items. Diffing the raw ones names fields that
   // normalization already reconciles, which points a reader at a red herring.
-  const normalizedLeft = normalizeToolCallJson(left) as JsonObject;
-  const normalizedRight = normalizeToolCallJson(right) as JsonObject;
+  const normalizedLeft = normalizeToolCallJson(left, defaults) as JsonObject;
+  const normalizedRight = normalizeToolCallJson(right, defaults) as JsonObject;
   const fields = [...new Set([...Object.keys(normalizedLeft), ...Object.keys(normalizedRight)])].sort()
     .filter(key => canonicalJson(normalizedLeft[key]) !== canonicalJson(normalizedRight[key]));
   return fields.length ? fields : undefined;
@@ -724,8 +732,9 @@ export function resetReasoningGapWarningsForTests(): void {
  * clean.
  *
  * `equalAfterStrip` separates the two mechanisms. It re-compares the WHOLE
- * items with the shared filler-strip rule applied to `arguments` — not the
- * arguments alone, or a divergence in any other field would be reported as a
+ * items with head matching's schema-default normalization and the shared
+ * filler-strip rule both applied to `arguments` — not the arguments alone, or
+ * a divergence in any other field would be reported as a
  * strip-rule gap the code never examined. When that makes them equal, the only
  * thing standing between the head and its own echo is filler the shared rule
  * removes, which is the shape #84 had. When they still differ, the difference
@@ -743,6 +752,7 @@ export function resetReasoningGapWarningsForTests(): void {
 function toolArgumentNormalizationGap(
   expected: unknown,
   actual: unknown,
+  defaults: ToolSchemaDefaults,
   requiredProps: () => Map<string, Set<string>>,
 ): Record<string, unknown> | undefined {
   if (conversationItemKind(expected) !== 'function_call') return undefined;
@@ -754,7 +764,8 @@ function toolArgumentNormalizationGap(
   if (typeof left.name !== 'string' || left.name !== right.name) return undefined;
   // Same call, same tool, different bytes. Compare NORMALIZED arguments so the
   // canonical-JSON reconciliation this file already applies is not re-reported.
-  if (canonicalJson(normalizeToolCallJson(left)) === canonicalJson(normalizeToolCallJson(right))) {
+  if (canonicalJson(normalizeToolCallJson(left, defaults))
+    === canonicalJson(normalizeToolCallJson(right, defaults))) {
     return undefined;
   }
   const required = requiredProps().get(left.name);
@@ -767,8 +778,8 @@ function toolArgumentNormalizationGap(
       // Carry the rest of the item along, so a difference somewhere other than
       // `arguments` cannot be reported as the filler-strip rule having forked.
       return canonicalJson({
-        ...(normalizeToolCallJson(item) as JsonObject),
-        arguments: canonicalJson(sanitizeToolInput(parsed, required)),
+        ...(normalizeToolCallJson(item, defaults) as JsonObject),
+        arguments: canonicalJson(stripSchemaDefaults(item.name, sanitizeToolInput(parsed, required), defaults)),
       });
     } catch { return undefined; }
   };
@@ -830,6 +841,7 @@ export function resetToolArgumentGapWarningsForTests(): void {
 function continuationMismatchDetails(
   entry: ConnectionEntry,
   payload: JsonObject,
+  defaults: ToolSchemaDefaults,
   log?: (message: string) => void,
   // Only the head clodex actually gave up on should reach stderr. Every candidate
   // head is described in the diagnostic, and a gap on a head that lost to a better
@@ -854,14 +866,14 @@ function continuationMismatchDetails(
   const comparable = Math.min(full.length, prefix.length);
   let mismatch = comparable;
   for (let index = 0; index < comparable; index += 1) {
-    if (!arraysEqual([full[index]], [prefix[index]])) {
+    if (!arraysEqual([full[index]], [prefix[index]], defaults)) {
       mismatch = index;
       break;
     }
   }
   const expected = mismatch < prefix.length ? prefix[mismatch] : undefined;
   const actual = mismatch < full.length ? full[mismatch] : undefined;
-  const reasoningGap = reasoningNormalizationGap(expected, actual);
+  const reasoningGap = reasoningNormalizationGap(expected, actual, defaults);
   if (reasoningGap && warnOnGap) raise(() => warnReasoningNormalizationGap(reasoningGap, log));
   // Claude may legitimately omit stored reasoning items (continuationMatch's
   // omitted_reasoning mode), which shifts the exact-prefix divergence onto a
@@ -885,6 +897,7 @@ function continuationMismatchDetails(
     toolArgumentGap = toolArgumentNormalizationGap(
       gapExpected,
       actual,
+      defaults,
       // The head's own schema when it has one; the current turn's tools are only a
       // fallback for a head that predates the snapshot (see headRequiredToolProps).
       () => entry.headRequiredToolProps ?? requiredToolProps(payload),
@@ -910,8 +923,8 @@ function continuationMismatchDetails(
     firstMismatch: mismatch,
     expectedKind: expected === undefined ? 'none' : conversationItemKind(expected),
     actualKind: actual === undefined ? 'none' : conversationItemKind(actual),
-    ...(expected !== undefined ? { expectedHash: conversationItemHash(expected) } : {}),
-    ...(actual !== undefined ? { actualHash: conversationItemHash(actual) } : {}),
+    ...(expected !== undefined ? { expectedHash: conversationItemHash(expected, defaults) } : {}),
+    ...(actual !== undefined ? { actualHash: conversationItemHash(actual, defaults) } : {}),
     ...(reasoningGap
       ? {
           reasoningNormalizationGap: reasoningGap,
@@ -927,11 +940,12 @@ function continuationMismatchDetails(
 function continuationMismatchSummary(
   entry: ConnectionEntry,
   payload: JsonObject,
+  defaults: ToolSchemaDefaults,
   log?: (message: string) => void,
   mismatchDump = false,
   precomputedDetails?: Record<string, unknown>,
 ): string {
-  const details = precomputedDetails ?? continuationMismatchDetails(entry, payload, log, true);
+  const details = precomputedDetails ?? continuationMismatchDetails(entry, payload, defaults, log, true);
   let summary = `full_items=${details.fullItems} expected_prefix_items=${details.expectedPrefixItems} `
     + `first_mismatch=${details.firstMismatch} expected=${details.expectedKind} actual=${details.actualKind}`;
   // The hashes make same-kind mismatches diagnosable from the log alone. With
@@ -946,8 +960,8 @@ function continuationMismatchSummary(
       const full = inputArray(payload);
       const prefix = [...(entry.requestInput ?? []), ...(entry.expectedAssistant ?? [])];
       const index = details.firstMismatch as number;
-      log(`mismatch dump expected[${index}]: ${mismatchDumpLine(prefix, index)}`);
-      log(`mismatch dump actual[${index}]: ${mismatchDumpLine(full, index)}`);
+      log(`mismatch dump expected[${index}]: ${mismatchDumpLine(prefix, index, defaults)}`);
+      log(`mismatch dump actual[${index}]: ${mismatchDumpLine(full, index, defaults)}`);
     }
   }
   return summary;
@@ -955,9 +969,9 @@ function continuationMismatchSummary(
 
 /** One side of a mismatch dump: canonical item bytes, capped, or `(absent)`
  * when the divergence is one history simply ending before the other. */
-function mismatchDumpLine(items: unknown[], index: number): string {
+function mismatchDumpLine(items: unknown[], index: number, defaults: ToolSchemaDefaults): string {
   if (index >= items.length) return '(absent)';
-  const line = canonicalJson(normalizeToolCallJson(items[index]));
+  const line = canonicalJson(normalizeToolCallJson(items[index], defaults));
   const max = 2_000;
   const marker = ' [truncated]';
   return line.length <= max ? line : line.slice(0, max - marker.length) + marker;
@@ -972,7 +986,7 @@ function mismatchDumpLine(items: unknown[], index: number): string {
  * meaning to comparing whole arrays, but it lets both sides be computed once
  * instead of re-serializing an entire conversation for every candidate head.
  */
-function canonicalItemStrings(items: unknown[], defaults?: ToolSchemaDefaults): string[] {
+function canonicalItemStrings(items: unknown[], defaults: ToolSchemaDefaults): string[] {
   return items.map(item => canonicalJson(normalizeToolCallJson([item], defaults)));
 }
 
@@ -2478,7 +2492,7 @@ export function createResponsesWebSocketFetch(
       // A rewind, branch, or hidden auxiliary inference gets its own full-context
       // head. Existing heads remain eligible for later exact-prefix matches.
       const diagnosticMismatch = continuationMismatchDetails(
-        diagnosticEntry, payload, debug, true, deferredMismatchWarnings,
+        diagnosticEntry, payload, requestToolDefaults, debug, true, deferredMismatchWarnings,
       );
       candidateMismatchDetails = new Map([[diagnosticEntry, diagnosticMismatch]]);
       // Every abandoned non-diagnostic head warns independently of diagnostics.
@@ -2487,7 +2501,9 @@ export function createResponsesWebSocketFetch(
         if (candidate === diagnosticEntry) continue;
         candidateMismatchDetails.set(
           candidate,
-          continuationMismatchDetails(candidate, payload, debug, true, deferredMismatchWarnings),
+          continuationMismatchDetails(
+            candidate, payload, requestToolDefaults, debug, true, deferredMismatchWarnings,
+          ),
         );
       }
       debug(
@@ -2495,6 +2511,7 @@ export function createResponsesWebSocketFetch(
         + `(${continuationMismatchSummary(
           diagnosticEntry,
           payload,
+          requestToolDefaults,
           debug,
           mismatchDump,
           diagnosticMismatch,
@@ -2690,7 +2707,7 @@ export function createResponsesWebSocketFetch(
       input: {
         count: requestInput.length,
         kinds: requestInput.map(conversationItemKind),
-        hashes: requestInput.map(conversationItemHash),
+        hashes: requestInput.map(item => conversationItemHash(item, requestToolDefaults)),
       },
       candidateCount: candidates.length,
       idleCandidateCount: idleCandidates.length,
@@ -2726,7 +2743,7 @@ export function createResponsesWebSocketFetch(
         idleMs: Math.max(0, now - entry.lastUsedAt),
         promptChanges: changedPromptFields(entry.promptFieldHashes, promptFieldHashes),
         mismatch: candidateMismatchDetails?.get(entry)
-          ?? continuationMismatchDetails(entry, payload, debug),
+          ?? continuationMismatchDetails(entry, payload, requestToolDefaults, debug),
       })),
       evictions,
     }, diagnosticCorrelation);
