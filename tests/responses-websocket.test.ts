@@ -54,6 +54,11 @@ function lastSocket(): FakeWebSocket {
   return fakeSockets[fakeSockets.length - 1]!;
 }
 
+/** How many sockets have been created — for asserting that a turn reused one. */
+function socketCount(): number {
+  return fakeSockets.length;
+}
+
 const sessionPayload = (input: unknown[], extra: Record<string, unknown> = {}) => ({
   model: 'gpt-5.6-sol',
   prompt_cache_key: 'relay-session-abc',
@@ -1989,6 +1994,290 @@ describe('createResponsesWebSocketFetch', () => {
     expect(sent.previous_response_id).toBe('resp_req');
     expect(sent.input).toEqual([toolOutput]);
     emitTextResponse(socket, 'resp_req_done', 'done');
+    await readAll(second);
+  });
+
+  it('continues when the client echoed a schema default the model never sent', async () => {
+    // A tool call that went through Claude Code's permission path comes back with
+    // its zod defaults filled in: an Edit the model emitted without `replace_all`
+    // returns as `replace_all: false` (measured on 2.1.267 and 2.1.268 alike —
+    // bypass mode never fills, `acceptEdits` always does). The schema in the
+    // request declares that default, so the property is dropped from both sides.
+    const tools = [{
+      type: 'function', name: 'Edit',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string' },
+          old_string: { type: 'string' },
+          new_string: { type: 'string' },
+          replace_all: { type: 'boolean', default: false },
+        },
+        required: ['file_path', 'old_string', 'new_string'],
+      },
+    }];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'fix it' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-schema-default' });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, { tools })),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_edit' } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: {
+        type: 'function_call', call_id: 'call_e', name: 'Edit',
+        arguments: '{"file_path":"a.py","old_string":"x","new_string":"y"}',
+      },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_edit' } })));
+    await readAll(first);
+
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_e', name: 'Edit',
+      arguments: '{"file_path":"a.py","old_string":"x","new_string":"y","replace_all":false}',
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_e', output: 'edited' };
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([...input, echoedCall, toolOutput], { tools })),
+    });
+    expect(lastSocket()).toBe(socket);
+    const sent = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_edit');
+    expect(sent.input).toEqual([toolOutput]);
+    emitTextResponse(socket, 'resp_edit_done', 'done');
+    await readAll(second);
+  });
+
+  it('finds a schema default inside a namespaced tool group', async () => {
+    // The `tools` array can nest function declarations inside a namespace entry,
+    // and the walk recurses into those. This is the case that recursion is for.
+    const tools = [{
+      type: 'namespace',
+      name: 'file_ops',
+      tools: [{
+        type: 'function', name: 'Edit',
+        parameters: {
+          type: 'object',
+          properties: {
+            file_path: { type: 'string' },
+            replace_all: { type: 'boolean', default: false },
+          },
+          required: ['file_path'],
+        },
+      }],
+    }];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'fix it' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-schema-namespace' });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, { tools })),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_ns' } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'function_call', call_id: 'call_ns', name: 'Edit', arguments: '{"file_path":"a.py"}' },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_ns' } })));
+    await readAll(first);
+
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_ns', name: 'Edit',
+      arguments: '{"file_path":"a.py","replace_all":false}',
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_ns', output: 'edited' };
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([...input, echoedCall, toolOutput], { tools })),
+    });
+    expect(lastSocket()).toBe(socket);
+    const sent = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_ns');
+    expect(sent.input).toEqual([toolOutput]);
+    emitTextResponse(socket, 'resp_ns_done', 'done');
+    await readAll(second);
+  });
+
+  it('does not let one client\'s tool schema decide another client\'s continuation', async () => {
+    // The defaults map used to be process-global and keyed only by tool name, so
+    // whichever client declared `Edit` last decided how every other client's
+    // history was normalized — and `entry.canonicalPrefix` caches the head side
+    // permanently under whatever the map held at the instant it was first built.
+    // Three requests, one process, NO reset between them (the reset in beforeEach
+    // is what hid this):
+    //   1. client A establishes a head whose call carries replace_all EXPLICITLY,
+    //      under a schema declaring default false — so both sides strip it;
+    //   2. client B runs a turn declaring the same tool with default TRUE;
+    //   3. a second request in A's own partition whose tools do NOT include Edit
+    //      (a title generation, a subagent) scans A's idle head and caches its
+    //      canonical prefix — under B's schema, with a shared map;
+    //   4. A's next real turn then strips its echo client-side while the cached
+    //      head keeps it, so A loses a chain it should have kept.
+    const toolsWithDefault = (value: boolean) => [{
+      type: 'function', name: 'Edit',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string' },
+          replace_all: { type: 'boolean', default: value },
+        },
+        required: ['file_path'],
+      },
+    }];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'fix it' }] }];
+    const explicitArgs = '{"file_path":"a.py","replace_all":false}';
+
+    // 1. Client A's head.
+    const clientA = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-two-client-a' });
+    const firstA = await clientA('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, { tools: toolsWithDefault(false) })),
+    });
+    const socketA = lastSocket();
+    socketA.emit('open');
+    socketA.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_a' } })));
+    socketA.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'function_call', call_id: 'call_a', name: 'Edit', arguments: explicitArgs },
+    })));
+    socketA.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_a' } })));
+    await readAll(firstA);
+
+    // 2. Client B, same tool name, opposite default.
+    const clientB = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-two-client-b' });
+    const firstB = await clientB('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, { tools: toolsWithDefault(true) })),
+    });
+    const socketB = lastSocket();
+    expect(socketB).not.toBe(socketA);
+    socketB.emit('open');
+    emitTextResponse(socketB, 'resp_b', 'b done');
+    await readAll(firstB);
+
+    // 3. A request in A's partition that declares no Edit tool at all, so it
+    //    re-records nothing and its scan is what populates A's prefix cache.
+    const sideA = await clientA('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload(
+        [{ role: 'user', content: [{ type: 'input_text', text: 'name this chat' }] }],
+        { tools: [{ type: 'function', name: 'Read', parameters: { type: 'object' } }] },
+      )),
+    });
+    const sideSocket = lastSocket();
+    if (sideSocket !== socketA) sideSocket.emit('open');
+    emitTextResponse(sideSocket, 'resp_a_side', 'title');
+    await readAll(sideA);
+
+    // 4. A's next real turn must still continue on its own head.
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_a', name: 'Edit', arguments: explicitArgs,
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_a', output: 'edited' };
+    const socketsBefore = socketCount();
+    const secondA = await clientA('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([...input, echoedCall, toolOutput], { tools: toolsWithDefault(false) })),
+    });
+    // Reusing A's socket means no new one is created, so this asserts the count
+    // rather than which socket is last.
+    expect(socketCount()).toBe(socketsBefore);
+    const sentA = socketA.send.mock.calls.map(call => JSON.parse(call[0] as string));
+    const continuation = sentA.find(sent => sent.previous_response_id === 'resp_a');
+    expect(continuation, `A did not continue on its own head: ${JSON.stringify(sentA.map(s => s.previous_response_id))}`)
+      .toBeDefined();
+    expect(continuation.input).toEqual([toolOutput]);
+    emitTextResponse(socketA, 'resp_a_done', 'done');
+    await readAll(secondA);
+  });
+
+  it('still starts a new chain when the echoed value differs from the schema default', async () => {
+    // Only a value EQUAL to the declared default is filler. `replace_all: true`
+    // is a real argument the model never sent, so this history diverged.
+    const tools = [{
+      type: 'function', name: 'Edit',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string' },
+          replace_all: { type: 'boolean', default: false },
+        },
+        required: ['file_path'],
+      },
+    }];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'fix it' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-schema-nondefault' });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, { tools })),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_edit_t' } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'function_call', call_id: 'call_t', name: 'Edit', arguments: '{"file_path":"a.py"}' },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_edit_t' } })));
+    await readAll(first);
+
+    const divergedCall = {
+      type: 'function_call', call_id: 'call_t', name: 'Edit',
+      arguments: '{"file_path":"a.py","replace_all":true}',
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_t', output: 'edited' };
+    const fullInput = [...input, divergedCall, toolOutput];
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(fullInput, { tools })),
+    });
+    const isolated = lastSocket();
+    expect(isolated).not.toBe(socket);
+    isolated.emit('open');
+    const sent = JSON.parse(isolated.send.mock.calls[0]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    expect(sent.input).toEqual(fullInput);
+    emitTextResponse(isolated, 'resp_edit_t_new', 'done');
+    await readAll(second);
+  });
+
+  it('does not strip a property the tool schema declares no default for', async () => {
+    // Without a declared default there is nothing to identify filler, so an
+    // added property is a divergent history — today's behaviour, unchanged.
+    const tools = [{
+      type: 'function', name: 'Edit',
+      parameters: {
+        type: 'object',
+        properties: { file_path: { type: 'string' }, replace_all: { type: 'boolean' } },
+        required: ['file_path'],
+      },
+    }];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'fix it' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-schema-nodefault' });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, { tools })),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_edit_n' } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'function_call', call_id: 'call_u', name: 'Edit', arguments: '{"file_path":"a.py"}' },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_edit_n' } })));
+    await readAll(first);
+
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_u', name: 'Edit',
+      arguments: '{"file_path":"a.py","replace_all":false}',
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_u', output: 'edited' };
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([...input, echoedCall, toolOutput], { tools })),
+    });
+    const isolated = lastSocket();
+    expect(isolated).not.toBe(socket);
+    isolated.emit('open');
+    const sent = JSON.parse(isolated.send.mock.calls[0]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    emitTextResponse(isolated, 'resp_edit_n_new', 'done');
     await readAll(second);
   });
 

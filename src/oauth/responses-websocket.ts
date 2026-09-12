@@ -155,9 +155,13 @@ interface RequestContext {
    * assigned once at construction and never reassigned — a transport retry resets
    * `sendPayload` back to it and reuses this same context — so the memo cannot go
    * stale, and it keeps a wide fan-out from re-serializing every in-flight
-   * conversation once per arriving sibling.
+   * conversation once per arriving sibling. It IS invalidated when the arriving
+   * request's tool-schema defaults differ from the ones it was built under: the
+   * payload is fixed, but the normalization applied to it is not.
    */
   canonicalInput?: string[];
+  /** Fingerprint of the tool-schema defaults `canonicalInput` was built under. */
+  canonicalInputToolDefaultsId?: string;
   sendPayload: JsonObject;
   promptFieldHashes: Record<string, string>;
   instructionsSnapshot?: string;
@@ -211,6 +215,13 @@ interface ConnectionEntry {
   /** Memoized canonical form of the stored prefix; cleared whenever it changes. */
   canonicalPrefix?: string[];
   canonicalEchoablePrefix?: string[];
+  /**
+   * Fingerprint of the tool-schema defaults the two memos above were built under.
+   * A head is reused across requests, and a request's defaults come from its own
+   * `tools`, so bytes canonicalized under a different map must be discarded rather
+   * than compared — otherwise one client's schema decides another client's verdict.
+   */
+  canonicalToolDefaultsId?: string;
   options: Required<Pick<ResponsesWebSocketFetchOptions, 'hardTtlMs' | 'idleTtlMs' | 'nurseryIdleTtlMs' | 'maxConnections' | 'now'>>;
   debug: (message: string) => void;
 }
@@ -445,12 +456,96 @@ function inputArray(payload: JsonObject): unknown[] {
   return Array.isArray(payload.input) ? payload.input : [];
 }
 
-function normalizeToolCallJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(normalizeToolCallJson);
+/**
+ * Schema defaults per tool, derived from ONE request's `tools` array.
+ *
+ * When a tool call goes through Claude Code's permission path, the echoed call
+ * comes back with its zod defaults filled in (an `Edit` the model emitted
+ * without `replace_all` returns as `replace_all: false`), while the head
+ * snapshot holds the model's raw arguments without them. The strict-prefix
+ * comparison then fails on every such call and the whole conversation is
+ * re-sent uncached. Compare-only: a property whose value equals the declared
+ * default is dropped from BOTH sides before hashing; outgoing payloads are
+ * untouched.
+ *
+ * Deliberately per-request and pure, for the same reason `headRequiredToolProps`
+ * snapshots `required` from the head's own turn: a process-global map keyed only
+ * by tool name is last-writer-wins across every client, partition and session a
+ * `clodex server` handles, and reading another client's schema can flip the
+ * verdict in either direction with no code change — under-stripping (a cached
+ * head keeps a property the client strips, so an ordinary parent-then-subagent
+ * sequence loses its chain) or over-stripping (a genuine history change compares
+ * equal). Both were reproduced through the real WebSocket transport.
+ */
+type ToolSchemaDefaults = Map<string, Map<string, string>>;
+
+export function toolSchemaDefaults(payload: JsonObject): ToolSchemaDefaults {
+  const defaults: ToolSchemaDefaults = new Map();
+  const add = (tool: unknown): void => {
+    if (!tool || typeof tool !== 'object') return;
+    const record = tool as JsonObject;
+    if (record.type === 'namespace' && Array.isArray(record.tools)) {
+      for (const nested of record.tools) add(nested);
+      return;
+    }
+    if (record.type !== 'function' || typeof record.name !== 'string') return;
+    const parameters = record.parameters;
+    const properties = parameters && typeof parameters === 'object'
+      ? (parameters as JsonObject).properties : undefined;
+    if (!properties || typeof properties !== 'object') return;
+    const perTool = new Map<string, string>();
+    for (const [prop, schema] of Object.entries(properties as JsonObject)) {
+      if (schema && typeof schema === 'object' && 'default' in (schema as JsonObject)) {
+        perTool.set(prop, canonicalJson((schema as JsonObject).default));
+      }
+    }
+    if (perTool.size) defaults.set(record.name, perTool);
+  };
+  if (Array.isArray(payload.tools)) for (const tool of payload.tools) add(tool);
+  return defaults;
+}
+
+/**
+ * Identity of a defaults map, for cache keys.
+ *
+ * `entry.canonicalPrefix` is memoized across requests, so the head side must not
+ * keep bytes that were normalized under a different map than the client side is
+ * being normalized under right now. Within one client the map is constant and the
+ * memo still holds; when it changes, the fingerprint changes and the prefix is
+ * recomputed.
+ */
+function toolSchemaDefaultsFingerprint(defaults: ToolSchemaDefaults): string {
+  if (!defaults.size) return 'none';
+  const parts: string[] = [];
+  for (const name of [...defaults.keys()].sort()) {
+    const perTool = defaults.get(name)!;
+    const props = [...perTool.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([prop, value]) => `${prop}=${value}`).join(',');
+    parts.push(`${name}:${props}`);
+  }
+  return createHash('sha256').update(parts.join(';')).digest('hex').slice(0, 16);
+}
+
+function stripSchemaDefaults(name: unknown, args: unknown, defaults: ToolSchemaDefaults | undefined): unknown {
+  if (!defaults) return args;
+  if (typeof name !== 'string' || !args || typeof args !== 'object' || Array.isArray(args)) return args;
+  const perTool = defaults.get(name);
+  if (!perTool) return args;
+  const out: JsonObject = {};
+  for (const [key, value] of Object.entries(args as JsonObject)) {
+    const expected = perTool.get(key);
+    if (expected !== undefined && canonicalJson(value) === expected) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+function normalizeToolCallJson(value: unknown, defaults?: ToolSchemaDefaults): unknown {
+  if (Array.isArray(value)) return value.map(item => normalizeToolCallJson(item, defaults));
   if (!value || typeof value !== 'object') return value;
   const record = value as JsonObject;
   const out: JsonObject = {};
-  for (const [key, child] of Object.entries(record)) out[key] = normalizeToolCallJson(child);
+  for (const [key, child] of Object.entries(record)) out[key] = normalizeToolCallJson(child, defaults);
 
   // Claude parses tool_use input into an object. The OpenAI SDK later serializes
   // it again, so insignificant whitespace and object-key order can differ from
@@ -461,7 +556,10 @@ function normalizeToolCallJson(value: unknown): unknown {
     : record.type === 'custom_tool_call' ? 'input' : undefined;
   if (jsonField && typeof record[jsonField] === 'string') {
     try {
-      out[jsonField] = canonicalJson(JSON.parse(record[jsonField] as string));
+      const parsed = JSON.parse(record[jsonField] as string);
+      out[jsonField] = canonicalJson(
+        jsonField === 'arguments' ? stripSchemaDefaults(record.name, parsed, defaults) : parsed,
+      );
     } catch {
       // A malformed/non-JSON custom-tool input must still match byte-for-byte.
     }
@@ -874,8 +972,8 @@ function mismatchDumpLine(items: unknown[], index: number): string {
  * meaning to comparing whole arrays, but it lets both sides be computed once
  * instead of re-serializing an entire conversation for every candidate head.
  */
-function canonicalItemStrings(items: unknown[]): string[] {
-  return items.map(item => canonicalJson(normalizeToolCallJson([item])));
+function canonicalItemStrings(items: unknown[], defaults?: ToolSchemaDefaults): string[] {
+  return items.map(item => canonicalJson(normalizeToolCallJson([item], defaults)));
 }
 
 /**
@@ -899,12 +997,24 @@ function continuationMatch(
   entry: ConnectionEntry,
   payload: JsonObject,
   clientItems: string[],
+  defaults: ToolSchemaDefaults,
+  defaultsId: string,
 ): ContinuationMatch | undefined {
   if (!entry.responseId || !entry.requestInput || !entry.expectedAssistant) return undefined;
   const full = inputArray(payload);
+  // Both sides of every comparison have to be canonicalized under the SAME
+  // defaults map. The memo is keyed on that map's fingerprint, so a head cached
+  // under one client's schemas is recomputed rather than compared across.
+  if (entry.canonicalToolDefaultsId !== defaultsId) {
+    entry.canonicalPrefix = undefined;
+    entry.canonicalEchoablePrefix = undefined;
+    entry.canonicalToolDefaultsId = defaultsId;
+  }
   // The stored prefix only changes when a response completes, so canonicalize it
   // once per head rather than once per lookup.
-  entry.canonicalPrefix ??= canonicalItemStrings([...entry.requestInput, ...entry.expectedAssistant]);
+  entry.canonicalPrefix ??= canonicalItemStrings(
+    [...entry.requestInput, ...entry.expectedAssistant], defaults,
+  );
   if (isStrictPrefix(entry.canonicalPrefix, clientItems)) {
     return { delta: full.slice(entry.canonicalPrefix.length), mode: 'exact' };
   }
@@ -916,7 +1026,7 @@ function continuationMatch(
   // remaining response items still match exactly.
   const echoedAssistant = entry.expectedAssistant.filter(item => conversationItemKind(item) !== 'reasoning');
   if (echoedAssistant.length === entry.expectedAssistant.length) return undefined;
-  entry.canonicalEchoablePrefix ??= canonicalItemStrings([...entry.requestInput, ...echoedAssistant]);
+  entry.canonicalEchoablePrefix ??= canonicalItemStrings([...entry.requestInput, ...echoedAssistant], defaults);
   if (!isStrictPrefix(entry.canonicalEchoablePrefix, clientItems)) return undefined;
   return { delta: full.slice(entry.canonicalEchoablePrefix.length), mode: 'omitted_reasoning' };
 }
@@ -2196,6 +2306,10 @@ export function createResponsesWebSocketFetch(
       authorizationFingerprint,
       claudeAgentId,
     );
+    // Per-request, never shared: see toolSchemaDefaults' comment for what a
+    // process-global map does to a server with more than one client.
+    const requestToolDefaults = toolSchemaDefaults(payload);
+    const requestToolDefaultsId = toolSchemaDefaultsFingerprint(requestToolDefaults);
     const promptFingerprint = responsesWebSocketPromptFingerprint(payload);
     const promptFieldHashes = responsesWebSocketPromptFieldHashes(payload);
     const instructionsSnapshot = instructionsFromPayload(payload);
@@ -2208,7 +2322,9 @@ export function createResponsesWebSocketFetch(
     // scans and the in-flight lineage test below need it, and none of them needs
     // it when the partition holds nothing to compare against.
     let canonicalClientItems: string[] | undefined;
-    const clientItems = (): string[] => (canonicalClientItems ??= canonicalItemStrings(inputArray(payload)));
+    const clientItems = (): string[] => (
+      canonicalClientItems ??= canonicalItemStrings(inputArray(payload), requestToolDefaults)
+    );
 
     // Hoisted verbatim so the SAME scan can run a second time after a pacing
     // wait: same expressions, same ordering, same tie-breaks. Nothing here is
@@ -2226,7 +2342,10 @@ export function createResponsesWebSocketFetch(
         candidates: scanned,
         idleCandidates: idle,
         matches: idle
-          .map(entry => ({ entry, match: continuationMatch(entry, payload, canonical) }))
+          .map(entry => ({
+            entry,
+            match: continuationMatch(entry, payload, canonical, requestToolDefaults, requestToolDefaultsId),
+          }))
           .filter((candidate): candidate is { entry: ConnectionEntry; match: ContinuationMatch } => candidate.match !== undefined)
           // Prefer the longest matching history, which produces the smallest delta.
           .sort((left, right) => left.match.delta.length - right.match.delta.length
@@ -2251,7 +2370,9 @@ export function createResponsesWebSocketFetch(
      */
     const couldPrecedeThisRequest = (entry: ConnectionEntry): boolean => {
       if (entry.responseId && entry.requestInput && entry.expectedAssistant) {
-        return continuationMatch(entry, payload, clientItems()) !== undefined;
+        return continuationMatch(
+          entry, payload, clientItems(), requestToolDefaults, requestToolDefaultsId,
+        ) !== undefined;
       }
       const streaming = entry.current;
       // `inFlight` and `current` are set together, so a candidate this predicate is
@@ -2261,7 +2382,15 @@ export function createResponsesWebSocketFetch(
       // continuation check uses: a client that re-sent the same turn is a duplicate
       // of the response in flight, not a branch off it, and must not be stitched
       // onto a turn whose output it has never seen.
-      streaming.canonicalInput ??= canonicalItemStrings(inputArray(streaming.originalPayload));
+      // Same snapshot rule as the head caches below: bytes canonicalized under a
+      // different defaults map cannot be compared against this request's client side.
+      if (streaming.canonicalInputToolDefaultsId !== requestToolDefaultsId) {
+        streaming.canonicalInput = undefined;
+        streaming.canonicalInputToolDefaultsId = requestToolDefaultsId;
+      }
+      streaming.canonicalInput ??= canonicalItemStrings(
+        inputArray(streaming.originalPayload), requestToolDefaults,
+      );
       return isPrefixOrEqual(streaming.canonicalInput, clientItems());
     };
     /** The in-flight head that forced isolation, for the diagnostic. */

@@ -552,6 +552,41 @@ transport-failure replay, although an OAuth 401 refresh can still start a new au
 **This policy can recover only while no model output has been exposed downstream**; replay after
 partial output could duplicate content or tool calls.
 
+### Schema defaults are filler on both sides
+
+When a tool call goes through Claude Code's permission path, the echoed call comes back with its zod
+defaults filled in: an `Edit` the model emitted without `replace_all` returns as `replace_all: false`.
+The head snapshot holds the model's raw arguments, so the strict-prefix comparison failed on every
+such call and re-sent the whole conversation (measured 2026-09-11 on one Luna session: 2 of 14 turns,
+~88k tokens each; 77.8% → 92.1% cached input with the fix).
+
+This is not a version change. `replace_all` carries the same `.default(false)` in 2.1.267 as in
+2.1.268, and captured echoes from both binaries agree: under `--dangerously-skip-permissions` the
+property is never filled, while `acceptEdits` and `--allowedTools` fill it in both versions. What
+fills it is `checkPermissions` writing `updatedInput` back to the transcript, so the trigger is the
+permission path, not a release.
+
+`toolSchemaDefaults(payload)` derives `{tool → {property → canonical default}}` from ONE request's
+`tools` array — namespaced tool groups included — and `normalizeToolCallJson` drops, from BOTH sides,
+any `arguments` property whose value equals its declared default. Compare-only: the outgoing payload
+is untouched. A value that differs from the default (`replace_all: true`) and a property with no
+declared default still diverge, as before.
+
+The map is per-request and pure, for the same reason `headRequiredToolProps` snapshots `required`
+from the head's own turn. A process-global map keyed only by tool name is last-writer-wins across
+every client, partition and session one `clodex server` handles, and `entry.canonicalPrefix` caches
+the head side permanently under whatever the map held when it was first built — so another client's
+schema can flip the verdict in either direction: under-stripping costs a chain that should have
+continued (the everyday parent-then-subagent sequence), over-stripping continues on a history that
+genuinely changed. Both were reproduced through the real WebSocket transport. The two prefix memos
+and the in-flight `canonicalInput` memo are therefore keyed on a fingerprint of the defaults map they
+were built under, and recomputed when it changes; within one client that fingerprint is constant, so
+the memos still do their job.
+
+Trade-off: a request whose `tools` omit a tool that appears in its own history gets no stripping for
+that tool, which is the pre-fix behaviour. Subagent histories never contain the parent's calls, so
+the residual is narrow.
+
 ### Mismatch diagnostics
 
 On a history mismatch the head-decision log includes `expected_hash`/`actual_hash` (SHA-256 of each
