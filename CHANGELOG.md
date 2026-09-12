@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.12.1](https://github.com/bman654/clodex/compare/v2.12.0...v2.12.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **patch:** keep two Claude Code installs of one version from clobbering each other on restore ([#228](https://github.com/bman654/clodex/issues/228)) ([3581e39](https://github.com/bman654/clodex/commit/3581e3971817dff02ea87097bccbe43afd0d397a))
+* **patch:** say which install clodex will patch when CLODEX_CLAUDE_PATH points elsewhere ([#227](https://github.com/bman654/clodex/issues/227)) ([fd11d76](https://github.com/bman654/clodex/commit/fd11d7614c433e037b9414fa15ce3b1880160c5d))
+* **patch:** stop --restore from leaving claude unable to start on macOS ([#226](https://github.com/bman654/clodex/issues/226)) ([27c6cee](https://github.com/bman654/clodex/commit/27c6ceeb9fdc1b573ff557e8b74b839f031c3dc6))
+
 ## [2.12.0](https://github.com/bman654/clodex/compare/v2.11.7...v2.12.0) (2026-09-11)
 
 
