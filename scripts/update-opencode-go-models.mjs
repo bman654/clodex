@@ -37,6 +37,8 @@ const ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go';
 // models (grok, mainline gpt) are deliberately absent.
 const TRANSPORTS = Object.assign(Object.create(null), {
   'deepseek-v4-flash': 'openai-completions',
+  // Measured 2026-09-11: V4.1 Flash answers on /v1/messages (thinking block + text).
+  'deepseek-v4.1-flash': 'anthropic-messages',
   'deepseek-v4-pro': 'openai-completions',
   'glm-5.1': 'openai-completions',
   'glm-5.2': 'openai-completions',

@@ -202,6 +202,8 @@ export interface SdkCallParams {
   maxOutputTokens?: number;
   temperature?: number;
   providerOptions?: Record<string, Record<string, unknown>>;
+  /** Per-request upstream headers; `streamText`/`generateText` take them as-is. */
+  headers?: Record<string, string>;
 }
 
 // ── system ───────────────────────────────────────────────────────────────────

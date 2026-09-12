@@ -47,11 +47,11 @@ describe('OpenCode Go catalog', () => {
 
     expect(OPENCODE_GO_SOURCE).toBe('https://models.dev/api.json');
     expect(new Date(OPENCODE_GO_SOURCE_FETCHED_AT).toISOString()).toBe(OPENCODE_GO_SOURCE_FETCHED_AT);
-    expect(models).toHaveLength(17);
+    expect(models).toHaveLength(18);
     expect(new Set(ids).size).toBe(models.length);
     expect(ids).not.toContain('grok-4.5');
     expect(new Set(models.map(model => model.modelFormat))).toEqual(new Set(['anthropic', 'openai']));
-    expect(models.filter(model => model.modelFormat === 'anthropic')).toHaveLength(4);
+    expect(models.filter(model => model.modelFormat === 'anthropic')).toHaveLength(5);
     expect(models.filter(model => model.modelFormat === 'openai')).toHaveLength(13);
   });
 
@@ -85,11 +85,20 @@ describe('OpenCode Go catalog', () => {
     });
     expect(byId.get('qwen3.6-plus')?.compatibility?.thinkingFormat).toBe('qwen');
     expect(byId.get('kimi-k2.6')?.compatibility?.supportsReasoningEffort).toBe(false);
+    // 2026-09-11 feed: the "(2x usage)" promotional pricing ended; list price doubled.
     expect(byId.get('gpt-5.6-luna')?.cost).toEqual({
-      input: 0.1,
-      output: 0.6,
-      cache_read: 0.01,
-      cache_write: 0.125,
+      input: 0.2,
+      output: 1.2,
+      cache_read: 0.02,
+      cache_write: 0.25,
+    });
+    expect(byId.get('deepseek-v4.1-flash')).toMatchObject({
+      modelFormat: 'anthropic',
+      npm: '@ai-sdk/anthropic',
+      apiUrl: OPENCODE_GO_ANTHROPIC_BASE_URL,
+      contextWindow: 1_000_000,
+      modalities: ['text', 'image'],
+      compatibility: { supportsReasoningEffort: false, supportsCountTokens: false },
     });
   });
 
@@ -110,7 +119,7 @@ describe('OpenCode Go catalog', () => {
       apiUrl: OPENCODE_GO_ANTHROPIC_BASE_URL,
     });
     expect(result[1]).toMatchObject({
-      name: 'DeepSeek V4 Pro',
+      name: 'DeepSeek V4 Pro (New)',
       modelFormat: 'openai',
       npm: '@ai-sdk/openai-compatible',
       apiUrl: OPENCODE_GO_COMPLETIONS_BASE_URL,
