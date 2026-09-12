@@ -617,14 +617,15 @@ tweakcc's own repack reads back as an ordinary module name.
   unverifiable backups produce a loud error, never a copy. **A matching version tag is not install
   provenance**: the npm platform package and the native installer ship different files under the same
   Claude Code version, and both are supported, so one machine can hold two same-version installs whose
-  bytes differ. The manifest is the only record of which install a backup was made for, and it holds
-  **one** install — so it can confirm a backup but can never rule one in by elimination. Two states
-  therefore refuse outright rather than fall through to version-tag selection (issue #199, reproduced
+  bytes differ. The manifest holds **one** install — so it can confirm a backup but can never rule one
+  in by elimination (the per-backup sidecar below is what does that). Two states therefore refuse
+  outright rather than fall through to version-tag selection (issue #199, reproduced
   on real 2.1.266 binaries in issue #199, and again on real 2.1.263 bytes with a byte-differing
   second copy standing in for the second install; the published 2.1.263 npm and native artifacts are
   independently known to differ in both size and hash):
   - the manifest records a **different** `binaryPath` than the resolved target — it vouches for
-    nothing in the backup directory, and the error names the install it does belong to;
+    nothing in the backup directory, and the error names the install it does belong to (unless a
+    per-backup sidecar records this one; see below);
   - the manifest records **this** target but the pristine bytes it named are gone or corrupt — its own
     testimony says the same-version backups still on disk were made for some other install.
 
@@ -635,18 +636,7 @@ tweakcc's own repack reads back as an ordinary module name.
   Disqualifying only the backup the manifest names is NOT sufficient and was rejected during review:
   the manifest holds one install, so every earlier install's backup is an unrecorded orphan carrying
   the same version tag, and "restore the one it did not name" hands a third install's bytes to the
-  target — turning a `conflicting pristine backups` refusal into a destructive copy. **What remains
-  unprotected is the no-manifest case**, and it is reachable by an ordinary sequence: a successful
-  `--restore` DELETES the manifest, so patch A → restore A → have the target resolve to install B →
-  restore again publishes A's pristine bytes over B, with only a warning. (`~/.clodex` wiped or a
-  different `CLODEX_HOME` get there too.) Selection there still rests on the version tag alone.
-  Worse, a user who answers the `conflicting pristine backups` refusal by deleting one file can
-  launder the wrong bytes into a manifest that the rules above then trust on sight — which is why
-  that message no longer says "remove the wrong one". Closing this needs provenance recorded per
-  backup rather than a single-slot manifest, or requiring `--restore` to see a `/*ccpatch:` marker in
-  the live binary before it copies anything (`clodex patch`'s implicit restore already inspects the
-  source; `--restore` never does). Tracked separately — do not read the rules above as a full
-  guarantee.
+  target — turning a `conflicting pristine backups` refusal into a destructive copy.
 
   Path identity is plain string equality, so a manifest written under a different spelling of the
   same path reads as another install and refuses — safe, but a false refusal, and it blocks
@@ -668,6 +658,140 @@ tweakcc's own repack reads back as an ordinary module name.
   --restore`. That mirror is a SINGLE slot holding whichever install clodex patched last, so on a
   machine with two same-version installs `tweakcc --restore` performs exactly the copy the rules
   above refuse. clodex writes the file but does not control that command.
+- **Each backup records which installs it was made for, in one file per install beside it** —
+  `claude-<ver>-<sha>.orig.for-<hash of install path>.json`, holding
+  `{"install": "<path>", "assumed": <bool>}` (issue #204). The manifest could not carry this: it holds
+  **one** install and a successful `--restore` **deletes** it, so a backup routinely outlives the only
+  record of what it belonged to. patch A → restore A → have the target resolve to a different
+  same-version install B → restore again published A's pristine bytes over B with nothing but a
+  warning, and **no files were lost anywhere in that sequence**. (`~/.clodex` wiped or a different
+  `CLODEX_HOME` reach the same state.) A user who answered the `conflicting pristine backups` refusal
+  by deleting one file could also launder the wrong bytes into a manifest every later restore then
+  trusted on sight.
+
+  **One file per install, never a shared list.** A single list would have to be read, merged and
+  rewritten, and the patch lock lives under `CLODEX_HOME` while the backup directory is shared — two
+  concurrent patches under different `CLODEX_HOME`s would lose an entry. A create-once file per
+  install has nothing to merge. Multiple installs is the normal case, not an edge: backups are
+  content-addressed, so two installs whose pristine bytes are identical legitimately share one backup
+  and it is correct for either. The install path is hashed only to keep the file name safe and
+  fixed-length; selection reads the path from inside the file, and a record whose name does not agree
+  with the install it holds is treated as damaged rather than trusted.
+
+  Consequences:
+  - a backup recorded for some OTHER install is refused, exactly like a manifest that records one;
+  - a record naming THIS install outranks a manifest that records a different one — it is direct
+    evidence, where the manifest was only evidence about the directory;
+  - a two-install machine now **works** instead of refusing: each install's own backup names it, so
+    `Found conflicting pristine backups` is no longer the outcome of the ordinary two-install case;
+  - restoring one install therefore must NOT clear the manifest belonging to another — `--restore`
+    clears the manifest only when it records the install being restored;
+  - a manifest that disagrees with an established record for the same install refuses — **but only
+    when the manifest does not describe the live bytes**. That state is reachable both ways round:
+    one install path rewritten in place with a different build of one claude version (the manifest is
+    then stale), or one install legitimately snapshotted twice, which `tweakcc` theming produces and
+    the snapshot path keeps both files for on purpose. What separates them is
+    `manifest.patchedSha256 === liveSha256`: when it holds, clodex provably wrote those bytes last, so
+    the manifest is current and its backup is the right source. Refusing there instead made every
+    later patch AND restore of an ordinary single-install machine fail permanently, with a message
+    telling the user to reinstall — which does not clear a record. Where neither claim can be dated,
+    the refusal stands, and both it and the two-records-disagree refusal now **name the record files**,
+    because deleting the stale one is the way out;
+  - a record that exists but **cannot be read** refuses rather than falling back to the version tag.
+    That includes a record that is unopenable rather than malformed (a directory, a dangling link,
+    mode 000): its name came out of the same directory listing, so "absent" is not an available
+    reading. Damaged positive evidence is not the same as no evidence — something claimed those
+    bytes. The message names the file, and deleting it opts back into the fallback;
+  - the version-tag fallback is refused for an install these bytes were **already guessed onto**. The
+    first guess proves nothing about ownership, which is why it neither selects nor establishes, but
+    running the same fallback again is how one install's bytes reach two. A guess recorded for THIS
+    install does not refuse — that is the same decision being repeated, and the single-install machine
+    depends on it.
+
+  **ESTABLISHED vs ASSUMED, and what may promote.** A record's `assumed` flag says whether the
+  association was proven or matched on a version tag, and the distinction has to survive every path
+  that could re-derive it:
+  - a guess is recorded AS a guess rather than skipped. Skipping was not enough: after a warned
+    version-tag restore the live bytes match the backup *because the guess put them there*, so the
+    next patch took the `reuse` path and recorded it as established;
+  - the manifest carries `pristineProvenance: 'assumed'` when the run that wrote it guessed, so the
+    next run cannot read a guessing run's own manifest as independent proof. Absent is read as
+    established, which is not a proof — a manifest written before the field existed may record a run
+    that guessed and is indistinguishable from one that did not. It is accepted because those
+    manifests are the migration path for every existing install;
+  - **every** plan **inherits** the confidence already recorded for those bytes. Confidence belongs to
+    the CONTENT, not to a filename: asking only about the name a plan chose left a third name carrying
+    the guess — restore B from a legacy backup by version tag, patch A so that backup is adopted under
+    its content address, then patch B, which picks the canonical name, finds no record of B beside it,
+    and established what the legacy name still called a guess. So every alias holding these exact bytes
+    is consulted, and the content address and the legacy name are read directly, because the scan finds
+    records only beside an existing `.orig` and a record outlives its backup. `reuse` matches bytes a guess may have put there, and
+    canonicalizing a legacy backup would otherwise launder a guess through a filename change. A
+    `snapshot` is no exception, even though it inspected the live bytes itself: if a guess restored
+    those very bytes onto this install, "the install holds them" is a fact the guess created, and
+    establishing on it would hand the bytes' true owner a refusal. **Nothing promotes a guess.** The
+    protection a promotion looked like it was buying is already provided by refusing the fallback for
+    an install these bytes were guessed onto, and an install whose record stays a guess is not
+    stranded — its own restores still work, with the note;
+  - an established record is never downgraded. Callers ask for what their run can prove, and a run
+    that can prove less must not erase what an earlier one knew.
+
+  **Both migration sites cover a manifest for another VERSION at this same path**, not only one for
+  another install: its backup is still on disk and clearing the manifest would leave it unattributed.
+
+  **`--restore` records before it writes, and before it clears.** Before the copy, because the guess
+  changes the live bytes to the backup's — after that, "the live bytes match this backup" is no longer
+  independent evidence, so the record saying it was a guess must already be on disk. If it cannot be
+  written, the guess is **refused** and the binary is untouched: it is the optional compatibility
+  path. Before the manifest is cleared, because the manifest may be the only thing attributing that
+  backup, and the manifest is dropped **only once an established record stands in its place** — a
+  manifest is stronger than a guess, so trading it for one destroys testimony instead of migrating it.
+  When the write fails on an established restore, the rescue still happens and the manifest is kept.
+
+  **`clodex patch` migrates the manifest it is about to replace**, when that manifest records a
+  different install or a different claude version. The manifest holds one install, so patching a
+  second one used to strip the first's only attribution.
+
+  **No pristine backup is published before its record** — not the fresh snapshot, and not the
+  canonical name a legacy backup is adopted into. A published `.orig` with no record beside it is
+  precisely the unattributed same-version file this exists to prevent, and a crash or a full disk
+  between the two writes would leave one for good. The reverse order is safe: a record whose backup
+  never appeared is inert, because scanning starts from the `.orig` files, and it stays true if those
+  bytes ever land at that address again.
+
+  **What remains is a backup written before records existed**: nothing attributes it, so selection
+  falls back to the version tag and the plan carries a loud note saying exactly that. Refusing would
+  strand every backup an earlier clodex wrote, including on the single-install machine where the guess
+  is always right. It self-heals — `--restore` and `clodex patch` both migrate a manifest's evidence,
+  and any patch of that install writes a record. Three narrower gaps stay open and are not closed
+  here:
+  - **Path identity is still plain string equality** (see below), so a case-only respelling of an
+    install path on APFS reads as another install: the restore is refused rather than falling back —
+    safe, and the message names the recorded spelling to use — and a manifest for the same install
+    under the other spelling survives a restore rather than being cleared. The fix is one
+    path-equivalence helper over `realpathSync.native`/inode, which invalidates the `binaryPath` in
+    every existing manifest and so needs a migration.
+  - **Replacing the executable at the SAME path with a different same-version artifact** leaves a
+    record pointing at a path whose bytes are no longer the ones it was written for. Two established
+    records now disagree and refuse, and a manifest disagreeing with a record refuses too, so the
+    destructive form is narrowed to the case where neither exists yet. Closing it entirely needs
+    `--restore` to read the live bundle for a `/*ccpatch:` marker first — issue #204's fix 1 — which
+    is Mach-O/ELF/PE-sensitive and needs the per-format probe.
+  - **A record's confidence is written with temp + rename, not compare-and-swap.** Two processes
+    recording the SAME install under different `CLODEX_HOME`s can race, and the last rename wins, so
+    an established record can be replaced by a guess. It needs a lock keyed by the backup directory
+    rather than by `CLODEX_HOME`; the same missing lock already lets `--restore` (which takes no lock
+    at all) interleave with a patch on `main`.
+
+  Two smaller consequences are accepted rather than fixed, both safe directions:
+  - an install whose only claim on a backup is a GUESS is refused when another install holds an
+    established record for those bytes, even though repeating its own guess used to work. The evidence
+    genuinely favours the other install; the message names it, and reinstalling clears it.
+  - the migration before a manifest is replaced checks `existsSync(manifest.backupPath)`, so a backup
+    that was manually MOVED to another same-version alias is not migrated to its new name. Finding the
+    bytes by hash instead would mean re-hashing every same-version backup (~250 MB each) on the
+    ordinary two-install patch, which is not worth it for a state only manual file movement reaches.
+
 - **`clodex patch --restore` must work on a binary that no longer runs** — that is what a pristine
   backup is *for*. It resolves the version from `claude --version` when it can, and otherwise falls
   back to the manifest's `claudeVersion` when `manifest.binaryPath` matches the resolved install and
@@ -675,9 +799,10 @@ tweakcc's own repack reads back as an ordinary module name.
   anything. An npm placeholder is the exception: it proves a package manager replaced the target, so
   the old manifest is no longer authoritative for that path even though the wrapper's `package.json`
   still reveals its version. The placeholder refusal preserves both manifest and backups. Generic
-  broken binaries retain manifest recovery. A successful restore drops the manifest, which is sound
-  only because a manifest recorded against a different install can no longer reach the copy — it is
-  refused during selection, so the other install's rescue record is never deleted with it. The patch
+  broken binaries retain manifest recovery. A successful restore drops the manifest **only when it
+  records the install that was restored**: selection can now succeed on a per-backup sidecar while the
+  manifest still holds a different install, and clearing it there would delete that install's only
+  rescue record. The patch
   path keeps the hard `version-unknown` failure (patching is elective; restoring is the way out), and
   its error message names `--restore` as the recovery.
 - **`CLODEX_CLAUDE_PATH` does not choose the patch target, and that is deliberate.** It selects the
