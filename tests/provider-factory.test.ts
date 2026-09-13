@@ -646,6 +646,45 @@ describe('createLanguageModel', () => {
     vi.doUnmock('@ai-sdk/openai');
   });
 
+  // OpenCode Go serves Muse Spark only on /v1/responses. An API-key Responses
+  // route that dropped its base URL would default to api.openai.com and send
+  // the Go key there, so the destination is asserted, not assumed.
+  it('passes the configured base URL on an API-key Responses route', async () => {
+    vi.resetModules();
+    const responses = vi.fn((modelId: string) => ({ modelId, provider: 'openai-responses' }));
+    const chat = vi.fn((modelId: string) => ({ modelId, provider: 'openai-chat' }));
+    const createOpenAI = vi.fn(() => ({ responses, chat }));
+    vi.doMock('@ai-sdk/openai', () => ({ createOpenAI }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({
+      npm: '@ai-sdk/openai',
+      modelId: 'muse-spark-1.3-contributor',
+      apiKey: 'go-key',
+      baseURL: 'https://opencode.ai/zen/go/v1',
+      authType: 'api',
+    });
+
+    expect(createOpenAI).toHaveBeenCalledWith({ apiKey: 'go-key', baseURL: 'https://opencode.ai/zen/go/v1' });
+    expect(responses).toHaveBeenCalledWith('muse-spark-1.3-contributor');
+    expect(chat).not.toHaveBeenCalled();
+    vi.doUnmock('@ai-sdk/openai');
+  });
+
+  it('leaves the SDK default host in place when an API-key route has no base URL', async () => {
+    vi.resetModules();
+    const responses = vi.fn((modelId: string) => ({ modelId, provider: 'openai-responses' }));
+    const chat = vi.fn((modelId: string) => ({ modelId, provider: 'openai-chat' }));
+    const createOpenAI = vi.fn(() => ({ responses, chat }));
+    vi.doMock('@ai-sdk/openai', () => ({ createOpenAI }));
+
+    const { createLanguageModel: create } = await import('../src/provider-factory.js');
+    await create({ npm: '@ai-sdk/openai', modelId: 'gpt-5.5', apiKey: 'sk-test', authType: 'api' });
+
+    expect(createOpenAI).toHaveBeenCalledWith({ apiKey: 'sk-test' });
+    vi.doUnmock('@ai-sdk/openai');
+  });
+
   // The Codex backend gates newer models on this header: gpt-6-astra answered
   // "requires a newer version of Codex. Please upgrade to the latest app or CLI"
   // (HTTP 400) while it was pinned at 0.144.1. Nothing tied the header to the

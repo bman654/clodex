@@ -34,7 +34,9 @@ describe('opencode-go catalog invariants', () => {
         expect(model.apiUrl, model.id).toBe('https://opencode.ai/zen/go');
       } else {
         expect(model.modelFormat, model.id).toBe('openai');
-        expect(model.npm, model.id).toBe('@ai-sdk/openai-compatible');
+        // Chat Completions entries use openai-compatible; Responses-only entries
+        // (Muse Spark) use @ai-sdk/openai. Both share the /v1 base.
+        expect(['@ai-sdk/openai-compatible', '@ai-sdk/openai'], model.id).toContain(model.npm);
         expect(model.apiUrl, model.id).toBe('https://opencode.ai/zen/go/v1');
       }
     }
@@ -82,7 +84,7 @@ describe('opencode-go catalog invariants', () => {
     const mappedIds = [
       'deepseek-v4-flash', 'deepseek-v4.1-flash', 'deepseek-v4-pro', 'glm-5.1', 'glm-5.2', 'gpt-5.6-luna',
       'hy3', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k3', 'mimo-v2.5', 'mimo-v2.5-pro',
-      'minimax-m2.7', 'minimax-m3', 'qwen3.6-plus', 'qwen3.7-max', 'qwen3.7-plus',
+      'minimax-m2.7', 'minimax-m3', 'muse-spark-1.2-contributor', 'muse-spark-1.3-contributor', 'qwen3.6-plus', 'qwen3.7-max', 'qwen3.7-plus',
       'qwen3.8-max',
     ];
     const hostileNames = ['constructor', 'toString', '__proto__', 'hasOwnProperty'];

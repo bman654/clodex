@@ -18,7 +18,7 @@ import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js
 import { isValidProviderId } from './validate.js';
 import {
   isRetainedOpenCodeGoProvider,
-  openCodeGoPinnedApiUrl,
+  openCodeGoPinnedModelApiUrl,
   retainedOpenCodeGoTemplate,
 } from './resolve-template.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
@@ -78,7 +78,7 @@ function resolveMaterializedApiUrl(
   if (!isRetainedOpenCodeGoProvider(provider)) {
     return cached.apiUrl ?? provider.api.url ?? '';
   }
-  return openCodeGoPinnedApiUrl(npm);
+  return openCodeGoPinnedModelApiUrl(npm);
 }
 
 /**

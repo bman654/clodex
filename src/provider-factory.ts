@@ -207,7 +207,11 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
             ...(spec.headers ? { headers: spec.headers } : {}),
             fetch: fetchWithoutCredentialHeaders,
           }
-        : { apiKey, ...(spec.headers ? { headers: spec.headers } : {}) };
+        // An API-key route to a third-party Responses host (OpenCode Go serves
+        // Muse Spark only on /v1/responses) must reach THAT host: without the
+        // base URL the SDK defaults to api.openai.com and sends the provider's
+        // key there.
+        : { apiKey, ...(baseURL ? { baseURL } : {}), ...(spec.headers ? { headers: spec.headers } : {}) };
     const openai = createOpenAI(oauthOptions);
     return useResponsesEndpoint ? openai.responses(modelId) : openai.chat(modelId);
   }

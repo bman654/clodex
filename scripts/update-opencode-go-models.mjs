@@ -34,7 +34,8 @@ const ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go';
 // routing knowledge: catalog entries only exist for ids mapped here. A new
 // model on models.dev surfaces in the updater's "unmapped" report and is added
 // once its transport is verified against the live endpoint. Responses-only
-// models (grok, mainline gpt) are deliberately absent.
+// models ride 'openai-responses' (the @ai-sdk/openai Responses path) only once
+// verified; grok and mainline gpt are still absent.
 const TRANSPORTS = Object.assign(Object.create(null), {
   'deepseek-v4-flash': 'openai-completions',
   // Measured 2026-09-11: V4.1 Flash answers on /v1/messages (thinking block + text).
@@ -51,6 +52,11 @@ const TRANSPORTS = Object.assign(Object.create(null), {
   'mimo-v2.5-pro': 'openai-completions',
   'minimax-m2.7': 'openai-completions',
   'minimax-m3': 'anthropic-messages',
+  // Measured 2026-09-13: both Muse Spark contributor models answer 200 on
+  // /v1/responses and 500 on /v1/chat/completions and /v1/messages; OpenCode's
+  // Go docs list them on /v1/responses with @ai-sdk/openai.
+  'muse-spark-1.2-contributor': 'openai-responses',
+  'muse-spark-1.3-contributor': 'openai-responses',
   'qwen3.6-plus': 'openai-completions',
   'qwen3.7-max': 'anthropic-messages',
   'qwen3.7-plus': 'anthropic-messages',
@@ -69,6 +75,11 @@ const TRANSPORTS = Object.assign(Object.create(null), {
 // below fails this updater if a map would send an effort value the feed does
 // not publish, and reports the safe direction rather than failing on it.
 const PATCHES = Object.assign(Object.create(null), {
+  // Muse Spark rides the @ai-sdk/openai Responses path, where effort is only
+  // sent for OpenAI/Codex model families (effortProviderOptions). The model
+  // reasons by default; clodex has no verified control to advertise yet.
+  'muse-spark-1.2-contributor': { supportsReasoningEffort: false },
+  'muse-spark-1.3-contributor': { supportsReasoningEffort: false },
   'deepseek-v4-flash': {
     reasoningEffortMap: { minimal: null, low: null, medium: null, high: 'high', max: 'max' },
     supportsStore: false,
@@ -337,7 +348,9 @@ function toClodexModel(id, devModel) {
     contextWindow: devModel.limit?.context,
     cost,
     modelFormat: anthropic ? 'anthropic' : 'openai',
-    npm: anthropic ? '@ai-sdk/anthropic' : '@ai-sdk/openai-compatible',
+    npm: anthropic
+      ? '@ai-sdk/anthropic'
+      : transport === 'openai-responses' ? '@ai-sdk/openai' : '@ai-sdk/openai-compatible',
     apiUrl: anthropic ? ANTHROPIC_BASE_URL : COMPLETIONS_BASE_URL,
     reasoning: devModel.reasoning === true,
     modalities,
