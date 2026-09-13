@@ -102,11 +102,12 @@ not divide. **Count each response once**: 254 request ids here carry more than o
 (retries), so joining usage per decision double-counts the successful attempt and inflated these very
 numbers by ~2.3M tokens.
 
-**Connection pools are process-wide, not per-partition:** `maxConnections` (established, default 64)
-and `maxNurseryConnections` (default 48). A head starts in the nursery and is promoted when selected
-for its first continuation, before that continuation is known to succeed — so a workload whose
-concurrent subagents inherit the parent's Claude session id, and therefore share one partition, can
-lose heads before their next turn and with them the continuation.
+**Connection pools are process-wide, not per-partition:** `maxConnections` (established) and
+`maxNurseryConnections`, both unbounded by default; the idle TTLs bound retention and descriptor
+exhaustion is handled, see "The pools are UNBOUNDED by default" below. A head starts in the nursery and is promoted when selected for
+its first continuation, before that continuation is known to succeed. Under an env-set cap, a workload whose concurrent
+subagents inherit the parent's Claude session id, and therefore share one partition, can lose heads
+before their next turn and with them the continuation.
 
 **Keeping a fan-out's chains alive trades throwaway sockets for retained heads.** The mismatching
 turn still opens its own socket; only a LATER turn of that conversation can reuse it. Of the 4,934
@@ -137,7 +138,7 @@ resuming that conversation costs a fresh upgrade and a full-context resend. Cons
 through the transport (nine sockets before this change, ten after), so the mechanism is established;
 its frequency in ordinary traffic is not, and the cap replay below finds no eviction-caused loss
 across the ledger's 27.6 hours: the ten real cap evictions displaced heads that had been idle 217-284
-seconds, already at the nursery TTL. The caps were nonetheless raised, on headroom over observed
+seconds, approaching the nursery TTL. The caps were nonetheless raised, on headroom over observed
 concurrency rather than on any observed loss — see the sizing discussion below.
 
 **On a fresh pool, and for a fan-out whose members have distinguishable opening turns, it opened
@@ -197,6 +198,49 @@ committed path, which has the same property. A stale memo could only mis-decide 
 don't-isolate — the committed history that drives `previous_response_id` is recomputed from
 `originalPayload` and never reads it.
 
+**The pools are UNBOUNDED by default; descriptor exhaustion is detected and handled as load
+shedding.** `RESPONSES_WS_MAX_CONNECTIONS` and `RESPONSES_WS_MAX_NURSERY_CONNECTIONS` are both
+`Infinity`, so `evictOldestIdleGeneration` never fires unless a finite cap is set —
+`CLODEX_WS_MAX_CONNECTIONS` / `CLODEX_WS_MAX_NURSERY_CONNECTIONS` (any positive integer; malformed
+values are logged and ignored) or the programmatic option, which outranks the environment. Such a
+cap bounds the IDLE pool only: busy heads still exceed it and isolated sockets are never counted.
+The `ws_head_decision` fields `maxConnections` / `maxNurseryConnections` read `null` when unbounded.
+The reasoning, from the sizing work below: every numeric cap was a guess per machine and per
+workload, a cap that bound cost a reusable conversation a full uncached resend, and head reuse in
+the 27.6-hour ledger was identical at every cap from 8 to unlimited. Retention is bounded by the
+idle and hard TTLs, and its ordinary cost is memory (~0.73 MiB per head measured; the pacer's 60
+dials/min times the TTLs bounds idle occupancy at roughly 300 nursery / 1,800 established heads,
+against an observed organic peak of 28). Descriptors are the backstop, not the usual bound: Node
+raises `RLIMIT_NOFILE`'s soft limit to the hard limit at startup (a stock macOS shell reports a 256
+SOFT limit; Node saw 245,749), so only a service or container with a clamped HARD limit reaches
+exhaustion. Note that plain `ulimit -n N` in bash/zsh clamps both, which is why that is the
+reproduction and not the counterexample.
+
+When it does, `descriptorExhaustionCode` in `createConnection`'s `error` handler decides whether a
+failed dial was descriptor exhaustion: `EMFILE`/`ENFILE` as the socket's error code, or — because
+the shipped route is a hostname, and a full descriptor table fails inside `getaddrinfo` first, which
+Node reports as `ENOTFOUND` with no cause — any other socket-open error whose one-descriptor probe
+(`fs.openSync(os.devNull)`, closed at once) throws `EMFILE`/`ENFILE`. Reproduced on macOS and Linux
+under a hard `ulimit -n 40`; a real `ENOTFOUND` with descriptors available (1,338 in the local
+ledgers) stays on the ordinary path. Then `shedIdleConnectionsForDescriptors` **terminates** every
+idle pooled head (not `close()`: a close handshake holds the descriptor until the peer answers or
+ws's 30 s timer fires; `terminate()` destroys the socket and Node closes the descriptor
+synchronously inside `uv_close`), oldest first, busy heads and isolated sockets untouched; the
+request then takes the ordinary one-shot transport retry, whose replacement dials against the freed
+descriptors. If that retry is starved too there was nothing idle to shed, and the request fails with
+a message naming the limit and the remedy — bounded by the single retry, never a loop. Each
+occurrence records a `ws_descriptor_exhaustion` diagnostic (`code`, `detectedBy: error_code |
+descriptor_probe`, `socketErrorCode`, `heldConnections` = pooled entries registered other than the
+failing dial, `shedConnections`); the shed heads are NOT in any decision's `evictions` array,
+because the shed happens in the socket error handler rather than at a head decision. The user is
+told **once per process**, on the parent-notice channel (the muted stderr under `clodex claude`
+would swallow it): which limit, how many pooled connections were registered and shed, and the remedy
+— `ulimit -n` in the launching shell or the service limit for `EMFILE`; for `ENFILE`, the kernel
+file table, which no per-process knob raises. Nothing here reads heap pressure.
+
+The rest of this section is the sizing history that led there. It remains accurate about how the
+caps behave when an env override sets one, and about how NOT to reason from a ledger replay.
+
 **Cap enforcement touches BOTH pools, at two different moments.** Creating a retained head calls
 `evictOldestIdleGeneration('nursery', maxNurseryConnections, 'nursery_lru_cap')` first; when that head
 is later selected for its first continuation, `continueOnHead` calls
@@ -207,7 +251,8 @@ which could be a large long-lived conversation that then resends full context. W
 `established_lru_cap` alongside `nursery_lru_cap`.
 
 **Pool caps are sized from peak OCCUPANCY, and a replay that reasons from eviction victim ages will
-mislead you.** The two shipped caps rest on very different evidence and should be changed separately.
+mislead you.** The two caps that shipped before the default became unbounded (64 established / 48
+nursery) rested on very different evidence.
 
 The established cap went 32 -> 64 on demand: this ledger's established gauge peaked at 28 against the
 old cap of 32, in ORGANIC traffic, and replaying it with the turns it used to isolate keeping heads of
@@ -234,7 +279,7 @@ with the cap and saturates at the nursery TTL, so the criterion reduces to arriv
 and mostly encodes whatever retry storm dominates the sample.
 
 **What the ledger does establish, from its own gauges rather than a model:** 10 real `nursery_lru_cap`
-evictions and zero `established_lru_cap` ones; the nursery victims had been idle 217-284s, already at
+evictions and zero `established_lru_cap` ones; the nursery victims had been idle 217-284s, approaching
 the 5-minute nursery TTL, so no recorded cap eviction cost a reusable conversation. Head reuse was
 cap-invariant across every setting replayed, including unlimited. The case for raising a cap is
 headroom over concurrency, never an observed loss.
@@ -278,7 +323,7 @@ identifying the cause needed `--ws-diagnostics` and a JSONL trawl. Watch `idle_m
 count: an eviction whose victim had been idle for minutes cost nothing, and one at a few seconds is
 the signal that a cap is too small.
 
-**An empty slot is free, so treat the caps as safety valves rather than tuning knobs.** They are read
+**An empty slot is free, which is why the default is no cap at all.** The caps are read
 only by the `>=` comparison in `evictOldestIdleGeneration` and echoed into diagnostics; nothing is
 preallocated and the registry is a `Map` of `Set`s sized by live entries, so unused capacity costs
 zero bytes and zero cycles, and eviction's sort is over actual entries. The caps also do not govern
@@ -287,20 +332,15 @@ hitting one is the expensive event: a reusable conversation is discarded and its
 uncached prompt plus a fresh upgrade. The pool size a workload actually needs is a property of how
 many agents are running, and churning connections underneath that number costs more than holding them.
 
-What a larger cap does raise is the ceiling on sockets HELD at once — 40 idle heads to 112 — each
-holding its conversation plus the canonical copy memoized for prefix comparison (roughly twice the
-context; 16 in-flight heads measured 11.7MB), bounded in practice by the 5- and 30-minute idle TTLs.
-**File descriptors are the real ceiling and the reason not to go much higher.** 112 is under half the
-256-descriptor soft limit a stock macOS shell commonly carries, and there is no `EMFILE` handling on
-this path, so exceeding a user's limit is an unhandled failure rather than a degraded mode. Check that
-before raising these again. The edge's own per-account connection limit is separate and not known; the
-44 upgrade rejections in this ledger are the only evidence about it.
-Override via `CLODEX_WS_MAX_CONNECTIONS` /
-`CLODEX_WS_MAX_NURSERY_CONNECTIONS` (integer 1–1024; malformed values are logged and ignored). An
-explicit programmatic option outranks the environment so tests are never perturbed. Eviction reasons
+What retention does raise is the number of heads HELD at once, each holding its conversation plus,
+once prefix comparison has memoized one, a canonical copy (16 in-flight heads measured 11.7MB;
+~0.73 MiB per head), bounded in practice by the 5- and 30-minute idle TTLs. Memory is the ordinary
+ceiling; descriptors are the backstop, handled as described above, and the reason a numeric cap is
+no longer needed to stay under either. The edge's own per-account connection limit is separate and
+not known; the 44 upgrade rejections in this ledger are the only evidence about it. Eviction reasons
 (`nursery_lru_cap`, `established_lru_cap`, `idle_ttl`, `nursery_idle_ttl`, `hard_ttl`) appear in the
-`evictions` array on every `ws_head_decision` diagnostic — sustained `*_lru_cap` counts mean a cap
-is too small.
+`evictions` array on every `ws_head_decision` diagnostic — a `*_lru_cap` entry can only appear under
+a finite cap.
 
 ### Pacing new connections
 
