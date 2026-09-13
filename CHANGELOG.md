@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.12.2](https://github.com/bman654/clodex/compare/v2.12.1...v2.12.2) (2026-09-13)
+
+
+### Bug Fixes
+
+* **oauth:** stop resending the whole conversation uncached after an approved tool call ([#214](https://github.com/bman654/clodex/issues/214)) ([0369ea7](https://github.com/bman654/clodex/commit/0369ea7ac76b0023be40780373f08e0f3607d91a))
+* **opencode-go:** make OpenCode Go models answer again and add DeepSeek V4.1 Flash ([#213](https://github.com/bman654/clodex/issues/213)) ([4295a39](https://github.com/bman654/clodex/commit/4295a399877801d4f84814f2d40ad93532355547))
+
 ## [2.12.1](https://github.com/bman654/clodex/compare/v2.12.0...v2.12.1) (2026-09-12)
 
 
