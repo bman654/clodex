@@ -11,6 +11,7 @@ class FakeWebSocket extends EventEmitter {
   options: { headers?: Record<string, string> };
   send = vi.fn();
   close = vi.fn();
+  terminate = vi.fn();
   constructor(url: string, options: { headers?: Record<string, string> }) {
     super();
     this.url = url;
@@ -21,9 +22,26 @@ class FakeWebSocket extends EventEmitter {
 
 vi.mock('ws', () => ({ WebSocket: FakeWebSocket, default: FakeWebSocket }));
 
+// The descriptor probe opens the null device; tests make that throw to stand in
+// for a full descriptor table without lowering the test runner's own limit.
+const descriptorProbe = vi.hoisted(() => ({ failWith: undefined as string | undefined }));
+vi.mock('node:fs', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    openSync: ((...args: Parameters<typeof actual.openSync>) => {
+      if (descriptorProbe.failWith) {
+        throw Object.assign(new Error(`${descriptorProbe.failWith}: too many open files`), { code: descriptorProbe.failWith });
+      }
+      return actual.openSync(...args);
+    }) as typeof actual.openSync,
+  };
+});
+
 import { installParentNoticeSink } from '../src/parent-notice.js';
 import {
   createResponsesWebSocketFetch,
+  resetDescriptorExhaustionNoticeForTests,
   resetReasoningGapWarningsForTests,
   resetToolArgumentGapWarningsForTests,
   resetResponsesWebSocketConnectionsForTests,
@@ -5094,10 +5112,11 @@ describe('createResponsesWebSocketFetch', () => {
     (diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!.evictions ?? []) as
       Record<string, unknown>[];
 
-  it('reports the shipped pool caps when nothing overrides them', async () => {
+  it('reports the shipped pools as unbounded when nothing overrides them', async () => {
     // The defaults are the deliverable of the sizing change, and they reach behaviour
     // only through option resolution — so read them back off a decision made by a
     // fetch constructed the way production constructs one, not off the constants.
+    // `null` is the unbounded default: the descriptor limit is the ceiling.
     // The env overrides must be cleared: a developer who exports them for their own
     // server would otherwise have this test confirm THEIR caps as the shipped ones.
     const saved = [
@@ -5122,7 +5141,7 @@ describe('createResponsesWebSocketFetch', () => {
       emitTextResponse(lastSocket(), 'resp_default_caps', 'ok');
       await readAll(response);
       expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
-        .toMatchObject({ maxConnections: 64, maxNurseryConnections: 48 });
+        .toMatchObject({ maxConnections: null, maxNurseryConnections: null });
     } finally {
       if (saved[0] !== undefined) process.env.CLODEX_WS_MAX_CONNECTIONS = saved[0];
       if (saved[1] !== undefined) process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS = saved[1];
@@ -6744,6 +6763,437 @@ describe('new-connection pacing', () => {
     } finally {
       delete process.env.CLODEX_WS_MAX_NEW_CONNECTIONS_PER_MIN;
       resetResponsesWebSocketConnectionsForTests();
+    }
+  });
+});
+
+describe('descriptor exhaustion', () => {
+  beforeEach(() => {
+    resetResponsesWebSocketConnectionsForTests();
+    resetDescriptorExhaustionNoticeForTests();
+    descriptorProbe.failWith = undefined;
+    fakeSockets.length = 0;
+  });
+
+  /** Admits every request at once; the shared pacer would queue a large fan-out. */
+  const instantPacer = () => ({ admit: vi.fn(async () => ({ kind: 'admitted' as const, waitedMs: 0 })) });
+
+  const rootPayload = (text: string, sessionId: string) => sessionPayload(
+    [{ role: 'user', content: [{ type: 'input_text', text }] }],
+    { prompt_cache_key: sessionId },
+  );
+
+  /** Opens one head per session id and completes its turn, leaving it idle. */
+  async function openIdleHeads(
+    wsFetch: ReturnType<typeof createResponsesWebSocketFetch>,
+    sessionIds: string[],
+  ): Promise<FakeWebSocket[]> {
+    const sockets: FakeWebSocket[] = [];
+    for (const sessionId of sessionIds) {
+      const response = await wsFetch('https://x', {
+        method: 'POST', headers: {},
+        body: JSON.stringify(rootPayload(`root ${sessionId}`, sessionId)),
+      });
+      const socket = lastSocket();
+      socket.emit('open');
+      emitTextResponse(socket, `resp_${sessionId}`, 'ok');
+      await readAll(response);
+      sockets.push(socket);
+    }
+    return sockets;
+  }
+
+  it('keeps more heads than the old caps allowed, with no cap eviction', async () => {
+    // 48 was the nursery cap this replaces; every one of these heads is a
+    // conversation whose next turn would otherwise resend its history uncached.
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-unbounded',
+      pacer: instantPacer(),
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const sessionIds = Array.from({ length: 60 }, (_, index) => `session-${index}`);
+    const sockets = await openIdleHeads(wsFetch, sessionIds);
+    expect(sockets.every(socket => !socket.close.mock.calls.length)).toBe(true);
+    const evictions = diagnostics
+      .filter(event => event.event === 'ws_head_decision')
+      .flatMap(event => (event.evictions ?? []) as Record<string, unknown>[]);
+    expect(evictions).toEqual([]);
+    // A decision is recorded before its own head registers, so the last one
+    // counts the 59 heads already held.
+    expect(diagnostics.at(-1)).toMatchObject({
+      event: 'ws_head_decision',
+      nurseryConnectionCount: 59,
+      maxNurseryConnections: null,
+    });
+  });
+
+  it('sheds idle heads on EMFILE, retries on freed descriptors, and tells the user once', async () => {
+    const notices: string[] = [];
+    const release = installParentNoticeSink(line => notices.push(line));
+    try {
+      const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-emfile',
+        pacer: instantPacer(),
+        onDiagnostic: event => diagnostics.push(event),
+      });
+      const [older, newer] = await openIdleHeads(wsFetch, ['older', 'newer']);
+
+      const response = await withResponsesWebSocketDiagnosticContext(
+        { requestId: 'req-emfile' },
+        () => wsFetch('https://x', {
+          method: 'POST', headers: {},
+          body: JSON.stringify(rootPayload('third conversation', 'third')),
+        }),
+      );
+      const starved = lastSocket();
+      expect(fakeSockets).toHaveLength(3);
+      starved.emit('error', Object.assign(new Error('connect EMFILE 1.2.3.4:443'), { code: 'EMFILE' }));
+
+      // Idle heads are torn down hard — a graceful close keeps the descriptor
+      // until the peer answers — and the replacement is dialled right away.
+      expect(older!.terminate).toHaveBeenCalledOnce();
+      expect(newer!.terminate).toHaveBeenCalledOnce();
+      expect(older!.close).not.toHaveBeenCalled();
+      expect(fakeSockets).toHaveLength(4);
+      const replacement = lastSocket();
+      replacement.emit('open');
+      emitTextResponse(replacement, 'resp_third', 'recovered');
+      expect(await readAll(response)).toContain('recovered');
+
+      expect(diagnostics).toContainEqual(expect.objectContaining({
+        event: 'ws_descriptor_exhaustion',
+        requestId: 'req-emfile',
+        code: 'EMFILE',
+        detectedBy: 'error_code',
+        heldConnections: 2,
+        shedConnections: 2,
+      }));
+      expect(diagnostics).toContainEqual(expect.objectContaining({
+        event: 'ws_transport_retry', outcome: 'recovered', requestId: 'req-emfile',
+      }));
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain("this process's open-file limit was reached (EMFILE)");
+      expect(notices[0]).toContain('had 2 pooled connection(s) registered');
+      expect(notices[0]).toContain('closed 2 idle');
+      expect(notices[0]).toContain('ulimit -n');
+
+      // A later exhaustion in the same process is recorded, not re-announced.
+      const again = await wsFetch('https://x', {
+        method: 'POST', headers: {},
+        body: JSON.stringify(rootPayload('fourth conversation', 'fourth')),
+      });
+      // The shed heads are gone from the pool: this decision sees only the
+      // recovered third head.
+      expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+        .toMatchObject({ activeConnectionCount: 1 });
+      lastSocket().emit('error', Object.assign(new Error('connect ENFILE'), { code: 'ENFILE' }));
+      const secondReplacement = lastSocket();
+      secondReplacement.emit('open');
+      emitTextResponse(secondReplacement, 'resp_fourth', 'again');
+      expect(await readAll(again)).toContain('again');
+      expect(diagnostics.filter(event => event.event === 'ws_descriptor_exhaustion'))
+        .toHaveLength(2);
+      expect(notices).toHaveLength(1);
+    } finally {
+      release();
+    }
+  });
+
+  it('never sheds a head that is carrying a response', async () => {
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-emfile-busy',
+      pacer: instantPacer(),
+    });
+    const busyResponse = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(rootPayload('busy conversation', 'busy')),
+    });
+    const busySocket = lastSocket();
+    busySocket.emit('open');
+    // Its turn is still streaming: nothing has completed on this socket.
+    const [idle] = await openIdleHeads(wsFetch, ['idle']);
+
+    const starvedResponse = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(rootPayload('starved conversation', 'starved')),
+    });
+    lastSocket().emit('error', Object.assign(new Error('connect EMFILE'), { code: 'EMFILE' }));
+
+    expect(idle!.terminate).toHaveBeenCalledOnce();
+    expect(busySocket.terminate).not.toHaveBeenCalled();
+    expect(busySocket.close).not.toHaveBeenCalled();
+
+    const replacement = lastSocket();
+    replacement.emit('open');
+    emitTextResponse(replacement, 'resp_starved', 'starved ok');
+    expect(await readAll(starvedResponse)).toContain('starved ok');
+    emitTextResponse(busySocket, 'resp_busy', 'busy ok');
+    expect(await readAll(busyResponse)).toContain('busy ok');
+  });
+
+  it('fails with an actionable message when the retry is starved too, and does not loop', async () => {
+    const notices: string[] = [];
+    const release = installParentNoticeSink(line => notices.push(line));
+    try {
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-emfile-exhausted',
+        pacer: instantPacer(),
+      });
+      const response = await wsFetch('https://x', {
+        method: 'POST', headers: {},
+        body: JSON.stringify(rootPayload('only conversation', 'only')),
+      });
+      lastSocket().emit('error', Object.assign(new Error('connect EMFILE'), { code: 'EMFILE' }));
+      expect(fakeSockets).toHaveLength(2);
+      lastSocket().emit('error', Object.assign(new Error('connect EMFILE'), { code: 'EMFILE' }));
+      expect(fakeSockets).toHaveLength(2);
+
+      const body = await readAll(response);
+      expect(body).toContain('open-file limit was reached (EMFILE)');
+      expect(body).toContain('0 pooled connection(s) registered');
+      expect(body).toContain('ulimit -n');
+      expect(body).not.toContain('connect EMFILE');
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain('closed 0 idle');
+    } finally {
+      release();
+    }
+  });
+
+  it('leaves other socket errors on the ordinary retry path', async () => {
+    const notices: string[] = [];
+    const release = installParentNoticeSink(line => notices.push(line));
+    try {
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-not-emfile',
+        pacer: instantPacer(),
+      });
+      const [idle] = await openIdleHeads(wsFetch, ['idle']);
+      const response = await wsFetch('https://x', {
+        method: 'POST', headers: {},
+        body: JSON.stringify(rootPayload('reset conversation', 'reset')),
+      });
+      lastSocket().emit('error', Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }));
+      expect(idle!.terminate).not.toHaveBeenCalled();
+      expect(notices).toEqual([]);
+      const replacement = lastSocket();
+      replacement.emit('open');
+      emitTextResponse(replacement, 'resp_reset', 'ok');
+      expect(await readAll(response)).toContain('ok');
+    } finally {
+      release();
+    }
+  });
+
+  it('sheds established heads too, oldest first', async () => {
+    // Established heads are the dominant idle population a full descriptor
+    // table finds (organic peak 28 vs 1-4 nursery), and promotion happens only
+    // on a continuation — so this stages a real second turn.
+    let clock = 1_000_000;
+    const now = () => clock;
+    const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+      accountId: 'acct-emfile-established',
+      pacer: instantPacer(),
+      now,
+      onDiagnostic: event => diagnostics.push(event),
+    });
+    const firstInput = [{ role: 'user', content: [{ type: 'input_text', text: 'turn one' }] }];
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload(firstInput, { prompt_cache_key: 'established' })),
+    });
+    const established = lastSocket();
+    established.emit('open');
+    emitTextResponse(established, 'resp_e1', 'one');
+    await readAll(first);
+
+    clock += 1_000;
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([
+        ...firstInput,
+        { role: 'assistant', content: [{ type: 'output_text', text: 'one' }] },
+        { role: 'user', content: [{ type: 'input_text', text: 'turn two' }] },
+      ], { prompt_cache_key: 'established' })),
+    });
+    expect(fakeSockets).toHaveLength(1);
+    expect(JSON.parse(established.send.mock.calls[1]![0] as string).previous_response_id).toBe('resp_e1');
+    // Promotion happens when the head is selected, so the decision already
+    // reports the generation the shed will find.
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+      .toMatchObject({ decision: 'continuation', selectedGeneration: 'established' });
+    emitTextResponse(established, 'resp_e2', 'two');
+    await readAll(second);
+
+    // A younger nursery head, used more recently than the established one.
+    clock += 1_000;
+    const [nursery] = await openIdleHeads(wsFetch, ['younger']);
+
+    clock += 1_000;
+    const starved = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(rootPayload('starved', 'starved')),
+    });
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+      .toMatchObject({ establishedConnectionCount: 1, nurseryConnectionCount: 1 });
+    lastSocket().emit('error', Object.assign(new Error('connect EMFILE'), { code: 'EMFILE' }));
+
+    expect(established.terminate).toHaveBeenCalledOnce();
+    expect(nursery!.terminate).toHaveBeenCalledOnce();
+    expect(established.close).not.toHaveBeenCalled();
+    // Oldest first: the established head was last used before the nursery one.
+    expect(established.terminate.mock.invocationCallOrder[0]!)
+      .toBeLessThan(nursery!.terminate.mock.invocationCallOrder[0]!);
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      event: 'ws_descriptor_exhaustion', heldConnections: 2, shedConnections: 2,
+    }));
+    const replacement = lastSocket();
+    replacement.emit('open');
+    emitTextResponse(replacement, 'resp_starved', 'recovered');
+    expect(await readAll(starved)).toContain('recovered');
+  });
+
+  it('detects exhaustion behind a hostname lookup failure by probing a descriptor', async () => {
+    // The shipped route is a hostname, and a full descriptor table fails inside
+    // getaddrinfo — the socket reports ENOTFOUND, not EMFILE.
+    const notices: string[] = [];
+    const release = installParentNoticeSink(line => notices.push(line));
+    try {
+      const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-enotfound',
+        pacer: instantPacer(),
+        onDiagnostic: event => diagnostics.push(event),
+      });
+      const [idle] = await openIdleHeads(wsFetch, ['idle']);
+      const response = await wsFetch('https://x', {
+        method: 'POST', headers: {},
+        body: JSON.stringify(rootPayload('starved', 'starved')),
+      });
+      descriptorProbe.failWith = 'EMFILE';
+      lastSocket().emit('error', Object.assign(new Error('getaddrinfo ENOTFOUND chatgpt.com'), { code: 'ENOTFOUND' }));
+      descriptorProbe.failWith = undefined;
+
+      expect(idle!.terminate).toHaveBeenCalledOnce();
+      expect(diagnostics).toContainEqual(expect.objectContaining({
+        event: 'ws_descriptor_exhaustion',
+        code: 'EMFILE',
+        detectedBy: 'descriptor_probe',
+        socketErrorCode: 'ENOTFOUND',
+        heldConnections: 1,
+        shedConnections: 1,
+      }));
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain('(EMFILE)');
+      const replacement = lastSocket();
+      replacement.emit('open');
+      emitTextResponse(replacement, 'resp_starved', 'recovered');
+      expect(await readAll(response)).toContain('recovered');
+    } finally {
+      release();
+    }
+  });
+
+  it('leaves a genuine lookup failure alone when descriptors are available', async () => {
+    const notices: string[] = [];
+    const release = installParentNoticeSink(line => notices.push(line));
+    try {
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-real-enotfound',
+        pacer: instantPacer(),
+      });
+      const [idle] = await openIdleHeads(wsFetch, ['idle']);
+      const response = await wsFetch('https://x', {
+        method: 'POST', headers: {},
+        body: JSON.stringify(rootPayload('offline', 'offline')),
+      });
+      lastSocket().emit('error', Object.assign(new Error('getaddrinfo ENOTFOUND chatgpt.com'), { code: 'ENOTFOUND' }));
+      lastSocket().emit('error', Object.assign(new Error('getaddrinfo ENOTFOUND chatgpt.com'), { code: 'ENOTFOUND' }));
+      expect(idle!.terminate).not.toHaveBeenCalled();
+      expect(notices).toEqual([]);
+      expect(await readAll(response)).toContain('ENOTFOUND');
+    } finally {
+      release();
+    }
+  });
+
+  it('names the system-wide limit on ENFILE and does not prescribe ulimit', async () => {
+    const notices: string[] = [];
+    const release = installParentNoticeSink(line => notices.push(line));
+    try {
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-enfile',
+        pacer: instantPacer(),
+      });
+      const response = await wsFetch('https://x', {
+        method: 'POST', headers: {},
+        body: JSON.stringify(rootPayload('only', 'only')),
+      });
+      lastSocket().emit('error', Object.assign(new Error('connect ENFILE'), { code: 'ENFILE' }));
+      lastSocket().emit('error', Object.assign(new Error('connect ENFILE'), { code: 'ENFILE' }));
+      const body = await readAll(response);
+      expect(body).toContain('system-wide open-file limit was reached (ENFILE)');
+      expect(body).not.toContain('ulimit');
+      expect(notices).toHaveLength(1);
+      expect(notices[0]).toContain('system-wide open-file limit was reached (ENFILE)');
+      expect(notices[0]).not.toContain('ulimit');
+    } finally {
+      release();
+    }
+  });
+
+  it('honours an env cap above the old 1024 ceiling instead of ignoring it', async () => {
+    process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS = '2000';
+    try {
+      const diagnostics: ResponsesWebSocketDiagnosticEvent[] = [];
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-big-cap',
+        onDiagnostic: event => diagnostics.push(event),
+      });
+      await openIdleHeads(wsFetch, ['one']);
+      expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+        .toMatchObject({ maxNurseryConnections: 2000 });
+    } finally {
+      delete process.env.CLODEX_WS_MAX_NURSERY_CONNECTIONS;
+    }
+  });
+
+  it('does not shed on an error from a socket that is already open', async () => {
+    // An open socket holds its own descriptor; a mid-stream failure there is not
+    // a starved dial, and after output there is no retry to benefit from a shed.
+    const notices: string[] = [];
+    const release = installParentNoticeSink(line => notices.push(line));
+    try {
+      const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, {
+        accountId: 'acct-open-error',
+        pacer: instantPacer(),
+      });
+      const [idle] = await openIdleHeads(wsFetch, ['idle']);
+      const response = await wsFetch('https://x', {
+        method: 'POST', headers: {},
+        body: JSON.stringify(rootPayload('streaming', 'streaming')),
+      });
+      const streaming = lastSocket();
+      streaming.emit('open');
+      streaming.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_s' } })));
+      streaming.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_item.added', output_index: 0, item: { type: 'message', id: 'msg_s' },
+      })));
+      streaming.emit('message', Buffer.from(JSON.stringify({
+        type: 'response.output_text.delta', item_id: 'msg_s', delta: 'partial',
+      })));
+      descriptorProbe.failWith = 'EMFILE';
+      streaming.emit('error', Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }));
+      descriptorProbe.failWith = undefined;
+      expect(idle!.terminate).not.toHaveBeenCalled();
+      expect(notices).toEqual([]);
+      expect(fakeSockets).toHaveLength(2);
+      expect(await readAll(response)).toContain('ECONNRESET');
+    } finally {
+      release();
     }
   });
 });

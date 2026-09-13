@@ -7,6 +7,8 @@
 // only after proving the next translated conversation appends to the chain head.
 
 import { createHash } from 'node:crypto';
+import { closeSync, openSync } from 'node:fs';
+import { devNull } from 'node:os';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { FetchFunction } from '@ai-sdk/provider-utils';
 import type { RawData, WebSocket as WsWebSocket } from 'ws';
@@ -36,48 +38,32 @@ export const RESPONSES_WS_HARD_TTL_MS = 55 * 60_000;
 export const RESPONSES_WS_IDLE_TTL_MS = 30 * 60_000;
 export const RESPONSES_WS_NURSERY_IDLE_TTL_MS = 5 * 60_000;
 /**
- * Pool caps. An unused slot costs nothing — the caps are read only by the `>=`
- * comparison in `evictOldestIdleGeneration`, nothing is preallocated, and the
- * registry is sized by live entries — while hitting a cap discards a reusable
- * conversation whose next turn then pays a full uncached prompt plus a fresh
- * upgrade. The asymmetry is the whole argument: size these above demand, because
- * unused capacity is free and a cap that binds is not.
+ * Pool caps: UNBOUNDED by default. The idle TTLs below are the retention
+ * policy; nothing else shrinks the pools unless the machine runs out of file
+ * descriptors, and that case is detected and handled as load shedding (see
+ * `shedIdleConnectionsForDescriptors`) rather than as a failure.
  *
- * The two numbers rest on different strengths of evidence. Say so before changing
- * either.
+ * A numeric cap was tried first (8/32, then 48/64) and every value was wrong for
+ * somebody: it had to be guessed per machine and per workload, and getting it
+ * wrong degraded SILENTLY — a cap eviction discards a reusable conversation whose
+ * next turn then resends its whole history uncached. The evidence that made the
+ * caps removable: over a 27.6-hour local ledger, head reuse was identical at
+ * every cap from 8 to unlimited, and the ten real cap evictions displaced heads
+ * idle 217-284s, approaching the 5-minute nursery TTL.
  *
- * `maxConnections` (established) 32 -> 64 is demand-driven. In a 27.6-hour local
- * ledger the established gauge peaked at 28 against the old cap of 32 — 88% of it —
- * in ORGANIC traffic, and replaying that ledger with the turns it used to isolate
- * keeping heads of their own puts the peak at 46. 32 was genuinely tight.
- *
- * `maxNurseryConnections` 8 -> 48 is a deliberately generous safety valve, NOT a
- * measured requirement. Organic nursery occupancy in that ledger was 1-4 for 22 of
- * 24 hours; a 16-conversation lab fan-out reached 11; the only readings near 24 came
- * from a single hour of upstream auth failures and its aftermath. 48 covers a
- * fan-out several times larger than anything observed, and is chosen because
- * overshoot is free rather than because demand was seen at that level.
- *
- * DO NOT re-derive these from eviction victim ages, and distrust any replay that
- * says you should. An earlier attempt did and was wrong three ways: it fed every
- * head decision into the pool including ~3,880 `parallel_isolated` ones that are
- * never registered in a pool at all; it never tore down heads whose request FAILED,
- * though `failContext` ends in `deleteEntry`, so 84% of its eviction "victims" could
- * not exist; and it compared idle time against request-start-to-request-start gaps,
- * which include generation time. The check that catches all of it: that model
- * predicted 231 nursery cap evictions at the cap this ledger actually ran, which
- * recorded 10. Measured from completion, the real idle horizon is p50 0.1s / p90
- * 0.8s / p99 22.2s, and the 10 real cap evictions displaced heads idle 217-284s —
- * at the 5-minute nursery TTL, costing nothing.
- *
- * Neither cap is a hard ceiling: only IDLE entries are evictable, so a generation
- * can exceed its cap while every head is busy, and isolated sockets are never
- * registered and never counted. The cost that scales with these numbers is memory —
- * each retained head holds its conversation plus a canonical copy for prefix
- * comparison — plus held descriptors, and there is no EMFILE handling on this path.
+ * Neither cap was a hard ceiling anyway: only IDLE entries are evictable, so a
+ * generation exceeded its cap while every head was busy, and isolated sockets
+ * are never registered and never counted. The ordinary cost of retention is
+ * memory — a retained head holds its conversation, plus a canonical copy once
+ * prefix comparison has memoized one (~0.73 MiB per head measured) — bounded by
+ * the pacer (60 dials/min) times the TTLs. Descriptors are the backstop, not the
+ * usual bound: Node raises the soft limit to the hard limit at startup, so only
+ * a service or container with a clamped HARD limit reaches `EMFILE`.
+ * `CLODEX_WS_MAX_CONNECTIONS` / `CLODEX_WS_MAX_NURSERY_CONNECTIONS` stay as an
+ * optional cap on the idle pool for anyone who wants one.
  */
-export const RESPONSES_WS_MAX_CONNECTIONS = 64;
-export const RESPONSES_WS_MAX_NURSERY_CONNECTIONS = 48;
+export const RESPONSES_WS_MAX_CONNECTIONS = Number.POSITIVE_INFINITY;
+export const RESPONSES_WS_MAX_NURSERY_CONNECTIONS = Number.POSITIVE_INFINITY;
 
 export interface ResponsesWebSocketFetchOptions {
   providerId?: string;
@@ -230,9 +216,9 @@ interface ConnectionEntry {
 // once: rewinds/branches, hidden title-generation requests, and stop hooks can
 // all share its model/effort/cache key. Retain each head and select by exact
 // conversation prefix instead of letting the newest branch replace the rest.
-// New heads live in a separately capped nursery LRU until their first reuse;
-// established heads therefore never consume nursery capacity, and one-shot
-// nursery traffic never consumes the established LRU's reserved slots.
+// New heads live in a nursery generation until their first reuse, with its own
+// (shorter) idle TTL and, under an env cap, its own LRU — so one-shot nursery
+// traffic never displaces established heads.
 const connections = new Map<string, Set<ConnectionEntry>>();
 let nextConnectionDebugId = 1;
 
@@ -1716,6 +1702,135 @@ function evictOldestIdleGeneration(
   return evictions;
 }
 
+/**
+ * The process ran out of file descriptors while opening a socket. `EMFILE` is
+ * the per-process limit, `ENFILE` the system-wide file table. A numeric-address
+ * dial reports either as the socket's `error` code — but the shipped route is a
+ * HOSTNAME, and a full descriptor table fails inside `getaddrinfo` first, which
+ * Node reports as `ENOTFOUND` with no cause. So the error code alone is not the
+ * detector: on any other socket-open error, `descriptorExhaustionCode` probes
+ * the process directly by opening one descriptor. Reproduced on macOS and
+ * Linux under a hard `ulimit -n 40`: `dns.lookup('chatgpt.com')` -> ENOTFOUND,
+ * `net.connect(port, '127.0.0.1')` -> EMFILE, and freeing one descriptor makes
+ * the same lookup succeed.
+ */
+const DESCRIPTOR_EXHAUSTION_CODES = new Set(['EMFILE', 'ENFILE']);
+
+function isDescriptorExhaustion(code: unknown): code is string {
+  return typeof code === 'string' && DESCRIPTOR_EXHAUSTION_CODES.has(code);
+}
+
+/**
+ * The exhaustion code behind a socket-open failure, or undefined when the
+ * process can still open a descriptor. The probe costs one open/close of the
+ * null device and runs only on the failure path.
+ */
+function descriptorExhaustionCode(error: Error): string | undefined {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (isDescriptorExhaustion(code)) return code;
+  try {
+    closeSync(openSync(devNull, 'r'));
+    return undefined;
+  } catch (probe) {
+    const probeCode = (probe as NodeJS.ErrnoException).code;
+    return isDescriptorExhaustion(probeCode) ? probeCode : undefined;
+  }
+}
+
+let descriptorExhaustionNoticed = false;
+
+export function resetDescriptorExhaustionNoticeForTests(): void {
+  descriptorExhaustionNoticed = false;
+}
+
+/**
+ * Descriptor exhaustion, handled as load-shedding rather than as a failure.
+ *
+ * With no numeric pool cap, the descriptor limit is where the pool stops
+ * growing — so hitting it is exactly the condition a cap eviction used to
+ * stand in for, now signalled by the machine instead of guessed. Every idle
+ * pooled head is closed, oldest first, so the transport retry that follows
+ * (`retryTransportFailure`, one attempt with the full context) opens its
+ * replacement against freed descriptors. Busy heads and isolated sockets are
+ * untouched: they carry a response somebody is waiting on, and closing them
+ * trades one failure for another. When nothing is idle there is nothing to
+ * shed, the retry reports the same exhaustion, and the request fails with a
+ * message that names the limit — bounded by the single retry, never a loop.
+ *
+ * Victims are TERMINATED, not closed. `close()` starts the WebSocket closing
+ * handshake and the descriptor stays open until the peer answers (or ws's
+ * 30-second close timeout fires); `terminate()` destroys the underlying socket,
+ * and Node closes the descriptor synchronously inside `uv_close`, so the
+ * replacement dialled in the same tick can take it.
+ *
+ * The user is told ONCE per process, on the parent-notice channel — the muted
+ * stderr under `clodex claude` would swallow it (see src/parent-notice.ts) —
+ * in terms they can act on: which limit, how many pooled connections were
+ * registered, and the knob. Later occurrences go to the debug log and the
+ * diagnostic ledger.
+ */
+function shedIdleConnectionsForDescriptors(
+  failing: ConnectionEntry,
+  ctx: RequestContext,
+  code: string,
+  socketErrorCode: string | undefined,
+): void {
+  // Pooled entries other than the one whose dial just failed. Isolated sockets
+  // are never registered, so they are neither counted nor shed.
+  const registered = connectionEntries().filter(entry => entry !== failing);
+  const idle = registered
+    .filter(entry => !entry.inFlight && entry.generation !== 'isolated')
+    .sort((left, right) => left.lastUsedAt - right.lastUsedAt);
+  for (const victim of idle) {
+    const idleMs = Math.max(0, victim.options.now() - victim.lastUsedAt);
+    victim.debug(
+      `shedding idle ${victim.generation} connection after ${code}: `
+      + `connection=${victim.debugId} idle_ms=${idleMs} reason=descriptor_exhaustion`,
+    );
+    victim.inFlight = false;
+    victim.current = undefined;
+    unregisterEntry(victim);
+    try { victim.socket.terminate(); } catch { /* ignore */ }
+  }
+  failing.debug(
+    `${code} opening connection=${failing.debugId}: registered=${registered.length} shed=${idle.length}`
+    + (socketErrorCode && socketErrorCode !== code ? ` reported_as=${socketErrorCode}` : ''),
+  );
+  emitContextDiagnostic(failing, ctx, {
+    event: 'ws_descriptor_exhaustion',
+    code,
+    detectedBy: socketErrorCode === code ? 'error_code' : 'descriptor_probe',
+    socketErrorCode: boundedDiagnosticIdentifier(socketErrorCode),
+    heldConnections: registered.length,
+    shedConnections: idle.length,
+  });
+  if (descriptorExhaustionNoticed) return;
+  descriptorExhaustionNoticed = true;
+  emitParentNotice(
+    `clodex: warning: ${descriptorLimitName(code)} was reached (${code}) while opening a ChatGPT connection. `
+    + `clodex had ${registered.length} pooled connection(s) registered and closed ${idle.length} idle one(s) to recover; `
+    + `each parallel conversation keeps one open. ${descriptorLimitRemedy(code)} `
+    + 'Further open-file warnings suppressed.',
+  );
+}
+
+function descriptorLimitName(code: string): string {
+  return code === 'ENFILE' ? "the system-wide open-file limit" : "this process's open-file limit";
+}
+
+// ENFILE is the kernel's file table, which no per-process knob raises.
+function descriptorLimitRemedy(code: string): string {
+  return code === 'ENFILE'
+    ? 'Close other programs holding many files, or raise the system-wide file limit, if this recurs.'
+    : 'Raise it with `ulimit -n` in the shell that starts clodex (or the service limit for a '
+      + 'launchd/systemd-managed server) if this recurs.';
+}
+
+function descriptorExhaustionMessage(code: string, registered: number): string {
+  return `${descriptorLimitName(code)} was reached (${code}) while opening a ChatGPT connection `
+    + `with ${registered} pooled connection(s) registered; ${descriptorLimitRemedy(code)}`;
+}
+
 function isModelDataEvent(type: string | undefined): boolean {
   return Boolean(type && (
     type.includes('.delta')
@@ -2220,13 +2335,26 @@ function createConnection(
   socket.on('error', (error: Error) => {
     const ctx = entry.current;
     if (ctx) {
+      const socketErrorCode = (error as NodeJS.ErrnoException).code;
       const details = {
         source: 'socket_error',
         socketErrorName: boundedDiagnosticIdentifier(error.name),
-        socketErrorCode: boundedDiagnosticIdentifier((error as NodeJS.ErrnoException).code),
+        socketErrorCode: boundedDiagnosticIdentifier(socketErrorCode),
         ...diagnosticTextFingerprint('errorMessage', error.message),
       };
-      handleTransportFailure(entry, ctx, error.message, details);
+      // Shed BEFORE the transport retry below, so the replacement it dials
+      // finds descriptors free. The retry itself is the ordinary one-shot path.
+      // Only a dial can be starved of a descriptor: a socket that is already
+      // open holds its own, and an error there is not descriptor pressure this
+      // request can recover from by shedding (no replay after output either).
+      let message = error.message;
+      const exhaustion = entry.open ? undefined : descriptorExhaustionCode(error);
+      if (exhaustion) {
+        const registered = connectionEntries().filter(other => other !== entry).length;
+        message = descriptorExhaustionMessage(exhaustion, registered);
+        shedIdleConnectionsForDescriptors(entry, ctx, exhaustion, socketErrorCode);
+      }
+      handleTransportFailure(entry, ctx, message, details);
     } else deleteEntry(entry);
   });
   socket.on('close', (code: number, reason: Buffer) => {
@@ -2248,29 +2376,34 @@ function createConnection(
   return entry;
 }
 
+function diagnosticCap(cap: number): number | null {
+  return Number.isFinite(cap) ? cap : null;
+}
+
 /**
- * Build a fetch transport backed by persistent, session-aware Responses sockets.
- * Each returned Response still represents exactly one AI SDK request.
- */
-/**
- * Reads a connection-pool cap from the environment.
+ * Reads a connection-pool cap from the environment — an optional cap on the
+ * idle pool, now that the shipped default is unbounded.
  *
- * Both pools are process-wide, so a workload that fans out into many concurrent
- * subagent conversations can evict heads before their next turn arrives. An
- * explicit option still wins, so tests are never perturbed by a stray variable.
- * A malformed value is reported and ignored rather than silently reinterpreted.
+ * Both pools are process-wide, so a bound set here evicts heads across every
+ * conversation the process serves. An explicit option still wins, so tests are
+ * never perturbed by a stray variable. A malformed value is reported and
+ * ignored rather than silently reinterpreted.
  */
 function envConnectionCap(name: string, log?: (message: string) => void): number | undefined {
   const raw = process.env[name];
   if (raw === undefined || raw.trim() === '') return undefined;
   const value = Number(raw.trim());
-  if (!Number.isInteger(value) || value < 1 || value > 1024) {
-    try { log?.(`ws: ignoring ${name}=${raw} (expected an integer between 1 and 1024)`); } catch { /* ignore */ }
+  if (!Number.isInteger(value) || value < 1) {
+    try { log?.(`ws: ignoring ${name}=${raw} (expected a positive integer)`); } catch { /* ignore */ }
     return undefined;
   }
   return value;
 }
 
+/**
+ * Build a fetch transport backed by persistent, session-aware Responses sockets.
+ * Each returned Response still represents exactly one AI SDK request.
+ */
 export function createResponsesWebSocketFetch(
   wsUrl: string,
   log?: (message: string) => void,
@@ -2715,8 +2848,10 @@ export function createResponsesWebSocketFetch(
       activeConnectionCount: connectionCount(),
       nurseryConnectionCount: connectionCountByGeneration('nursery'),
       establishedConnectionCount: connectionCountByGeneration('established'),
-      maxConnections: resolvedOptions.maxConnections,
-      maxNurseryConnections: resolvedOptions.maxNurseryConnections,
+      // `null` is unbounded, the shipped default. A number is a finite cap on
+      // the idle pool from an env or programmatic override.
+      maxConnections: diagnosticCap(resolvedOptions.maxConnections),
+      maxNurseryConnections: diagnosticCap(resolvedOptions.maxNurseryConnections),
       selectedConnectionId: selected?.debugId,
       selectedGeneration: selected?.generation,
       continuationMatchMode: selectedMatch?.mode,
