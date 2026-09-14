@@ -1,12 +1,17 @@
-// src/outbound-proxy.ts — make clodex's OWN outbound network calls honor
-// HTTP_PROXY / HTTPS_PROXY / NO_PROXY.
+// src/outbound-proxy.ts — control clodex's OWN outbound fetch transport and
+// honor HTTP_PROXY / HTTPS_PROXY / NO_PROXY.
 //
 // Node's fetch (undici) ignores proxy env vars by default, so OAuth device
 // flow/token refresh, model-list refresh, models.dev fetches, and upstream
 // OpenAI calls made through the AI SDK would all bypass a corporate proxy.
-// installOutboundProxyDispatcher() installs undici's EnvHttpProxyAgent as the
-// global fetch dispatcher — but only when a proxy env var is actually set, so
-// proxy-less environments are completely unaffected.
+// installOutboundDispatcher() installs the package undici dispatcher
+// globally: EnvHttpProxyAgent when proxy env is configured, or Agent otherwise.
+//
+// Node 26's bundled undici 8 turns on HTTP/2 in fetch(). If a peer tears down a
+// pooled h2 session with a fatal TLS alert, Node marks it destroyed but never
+// closes it, undici never evicts it, and every later request to that origin
+// fails immediately with ERR_HTTP2_INVALID_SESSION until restart (issue #233).
+// Both dispatcher variants therefore disable HTTP/2 explicitly.
 //
 // The OAuth Responses WebSocket transport and raw first-party passthrough do
 // not go through the undici dispatcher. outboundHttpProxyAgent() builds an
@@ -109,27 +114,29 @@ export function proxyUrlTargetsListener(
 let dispatcherInstalled = false;
 
 /** Reset the install-once latch (tests only). */
-export function resetOutboundProxyDispatcherForTests(): void {
+export function resetOutboundDispatcherForTests(): void {
   dispatcherInstalled = false;
 }
 
 /**
- * Install undici's EnvHttpProxyAgent as the global fetch dispatcher when any
- * proxy env var is set. Idempotent. A failure warns and falls back to direct
- * connections — it must never break the CLI.
+ * Install package undici's global fetch dispatcher with HTTP/2 disabled,
+ * honoring proxy env vars when present. Idempotent. A failure warns and keeps
+ * Node's existing dispatcher — it must never break the CLI.
  */
-export async function installOutboundProxyDispatcher(): Promise<boolean> {
+export async function installOutboundDispatcher(): Promise<boolean> {
   if (dispatcherInstalled) return true;
-  if (!hasOutboundProxyEnv()) return false;
   try {
-    const { EnvHttpProxyAgent, setGlobalDispatcher } = await import('undici');
-    setGlobalDispatcher(new EnvHttpProxyAgent());
+    const { Agent, EnvHttpProxyAgent, setGlobalDispatcher } = await import('undici');
+    const dispatcher = hasOutboundProxyEnv()
+      ? new EnvHttpProxyAgent({ allowH2: false })
+      : new Agent({ allowH2: false });
+    setGlobalDispatcher(dispatcher);
     dispatcherInstalled = true;
     return true;
   } catch (err) {
     console.error(
-      'clodex: HTTP(S)_PROXY is set but installing the outbound proxy dispatcher failed; '
-      + `using direct connections (${err instanceof Error ? err.message : String(err)})`,
+      'clodex: installing the outbound fetch dispatcher failed; '
+      + `continuing with Node's existing dispatcher (${err instanceof Error ? err.message : String(err)})`,
     );
     return false;
   }

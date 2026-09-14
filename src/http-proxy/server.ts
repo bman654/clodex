@@ -1172,6 +1172,10 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       return;
     }
 
+    // Node's http server drops its own 'error' listener once it hands the
+    // socket to 'connect'. Without a replacement a client reset -- or an EPIPE
+    // on the 400 write below -- surfaces as an uncaughtException (issue #233).
+    clientSocket.once('error', () => clientSocket.destroy());
     const target = authorityParts(req.url ?? '');
     if (!target) {
       clientSocket.end('HTTP/1.1 400 Bad Request\r\n\r\n');

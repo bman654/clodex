@@ -79,7 +79,7 @@ import {
   startConfiguredHttpProxy,
 } from './http-proxy/index.js';
 import { runPatchCommand, runLaunchPatchCheck } from './patcher.js';
-import { installOutboundProxyDispatcher } from './outbound-proxy.js';
+import { installOutboundDispatcher } from './outbound-proxy.js';
 const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--trace', '--fast', '--endpoint', '--proxy', '--save-mode', '--help', '-h', '--version', '-v']);
 const CLODEX_LAUNCH_FLAGS = new Set(['--provider', '--model', '--context']);
 
@@ -1643,9 +1643,10 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
 }
 
 export async function main(args: string[] = process.argv.slice(2)): Promise<number> {
-  // Honor HTTP_PROXY/HTTPS_PROXY/NO_PROXY for clodex's own outbound calls
-  // (no-op when no proxy env var is set; never throws).
-  await installOutboundProxyDispatcher();
+  // Pin clodex's fetch calls to HTTP/1.1 so Node 26 cannot retain a destroyed
+  // HTTP/2 session, while still honoring HTTP_PROXY/HTTPS_PROXY/NO_PROXY.
+  // Installation is idempotent and warns rather than throwing on failure.
+  await installOutboundDispatcher();
 
   const parsed = parseArgs(args);
 

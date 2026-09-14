@@ -6,6 +6,7 @@ import {
   fetchWithOAuthRetry,
   anthropicSseModelRewrite,
   relayAnthropicMessages,
+  UpstreamUnreachableError,
 } from '../src/upstream-forward.js';
 
 describe('anthropicUpstreamHeaders', () => {
@@ -80,6 +81,54 @@ describe('anthropicUpstreamHeaders', () => {
       Authorization: 'Bearer oauth-token',
       'X-Plan': 'coding',
     });
+  });
+});
+
+describe('UpstreamUnreachableError', () => {
+  it('preserves the fetch error and adds its nested network code to the generic message', () => {
+    const networkCause = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:443'), {
+      code: 'ECONNREFUSED',
+    });
+    const fetchError = new TypeError('fetch failed', { cause: networkCause });
+
+    const error = new UpstreamUnreachableError(fetchError);
+
+    expect(error.cause).toBe(fetchError);
+    expect(error.message).toBe('Upstream unreachable: fetch failed (ECONNREFUSED)');
+  });
+
+  it('does not repeat a code already present in the cause message', () => {
+    const cause = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:443'), {
+      code: 'ECONNREFUSED',
+    });
+
+    const error = new UpstreamUnreachableError(cause);
+
+    expect(error.cause).toBe(cause);
+    expect(error.message).toBe('Upstream unreachable: connect ECONNREFUSED 127.0.0.1:443');
+  });
+
+  it('adds a code carried directly on the cause', () => {
+    const cause = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+
+    const error = new UpstreamUnreachableError(cause);
+
+    expect(error.message).toBe('Upstream unreachable: socket hang up (ECONNRESET)');
+  });
+
+  it('falls back to the code alone when the cause message is empty', () => {
+    const cause = Object.assign(new Error(''), { code: 'ETIMEDOUT' });
+
+    expect(new UpstreamUnreachableError(cause).message).toBe('Upstream unreachable: ETIMEDOUT');
+  });
+
+  it('preserves and describes a non-Error cause', () => {
+    const cause = 'connection unavailable';
+
+    const error = new UpstreamUnreachableError(cause);
+
+    expect(error.cause).toBe(cause);
+    expect(error.message).toBe('Upstream unreachable: connection unavailable');
   });
 });
 

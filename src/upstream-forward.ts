@@ -45,7 +45,21 @@ export function anthropicUpstreamHeaders(
 
 export class UpstreamUnreachableError extends Error {
   constructor(cause: unknown) {
-    super(`Upstream unreachable: ${cause instanceof Error ? cause.message : String(cause)}`);
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    const directCode = cause !== null && typeof cause === 'object'
+      ? (cause as { code?: unknown }).code
+      : undefined;
+    const nestedCause = cause instanceof Error ? cause.cause : undefined;
+    const nestedCode = nestedCause !== null && typeof nestedCause === 'object'
+      ? (nestedCause as { code?: unknown }).code
+      : undefined;
+    const code = typeof directCode === 'string'
+      ? directCode
+      : typeof nestedCode === 'string' ? nestedCode : undefined;
+    const detailWithCode = code && !detail.includes(code)
+      ? (detail ? `${detail} (${code})` : code)
+      : detail;
+    super(`Upstream unreachable: ${detailWithCode}`, { cause });
     this.name = 'UpstreamUnreachableError';
   }
 }

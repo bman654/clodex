@@ -423,6 +423,83 @@ describe('selective HTTP proxy', () => {
     }
   });
 
+  it('handles a client reset in a passthrough CONNECT tunnel and tears down upstream', async () => {
+    let acceptUpstream!: (socket: net.Socket) => void;
+    const upstreamAccepted = new Promise<net.Socket>(resolve => { acceptUpstream = resolve; });
+    const upstreamServer = net.createServer(socket => {
+      socket.on('error', () => {});
+      socket.on('data', data => socket.write(data));
+      acceptUpstream(socket);
+    });
+    const upstreamPort = await listen(upstreamServer);
+    const proxy = await startHttpProxy({ routes: [] });
+    const client = net.connect(proxy.port, proxy.host);
+    client.on('error', () => {});
+    const uncaught: Error[] = [];
+    const onUncaught = (error: Error): void => { uncaught.push(error); };
+    process.prependListener('uncaughtException', onUncaught);
+    let upstreamSocket: net.Socket | undefined;
+
+    try {
+      await once(client, 'connect');
+      client.write(
+        `CONNECT 127.0.0.1:${upstreamPort} HTTP/1.1\r\n`
+        + `Host: 127.0.0.1:${upstreamPort}\r\n\r\n`,
+      );
+      const [established] = await once(client, 'data') as [Buffer];
+      expect(established.toString()).toContain('200 Connection Established');
+      upstreamSocket = await upstreamAccepted;
+
+      client.write('ping');
+      const [echoed] = await once(client, 'data') as [Buffer];
+      expect(echoed.toString()).toBe('ping');
+      const upstreamClosed = once(upstreamSocket, 'close');
+      client.resetAndDestroy();
+      await Promise.race([
+        upstreamClosed,
+        new Promise((_, reject) => setTimeout(
+          () => reject(new Error('upstream tunnel socket did not close after client reset')),
+          1_000,
+        )),
+      ]);
+      await new Promise(resolve => setImmediate(resolve));
+
+      expect(uncaught).toEqual([]);
+      expect(upstreamSocket.destroyed).toBe(true);
+    } finally {
+      process.off('uncaughtException', onUncaught);
+      client.destroy();
+      upstreamSocket?.destroy();
+      await proxy.close();
+      await new Promise<void>(resolve => upstreamServer.close(() => resolve()));
+    }
+  });
+
+  it('handles a client reset while answering a malformed CONNECT authority', async () => {
+    const proxy = await startHttpProxy({ routes: [] });
+    const client = net.connect(proxy.port, proxy.host);
+    client.on('error', () => {});
+    const uncaught: Error[] = [];
+    const onUncaught = (error: Error): void => { uncaught.push(error); };
+    process.prependListener('uncaughtException', onUncaught);
+
+    try {
+      await once(client, 'connect');
+      // '[' is not a valid authority, so the handler takes the 400 branch.
+      client.write('CONNECT [ HTTP/1.1\r\nHost: x\r\n\r\n');
+      // Reset before the 400 is written so the write hits a dead socket.
+      await new Promise(resolve => setImmediate(resolve));
+      client.resetAndDestroy();
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off('uncaughtException', onUncaught);
+      client.destroy();
+      await proxy.close();
+    }
+  });
+
   it('forwards first-party request bytes and auth unchanged', async () => {
     const certificates = ensureHttpProxyCertificates();
     const inferenceLogPath = join(testHome, 'anthropic-inference.jsonl');

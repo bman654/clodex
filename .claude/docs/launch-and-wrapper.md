@@ -120,11 +120,12 @@ out from under a running child.
 
 ## Outbound proxy
 
-`src/outbound-proxy.ts`. When `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` are set in clodex's environment,
-`installOutboundProxyDispatcher()` (called at the top of `main()`) installs undici's
-`EnvHttpProxyAgent` as the global fetch dispatcher, so every fetch-based call (OAuth device
-flow/refresh, model-list and models.dev refresh, AI-SDK upstream calls) honors them. Without proxy
-env vars it is a no-op.
+`src/outbound-proxy.ts`. `installOutboundDispatcher()` (called at the top of `main()`) always
+installs the package undici dispatcher globally with HTTP/2 disabled. It uses `EnvHttpProxyAgent`
+when `HTTP_PROXY`/`HTTPS_PROXY` are configured, so every fetch-based call (OAuth device flow/refresh,
+model-list and models.dev refresh, AI-SDK upstream calls) honors those variables and `NO_PROXY`;
+otherwise it uses a direct `Agent`. Pinning fetch to HTTP/1.1 prevents Node 26's bundled undici 8
+from retaining a destroyed pooled HTTP/2 session and failing every later request to that origin.
 
 Transports that do not use the undici dispatcher share the same resolver: the `ws`-based OAuth
 Responses WebSocket gets an `https-proxy-agent` CONNECT tunnel via `outboundWsProxyAgent()`, and the
