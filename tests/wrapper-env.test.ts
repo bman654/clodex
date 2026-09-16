@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   computeWrapperEnv,
+  wrapperSpawnShell,
   LOCAL_GATEWAY_API_KEY,
   wrapperInvocationIsChat,
   wrapperRequiresServer,
@@ -307,5 +308,21 @@ describe('computeWrapperEnv', () => {
     expect(wrapperRequiresServer({})).toBe(false);
     expect(wrapperRequiresServer({ CLODEX_REQUIRE_SERVER: '0' })).toBe(false);
     expect(wrapperRequiresServer({ CLODEX_REQUIRE_SERVER: '1' })).toBe(true);
+  });
+});
+
+describe('wrapperSpawnShell', () => {
+  it.each([
+    ['win32', 'C:\\nvm4w\\nodejs\\claude.cmd', true],
+    ['win32', 'C:\\nvm4w\\nodejs\\CLAUDE.CMD', true],
+    ['win32', 'C:\\tools\\claude.bat', true],
+    ['win32', 'C:\\Users\\jane\\.vscode\\extensions\\anthropic.claude-code-2.1.267-win32-x64\\resources\\native-binary\\claude.exe', false],
+    ['win32', 'C:\\nvm4w\\nodejs\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe', false],
+    ['win32', 'C:\\nvm4w\\nodejs\\claude', false],
+    ['win32', 'C:\\odd\\claude.cmd.exe', false],
+    ['darwin', '/usr/local/bin/claude.cmd', false],
+    ['linux', '/usr/local/bin/claude', false],
+  ] as const)('%s %s -> shell=%s', (platform, target, expected) => {
+    expect(wrapperSpawnShell(platform, target)).toBe(expected);
   });
 });

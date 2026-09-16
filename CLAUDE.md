@@ -132,7 +132,8 @@ names an internal module (`adapter`, `transport`, `sdk`) where you have the choi
 ## Architecture map
 
 **Entry points:** `src/cli.ts` — arg parsing (`parseArgs`, `consumeBridgeModeFlag`), help texts, and
-dispatch for `claude`, `server`, `models`/`favorites`, `providers`, `patch` — and
+dispatch for `claude`, `server`, `models`/`favorites`, `providers`, `patch`,
+`install-vscode-launcher` — and
 `src/claude-wrapper.ts` (the `clodex-claude` bin). Every other module is a focused unit with no
 side effects at import time.
 
@@ -225,6 +226,11 @@ and missed `linux-arm64`, `linux-arm64-musl` and `win32-arm64`. The probe now ap
 site to each build's own bundle; run it per format when you touch `src/patch-transforms.ts` too.
 
 **`claude -p` end-to-end tests are manual only — NEVER add them to the automated suite.**
+
+`tests/vscode-launcher.windows.test.ts` runs only on the `windows-launcher` CI job
+(`windows-latest`, after `pnpm build`): it compiles the Windows VS Code launcher with the runner's
+real `csc.exe` and drives the resulting `.exe`. It is skipped everywhere else; `pnpm test` on macOS
+or Linux says nothing about it. See `.claude/docs/launch-and-wrapper.md`.
 
 ## Key constraints
 

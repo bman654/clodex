@@ -46,6 +46,7 @@ import {
   wrapperInvocationIsChat,
   wrapperIsTopLevelVsCodeHost,
   wrapperRequiresServer,
+  wrapperSpawnShell,
   wrapperSubstitutionEligible,
 } from './wrapper-env.js';
 import { finalizeWrapperTarget, prepareWrapperTarget } from './wrapper-target.js';
@@ -211,11 +212,13 @@ async function main(): Promise<void> {
 
   execIntoClaude(claudePath!, claudeArgs, env);
 
-  // Only reached when exec is unavailable or failed.
+  // Only reached when exec is unavailable or failed. A shell is used only for
+  // Windows .cmd/.bat launchers, which Node cannot spawn directly; a native
+  // .exe is spawned directly so its arguments never cross cmd.exe.
   const child = spawn(claudePath!, claudeArgs, {
     stdio: 'inherit',
     env,
-    shell: isWindows,
+    shell: wrapperSpawnShell(process.platform, claudePath!),
   });
 
   const forward = (signal: NodeJS.Signals) => child.kill(signal);

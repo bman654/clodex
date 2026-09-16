@@ -107,7 +107,7 @@ flowchart LR
 > Using Claude Code's agents view or background agents? Ask your Claude Code agent to read [docs/background-agents.md](docs/background-agents.md) and set it up for you — one global `clodex server --proxy` plus the `clodex-claude` wrapper bin bridges every claude process automatically.
 
 > [!TIP]
-> Using the Claude Code VS Code extension? On macOS/Linux, `clodex-claude` can launch a verified patched install for the extension's model initialization; follow the [VS Code setup](docs/background-agents.md#vs-code-model-picker-on-macoslinux). The Windows launcher is the companion change in draft PR #243; substitution remains macOS/Linux for now. See [docs/windows-setup.md](docs/windows-setup.md).
+> Using the Claude Code VS Code extension? On macOS/Linux, `clodex-claude` launches your verified clodex-patched install in place of the extension's bundled binary, so clodex models appear in its model picker; follow the [VS Code setup](docs/background-agents.md#vs-code-model-picker-on-macoslinux). On Windows, `clodex install-vscode-launcher` builds the `.exe` the extension needs to launch Claude Code through `clodex-claude` — that gets you routing to your running server without proxy values in VS Code settings, but the patched-install substitution is not enabled on Windows yet, so the picker stays the bundled binary's. See [docs/windows-setup.md](docs/windows-setup.md).
 
 ## CLI reference
 
@@ -292,6 +292,10 @@ Two things worth knowing about the numbers:
 | `refresh-models [id]` | Update cached model lists |
 
 Providers supported: `openai` (API key, platform.openai.com), `openai-oauth` (ChatGPT/Codex plan), and `opencode-go` (OpenCode Go API key). OpenCode Go exposes its Anthropic Messages and Chat Completions models; Responses-only entries are intentionally excluded. See [OpenCode Go provider](docs/opencode-go.md).
+
+### `clodex install-vscode-launcher`
+
+Windows only. Builds `%USERPROFILE%\.clodex\bin\clodex-claude.exe`, the executable the Claude Code VS Code extension can use as its `claudeCode.claudeProcessWrapper`, so chats in the editor launch Claude Code through `clodex-claude` (on Windows npm installs that wrapper as three script shims — extensionless, `.cmd`, `.ps1` — and no executable the extension can spawn). It compiles a short C# source shipped in the package with the compiler already inside the .NET Framework — nothing is downloaded — and prints the setting to paste; it never edits VS Code or Claude settings. The paths to `node.exe` and the clodex install are compiled in, so re-run it after switching Node versions or moving clodex. Setup guide: [docs/windows-setup.md](docs/windows-setup.md).
 
 ### Root
 

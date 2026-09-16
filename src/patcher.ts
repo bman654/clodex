@@ -746,7 +746,7 @@ function verifyPristineSource(
  * SOURCE's mode, not the destination's, so a rename without this would publish a
  * binary carrying whatever permissions the backup file happened to have.
  */
-function publishFileByRename(from: string, to: string, mode?: number): void {
+export function publishFileByRename(from: string, to: string, mode?: number): void {
   const temp = `${to}.tmp-${process.pid}-${Date.now().toString(36)}`;
   try {
     copyFileSync(from, temp);

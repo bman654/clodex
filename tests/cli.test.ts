@@ -1,7 +1,7 @@
 // tests/cli.test.ts
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import * as p from '@clack/prompts';
-import { parseArgs, rootHelpText, claudeHelpText, serverHelpText, modelsHelpText, patchHelpText, main, runClaudeCommand } from '../src/cli.js';
+import { parseArgs, rootHelpText, claudeHelpText, serverHelpText, modelsHelpText, patchHelpText, installVscodeLauncherHelpText, main, runClaudeCommand } from '../src/cli.js';
 import { VERSION } from '../src/constants.js';
 import { fetchProviderCatalog, resolveLocalProviderApiKey } from '../src/provider-catalog.js';
 import { startProxy } from '../src/proxy.js';
@@ -258,7 +258,7 @@ describe('runClaudeCommand', () => {
 });
 
 describe('help text', () => {
-  const helps = [rootHelpText(), claudeHelpText(), serverHelpText(), modelsHelpText(), patchHelpText()];
+  const helps = [rootHelpText(), claudeHelpText(), serverHelpText(), modelsHelpText(), patchHelpText(), installVscodeLauncherHelpText()];
 
   it('brands every help screen as clodex', () => {
     for (const help of helps) {
@@ -287,6 +287,7 @@ describe('help text', () => {
     expect(root).toContain('clodex patch');
     expect(root).toContain('clodex models');
     expect(root).toContain('clodex providers');
+    expect(root).toContain('clodex install-vscode-launcher');
     expect(root).toContain('OpenCode Go');
     expect(root).toContain('--endpoint');
     expect(root).toContain('--proxy');

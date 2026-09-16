@@ -5,7 +5,7 @@ import type { ModelRuntimeCompatibility } from './model-runtime-compatibility.js
 
 export type ModelFormat = 'anthropic' | 'openai' | 'unsupported';
 
-export type StarterCommand = 'root' | 'claude' | 'server' | 'models' | 'providers' | 'patch';
+export type StarterCommand = 'root' | 'claude' | 'server' | 'models' | 'providers' | 'patch' | 'install-vscode-launcher';
 
 export interface ModelCost {
   input: number;

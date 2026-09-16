@@ -29,6 +29,7 @@
   "files": [
     "dist",
     "docs",
+    "launcher",
     "README.md"
   ],
   "engines": {

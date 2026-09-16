@@ -117,12 +117,69 @@ role,
 claude's pid stops matching its group id, and the signal dies as ESRCH inside a silent catch —
 background sessions freeze at their startup size. Interactive sessions hide this entirely, because
 there the kernel delivers SIGWINCH through the controlling terminal. `execve` is POSIX-only and
-needs Node 22.15, so Windows and older 22.x keep a spawn fallback; it **aborts the process on
+needs Node 22.15, so Windows and older 22.x keep a spawn fallback (on Windows with a shell only for
+`.cmd`/`.bat` launchers — `wrapperSpawnShell`); it **aborts the process on
 syscall failure instead of throwing**, which is why the binary is re-checked immediately before the
 call rather than relied on to fall back. Any shell launcher in front of the wrapper must `exec` too.
 
 **Keep the wrapper tiny and its imports minimal** — it runs for every spawned agent process. Setup
 doc: `docs/background-agents.md` (shipped via the `docs` entry in package.json `files`).
+
+### The Windows VS Code launcher (`clodex install-vscode-launcher`)
+
+`src/vscode-launcher.ts`, `launcher/clodex-claude-launcher.cs` (shipped via the `launcher` entry in
+`files`; deliberately **not** a `bin` — a bin-link would put a `.cmd` shim in front again).
+
+The Claude Code VS Code extension spawns `claudeCode.claudeProcessWrapper` with no shell and
+`windowsHide`, as `<wrapper> <bundled claude.exe> <args...>`; the setting is one executable string
+with no argument field. On Windows npm installs `clodex-claude` as three script shims
+(extensionless POSIX shell, `.cmd`, `.ps1`) and no executable; the spawn rejects them with
+`spawn EINVAL` (#196, #234). The command compiles a native `.exe` on the
+user's machine with the C# compiler inside the .NET Framework (`%WINDIR%\Microsoft.NET\
+Framework64\v4.*\csc.exe`, then `Framework\`), C# 5 language level, and publishes it to
+`<CLODEX_HOME>\bin\clodex-claude.exe` by temp-and-rename (`publishFileByRename`). No prebuilt
+binary ships (Defender/SmartScreen on unsigned Go/C executables) and no npm lifecycle script runs
+it (pnpm 10 blocks them, npm runs them silently).
+
+The launcher:
+
+- forwards the **raw command line** from `GetCommandLineW` minus its first token (its own path,
+  quoted or not, per the C runtime's argv[0] rule) rather than re-quoting `string[] args` — .NET
+  Framework has no `ArgumentList`, and CRT re-quoting is lossy for JSON and empty arguments;
+- runs `"<node.exe>" "<dist/claude-wrapper.js>" <tail>` with both paths **baked in as constants**
+  at compile time (`process.execPath` and the installed package's `dist/claude-wrapper.js`);
+  falls back to `node.exe` on `PATH` if the baked Node is gone, exits 127 with a re-run message if
+  the wrapper script is gone;
+- creates a job object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, starts Node `CREATE_SUSPENDED`,
+  assigns it, then resumes — so the extension killing the launcher takes Node and claude with it.
+  The job handle is never closed on purpose; process exit closes it. Every Win32 return is checked:
+  job creation/configuration/assignment failure prints one `warning: … cancellation cleanup is not
+  guaranteed` line and continues; a failed resume or wait terminates the child and exits 1 with a
+  one-line reason;
+- returns `true` from its console control handler for Ctrl+C/Break so the child, which shares the
+  console, handles them; exits with the child's exit code.
+
+The launcher chooses no binary. `wrapperSubstitutionEligible` returns false on `win32`, so the
+wrapper it starts runs the bundled `claude.exe` the extension handed it; on Windows the launcher
+delivers server discovery and routing, and the extension's picker stays the bundled binary's until
+substitution is enabled there.
+
+Every environmental input of the command (platform, env, node path, compiler runner, scratch root)
+is an option, and `tests/vscode-launcher.test.ts` drives the whole path against a fake `csc.exe`
+in a fake `%WINDIR%` tree, plus a tsup-built package layout for the default path resolution. The
+real compile and the real executable are covered by **`tests/vscode-launcher.windows.test.ts` on the
+`windows-launcher` CI job** (`windows-latest`): it runs the built `dist/cli.js` so the runner's own
+Framework `csc.exe` compiles the shipped source, then spawns the `.exe` the way the extension does
+(no shell, argv array) with node.exe + a probe script as the "bundled claude" — argument values
+with spaces, quotes, JSON, `""`, `%PATH%`, `&|<>^` and non-ASCII arrive at the probe unchanged
+through node and the wrapper, stdin/stdout/exit code pass through, killing the launcher takes node,
+the probe and its grandchild down, and a stale baked wrapper path exits 127 with the re-run hint.
+That job is also what proves the inner boundary: `wrapperSpawnShell` (`src/wrapper-env.ts`) makes
+the wrapper's Windows spawn fallback use a shell only for `.cmd`/`.bat` launchers (Node refuses to
+spawn those without one); a native `.exe` is spawned directly, and the JSON/`%PATH%` assertions
+only hold on that direct path. Off Windows the file is skipped at collection. The C# source can
+also be compile-checked and its command-line splitting executed on macOS/Linux with the .NET SDK
+(`LangVersion=5`).
 
 
 ## Config and env isolation
