@@ -23,6 +23,7 @@ import {
   type RetryAfterProvenance,
 } from '../upstream-error.js';
 import { sanitizeToolInput } from '../tool-input-sanitize.js';
+import { coerceEchoedScalar, schemaScalarKind, type ScalarKind } from '../tool-input-coerce.js';
 import {
   resetWsUpgradePacerForTests,
   sharedWsUpgradePacer,
@@ -451,16 +452,34 @@ function inputArray(payload: JsonObject): unknown[] {
 }
 
 /**
- * Schema defaults per tool, derived from ONE request's `tools` array.
+ * Schema rules per tool, derived from ONE request's `tools` array: the declared
+ * default of each property, and the scalar kind it declares.
  *
- * When a tool call goes through Claude Code's permission path, the echoed call
- * comes back with its zod defaults filled in (an `Edit` the model emitted
- * without `replace_all` returns as `replace_all: false`), while the head
- * snapshot holds the model's raw arguments without them. The strict-prefix
- * comparison then fails on every such call and the whole conversation is
- * re-sent uncached. Compare-only: a property whose value equals the declared
- * default is dropped from BOTH sides before hashing; outgoing payloads are
- * untouched.
+ * When Claude Code receives a tool call it re-types and fills the arguments
+ * against the tool's schema before storing the message, and the stored form is
+ * what the next request echoes (ingest-time, every permission mode; verified in
+ * the 2.1.273 bundle and captured on 2.1.267/2.1.270/2.1.273). An `Edit` the
+ * model emitted without `replace_all` returns as `replace_all: false` (#214),
+ * and a `Bash` call emitted with `"timeout":"5000","run_in_background":"false"`
+ * returns as `timeout: 5000, run_in_background: false` (#225), while the head
+ * snapshot holds the model's raw arguments. The strict-prefix comparison then
+ * fails on every such call and the whole conversation is re-sent uncached.
+ * Compare-only, on BOTH sides before hashing: a string is re-typed to the
+ * declared number/integer/boolean when either of the client's rules would (the
+ * rule in tool-input-coerce.ts), then a property whose value equals the
+ * declared default is dropped — a required property with a declared default
+ * included, because the client fills those at ingest too (TaskOutput's
+ * `block`/`timeout` are required on the wire and filled by `rW`). Outgoing
+ * payloads are untouched. Both sides because the client can also echo the raw
+ * strings (its wire-input flag, or Bash keeping the whole input as written when
+ * one value fails its strict parse); a genuinely different value still differs
+ * after the same rule is applied to each side. The symmetry also equates a
+ * typed head with a string echo, a direction no client path produces; that is
+ * harmless for the same reason default stripping is — upstream keeps the
+ * model's own emission, the tool already ran, and outputs compare byte-exact.
+ *
+ * The parameter name `defaults` is kept at every consumer below: the map
+ * predates the scalar rule and is threaded through this file unchanged.
  *
  * Deliberately per-request and pure, for the same reason `headRequiredToolProps`
  * snapshots `required` from the head's own turn: a process-global map keyed only
@@ -472,7 +491,13 @@ function inputArray(payload: JsonObject): unknown[] {
  * under a map that the next request no longer uses. Without keyed invalidation,
  * under-stripping loses a chain and over-stripping can accept changed history.
  */
-type ToolSchemaDefaults = Map<string, Map<string, string>>;
+interface SchemaPropertyRule {
+  /** Canonical JSON of the declared default, when the schema declares one. */
+  default?: string;
+  /** The declared scalar kind, when the client would re-type a string to it. */
+  scalar?: ScalarKind;
+}
+type ToolSchemaDefaults = Map<string, Map<string, SchemaPropertyRule>>;
 
 export function toolSchemaDefaults(payload: JsonObject): ToolSchemaDefaults {
   const defaults: ToolSchemaDefaults = new Map();
@@ -488,11 +513,14 @@ export function toolSchemaDefaults(payload: JsonObject): ToolSchemaDefaults {
     const properties = parameters && typeof parameters === 'object'
       ? (parameters as JsonObject).properties : undefined;
     if (!properties || typeof properties !== 'object') return;
-    const perTool = new Map<string, string>();
+    const perTool = new Map<string, SchemaPropertyRule>();
     for (const [prop, schema] of Object.entries(properties as JsonObject)) {
-      if (schema && typeof schema === 'object' && 'default' in (schema as JsonObject)) {
-        perTool.set(prop, canonicalJson((schema as JsonObject).default));
-      }
+      if (!schema || typeof schema !== 'object') continue;
+      const rule: SchemaPropertyRule = {};
+      if ('default' in (schema as JsonObject)) rule.default = canonicalJson((schema as JsonObject).default);
+      const scalar = schemaScalarKind(schema, parameters);
+      if (scalar) rule.scalar = scalar;
+      if (rule.default !== undefined || rule.scalar) perTool.set(prop, rule);
     }
     if (perTool.size) defaults.set(record.name, perTool);
   };
@@ -511,6 +539,7 @@ export function toolSchemaDefaults(payload: JsonObject): ToolSchemaDefaults {
  */
 function toolSchemaDefaultsFingerprint(defaults: ToolSchemaDefaults): string {
   if (!defaults.size) return 'none';
+  // Each rule is built with its keys in one fixed order, so its JSON is stable.
   const tuples = [...defaults.entries()]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([name, perTool]) => [
@@ -520,6 +549,12 @@ function toolSchemaDefaultsFingerprint(defaults: ToolSchemaDefaults): string {
   return createHash('sha256').update(JSON.stringify(tuples)).digest('hex').slice(0, 16);
 }
 
+/**
+ * Apply the request's schema rules to one call's parsed arguments: re-type a
+ * string to the declared scalar kind first (the client re-types before it
+ * fills defaults, so a `"false"` echoed for a `default: false` boolean is both
+ * re-typed and then filler), then drop a value equal to the declared default.
+ */
 function stripSchemaDefaults(name: unknown, args: unknown, defaults: ToolSchemaDefaults | undefined): unknown {
   if (!defaults) return args;
   if (typeof name !== 'string' || !args || typeof args !== 'object' || Array.isArray(args)) return args;
@@ -527,9 +562,10 @@ function stripSchemaDefaults(name: unknown, args: unknown, defaults: ToolSchemaD
   if (!perTool) return args;
   const out: JsonObject = {};
   for (const [key, value] of Object.entries(args as JsonObject)) {
-    const expected = perTool.get(key);
-    if (expected !== undefined && canonicalJson(value) === expected) continue;
-    out[key] = value;
+    const rule = perTool.get(key);
+    const typed = rule?.scalar ? coerceEchoedScalar(value, rule.scalar) : value;
+    if (rule?.default !== undefined && canonicalJson(typed) === rule.default) continue;
+    out[key] = typed;
   }
   return out;
 }
@@ -726,8 +762,9 @@ export function resetReasoningGapWarningsForTests(): void {
  * clean.
  *
  * `equalAfterStrip` separates the two mechanisms. It re-compares the WHOLE
- * items with head matching's schema-default normalization and the shared
- * filler-strip rule both applied to `arguments` — not the arguments alone, or
+ * items with head matching's schema normalization (scalar re-typing and
+ * default stripping, `stripSchemaDefaults`) and the shared filler-strip rule
+ * both applied to `arguments` — not the arguments alone, or
  * a divergence in any other field would be reported as a
  * strip-rule gap the code never examined. When that makes them equal, the only
  * thing standing between the head and its own echo is filler the shared rule

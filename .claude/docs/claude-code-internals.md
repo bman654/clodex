@@ -430,6 +430,81 @@ not have to.
   so when the origin answered 101 Node destroyed that socket and `response` never fired, leaving
   the client waiting on the 120 s timeout above. Verified on 22.11.0, 22.14.0 and 24.14.1.
 
+## Tool-call arguments are rewritten at ingest (verified 2.1.273; captured 2.1.267, 2.1.270, 2.1.273)
+
+The arguments a tool call is *echoed* with are not the arguments the model emitted. When an assistant
+message arrives from the API, the client rewrites every `tool_use.input` against the tool's schema
+and stores the rewritten form; the next request sends that. This is what #214 (defaults filled) and
+#225 (strings re-typed) reconcile in clodex. Line numbers are from
+`claude-2.1.273-darwin-arm64.js`; the bundle's own functions were executed with its zod (4.4.3) and
+the behaviour captured against a synthetic Anthropic-format server with each pristine binary in
+`~/.tweakcc`, in bypass mode, under `--allowedTools` and under `acceptEdits`.
+
+- **Where.** `Zq` (L12581) runs on every assistant message (call sites: four on L11543 and the
+  streamed tool-use path on L9596). For each `tool_use` whose tool is in the current tool list it
+  applies, inside one `try`:
+  1. `qKe` → `OYs` (L12552), a generic per-property repair that runs on **every** tool: a string
+     value is JSON-parsed and kept when the parse yields the kind the zod shape (or an MCP tool's
+     JSON schema, resolved by `cMt` — `type` string or array, `$ref` into `$defs`/`definitions`,
+     `anyOf`/`oneOf`, with array/object preferred, then string, then the first non-null scalar) declares
+     for that top-level property — array, object, boolean (no print-back check, one BOM strip), or a
+     finite number that prints back identically (`String(parsed) === raw`, integral for `integer`).
+     `optional`/`nullable`/`default` wrappers are unwrapped; a `preprocess` pipe resolves to
+     `"transform"` and is **skipped**, which is what limits coverage on built-ins. An annotation-only
+     property (`{description}`) counts as `"any"` and is re-typed too.
+  2. `rW` (L11539), per tool: **Read** re-types `offset` only through `UF` (`limit` stays a string —
+     captured); **Bash** runs the whole input through its strict schema, whose `timeout` carries
+     `_H` = `z.preprocess(UF)` (L9822: trim — which also strips U+FEFF — then
+     `/^[-+]?\d+(\.\d+)?$/` and `Number()`) and whose `run_in_background` /
+     `dangerouslyDisableSandbox` carry `sw` = `z.preprocess(k1)` (L7356: exactly `"true"`/`"false"`),
+     then rebuilds the object (also stripping a `cd <cwd> &&` prefix and rewriting `\\;` → `\;` in
+     `command`); **Edit** parses through its schema, filling `replace_all: false` and folding
+     `old_str`/`new_str` aliases; **Write**, **TaskOutput** (fills `block ?? true`,
+     `timeout ?? 30000`) and **ExitPlanMode** have their own cases.
+  If `rW` throws, the catch at L12581 keeps the `qKe` result and skips the per-tool step wholesale.
+  Bash's schema is a strict object, so **one uncoercible value or one unknown key means the
+  per-tool step is skipped and the transcript keeps the generic repair's output** — the scalar
+  strings untouched, unknown key included (captured: `foo:"bar"` echoed with every scalar
+  untouched). It does not drop the key; it is not necessarily the exact model input either, since
+  the generic repair (and its double-escaped-unicode pass) may already have changed another field.
+- **Which tools are re-typed on the transcript.** Bash (`timeout` and its two booleans, via `rW`),
+  Read (`offset` only), ToolSearch (`max_results`, plain schema → generic repair; captured `"5"`→`5`),
+  Agent (`run_in_background`, plain), TaskOutput (filled), Monitor/ExitWorktree/LSP/REPL (plain
+  scalars), and every MCP tool with a number/integer/boolean property. **Not** re-typed:
+  PowerShell, Grep and CronCreate — all their scalars are `_H`/`sw` preprocess pipes, which the
+  generic repair skips, and they have no `rW` case (captured: Grep `head_limit:"5"` echoed as a
+  string). ScheduleWakeup's `delaySeconds` is a pipe too; only its plain `stop`/`noop` are re-typed.
+- **The wire schema hides all of this.** Every pipe appears as plain `{type:"number"|"integer"|
+  "boolean"}`; 11 of the 12 built-in schemas carry `additionalProperties:false`. A server cannot tell
+  which client rule a property falls under.
+- **Not the permission path.** Bypass mode and `--allowedTools` echo identical rewritten arguments
+  (Bash and Edit, all three versions). The tool runner's `inputSchema.safeParse` (L10117,
+  `He=De.data` L10119) feeds permission checks and `tool.call`; neither it nor a decision's
+  `updatedInput` is written into `tool_use.input`.
+- **The wire-echo flag.** The raw wire input is also kept (`aFe`, L9197, as `wireToolInputs` on the
+  message). When `echoWireToolInputs` is on — `wI()` (L9197): env `CLAUDE_CODE_HUMBLE_HAMMOCK`, else
+  GrowthBook `tengu_humble_hammock`, default `false` — **and** the request builder's consistency
+  gate passes (L12575 → `sNr`, L12552; for Bash, `qYs` tolerates exactly the `UF`/`k1` coercions,
+  the `\;` rewrite and the cwd strip), the builder sends the raw input instead; the flag alone is
+  not sufficient. Captured with the env var set: Bash
+  echoes `"5000"` / `"false"` and Edit echoes without `replace_all`. clodex therefore normalizes both
+  sides rather than snapshotting one shape.
+
+Captured pairs (bypass mode, 2.1.273; identical on 2.1.267 and 2.1.270 where marked):
+
+| model emitted | echoed | |
+| --- | --- | --- |
+| Bash `{"command":"ls","timeout":"5000","run_in_background":"false"}` | `{"command":"ls","run_in_background":false,"timeout":5000}` | 267/270/273 |
+| Bash `timeout` `"5000.0"`, `" 5000 "`, `"05"`, `"+5"` | `5000`, `5000`, `5`, `5` | 273 |
+| Bash `{"command":"ls","timeout":"abc","run_in_background":"false"}` | unchanged | |
+| Bash `{"command":"ls","timeout":"5000.0","run_in_background":"0"}` | unchanged (`"0"` fails, so nothing is re-typed) | |
+| Bash `{...,"run_in_background":"False",...,"foo":"bar"}` | unchanged, `foo` kept | |
+| Read `{"file_path":"/etc/hosts","offset":"5","limit":"10"}` | `{"file_path":"/etc/hosts","limit":"10","offset":5}` | 267/270/273 |
+| Read `offset` `"5.5"`, `"05"`, `" 5 "` | `5.5`, `5`, `5` | 273 |
+| ToolSearch `max_results:"5"` | `5` | 273 |
+| Grep `head_limit:"5"` | unchanged | 273 |
+| Edit `{file_path,old_string,new_string}` | `+ "replace_all":false` | 267/270/273 |
+
 ## Things that looked like clodex bugs and were not (not version-specific)
 
 - **"Concurrent subagents died at turn 2" was not unknown-model classification.** The agents' first

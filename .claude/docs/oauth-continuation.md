@@ -592,25 +592,67 @@ transport-failure replay, although an OAuth 401 refresh can still start a new au
 **This policy can recover only while no model output has been exposed downstream**; replay after
 partial output could duplicate content or tool calls.
 
-### Schema defaults are filler on both sides
+### Schema defaults and scalar types are normalized on both sides
 
-When a tool call goes through Claude Code's permission path, the echoed call comes back with its zod
-defaults filled in: an `Edit` the model emitted without `replace_all` returns as `replace_all: false`.
-The head snapshot holds the model's raw arguments, so the strict-prefix comparison failed on every
-such call and re-sent the whole conversation (measured 2026-09-11 on one Luna session: 2 of 14 turns,
-~88k tokens each; 77.8% → 92.1% cached input with the fix).
+Claude Code rewrites a tool call's arguments against the tool's schema **when the assistant message
+arrives**, before storing it, and the stored form is what the next request echoes. Two shapes of that
+rewrite have broken head matching:
 
-This is not a version change. `replace_all` carries the same `.default(false)` in 2.1.267 as in
-2.1.268, and captured echoes from both binaries agree: under `--dangerously-skip-permissions` the
-property is never filled, while `acceptEdits` and `--allowedTools` fill it in both versions. What
-fills it is `checkPermissions` writing `updatedInput` back to the transcript, so the trigger is the
-permission path, not a release.
+- **Defaults filled (#214).** An `Edit` the model emitted without `replace_all` returns as
+  `replace_all: false`. Measured 2026-09-11 on one Luna session: 2 of 14 turns re-sent, ~88k tokens
+  each; 77.8% → 92.1% cached input with the fix.
+- **Scalars re-typed (#225).** A `Bash` call emitted with `"timeout":"5000","run_in_background":"false"`
+  returns as `timeout: 5000, run_in_background: false`. GPT-family models emit stringified scalars
+  for optional numeric and boolean parameters. The pre-#214 ledger of 2026-09-10/11 held 77 Bash
+  `equalAfterStrip:false` records beside the 177 Edit ones — three incidents, each one uncached
+  full-context send. Those are *consistent with* this mechanism, not measurements of it: the ledger
+  stores hashes, and Bash's other ingest rewrites (the `cd <cwd> &&` prefix strip, `\\;` → `\;`)
+  produce the same signature.
 
-`toolSchemaDefaults(payload)` derives `{tool → {property → canonical default}}` from ONE request's
-`tools` array — namespaced tool groups included — and `normalizeToolCallJson` drops, from BOTH sides,
-any `arguments` property whose value equals its declared default. Compare-only: the outgoing payload
-is untouched. A value that differs from the default (`replace_all: true`) and a property with no
-declared default still diverge, as before.
+Both happen regardless of the permission decision. Captured against a synthetic server with the
+real 2.1.267, 2.1.270 and 2.1.273 binaries: `--dangerously-skip-permissions`, `--allowedTools` and
+`acceptEdits` echo the same rewritten arguments. (An earlier version of this section attributed the
+fill to the permission path, `checkPermissions` → `updatedInput`; that was wrong — the runner's
+parsed input is never written back to the transcript, and the ingest normalizer is what fills and
+re-types.) The mechanism, which tools it reaches, the exact spellings the client accepts, and the
+flag that makes it echo the raw strings instead are in `claude-code-internals.md` ("Tool-call
+arguments are rewritten at ingest"). In short: Bash, Read (`offset`), ToolSearch, Agent, TaskOutput
+and MCP tools are re-typed; PowerShell, Grep and CronCreate are not, because their scalars are
+declared through a zod preprocess the client's generic repair skips.
+
+`toolSchemaDefaults(payload)` derives `{tool → {property → {default, scalar}}}` from ONE request's
+`tools` array — namespaced tool groups included — where `default` is the canonical declared default
+and `scalar` is the `number` / `integer` / `boolean` kind resolved the way the client resolves an
+MCP schema (`type` string or array, a local `$ref` into `$defs`/`definitions`, `anyOf`/`oneOf`; a
+union with `string`, an enum without a scalar `type`, or an annotation-only property yields none).
+Two client quirks are mirrored rather than corrected — refs are looked up in `$defs` whenever it
+exists, and resolution stops after 64 schema visits — because either can only equate two spellings
+of one value. `normalizeToolCallJson`
+applies both to BOTH sides of every comparison, via `stripSchemaDefaults`: a string is first re-typed
+by the rule in `src/tool-input-coerce.ts` — the UNION of what the client's two rules accept: a
+decimal literal after trimming (`"5000"`, `"5000.0"`, `" 5000 "`, `"05"`, `"+5"`, `"5.5"` even for
+`integer`), a spelling that prints back identically (`"1e+21"`), and `"true"`/`"false"` with
+surrounding JSON whitespace; not `"1e3"`, `"0x10"`, `"False"`, `"0"`, and not a decimal literal with
+more than 15 significant digits (`Number()` is lossy past DBL_DIG, so `"9007199254740993"` is left a
+string and that rare echo loses its chain — the safe direction) — then a value equal to the
+declared default is dropped. A required property with a declared default is stripped like any other:
+an outer zod `.default()` is required on the wire, and the client fills TaskOutput's `block` and
+`timeout` at ingest, so exempting required properties would lose that chain (guarded by a test).
+Compare-only: the outgoing payload is untouched.
+
+Why both sides rather than snapshotting the re-typed shape: the client can echo the *raw* strings
+too — under its `CLAUDE_CODE_HUMBLE_HAMMOCK` / `tengu_humble_hammock` wire-echo flag, or for a Bash
+call where any one value fails to parse (its re-typing is all-or-nothing). Normalizing each side to
+the same value keeps the chain in either case, while `"5000"` against `6000`, `"false"` against
+`true`, a value that differs from its default (`replace_all: true`), a property whose schema declares
+a string, and a spelling the client would not re-type (`"False"` against `false`) all still diverge.
+Accepting the union is safe for the same reason: a spelling maps to the value it denotes, so
+distinct values with at most 15 significant digits never become equal and longer literals are not
+re-typed; the exponent path is injective because `String(n)` is unique per double. The symmetry also
+equates a typed head with a string echo (`5000` against `"5000"`), a direction no client path
+produces; that is harmless for the same reason default stripping's own symmetry is — upstream keeps
+the model's own emission, the tool already ran with the client's arguments, and tool outputs
+compare byte-exact.
 
 The map is per-request and pure, for the same reason `headRequiredToolProps` snapshots `required`
 from the head's own turn. A process-global map keyed only by tool name is last-writer-wins across
@@ -690,8 +732,9 @@ genuine rewind or branch regenerates the call under a new one. These record
 
 - **Only `equalAfterStrip: true` warns on stderr**, deduplicated by tool and hard-capped (the
   terminal is shared with Claude Code's UI). It means the two items are identical once head
-  matching's schema-default normalization and the shared filler-strip rule are both applied to
-  `arguments` — nothing but filler stood between the head and its own echo.
+  matching's schema normalization (scalar re-typing and default stripping) and the shared
+  filler-strip rule are both applied to `arguments` — nothing but filler stood between the head and
+  its own echo.
 - **Coverage is narrower than it looks, in two directions.** It fires only when the divergent
   `function_call` is the *first* divergent item, with one alignment: a stored reasoning item Claude
   legitimately omitted (`continuationMatch`'s omitted-reasoning mode) shifts divergence onto a

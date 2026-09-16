@@ -2016,10 +2016,10 @@ describe('createResponsesWebSocketFetch', () => {
   });
 
   it('continues when the client echoed a schema default the model never sent', async () => {
-    // A tool call that went through Claude Code's permission path comes back with
-    // its zod defaults filled in: an Edit the model emitted without `replace_all`
-    // returns as `replace_all: false` (measured on 2.1.267 and 2.1.268 alike —
-    // bypass mode never fills, `acceptEdits` always does). The schema in the
+    // Claude Code fills a tool call's zod defaults when the assistant message
+    // arrives, before storing it: an Edit the model emitted without `replace_all`
+    // returns as `replace_all: false` (captured on 2.1.267, 2.1.270 and 2.1.273,
+    // in bypass mode and under `--allowedTools` alike). The schema in the
     // request declares that default, so the property is dropped from both sides.
     const tools = [{
       type: 'function', name: 'Edit',
@@ -2528,6 +2528,462 @@ describe('createResponsesWebSocketFetch', () => {
     const sent = JSON.parse(isolated.send.mock.calls[0]![0] as string);
     expect(sent.previous_response_id).toBeUndefined();
     emitTextResponse(isolated, 'resp_edit_n_new', 'done');
+    await readAll(second);
+  });
+
+  // Issue #225. Claude Code re-types a tool call's arguments against the tool's
+  // schema when the assistant message arrives (every permission mode, verified on
+  // 2.1.267/2.1.270/2.1.273 against a synthetic server): for Bash, `"5000"` is
+  // echoed as `5000` and `"false"` as `false`. Both sides are normalized under
+  // the request's own schema, so the head survives whichever shape comes back.
+  const BASH_TOOLS = [{
+    type: 'function', name: 'Bash',
+    parameters: {
+      type: 'object',
+      properties: {
+        command: { type: 'string' },
+        timeout: { type: 'number' },
+        description: { type: 'string' },
+        run_in_background: { type: 'boolean' },
+        dangerouslyDisableSandbox: { type: 'boolean' },
+      },
+      required: ['command'],
+      additionalProperties: false,
+    },
+  }];
+
+  async function establishBashHead(
+    accountId: string, responseId: string, callId: string, args: string, tools = BASH_TOOLS,
+  ) {
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'list files' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, { tools })),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: responseId } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'function_call', call_id: callId, name: 'Bash', arguments: args },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: responseId } })));
+    await readAll(first);
+    return { input, wsFetch, socket };
+  }
+
+  it('continues when the client echoed a string scalar re-typed to the schema number or boolean', async () => {
+    const { input, wsFetch, socket } = await establishBashHead(
+      'acct-scalar-coerce', 'resp_bash_coerce', 'call_bc',
+      '{"command":"ls","timeout":"5000","run_in_background":"false"}',
+    );
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_bc', name: 'Bash',
+      arguments: '{"command":"ls","timeout":5000,"run_in_background":false}',
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_bc', output: 'a.txt' };
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([...input, echoedCall, toolOutput], { tools: BASH_TOOLS })),
+    });
+    expect(lastSocket()).toBe(socket);
+    const sent = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_bash_coerce');
+    expect(sent.input).toEqual([toolOutput]);
+    emitTextResponse(socket, 'resp_bash_coerce_done', 'done');
+    await readAll(second);
+  });
+
+  it('still continues when the client echoed the string scalars unchanged', async () => {
+    // The client sends the raw wire arguments instead when its
+    // CLAUDE_CODE_HUMBLE_HAMMOCK / tengu_humble_hammock flag is on, and skips
+    // Bash's re-typing entirely when any one value fails to parse. Normalizing
+    // both sides keeps the chain in either case; a snapshot rewritten to the
+    // coerced shape would lose it.
+    const { input, wsFetch, socket } = await establishBashHead(
+      'acct-scalar-raw', 'resp_bash_raw', 'call_br',
+      '{"command":"ls","timeout":"5000","run_in_background":"false"}',
+    );
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_br', name: 'Bash',
+      arguments: '{"command":"ls","timeout":"5000","run_in_background":"false"}',
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_br', output: 'a.txt' };
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([...input, echoedCall, toolOutput], { tools: BASH_TOOLS })),
+    });
+    expect(lastSocket()).toBe(socket);
+    const sent = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_bash_raw');
+    expect(sent.input).toEqual([toolOutput]);
+    emitTextResponse(socket, 'resp_bash_raw_done', 'done');
+    await readAll(second);
+  });
+
+  it('starts a new chain when a re-typed scalar also changed value', async () => {
+    // Type-only reconciliation: `"5000"` and `5000` are the same call, `"5000"`
+    // and `6000` are not, and neither are `"false"` and `true`.
+    for (const [label, echoedArgs] of [
+      ['timeout', '{"command":"ls","timeout":6000,"run_in_background":false}'],
+      ['run_in_background', '{"command":"ls","timeout":5000,"run_in_background":true}'],
+    ] as const) {
+      const { input, wsFetch, socket } = await establishBashHead(
+        `acct-scalar-changed-${label}`, `resp_bash_changed_${label}`, `call_bx_${label}`,
+        '{"command":"ls","timeout":"5000","run_in_background":"false"}',
+      );
+      const divergedCall = {
+        type: 'function_call', call_id: `call_bx_${label}`, name: 'Bash', arguments: echoedArgs,
+      };
+      const toolOutput = { type: 'function_call_output', call_id: `call_bx_${label}`, output: 'a.txt' };
+      const fullInput = [...input, divergedCall, toolOutput];
+      const second = await wsFetch('https://x', {
+        method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(fullInput, { tools: BASH_TOOLS })),
+      });
+      const isolated = lastSocket();
+      expect(isolated, label).not.toBe(socket);
+      isolated.emit('open');
+      const sent = JSON.parse(isolated.send.mock.calls[0]![0] as string);
+      expect(sent.previous_response_id, label).toBeUndefined();
+      expect(sent.input, label).toEqual(fullInput);
+      emitTextResponse(isolated, `resp_bash_changed_${label}_new`, 'done');
+      await readAll(second);
+    }
+  });
+
+  // A generic helper for one-call tables: establish a head whose call carries
+  // `modelArgs` under `tools`, replay `echoedArgs`, and assert continuation or a
+  // new chain. `name` is the tool name in both items.
+  async function expectEchoOutcome(
+    label: string, tools: unknown[], name: string, modelArgs: string, echoedArgs: string, continues: boolean,
+  ): Promise<void> {
+    const id = label.replace(/\W+/g, '_');
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'do it' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: `acct-echo-${id}` });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, { tools })),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: `resp_echo_${id}` } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'function_call', call_id: `call_echo_${id}`, name, arguments: modelArgs },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: `resp_echo_${id}` } })));
+    await readAll(first);
+
+    const echoedCall = { type: 'function_call', call_id: `call_echo_${id}`, name, arguments: echoedArgs };
+    const toolOutput = { type: 'function_call_output', call_id: `call_echo_${id}`, output: 'ok' };
+    const fullInput = [...input, echoedCall, toolOutput];
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(fullInput, { tools })),
+    });
+    if (continues) {
+      expect(lastSocket(), label).toBe(socket);
+      const sent = JSON.parse(socket.send.mock.calls[1]![0] as string);
+      expect(sent.previous_response_id, label).toBe(`resp_echo_${id}`);
+      expect(sent.input, label).toEqual([toolOutput]);
+      emitTextResponse(socket, `resp_echo_${id}_done`, 'done');
+    } else {
+      const isolated = lastSocket();
+      expect(isolated, label).not.toBe(socket);
+      isolated.emit('open');
+      const sent = JSON.parse(isolated.send.mock.calls[0]![0] as string);
+      expect(sent.previous_response_id, label).toBeUndefined();
+      expect(sent.input, label).toEqual(fullInput);
+      emitTextResponse(isolated, `resp_echo_${id}_new`, 'done');
+    }
+    await readAll(second);
+  }
+
+  it('continues for every number spelling the Bash coercer re-types', async () => {
+    // Bash `timeout` goes through the client's `UF`: trim, decimal literal, Number().
+    // Captured on 2.1.273: "5000.0", " 5000 ", "05", "+5" all echo as the number.
+    for (const [modelValue, echoedValue] of [
+      ['"5000.0"', '5000'], ['" 5000 "', '5000'], ['" 5000"', '5000'], ['"05"', '5'], ['"+5"', '5'],
+      ['"-0"', '0'], ['"999999999999999"', '999999999999999'],
+    ] as const) {
+      await expectEchoOutcome(
+        `bash uf ${modelValue}`, BASH_TOOLS, 'Bash',
+        `{"command":"ls","timeout":${modelValue}}`, `{"command":"ls","timeout":${echoedValue}}`, true,
+      );
+    }
+  });
+
+  it('starts a new chain rather than re-type a literal longer than 15 significant digits', async () => {
+    // The client does re-type "9007199254740993" (to 9007199254740992, lossily),
+    // so this echo is real; but re-typing it here would also make two DIFFERENT
+    // raw values compare equal (2^53 and 2^53+1 share a double). Losing this
+    // rare chain is the safe direction, so the literal is left a string and the
+    // typed echo diverges.
+    await expectEchoOutcome('bash 2^53+1 re-typed', BASH_TOOLS, 'Bash',
+      '{"command":"ls","timeout":"9007199254740993"}', '{"command":"ls","timeout":9007199254740992}', false);
+    // Two different raw values under one call_id must stay a mismatch.
+    await expectEchoOutcome('bash 2^53 vs 2^53+1', BASH_TOOLS, 'Bash',
+      '{"command":"ls","timeout":"9007199254740992"}', '{"command":"ls","timeout":"9007199254740993"}', false);
+    // ...and so must an explicit long literal against an omitted default that
+    // would round to the same double.
+    const tools = [{
+      type: 'function', name: 'Bash',
+      parameters: {
+        type: 'object',
+        properties: { command: { type: 'string' }, timeout: { type: 'number', default: 9007199254740992 } },
+        required: ['command'],
+      },
+    }];
+    await expectEchoOutcome('bash long literal vs omitted default', tools, 'Bash',
+      '{"command":"ls","timeout":"9007199254740993"}', '{"command":"ls"}', false);
+  });
+
+  it('continues for the generic-repair spellings on a plain number or boolean property', async () => {
+    // Agent-style tools have no preprocess pipe, so the client's generic repair
+    // JSON-parses the string: a canonical exponent prints back identically, and a
+    // boolean is kept without a print-back check.
+    const tools = [{
+      type: 'function', name: 'Agent',
+      parameters: {
+        type: 'object',
+        properties: { prompt: { type: 'string' }, budget: { type: 'number' }, run_in_background: { type: 'boolean' } },
+        required: ['prompt'],
+      },
+    }];
+    await expectEchoOutcome('generic exponent', tools, 'Agent',
+      '{"prompt":"go","budget":"1e+21"}', '{"prompt":"go","budget":1e+21}', true);
+    await expectEchoOutcome('generic padded boolean', tools, 'Agent',
+      '{"prompt":"go","run_in_background":" true "}', '{"prompt":"go","run_in_background":true}', true);
+  });
+
+  it('continues for an MCP nullable scalar declared through anyOf or $ref', async () => {
+    const tools = [{
+      type: 'function', name: 'mcp__srv__count',
+      parameters: {
+        type: 'object',
+        $defs: { Limit: { type: 'number' } },
+        properties: {
+          n: { anyOf: [{ type: 'integer' }, { type: 'null' }] },
+          limit: { $ref: '#/$defs/Limit' },
+          mode: { anyOf: [{ type: 'number' }, { type: 'string' }] },
+        },
+      },
+    }];
+    await expectEchoOutcome('mcp anyOf nullable integer', tools, 'mcp__srv__count', '{"n":"5"}', '{"n":5}', true);
+    await expectEchoOutcome('mcp $ref number', tools, 'mcp__srv__count', '{"limit":"10"}', '{"limit":10}', true);
+    // A union with string is left alone by the client, so a typed echo is a real change.
+    await expectEchoOutcome('mcp number|string union', tools, 'mcp__srv__count', '{"mode":"5"}', '{"mode":5}', false);
+  });
+
+  it('starts a new chain for a spelling neither client rule re-types', async () => {
+    // `"False"`, `"0"` and `"1e3"` stay strings on the client, so an echo carrying
+    // the typed value is a divergent history, not a coercion.
+    for (const [label, modelArgs, echoedArgs] of [
+      ['capitalised boolean', '{"command":"ls","run_in_background":"False"}', '{"command":"ls","run_in_background":false}'],
+      ['numeric boolean', '{"command":"ls","run_in_background":"0"}', '{"command":"ls","run_in_background":false}'],
+      ['bare exponent', '{"command":"ls","timeout":"1e3"}', '{"command":"ls","timeout":1000}'],
+      ['hex', '{"command":"ls","timeout":"0x10"}', '{"command":"ls","timeout":16}'],
+    ] as const) {
+      await expectEchoOutcome(label, BASH_TOOLS, 'Bash', modelArgs, echoedArgs, false);
+    }
+  });
+
+  it('does not re-type a property the tool schema declares as a string', async () => {
+    // Without a declared number/boolean type there is no client coercion to
+    // mirror, so a typed echo is a divergent history — today's behaviour.
+    const tools = [{
+      type: 'function', name: 'Bash',
+      parameters: {
+        type: 'object',
+        properties: { command: { type: 'string' }, timeout: { type: 'string' } },
+        required: ['command'],
+      },
+    }];
+    const { input, wsFetch, socket } = await establishBashHead(
+      'acct-scalar-string-schema', 'resp_bash_string_schema', 'call_bss',
+      '{"command":"ls","timeout":"5000"}', tools,
+    );
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_bss', name: 'Bash', arguments: '{"command":"ls","timeout":5000}',
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_bss', output: 'a.txt' };
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([...input, echoedCall, toolOutput], { tools })),
+    });
+    const isolated = lastSocket();
+    expect(isolated).not.toBe(socket);
+    isolated.emit('open');
+    const sent = JSON.parse(isolated.send.mock.calls[0]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    emitTextResponse(isolated, 'resp_bass_new', 'done');
+    await readAll(second);
+  });
+
+  it('re-types a Read offset the way the client does and leaves limit as the client leaves it', async () => {
+    // Read's `offset` goes through the client's `UF` at ingest; `limit` is a
+    // preprocess pipe with no per-tool case, so the client leaves it a string
+    // (captured on 2.1.267/2.1.270/2.1.273: {offset:"5",limit:"10"} echoes as
+    // {offset:5,limit:"10"}). `offset` is `integer` on the wire and "5.5" is
+    // still echoed as 5.5, so there is no integrality check.
+    const tools = [{
+      type: 'function', name: 'Read',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string' },
+          offset: { type: 'integer', minimum: 0 },
+          limit: { type: 'integer', exclusiveMinimum: 0 },
+        },
+        required: ['file_path'],
+      },
+    }];
+    await expectEchoOutcome('read integral offset', tools, 'Read',
+      '{"file_path":"a.py","offset":"5","limit":"10"}', '{"file_path":"a.py","offset":5,"limit":"10"}', true);
+    await expectEchoOutcome('read fractional offset', tools, 'Read',
+      '{"file_path":"a.py","offset":"5.5"}', '{"file_path":"a.py","offset":5.5}', true);
+    await expectEchoOutcome('read changed offset', tools, 'Read',
+      '{"file_path":"a.py","offset":"5"}', '{"file_path":"a.py","offset":6}', false);
+  });
+
+  it('re-types a string before judging it against the declared default', async () => {
+    // The client re-types first and fills defaults second, so `"false"` emitted
+    // for Edit's `default: false` boolean is echoed as `replace_all: false`
+    // (captured on 2.1.273). Both sides must re-type before the default strip:
+    // the echo's `false` is filler, and the head's `"false"` must become the
+    // same filler rather than a string that survives the strip.
+    const tools = [{
+      type: 'function', name: 'Edit',
+      parameters: {
+        type: 'object',
+        properties: {
+          file_path: { type: 'string' },
+          replace_all: { type: 'boolean', default: false },
+        },
+        required: ['file_path'],
+      },
+    }];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'fix it' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-scalar-then-default' });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, { tools })),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_std' } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'function_call', call_id: 'call_std', name: 'Edit', arguments: '{"file_path":"a.py","replace_all":"false"}' },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_std' } })));
+    await readAll(first);
+
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_std', name: 'Edit', arguments: '{"file_path":"a.py","replace_all":false}',
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_std', output: 'edited' };
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([...input, echoedCall, toolOutput], { tools })),
+    });
+    expect(lastSocket()).toBe(socket);
+    const sent = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_std');
+    expect(sent.input).toEqual([toolOutput]);
+    emitTextResponse(socket, 'resp_std_done', 'done');
+    await readAll(second);
+  });
+
+  it('recomputes a prefix memo cached under a schema with the same default but no scalar type', async () => {
+    // The memo fingerprint must cover the scalar kind, not only the default:
+    // a side request in A's partition declares `timeout` as a STRING with the
+    // same default, scans A's idle head, and caches its canonical prefix with
+    // `"5000"` left as a string. A's real turn declares it a number and echoes
+    // `5000`; a fingerprint blind to the kind would reuse the stale prefix.
+    const bashWith = (type: string) => [{
+      type: 'function', name: 'Bash',
+      parameters: {
+        type: 'object',
+        properties: { command: { type: 'string' }, timeout: { type, default: 30000 } },
+        required: ['command'],
+      },
+    }];
+    const { input, wsFetch, socket } = await establishBashHead(
+      'acct-scalar-memo', 'resp_scalar_memo', 'call_sm', '{"command":"ls","timeout":"5000"}', bashWith('number'),
+    );
+
+    const side = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload(
+        [{ role: 'user', content: [{ type: 'input_text', text: 'name this chat' }] }],
+        { tools: bashWith('string') },
+      )),
+    });
+    const sideSocket = lastSocket();
+    if (sideSocket !== socket) sideSocket.emit('open');
+    emitTextResponse(sideSocket, 'resp_scalar_memo_side', 'title');
+    await readAll(side);
+
+    const echoedCall = { type: 'function_call', call_id: 'call_sm', name: 'Bash', arguments: '{"command":"ls","timeout":5000}' };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_sm', output: 'a.txt' };
+    const socketsBefore = socketCount();
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {},
+      body: JSON.stringify(sessionPayload([...input, echoedCall, toolOutput], { tools: bashWith('number') })),
+    });
+    expect(socketCount()).toBe(socketsBefore);
+    const sentA = socket.send.mock.calls.map(call => JSON.parse(call[0] as string));
+    const continuation = sentA.find(sent => sent.previous_response_id === 'resp_scalar_memo');
+    expect(continuation, `did not continue on the head: ${JSON.stringify(sentA.map(s => s.previous_response_id))}`)
+      .toBeDefined();
+    expect(continuation.input).toEqual([toolOutput]);
+    emitTextResponse(socket, 'resp_scalar_memo_done', 'done');
+    await readAll(second);
+  });
+
+
+  it('continues a TaskOutput call whose required-on-the-wire defaults the client filled at ingest', async () => {
+    // Bundle 2.1.273 L10789: block is sw(I().default(!0)), timeout is v()...default(30000);
+    // zod v4 toJSONSchema (output mode, as the bundle's ege() uses) lists BOTH in `required`
+    // and carries their defaults. rW's TaskOutput case (L11539) fills block??true, timeout??30000
+    // at ingest, so the client echoes them even though the model omitted them. A rule that
+    // exempted required properties from default stripping would lose this chain — guard it.
+    const tools = [{
+      type: 'function', name: 'TaskOutput',
+      parameters: {
+        type: 'object',
+        properties: {
+          task_id: { type: 'string' },
+          block: { type: 'boolean', default: true },
+          timeout: { type: 'number', default: 30000 },
+        },
+        required: ['task_id', 'block', 'timeout'], additionalProperties: false,
+      },
+    }];
+    const input = [{ role: 'user', content: [{ type: 'input_text', text: 'check the task' }] }];
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-r1-taskoutput' });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(input, { tools })),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_r1_to' } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'function_call', call_id: 'call_r1_to', name: 'TaskOutput', arguments: '{"task_id":"t1"}' },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_r1_to' } })));
+    await readAll(first);
+
+    const echoedCall = {
+      type: 'function_call', call_id: 'call_r1_to', name: 'TaskOutput',
+      arguments: '{"task_id":"t1","block":true,"timeout":30000}',
+    };
+    const toolOutput = { type: 'function_call_output', call_id: 'call_r1_to', output: 'done' };
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([...input, echoedCall, toolOutput], { tools })),
+    });
+    expect(lastSocket()).toBe(socket);
+    const sent = JSON.parse(socket.send.mock.calls[1]![0] as string);
+    expect(sent.previous_response_id).toBe('resp_r1_to');
+    expect(sent.input).toEqual([toolOutput]);
+    emitTextResponse(socket, 'resp_r1_to_done', 'done');
     await readAll(second);
   });
 
@@ -3251,6 +3707,84 @@ describe('createResponsesWebSocketFetch', () => {
     });
     expect(mismatch).not.toHaveProperty('expectedHash');
     expect(mismatch).not.toHaveProperty('toolArgumentNormalizationGap');
+  });
+
+  it('records the full matched prefix after a re-typed scalar continuation', async () => {
+    // Issue #225: the diagnostic path normalizes under the same per-request
+    // schema map as the matcher, so a `"5000"` → `5000` echo is not reported as a
+    // normalization gap on the head it continued on.
+    const tools = [{
+      type: 'function', name: 'Bash',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string' },
+          timeout: { type: 'number' },
+          run_in_background: { type: 'boolean' },
+        },
+        required: ['command'],
+      },
+    }];
+    const { diagnostics } = await runToolArgumentMismatch({
+      accountId: 'acct-scalar-diagnostic',
+      responseId: 'resp_scalar_diagnostic',
+      tools,
+      upstreamCall: {
+        type: 'function_call', call_id: 'call_bash_diagnostic', name: 'Bash',
+        arguments: '{"command":"ls","timeout":"5000","run_in_background":"false"}',
+      },
+      echoedCall: {
+        type: 'function_call', call_id: 'call_bash_diagnostic', name: 'Bash',
+        arguments: '{"command":"ls","timeout":5000,"run_in_background":false}',
+      },
+    });
+
+    const decision = diagnostics.filter(event => event.event === 'ws_head_decision').at(-1)!;
+    expect(decision).toMatchObject({ decision: 'continuation', continuationMatchMode: 'exact' });
+    const mismatch = firstHeadMismatch(diagnostics);
+    expect(mismatch).toMatchObject({
+      fullItems: 3, expectedPrefixItems: 2, firstMismatch: 2, expectedKind: 'none', actualKind: 'function_call_output',
+    });
+    expect(mismatch).not.toHaveProperty('toolArgumentNormalizationGap');
+  });
+
+  it('warns when a filler-strip gap accompanies a re-typed scalar echo', async () => {
+    // `equalAfterStrip` applies the scalar re-typing alongside the default
+    // strip, so the only remaining difference is the `null` filler and the
+    // canary still fires for the shape #84 had.
+    const tools = [{
+      type: 'function', name: 'Bash',
+      parameters: {
+        type: 'object',
+        properties: {
+          command: { type: 'string' },
+          timeout: { type: 'number' },
+          description: { type: 'string' },
+        },
+        required: ['command'],
+      },
+    }];
+    const { stderr, diagnostics } = await runToolArgumentMismatch({
+      accountId: 'acct-tool-gap-scalar',
+      responseId: 'resp_tool_gap_scalar',
+      tools,
+      upstreamCall: {
+        type: 'function_call', id: 'fc_2', call_id: 'call_bash_gap', name: 'Bash',
+        arguments: '{"command":"ls","timeout":"5000"}',
+        status: 'completed',
+      },
+      echoedCall: {
+        type: 'function_call', call_id: 'call_bash_gap', name: 'Bash',
+        arguments: '{"command":"ls","timeout":5000,"description":null}',
+      },
+    });
+
+    expect(stderr.join('')).toContain('filler-strip rule is applied');
+    expect(diagnostics.filter(event => event.event === 'ws_head_decision').at(-1))
+      .toMatchObject({ decision: 'history_mismatch_new_head' });
+    expect(firstHeadMismatch(diagnostics)).toMatchObject({
+      toolArgumentNormalizationGap: { tool: 'Bash', equalAfterStrip: true },
+    });
   });
 
   it('preserves an undefaulted false argument beside a declared default', async () => {
@@ -5347,6 +5881,54 @@ describe('createResponsesWebSocketFetch', () => {
     expect(responsesWebSocketPromptFingerprint({ model: 'm', tools: [{ name: 'x', parameters: { b: 2, a: 1 } }], input: ['a'] }))
       .toBe(responsesWebSocketPromptFingerprint({ tools: [{ parameters: { a: 1, b: 2 }, name: 'x' }], model: 'm', input: ['different'] }));
   });
+
+  it('starts a new chain when an opaque JSON-looking function output changes bytes', async () => {
+    // `function_call_output.output` is compared byte-exact: it is opaque text,
+    // not JSON, so a key-order change is a different history. Pins the boundary
+    // the tool-argument normalization must not cross.
+    const tools = [{ type: 'function', name: 'JsonTool', parameters: { type: 'object' } }];
+    const firstUser = { role: 'user', content: [{ type: 'input_text', text: 'run it' }] };
+    const wsFetch = createResponsesWebSocketFetch(WS_URL, undefined, { accountId: 'acct-output-json-exact' });
+    const first = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload([firstUser], { tools })),
+    });
+    const socket = lastSocket();
+    socket.emit('open');
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.created', response: { id: 'resp_output_call' } })));
+    socket.emit('message', Buffer.from(JSON.stringify({
+      type: 'response.output_item.done', output_index: 0,
+      item: { type: 'function_call', call_id: 'call_output_json', name: 'JsonTool', arguments: '{}' },
+    })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'response.completed', response: { id: 'resp_output_call' } })));
+    await readAll(first);
+
+    const echoedCall = { type: 'function_call', call_id: 'call_output_json', name: 'JsonTool', arguments: '{}' };
+    const originalOutput = { type: 'function_call_output', call_id: 'call_output_json', output: '{"a":1,"b":2}' };
+    const secondInput = [firstUser, echoedCall, originalOutput];
+    const second = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(secondInput, { tools })),
+    });
+    expect(lastSocket()).toBe(socket);
+    emitTextResponse(socket, 'resp_output_done', 'done');
+    await readAll(second);
+
+    const changedOutput = { ...originalOutput, output: '{"b":2,"a":1}' };
+    const assistant = { role: 'assistant', content: [{ type: 'output_text', text: 'done' }] };
+    const nextUser = { role: 'user', content: [{ type: 'input_text', text: 'again' }] };
+    const fullInput = [firstUser, echoedCall, changedOutput, assistant, nextUser];
+    const third = await wsFetch('https://x', {
+      method: 'POST', headers: {}, body: JSON.stringify(sessionPayload(fullInput, { tools })),
+    });
+    const isolated = lastSocket();
+    expect(isolated).not.toBe(socket);
+    isolated.emit('open');
+    const sent = JSON.parse(isolated.send.mock.calls[0]![0] as string);
+    expect(sent.previous_response_id).toBeUndefined();
+    expect(sent.input).toEqual(fullInput);
+    emitTextResponse(isolated, 'resp_output_changed', 'changed');
+    await readAll(third);
+  });
+
 });
 
 describe('new-connection pacing', () => {
