@@ -27,15 +27,28 @@
 import { spawn } from 'node:child_process';
 import { accessSync, constants as fsConstants, statSync } from 'node:fs';
 import { constants as osConstants } from 'node:os';
+import { isAbsolute } from 'node:path';
 import { OAUTH_ACCOUNT_ENV } from './oauth-account-selection.js';
 import { findClaudeBinary } from './claude-binary.js';
 import { waitForTcpListenerCandidate } from './listener-ready.js';
+import {
+  emitParentNotice,
+  installParentNoticeSink,
+  writeParentNoticeLinesSync,
+} from './parent-notice.js';
 import {
   orderWrapperServerCandidates,
   readLiveServerRuntimeStates,
   type ServerRuntimeState,
 } from './server-runtime.js';
-import { computeWrapperEnv, wrapperRequiresServer } from './wrapper-env.js';
+import {
+  computeWrapperEnv,
+  wrapperInvocationIsChat,
+  wrapperIsTopLevelVsCodeHost,
+  wrapperRequiresServer,
+  wrapperSubstitutionEligible,
+} from './wrapper-env.js';
+import { finalizeWrapperTarget, prepareWrapperTarget } from './wrapper-target.js';
 
 const isWindows = process.platform === 'win32';
 const WRAPPER_SERVER_READY_TIMEOUT_MS = 500;
@@ -48,6 +61,18 @@ function isExecutableFile(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Emit one normalized notice synchronously before exec takes ownership of stderr. */
+function emitPreExecNotice(message: string): void {
+  const lines: string[] = [];
+  const release = installParentNoticeSink(line => lines.push(line));
+  try {
+    emitParentNotice(message);
+  } finally {
+    release();
+  }
+  writeParentNoticeLinesSync(lines);
 }
 
 function activeProviderCredentialOverride(env: NodeJS.ProcessEnv): string | null {
@@ -109,11 +134,18 @@ async function main(): Promise<void> {
 
   let claudePath: string | null = null;
   let claudeArgs: string[] = [];
+  let handedInClaudePath: string | null = null;
+  const firstArgIsExecutable = Boolean(argv[0] && isExecutableFile(argv[0]));
+  const vscodeExplicitPath = wrapperIsTopLevelVsCodeHost(process.env)
+    && Boolean(argv[0] && isAbsolute(argv[0]));
   if (checkOnly) {
     // Readiness checks validate discovery and TCP state without launching Claude.
-  } else if (argv[0] && isExecutableFile(argv[0])) {
+  } else if (argv[0] && (firstArgIsExecutable || vscodeExplicitPath)) {
     // CLAUDE_CODE_PROCESS_WRAPPER shape: first arg is the claude binary path.
+    // VS Code's path stays authoritative even if an update removed it before
+    // this stat; silently discovering another install would run the wrong file.
     claudePath = argv[0];
+    handedInClaudePath = firstArgIsExecutable ? argv[0] : null;
     claudeArgs = argv.slice(1);
   } else {
     claudePath = findClaudeBinary();
@@ -161,6 +193,21 @@ async function main(): Promise<void> {
     );
   }
   const env = computeWrapperEnv(process.env, state);
+
+  // The VS Code extension hands its bundled executable to the configured
+  // process wrapper. In proxy mode only, replace a known-pristine copy with the
+  // exact patched output recorded for those bytes. Every refusal keeps the
+  // explicit path authoritative; discovery must never pick a different binary.
+  if (
+    handedInClaudePath
+    && wrapperSubstitutionEligible(process.platform, process.env, state)
+  ) {
+    const target = finalizeWrapperTarget(prepareWrapperTarget(handedInClaudePath));
+    claudePath = target.path;
+    if (target.notice && wrapperInvocationIsChat(claudeArgs)) {
+      emitPreExecNotice(target.notice);
+    }
+  }
 
   execIntoClaude(claudePath!, claudeArgs, env);
 

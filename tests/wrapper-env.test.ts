@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import {
   computeWrapperEnv,
   LOCAL_GATEWAY_API_KEY,
+  wrapperInvocationIsChat,
   wrapperRequiresServer,
+  wrapperSubstitutionEligible,
 } from '../src/wrapper-env.js';
 import {
   readLiveServerRuntimeState,
@@ -29,6 +31,50 @@ function networkContract(env: NodeJS.ProcessEnv): {
 } {
   return JSON.parse(env[NETWORK_ENV_CONTRACT_VAR]!);
 }
+
+describe('wrapperSubstitutionEligible', () => {
+  const proxyState: ServerRuntimeState = {
+    mode: 'proxy',
+    port: 17645,
+    pid: process.pid,
+    caPath: '/tmp/clodex-ca.pem',
+    startedAt: '2026-09-16T00:00:00.000Z',
+  };
+  const endpointState: ServerRuntimeState = {
+    ...proxyState,
+    mode: 'endpoint',
+  };
+  const topLevelEnv = { CLAUDE_CODE_ENTRYPOINT: 'claude-vscode' };
+  const cases: Array<{
+    label: string;
+    platform: NodeJS.Platform;
+    env: NodeJS.ProcessEnv;
+    state: ServerRuntimeState | null;
+    expected: boolean;
+  }> = [
+    { label: 'top-level POSIX proxy', platform: 'darwin', env: topLevelEnv, state: proxyState, expected: true },
+    { label: 'Windows', platform: 'win32', env: topLevelEnv, state: proxyState, expected: false },
+    { label: 'another entrypoint', platform: 'darwin', env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, state: proxyState, expected: false },
+    { label: 'CLAUDECODE child', platform: 'darwin', env: { ...topLevelEnv, CLAUDECODE: '1' }, state: proxyState, expected: false },
+    { label: 'child session', platform: 'darwin', env: { ...topLevelEnv, CLAUDE_CODE_CHILD_SESSION: '1' }, state: proxyState, expected: false },
+    { label: 'endpoint server', platform: 'darwin', env: topLevelEnv, state: endpointState, expected: false },
+    { label: 'no server', platform: 'darwin', env: topLevelEnv, state: null, expected: false },
+  ];
+
+  it.each(cases)('returns $expected for $label', ({ platform, env, state, expected }) => {
+    expect(wrapperSubstitutionEligible(platform, env, state)).toBe(expected);
+  });
+});
+
+describe('wrapperInvocationIsChat', () => {
+  it.each([
+    ['persistent stream-json chat', ['--output-format', 'stream-json', '--input-format', 'stream-json'], true],
+    ['ordinary helper', ['auth', 'status', '--json'], false],
+    ['nonpersistent suggestions query', ['--output-format', 'stream-json', '--no-session-persistence'], false],
+  ] as const)('returns %s correctly', (_label, args, expected) => {
+    expect(wrapperInvocationIsChat(args)).toBe(expected);
+  });
+});
 
 describe('computeWrapperEnv', () => {
   it('proxy-mode server: injects proxy vars + CA and removes ANTHROPIC_BASE_URL', () => {

@@ -40,6 +40,11 @@ import { basename, dirname, join } from 'node:path';
 import pc from 'picocolors';
 import * as p from '@clack/prompts';
 import { getAppHome } from './paths.js';
+import {
+  getPatchManifestPath,
+  readPatchManifest,
+  type PatchManifest,
+} from './patch-manifest.js';
 import { loadPreferences, savePreferences } from './config.js';
 import {
   contextLimitsFrom,
@@ -127,53 +132,13 @@ import {
 
 // ── Manifest ────────────────────────────────────────────────────────────────
 
-export interface PatchManifest {
-  /** Resolved (real) path of the patched claude binary. */
-  binaryPath: string;
-  /** `claude --version` at patch time. */
-  claudeVersion: string;
-  /** sha256 of the transform-set version and desired patch model config. */
-  configHash: string;
-  /** Size in bytes of the binary after patching (cheap staleness probe). */
-  patchedSize: number;
-  /** sha256 of the binary after patching. */
-  patchedSha256: string;
-  /** Pristine backup used for restore. */
-  backupPath: string;
-  /**
-   * sha256 of the pristine bytes in `backupPath`. Written since content-addressed
-   * backups landed; absent in manifests from older installs, so readers must
-   * treat it as optional.
-   */
-  pristineSha256?: string;
-  /**
-   * `assumed` when this run tied `backupPath` to `binaryPath` by the claude version
-   * in a file name alone, rather than by a record or an earlier manifest. Absent
-   * means established. Without it, the next run reads a guessing run's manifest as
-   * independent proof and promotes the guess (issue #204).
-   */
-  pristineProvenance?: 'assumed';
-  patchedAt: string;
-}
-
-export function getPatchManifestPath(): string {
-  return join(getAppHome(), 'patch-state.json');
-}
+// Preserve the patcher's public surface while the manifest reader is shared
+// with the lightweight clodex-claude wrapper. Writes remain owned here.
+export { getPatchManifestPath, readPatchManifest };
+export type { PatchManifest };
 
 export function getPatchLockPath(): string {
   return join(getAppHome(), 'patch.lock');
-}
-
-export function readPatchManifest(path = getPatchManifestPath()): PatchManifest | null {
-  try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as PatchManifest;
-    if (parsed && typeof parsed.binaryPath === 'string' && typeof parsed.configHash === 'string') {
-      return parsed;
-    }
-  } catch {
-    // missing or invalid manifest → unpatched
-  }
-  return null;
 }
 
 function writePatchManifest(manifest: PatchManifest, path = getPatchManifestPath()): void {

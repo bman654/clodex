@@ -285,6 +285,26 @@ built with `pH()` env.
 `utn() ? {...KIs(), ...Qdt()} : pH()`, and `KIs()` copies only
 `["HOME","LOGNAME","PATH","SHELL","TERM","USER"]`.
 
+### Process-wrapper host markers (verified 2.1.273, darwin-arm64; extension 2.1.267/2.1.273)
+
+The inspected VS Code extensions build their top-level Claude environment by setting
+`CLAUDE_CODE_ENTRYPOINT=claude-vscode` after configured environment variables, then deleting
+`CLAUDECODE` and `CLAUDE_CODE_CHILD_SESSION`. They invoke a configured
+`claudeProcessWrapper` as the executable with the bundled Claude path prepended to the SDK
+arguments. Main-chat wrapper stderr is logged to the **Claude VSCode** output channel with a
+`From claude: ...` prefix. The chat SDK uses that sanitized environment directly. Extension helper
+commands normally carry the same values but construct their environment as
+`{...process.env, ...sanitizedEnv}`. A deletion from the sanitized copy therefore cannot remove an
+ambient `CLAUDECODE` inherited by the extension host: in that unusual launch shape the chat remains
+top-level while helpers retain the marker.
+
+Nested CLI launch shapes differ. Tool, hook, and agent child environments set `CLAUDECODE` and/or
+`CLAUDE_CODE_CHILD_SESSION`. Background pty-host launches delete those markers but also pass their
+environment through the entrypoint scrubber, which removes `claude-vscode`, `claude-desktop`, and
+`claude-desktop-3p`. A wrapper can therefore identify the top-level VS Code shape by requiring the
+VS Code entrypoint and neither child marker; background pty hosts are excluded by the missing
+entrypoint rather than by a marker.
+
 ## `NO_PROXY` cannot solve child-env isolation (verified 2.1.221)
 
 It has **no process dimension** — parent and children read the same variables — and it is a denylist

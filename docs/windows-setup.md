@@ -55,7 +55,10 @@ running; stop it and the port goes dead, so every request fails until you start 
 > Do not set `claudeCode.claudeProcessWrapper` to `clodex-claude` here. On Windows npm installs that
 > bin as `clodex-claude`, `clodex-claude.cmd` and `clodex-claude.ps1` — there is no `.exe`. The
 > extension spawns the wrapper without a shell, so pointing it at the `.cmd` fails with
-> `spawn EINVAL`. The environment-variable approach above is the one that works.
+> `spawn EINVAL`. clodex now performs verified patched-install selection when its wrapper is
+> spawnable on macOS or Linux. The Windows launcher is the companion change in draft PR #243;
+> substitution remains macOS/Linux in this change. Until that companion lands, the
+> environment-variable approach above is the built-in setup that works on Windows.
 
 ### Selecting a clodex model
 
@@ -92,6 +95,18 @@ Routing does not depend on the patch. Claude Code sends the model name it was gi
 maps it. The patch is what makes the binary itself aware of clodex models — listing them in the
 picker, accepting them as known aliases, and reporting their context windows.
 
+On macOS, and through the same POSIX path on Linux, `clodex-claude` handles target selection
+conservatively: it substitutes
+the install recorded in `patch-state.json` only when the extension's full binary hash matches that
+manifest's pristine hash and the install's full hash still matches the recorded patched output.
+Equal version labels or file sizes are not enough. A mismatch runs the extension's original binary
+and writes one line to stderr, which the inspected extension records in its **Claude VSCode** output
+channel. The CLI and extension update independently,
+so re-align their builds and re-run `clodex patch` after an update before expecting picker entries.
+That binary-selection behavior was verified in process-level tests, not a running editor, and the
+Linux host path was not run for this change. Substitution remains macOS/Linux here; the Windows
+launcher is the companion change in draft PR #243.
+
 ### Point the extension at the patched binary
 
 `claudeCode.claudeProcessWrapper` takes an executable path. Claude Code invokes it as:
@@ -104,8 +119,9 @@ passing the binary it *would* have run as the first argument. A wrapper that dro
 runs the clodex-patched binary instead gives the extension a patched Claude Code.
 
 It must be a real `.exe`, for the `spawn EINVAL` reason above. Any language that produces one works;
-this is a Go reference implementation. It asks clodex which binary it patched, so the same compiled
-exe works on any machine without editing a path:
+this is the previous Go reference workaround. It reads the last manifest target directly and does
+**not** use `clodex-claude`'s full-hash selection or update guards, so keep its target aligned and
+re-patched yourself. The packaged launcher is the companion change in draft PR #243:
 
 ```go
 // The extension invokes a claudeProcessWrapper as:
@@ -237,21 +253,22 @@ returns you to the step 1 setup.
 
 ### Consequences of setting a process wrapper
 
-Claude Code changes two behaviors when `claudeProcessWrapper` is set. Both were read from the
-extension's own code rather than observed failing:
+At least two extension behaviors relevant to this setup change when `claudeProcessWrapper` is set.
+These were read from the extension's own code rather than observed in a running editor:
 
-- **Its update check is skipped.** Keeping Claude Code current becomes your job:
+- **A post-update activation health/telemetry probe is skipped.** This is not the VS Code
+  marketplace updater and does not show that extension auto-updates stop. The extension can still
+  update separately from the CLI selected by a wrapper.
+- **The SDK supplies a permission mode.** With no explicit mode, wrapper launches add
+  `--permission-mode default` instead of leaving default-mode resolution to the CLI. An explicitly
+  configured mode still wins. If permission prompts behave unexpectedly under a wrapper, remove the
+  wrapper setting while narrowing it down.
 
-  ```powershell
-  npm install -g @anthropic-ai/claude-code@latest
-  clodex patch
-  ```
-
-- **Permission-mode resolution moves out of the CLI.** If permission prompts behave unexpectedly
-  under a wrapper, this is the setting to remove first when narrowing it down.
-
-Re-running `clodex patch` after each Claude Code update is required regardless of the wrapper — the
-patch applies to a specific version of the binary.
+Re-running `clodex patch` after each Claude Code CLI update is required regardless of the wrapper —
+the patch applies to specific bytes. On macOS/Linux, `clodex-claude` falls back to the extension's
+binary when the bundled and local pristine builds do not match. The Windows Go wrapper above has no
+such verification: it keeps launching its recorded CLI path, so align the extension and CLI builds
+manually and re-patch after either one updates.
 
 Keep the two versions aligned as well. With a wrapper set, the binary the extension launches is no
 longer the one it ships with, while the extension itself can still update from the marketplace — so
@@ -297,4 +314,5 @@ Code VS Code extension 2.1.267, against the ChatGPT/Codex-plan OAuth provider:
 
 Not verified: any Node version manager other than NVM for Windows, any provider other than
 ChatGPT/Codex-plan OAuth, and the two wrapper consequences above, which were read from the
-extension's code rather than reproduced.
+extension's code rather than reproduced. The built-in full-hash selector has not been run in the Windows extension; substitution remains
+macOS/Linux in this change, and the Windows launcher is the companion change in draft PR #243.

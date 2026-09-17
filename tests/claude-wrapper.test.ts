@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -12,15 +13,37 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { rootCertificates } from 'node:tls';
 import { fileURLToPath } from 'node:url';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { build } from 'tsup';
+import {
+  createPatchedWrapperFixture,
+  runBuiltWrapper,
+  runBuiltWrapperWithClosedStderr,
+  type WrapperResult,
+} from './helpers/patched-wrapper-fixture.js';
 
-interface WrapperResult {
-  code: number | null;
-  signal: NodeJS.Signals | null;
-  stdout: string;
-  stderr: string;
-}
+const patchFixture = vi.hoisted(() => ({
+  sentinel: '\n#__CLAUDE_BUNDLE__\n',
+}));
+
+vi.mock('tweakcc', () => ({
+  tryDetectInstallation: async ({ path }: { path?: string }) => {
+    if (!path || !existsSync(path)) throw new Error(`no installation at ${path}`);
+    return { path, version: 'fake', kind: 'native' as const };
+  },
+  readContent: async (installation: { path: string }) => {
+    const raw = readFileSync(installation.path, 'utf8');
+    const index = raw.indexOf(patchFixture.sentinel);
+    if (index === -1) throw new Error('missing fake Claude bundle');
+    return raw.slice(index + patchFixture.sentinel.length);
+  },
+  writeContent: async (installation: { path: string }, content: string) => {
+    const raw = readFileSync(installation.path, 'utf8');
+    const head = raw.slice(0, raw.indexOf(patchFixture.sentinel));
+    writeFileSync(installation.path, head + patchFixture.sentinel + content, { mode: 0o755 });
+    chmodSync(installation.path, 0o755);
+  },
+}));
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 let buildRoot: string;
@@ -31,55 +54,10 @@ let helperPath: string;
 let launchMarker: string;
 let caPath: string;
 
-async function runWrapper(
-  args: string[],
-  envOverrides: NodeJS.ProcessEnv = {},
-): Promise<WrapperResult> {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    CLODEX_HOME: clodexHome,
-    ...envOverrides,
-  };
-  if (!Object.hasOwn(envOverrides, 'CLODEX_REQUIRE_SERVER')) {
-    delete env['CLODEX_REQUIRE_SERVER'];
-  }
-  if (!Object.hasOwn(envOverrides, 'CLODEX_OAUTH_ACCOUNT')) {
-    delete env['CLODEX_OAUTH_ACCOUNT'];
-  }
-  for (const name of Object.keys(env)) {
-    if (/^CLODEX_KEY_[A-Z0-9_]+$/.test(name) && !Object.hasOwn(envOverrides, name)) {
-      delete env[name];
-    }
-  }
-
-  return new Promise((resolveResult, reject) => {
-    const child = spawn(process.execPath, [wrapperPath, ...args], {
-      env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += String(chunk);
-    });
-
-    const timeout = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`wrapper timed out for arguments: ${args.join(' ')}`));
-    }, 5_000);
-    child.once('error', (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-    child.once('close', (code, signal) => {
-      clearTimeout(timeout);
-      resolveResult({ code, signal, stdout, stderr });
-    });
-  });
-}
+const runWrapper = (args: string[], envOverrides: NodeJS.ProcessEnv = {}) =>
+  runBuiltWrapper({ wrapperPath, clodexHome, args, envOverrides });
+const runWrapperWithClosedStderr = (args: string[], envOverrides: NodeJS.ProcessEnv = {}) =>
+  runBuiltWrapperWithClosedStderr({ wrapperPath, clodexHome, args, envOverrides });
 
 async function openLoopbackServer(
   host = '127.0.0.1',
@@ -144,6 +122,18 @@ function advertiseEndpoint(port: number, pid = process.pid): void {
       mode: 'endpoint',
       port,
       pid,
+      startedAt: new Date().toISOString(),
+    },
+  ]);
+}
+
+function advertiseProxy(port: number, pid = process.pid): void {
+  advertiseServers([
+    {
+      mode: 'proxy',
+      port,
+      pid,
+      caPath,
       startedAt: new Date().toISOString(),
     },
   ]);
@@ -500,6 +490,260 @@ describe('clodex-claude process wrapper', () => {
         closeServer(olderProxy!.server),
         closeServer(endpoint!.server),
       ]);
+    }
+  });
+});
+
+describe('clodex-claude VS Code patched-install selection', () => {
+  it('runs the real patch command output with exact argv, bridge env, stdout, and exit code', async () => {
+    const proxy = await openLoopbackServer();
+    advertiseProxy(proxy.port);
+    try {
+      const fixture = await createPatchedWrapperFixture({ testRoot, clodexHome, sentinel: patchFixture.sentinel });
+      const args = ['--input-format', 'stream-json', '--flag', 'two words', 'double"quote', "single'quote", ''];
+      const result = await runWrapper([fixture.handedInPath, ...args], {
+        CLAUDE_CODE_ENTRYPOINT: 'claude-vscode',
+        FAKE_EXIT_CODE: '37',
+      });
+      const launched = JSON.parse(readFileSync(fixture.markerPath, 'utf8')) as { pid: number };
+      const expected = {
+        identity: 'patched-install',
+        pid: launched.pid,
+        args,
+        baseUrl: null,
+        httpProxy: `http://127.0.0.1:${proxy.port}`,
+        httpsProxy: `http://127.0.0.1:${proxy.port}`,
+        caPath,
+      };
+
+      expect(result).toMatchObject({ code: 37, signal: null, stderr: '' });
+      expect(result.stdout).toBe(`${JSON.stringify(expected)}\n`);
+      expect(launched).toEqual(expected);
+      if (execReplacesProcessImage) expect(launched.pid).toBe(result.pid);
+    } finally {
+      await closeServer(proxy.server);
+    }
+  });
+
+  it('notices a refused chat spawn but keeps a refused helper spawn silent', async () => {
+    const proxy = await openLoopbackServer();
+    advertiseProxy(proxy.port);
+    try {
+      const fixture = await createPatchedWrapperFixture({ testRoot, clodexHome, sentinel: patchFixture.sentinel });
+      const original = readFileSync(fixture.handedInPath, 'utf8');
+      writeFileSync(fixture.handedInPath, original.replace('Defaults to inherit.', 'Defaults to another.'), {
+        mode: 0o755,
+      });
+      chmodSync(fixture.handedInPath, 0o755);
+      const args = ['--output-format', 'stream-json', 'space value', '"quoted"', ''];
+      const result = await runWrapper([fixture.handedInPath, ...args], {
+        CLAUDE_CODE_ENTRYPOINT: 'claude-vscode',
+        FAKE_EXIT_CODE: '29',
+      });
+      const expected = {
+        identity: 'extension-bundle',
+        pid: result.pid,
+        args,
+        baseUrl: null,
+        httpProxy: `http://127.0.0.1:${proxy.port}`,
+        httpsProxy: `http://127.0.0.1:${proxy.port}`,
+        caPath,
+      };
+
+      expect(result).toMatchObject({ code: 29, signal: null });
+      expect(result.stdout).toBe(`${JSON.stringify(expected)}\n`);
+      expect(result.stdout).not.toContain('clodex-claude:');
+      expect(result.stderr.trimEnd().split('\n')).toHaveLength(1);
+      expect(result.stderr).toContain(`running ${JSON.stringify(fixture.handedInPath)}`);
+      expect(result.stderr).toContain('bytes do not match the pristine source');
+      expect(result.stderr).toContain(JSON.stringify(join(clodexHome, 'patch-state.json')));
+
+      const helperInvocations = [
+        ['auth', 'status', '--json'],
+        ['--output-format', 'stream-json', '--no-session-persistence', '-p', 'suggest'],
+      ];
+      for (const helperArgs of helperInvocations) {
+        const helper = await runWrapper([fixture.handedInPath, ...helperArgs], {
+          CLAUDE_CODE_ENTRYPOINT: 'claude-vscode',
+          FAKE_EXIT_CODE: '43',
+        });
+        expect(helper).toMatchObject({ code: 43, signal: null, stderr: '' });
+        expect(JSON.parse(helper.stdout)).toMatchObject({
+          identity: 'extension-bundle',
+          args: helperArgs,
+        });
+      }
+    } finally {
+      await closeServer(proxy.server);
+    }
+  });
+
+  it('survives a closed stderr pipe while falling back', async () => {
+    const proxy = await openLoopbackServer();
+    advertiseProxy(proxy.port);
+    try {
+      const fixture = await createPatchedWrapperFixture({ testRoot, clodexHome, sentinel: patchFixture.sentinel });
+      const original = readFileSync(fixture.handedInPath, 'utf8');
+      writeFileSync(fixture.handedInPath, `${original}\n# same-version local change\n`, { mode: 0o755 });
+      const chatArgs = ['--output-format', 'stream-json', '--closed-stderr'];
+      const result = await runWrapperWithClosedStderr([fixture.handedInPath, ...chatArgs], {
+        CLAUDE_CODE_ENTRYPOINT: 'claude-vscode',
+        FAKE_EXIT_CODE: '41',
+      });
+
+      expect(result).toMatchObject({ code: 41, signal: null });
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        identity: 'extension-bundle',
+        args: chatArgs,
+      });
+    } finally {
+      await closeServer(proxy.server);
+    }
+  });
+
+  it('--check keeps its no-launch behavior when patch selection state exists', async () => {
+    const proxy = await openLoopbackServer();
+    advertiseProxy(proxy.port);
+    try {
+      const fixture = await createPatchedWrapperFixture({ testRoot, clodexHome, sentinel: patchFixture.sentinel });
+      const result = await runWrapper(['--check', fixture.handedInPath], {
+        CLAUDE_CODE_ENTRYPOINT: 'claude-vscode',
+      });
+
+      expect(result).toMatchObject({ code: 0, signal: null, stdout: '', stderr: '' });
+      expect(existsSync(fixture.markerPath)).toBe(false);
+    } finally {
+      await closeServer(proxy.server);
+    }
+  });
+
+  it('does not substitute for endpoint mode', async () => {
+    const endpoint = await openLoopbackServer();
+    advertiseEndpoint(endpoint.port);
+    try {
+      const fixture = await createPatchedWrapperFixture({ testRoot, clodexHome, sentinel: patchFixture.sentinel });
+      const result = await runWrapper([fixture.handedInPath, '--endpoint-row'], {
+        CLAUDE_CODE_ENTRYPOINT: 'claude-vscode',
+      });
+      const launched = JSON.parse(result.stdout) as { identity: string; baseUrl: string };
+
+      expect(result).toMatchObject({ code: 0, signal: null, stderr: '' });
+      expect(launched).toMatchObject({
+        identity: 'extension-bundle',
+        baseUrl: `http://127.0.0.1:${endpoint.port}/anthropic`,
+      });
+    } finally {
+      await closeServer(endpoint.server);
+    }
+  });
+
+  it('does not substitute without a live server', async () => {
+    const fixture = await createPatchedWrapperFixture({ testRoot, clodexHome, sentinel: patchFixture.sentinel });
+    const result = await runWrapper([fixture.handedInPath, '--no-server-row'], {
+      CLAUDE_CODE_ENTRYPOINT: 'claude-vscode',
+    });
+
+    expect(result).toMatchObject({ code: 0, signal: null, stderr: '' });
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      identity: 'extension-bundle',
+      baseUrl: null,
+    });
+  });
+
+  it('never discovers another Claude install for a missing VS Code path', async () => {
+    const fixture = await createPatchedWrapperFixture({
+      testRoot,
+      clodexHome,
+      sentinel: patchFixture.sentinel,
+    });
+    rmSync(fixture.handedInPath);
+    const result = await runWrapper([fixture.handedInPath, '--must-not-forward'], {
+      CLAUDE_CODE_ENTRYPOINT: 'claude-vscode',
+      CLODEX_CLAUDE_PATH: fixture.patchedPath,
+    });
+
+    expect(result).toMatchObject({ code: 127, signal: null, stdout: '' });
+    expect(result.stderr.trimEnd().split('\n')).toHaveLength(1);
+    expect(result.stderr).toContain(`failed to launch ${fixture.handedInPath}`);
+    expect(existsSync(fixture.markerPath)).toBe(false);
+  });
+
+  it.each(['CLAUDE_CODE_CHILD_SESSION', 'CLAUDECODE'] as const)(
+    'keeps direct discovery for an absolute child argument marked by %s',
+    async (marker) => {
+      const fixture = await createPatchedWrapperFixture({
+        testRoot,
+        clodexHome,
+        sentinel: patchFixture.sentinel,
+      });
+      const absoluteArgument = join(testRoot, 'missing-child-argument');
+      const result = await runWrapper([absoluteArgument, '--nested-direct'], {
+        CLAUDE_CODE_ENTRYPOINT: 'claude-vscode',
+        CLODEX_CLAUDE_PATH: fixture.handedInPath,
+        [marker]: '1',
+      });
+
+      expect(result).toMatchObject({ code: 0, signal: null, stderr: '' });
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        identity: 'extension-bundle',
+        args: [absoluteArgument, '--nested-direct'],
+      });
+    },
+  );
+
+  it.each([
+    ['CLAUDE_CODE_CHILD_SESSION', { CLAUDE_CODE_ENTRYPOINT: 'claude-vscode', CLAUDE_CODE_CHILD_SESSION: '1' }],
+    ['CLAUDECODE', { CLAUDE_CODE_ENTRYPOINT: 'claude-vscode', CLAUDECODE: '1' }],
+    ['no VS Code entrypoint', {}],
+  ] as const)('does not substitute a child/background process with %s', async (_label, env) => {
+    const proxy = await openLoopbackServer();
+    advertiseProxy(proxy.port);
+    try {
+      const fixture = await createPatchedWrapperFixture({
+        testRoot,
+        clodexHome,
+        sentinel: patchFixture.sentinel,
+      });
+      const result = await runWrapper(
+        [fixture.handedInPath, '--background-row'],
+        env,
+      );
+
+      expect(result).toMatchObject({ code: 0, signal: null, stderr: '' });
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        identity: 'extension-bundle',
+        args: ['--background-row'],
+      });
+    } finally {
+      await closeServer(proxy.server);
+    }
+  });
+
+  it('does not substitute direct discovery or a non-VS-Code process wrapper', async () => {
+    const proxy = await openLoopbackServer();
+    advertiseProxy(proxy.port);
+    try {
+      const fixture = await createPatchedWrapperFixture({ testRoot, clodexHome, sentinel: patchFixture.sentinel });
+      const direct = await runWrapper(['--direct-row', ''], {
+        CLAUDE_CODE_ENTRYPOINT: 'claude-vscode',
+        CLODEX_CLAUDE_PATH: fixture.handedInPath,
+      });
+      const generic = await runWrapper([fixture.handedInPath, '--generic-row'], {
+        CLAUDE_CODE_ENTRYPOINT: 'cli',
+      });
+
+      expect(JSON.parse(direct.stdout)).toMatchObject({
+        identity: 'extension-bundle',
+        args: ['--direct-row', ''],
+      });
+      expect(JSON.parse(generic.stdout)).toMatchObject({
+        identity: 'extension-bundle',
+        args: ['--generic-row'],
+      });
+      expect(direct.stderr).toBe('');
+      expect(generic.stderr).toBe('');
+    } finally {
+      await closeServer(proxy.server);
     }
   });
 });

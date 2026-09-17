@@ -50,7 +50,18 @@
 // and scanning rules it is read by.
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
@@ -62,8 +73,23 @@ export function backupDir(): string {
   return process.env['TWEAKCC_CONFIG_DIR']?.trim() || join(homedir(), '.tweakcc');
 }
 
+const HASH_CHUNK_BYTES = 1024 * 1024;
+
+/** Full-file SHA-256 without retaining a Claude Code executable in memory. */
 export function sha256File(path: string): string {
-  return createHash('sha256').update(readFileSync(path)).digest('hex');
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(HASH_CHUNK_BYTES);
+  const fd = openSync(path, 'r');
+  try {
+    let bytesRead: number;
+    do {
+      bytesRead = readSync(fd, buffer, 0, buffer.length, null);
+      if (bytesRead > 0) hash.update(buffer.subarray(0, bytesRead));
+    } while (bytesRead > 0);
+  } finally {
+    closeSync(fd);
+  }
+  return hash.digest('hex');
 }
 
 /** Filename-safe form of a claude version string. */

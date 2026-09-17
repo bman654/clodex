@@ -64,6 +64,52 @@ branches are asymmetric:
 
 Env computation is the pure `computeWrapperEnv`.
 
+### VS Code's bundled binary
+
+In the inspected VS Code extensions 2.1.267 and 2.1.273, macOS can point
+`claudeCode.claudeProcessWrapper` at the spawnable `clodex-claude` executable; Linux follows the
+same POSIX launch path. The Linux host path was not run for this change. The extension invokes it as
+`clodex-claude <bundled-claude> <args...>`, sets `CLAUDE_CODE_ENTRYPOINT=claude-vscode`, and
+clears the child-session markers. With a live **proxy-mode** server, that exact host/shape enables
+one conservative target change:
+
+- `CLODEX_HOME/patch-state.json` must contain the complete current manifest, including full
+  `pristineSha256` and `patchedSha256` fingerprints;
+- the handed-in file's full SHA-256 must equal `pristineSha256`; and
+- the manifest's different `binaryPath` must still be an executable file whose full SHA-256 equals
+  `patchedSha256`. The target is rechecked at the exec handoff.
+
+Only then does the wrapper run the recorded patched install, preserving every original argument
+following the handed-in path. A missing/legacy/invalid manifest, an already-patched or same-file
+input, different bytes (even at the same size or version), a missing/changed target, or any read
+failure keeps the handed-in path authoritative. It never falls through to ordinary Claude binary
+discovery, runs a version subprocess, writes state, caches a decision, or patches at launch. Chat
+and extension helper commands are both eligible for verified substitution. When verification fails,
+the wrapper emits its one bounded stderr notice only for the persistent SDK chat spawn, identified
+by `--output-format stream-json` or `--input-format stream-json` without
+`--no-session-persistence`. Auth, MCP, plugin, edit-hook, and nonpersistent suggestions helpers stay
+silent when refused so their own error text remains first. The inspected VS Code extension source
+records main-chat stderr in the **Claude VSCode** output channel with a `From claude: ...` prefix.
+This output-channel behavior
+was not exercised in a running editor. Stdout remains the Agent SDK protocol channel. A fingerprint
+mismatch still reads the full handed-in executable on each eligible spawn before refusing; selection
+is deliberately not cached.
+
+If VS Code itself inherits `CLAUDECODE=1` because it was launched from inside a Claude Code session,
+the extension removes that marker from the chat environment but helper commands merge it back from
+the extension host. The chat remains eligible for substitution while helpers keep the handed-in
+binary; neither path selects an unverified executable.
+
+This substitution does not apply to endpoint mode, no-server launches, `--check`, direct terminal
+use, Windows, or ordinary/background `CLAUDE_CODE_PROCESS_WRAPPER` children. Tool, hook, and agent
+children carry child-session markers; background pty wrappers instead lose the `claude-vscode`
+entrypoint. Both shapes therefore keep their handed-in executable. The extension and installed CLI
+update independently: while their source artifacts differ, the wrapper deliberately launches the
+extension's bundled copy and the picker may omit clodex entries. After either channel updates,
+align the builds and re-run `clodex patch`; re-run it after favorites or patch configuration changes
+as well. Equal version labels are not enough because supported same-version distributions have
+shipped different bytes.
+
 **The wrapper must `exec` into claude (`process.execve`), never spawn it as a child.** Claude Code
 starts each background pty host with `detached: true`, then delivers resizes to that process group
 via `process.kill(-process.pid, 'SIGWINCH')`. A wrapper that parents claude keeps the group-leader

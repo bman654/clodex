@@ -53,6 +53,32 @@ export function wrapperRequiresServer(env: NodeJS.ProcessEnv): boolean {
   return env[REQUIRE_SERVER_ENV] === '1';
 }
 
+/** The extension's top-level host shape, shared with missing-path handling. */
+export function wrapperIsTopLevelVsCodeHost(env: NodeJS.ProcessEnv): boolean {
+  return env['CLAUDE_CODE_ENTRYPOINT'] === 'claude-vscode'
+    && !env['CLAUDE_CODE_CHILD_SESSION']
+    && !env['CLAUDECODE'];
+}
+
+/** Whether this wrapper spawn may select the manifest's verified patched install. */
+export function wrapperSubstitutionEligible(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  state: ServerRuntimeState | null,
+): boolean {
+  return platform !== 'win32'
+    && wrapperIsTopLevelVsCodeHost(env)
+    && state?.mode === 'proxy';
+}
+
+/** Main chat is the persistent SDK stream-json spawn; programmatic queries are not. */
+export function wrapperInvocationIsChat(args: readonly string[]): boolean {
+  const streamJson = args.some((arg, index) =>
+    arg === 'stream-json'
+      && (args[index - 1] === '--output-format' || args[index - 1] === '--input-format'));
+  return streamJson && !args.includes('--no-session-persistence');
+}
+
 export function computeWrapperEnv(
   baseEnv: NodeJS.ProcessEnv,
   state: ServerRuntimeState | null,
