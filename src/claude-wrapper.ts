@@ -199,9 +199,12 @@ async function main(): Promise<void> {
   // process wrapper. In proxy mode only, replace a known-pristine copy with the
   // exact patched output recorded for those bytes. Every refusal keeps the
   // explicit path authoritative; discovery must never pick a different binary.
+  // On Windows this runs under the native launcher and reaches the spawn
+  // fallback below, which starts a `.exe` directly — the selector accepts
+  // nothing else there.
   if (
     handedInClaudePath
-    && wrapperSubstitutionEligible(process.platform, process.env, state)
+    && wrapperSubstitutionEligible(process.env, state)
   ) {
     const target = finalizeWrapperTarget(prepareWrapperTarget(handedInClaudePath));
     claudePath = target.path;

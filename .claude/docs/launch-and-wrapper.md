@@ -68,16 +68,36 @@ Env computation is the pure `computeWrapperEnv`.
 
 In the inspected VS Code extensions 2.1.267 and 2.1.273, macOS can point
 `claudeCode.claudeProcessWrapper` at the spawnable `clodex-claude` executable; Linux follows the
-same POSIX launch path. The Linux host path was not run for this change. The extension invokes it as
-`clodex-claude <bundled-claude> <args...>`, sets `CLAUDE_CODE_ENTRYPOINT=claude-vscode`, and
-clears the child-session markers. With a live **proxy-mode** server, that exact host/shape enables
-one conservative target change:
+same POSIX launch path, and Windows points it at the `.exe` from `clodex install-vscode-launcher`
+(below), which starts the same wrapper. The Linux host path was not run for this change. The
+extension invokes it as `clodex-claude <bundled-claude> <args...>`, sets
+`CLAUDE_CODE_ENTRYPOINT=claude-vscode`, and clears the child-session markers. With a live
+**proxy-mode** server, that exact host/shape enables one conservative target change:
 
 - `CLODEX_HOME/patch-state.json` must contain the complete current manifest, including full
   `pristineSha256` and `patchedSha256` fingerprints;
 - the handed-in file's full SHA-256 must equal `pristineSha256`; and
 - the manifest's different `binaryPath` must still be an executable file whose full SHA-256 equals
   `patchedSha256`. The target is rechecked at the exec handoff.
+
+"Executable" is `requireWrapperExecutable` in `src/wrapper-target.ts`: `access(X_OK)` on POSIX;
+on Windows, where libuv's `access` ignores `X_OK` entirely, a `.exe` name — the shape the spawn
+fallback starts directly. A `.cmd`/`.bat` (spawned through `cmd.exe`, naming any program) is
+refused on either side. File identity around the hash-to-exec window is compared from
+`statSync(path, { bigint: true })`: `dev`, `ino`, `size`, `mode`, `mtimeNs`, `ctimeNs`. Bigints
+because NTFS file reference numbers are 64-bit (a 16-bit sequence over a 48-bit MFT record — NTFS
+layout, and libuv reports the whole value; past sequence 32 a double rounds it, which
+`tests/wrapper-target.test.ts` shows with a synthetic id), and nanoseconds because NTFS stamps are
+100 ns units and the `*Ms` doubles round them. What the `windows-launcher` job measures
+(`tests/wrapper-substitution.windows.test.ts`): `ino` is non-zero and stable across stats, an open
+handle and a hard link; `dev` equals the volume serial; `ctime` moves on an in-place same-size
+rewrite with `mtime` restored (it is the NTFS ChangeTime, and `birthtime` is the creation time);
+`mode` changes with the read-only attribute; `access(X_OK)` passes for a text file; and the
+selector declines exactly that rewrite between prepare and finalize. First run (2026-09-17,
+`windows-latest`, Node 24.20): `ino` sequence 3, well under 2^53; `dev` 0xd6f2a281 = the C: serial;
+`ctime` +80 ms across the rewrite with `mtime` and `birthtime` unchanged; mode 0o100666 → 0o100444;
+SHA-256 of 200 MB 1180 ms then 348 ms on one run, 177 ms then 183 ms on the next — a few hundred
+milliseconds per eligible spawn in steady state, with the occasional first-touch second.
 
 Only then does the wrapper run the recorded patched install, preserving every original argument
 following the handed-in path. A missing/legacy/invalid manifest, an already-patched or same-file
@@ -101,7 +121,7 @@ the extension host. The chat remains eligible for substitution while helpers kee
 binary; neither path selects an unverified executable.
 
 This substitution does not apply to endpoint mode, no-server launches, `--check`, direct terminal
-use, Windows, or ordinary/background `CLAUDE_CODE_PROCESS_WRAPPER` children. Tool, hook, and agent
+use, or ordinary/background `CLAUDE_CODE_PROCESS_WRAPPER` children. Tool, hook, and agent
 children carry child-session markers; background pty wrappers instead lose the `claude-vscode`
 entrypoint. Both shapes therefore keep their handed-in executable. The extension and installed CLI
 update independently: while their source artifacts differ, the wrapper deliberately launches the
@@ -159,10 +179,10 @@ The launcher:
 - returns `true` from its console control handler for Ctrl+C/Break so the child, which shares the
   console, handles them; exits with the child's exit code.
 
-The launcher chooses no binary. `wrapperSubstitutionEligible` returns false on `win32`, so the
-wrapper it starts runs the bundled `claude.exe` the extension handed it; on Windows the launcher
-delivers server discovery and routing, and the extension's picker stays the bundled binary's until
-substitution is enabled there.
+The launcher chooses no binary. It hands the wrapper the bundled `claude.exe` the extension named,
+and the wrapper applies the substitution rules above unchanged (`wrapperSubstitutionEligible` has
+no platform term); the selected `.exe` is then started by the wrapper's Windows spawn fallback
+without a shell, with the fallback notice already written to the inherited stderr.
 
 Every environmental input of the command (platform, env, node path, compiler runner, scratch root)
 is an option, and `tests/vscode-launcher.test.ts` drives the whole path against a fake `csc.exe`
@@ -180,6 +200,18 @@ spawn those without one); a native `.exe` is spawned directly, and the JSON/`%PA
 only hold on that direct path. Off Windows the file is skipped at collection. The C# source can
 also be compile-checked and its command-line splitting executed on macOS/Linux with the .NET SDK
 (`LangVersion=5`).
+
+The same job runs `tests/wrapper-substitution.windows.test.ts`, the Windows counterpart of the
+patched-install selection tests in `tests/claude-wrapper.test.ts`: `tests/fixtures/fake-claude.cs`
+is compiled with the runner's `csc.exe` into a stand-in `claude.exe` (answers `--version`, reports
+which copy of itself ran by looking for clodex's `/*ccpatch:` marker in its own overlay bytes), the
+fake bundle is appended after a sentinel, the REAL `runPatchCommand` patches it with tweakcc mocked
+byte-for-byte (latin1, not utf8 — the head is a PE image), and the launcher built by the first
+suite is spawned as the extension spawns it with a pristine copy as the handed-in path. It asserts
+the patched copy runs for chat and helper spawns, that a same-size different-bytes copy runs as
+handed in with one stderr line written before the binary's own output (both fds into one file),
+that refused helper spawns stay silent, and that a dead server disables substitution. Its first
+suite records the NTFS facts listed above and prints the SHA-256 time for a 200 MB file.
 
 
 ## Config and env isolation

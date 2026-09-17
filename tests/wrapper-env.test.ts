@@ -46,24 +46,24 @@ describe('wrapperSubstitutionEligible', () => {
     mode: 'endpoint',
   };
   const topLevelEnv = { CLAUDE_CODE_ENTRYPOINT: 'claude-vscode' };
+  // No platform column: the gate no longer knows the platform. Windows is eligible like every
+  // other host; what Windows needs differently is the executable rule in wrapper-target.ts.
   const cases: Array<{
     label: string;
-    platform: NodeJS.Platform;
     env: NodeJS.ProcessEnv;
     state: ServerRuntimeState | null;
     expected: boolean;
   }> = [
-    { label: 'top-level POSIX proxy', platform: 'darwin', env: topLevelEnv, state: proxyState, expected: true },
-    { label: 'Windows', platform: 'win32', env: topLevelEnv, state: proxyState, expected: false },
-    { label: 'another entrypoint', platform: 'darwin', env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, state: proxyState, expected: false },
-    { label: 'CLAUDECODE child', platform: 'darwin', env: { ...topLevelEnv, CLAUDECODE: '1' }, state: proxyState, expected: false },
-    { label: 'child session', platform: 'darwin', env: { ...topLevelEnv, CLAUDE_CODE_CHILD_SESSION: '1' }, state: proxyState, expected: false },
-    { label: 'endpoint server', platform: 'darwin', env: topLevelEnv, state: endpointState, expected: false },
-    { label: 'no server', platform: 'darwin', env: topLevelEnv, state: null, expected: false },
+    { label: 'top-level VS Code chat with a proxy server', env: topLevelEnv, state: proxyState, expected: true },
+    { label: 'another entrypoint', env: { CLAUDE_CODE_ENTRYPOINT: 'cli' }, state: proxyState, expected: false },
+    { label: 'CLAUDECODE child', env: { ...topLevelEnv, CLAUDECODE: '1' }, state: proxyState, expected: false },
+    { label: 'child session', env: { ...topLevelEnv, CLAUDE_CODE_CHILD_SESSION: '1' }, state: proxyState, expected: false },
+    { label: 'endpoint server', env: topLevelEnv, state: endpointState, expected: false },
+    { label: 'no server', env: topLevelEnv, state: null, expected: false },
   ];
 
-  it.each(cases)('returns $expected for $label', ({ platform, env, state, expected }) => {
-    expect(wrapperSubstitutionEligible(platform, env, state)).toBe(expected);
+  it.each(cases)('returns $expected for $label', ({ env, state, expected }) => {
+    expect(wrapperSubstitutionEligible(env, state)).toBe(expected);
   });
 });
 

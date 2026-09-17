@@ -692,9 +692,9 @@ ${pc.bold('Behavior:')}
   a running clodex server --proxy. Node and Claude Code are tied to the launcher
   with a Windows job object so that cancelling a chat leaves no stray processes;
   if Windows refuses the job object the launcher says so on stderr and runs anyway.
-  clodex-claude's substitution of your patched install (what puts clodex models
-  in the extension's model picker on macOS/Linux) is not enabled on Windows: the
-  bundled binary the extension hands it is what runs, so the picker is unchanged.
+  As on macOS and Linux, clodex-claude then runs your clodex-patched install in
+  place of the bundled claude.exe when the two builds match, so clodex models
+  appear in the extension's model picker; re-run clodex patch after updates.
 
   The paths to node.exe and to the clodex install are compiled in: re-run this
   command after switching Node versions or moving the clodex install.

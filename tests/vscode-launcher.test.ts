@@ -410,7 +410,8 @@ describe('clodex install-vscode-launcher command', () => {
     expect(output).toMatch(/switching Node versions/);
     expect(output).toMatch(/clodex server --proxy/);
     expect(output).toMatch(/claudeCode.environmentVariables/);
-    expect(output).toMatch(/is not enabled on Windows\. Here it runs the\nbundled binary the extension hands it, so the picker stays as it was/);
+    expect(output).toMatch(/runs that patched\ninstall in place of the extension's bundled claude\.exe when the two builds match/);
+    expect(output).not.toMatch(/not enabled on Windows/);
   });
 
   it('prints the failure and compiler output to stderr and exits 1', () => {

@@ -1,4 +1,4 @@
-import { accessSync, constants as fsConstants, statSync, type Stats } from 'node:fs';
+import { accessSync, constants as fsConstants, statSync, type BigIntStats } from 'node:fs';
 import { readWrapperPatchManifest, type WrapperPatchManifest } from './patch-manifest.js';
 import { sha256File } from './patch-backup.js';
 
@@ -21,26 +21,53 @@ export interface WrapperTargetDecision {
   notice?: string;
 }
 
+/**
+ * Everything `stat` reports that a rewrite of the file can disturb, held as bigints so nothing is
+ * rounded. NTFS matters here: Node reports `ino` as the 64-bit file reference number (a 16-bit
+ * sequence number above a 48-bit record index), which a double cannot hold exactly once the
+ * sequence number reaches 32, and `ctime` as the NTFS ChangeTime — it moves on every write and on
+ * `SetFileTime`, so an in-place rewrite that restores `mtime` still shows here. Times are
+ * compared at nanosecond resolution (100 ns on NTFS) rather than the rounded `*Ms` doubles.
+ */
 interface FileIdentity {
-  dev: number;
-  ino: number;
-  size: number;
-  mode: number;
-  mtimeMs: number;
-  ctimeMs: number;
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mode: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
 }
 
-interface WrapperTargetFileOps {
-  stat(path: string): Stats;
+export interface WrapperTargetFileOps {
+  stat(path: string): BigIntStats;
   requireExecutable(path: string): void;
   sha256(path: string): string;
 }
 
-const defaultFileOps: WrapperTargetFileOps = {
-  stat: statSync,
-  requireExecutable(path) {
-    if (process.platform !== 'win32') accessSync(path, fsConstants.X_OK);
-  },
+const WINDOWS_EXECUTABLE = /\.exe$/i;
+
+/**
+ * What "executable" means before either file may be run. POSIX asks the kernel. Windows has no
+ * execute bit — libuv's `access(X_OK)` passes for any existing file — so the rule there is the one
+ * the spawn path applies: a native `.exe`, which the wrapper spawns directly. The extension's
+ * bundled `claude.exe` and every patch target clodex records on Windows (npm's `bin\claude.exe`,
+ * the native installer's `claude.exe`) satisfy it; a `.cmd`/`.bat` launcher, which would be run
+ * through `cmd.exe` and could name any program, is refused rather than hashed.
+ */
+export function requireWrapperExecutable(
+  path: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform === 'win32') {
+    if (!WINDOWS_EXECUTABLE.test(path)) throw new Error('not a Windows executable');
+    return;
+  }
+  accessSync(path, fsConstants.X_OK);
+}
+
+export const defaultWrapperTargetFileOps: WrapperTargetFileOps = {
+  stat: path => statSync(path, { bigint: true }),
+  requireExecutable: path => requireWrapperExecutable(path),
   sha256: sha256File,
 };
 
@@ -66,8 +93,8 @@ function identityOf(path: string, fileOps: WrapperTargetFileOps): FileIdentity {
     ino: stat.ino,
     size: stat.size,
     mode: stat.mode,
-    mtimeMs: stat.mtimeMs,
-    ctimeMs: stat.ctimeMs,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs,
   };
 }
 
@@ -79,8 +106,8 @@ function sameIdentity(left: FileIdentity, right: FileIdentity): boolean {
   return sameFile(left, right)
     && left.size === right.size
     && left.mode === right.mode
-    && left.mtimeMs === right.mtimeMs
-    && left.ctimeMs === right.ctimeMs;
+    && left.mtimeNs === right.mtimeNs
+    && left.ctimeNs === right.ctimeNs;
 }
 
 function fallbackNotice(
@@ -154,7 +181,7 @@ export function prepareWrapperTarget(
 
   const { manifest } = manifestRead;
   const candidatePath = manifest.binaryPath;
-  const fileOps = options.fileOps ?? defaultFileOps;
+  const fileOps = options.fileOps ?? defaultWrapperTargetFileOps;
   let handedInIdentity: FileIdentity;
   let candidateIdentity: FileIdentity;
   try {
@@ -194,7 +221,7 @@ export function prepareWrapperTarget(
       decision: { path: handedInPath, reason: 'manifest-target-is-handed-in' },
     };
   }
-  if (candidateIdentity.size !== manifest.patchedSize) {
+  if (candidateIdentity.size !== BigInt(manifest.patchedSize)) {
     return {
       kind: 'decided',
       decision: fallback(

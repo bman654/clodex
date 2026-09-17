@@ -1,8 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
-  accessSync,
   chmodSync,
-  constants as fsConstants,
   mkdtempSync,
   readFileSync,
   linkSync,
@@ -17,9 +15,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  defaultWrapperTargetFileOps,
   finalizeWrapperTarget,
   prepareWrapperTarget,
+  requireWrapperExecutable,
   type WrapperTargetDecision,
+  type WrapperTargetReason,
 } from '../src/wrapper-target.js';
 import { readPatchManifest } from '../src/patch-manifest.js';
 
@@ -29,6 +30,8 @@ let root: string;
 let handedIn: string;
 let patched: string;
 let manifestPath: string;
+/** The selector accepts only `.exe` on Windows; nothing here is ever run, so the name is free. */
+const exe = process.platform === 'win32' ? '.exe' : '';
 
 function writeExecutable(path: string, contents: string): void {
   writeFileSync(path, contents, { mode: 0o755 });
@@ -59,8 +62,8 @@ function decide(): WrapperTargetDecision {
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'clodex-wrapper-target-'));
-  handedIn = join(root, 'extension-claude');
-  patched = join(root, 'installed-claude');
+  handedIn = join(root, `extension-claude${exe}`);
+  patched = join(root, `installed-claude${exe}`);
   manifestPath = join(root, 'patch-state.json');
   writeExecutable(handedIn, 'known-pristine-build');
   writeExecutable(patched, 'known-patched-output');
@@ -116,7 +119,7 @@ describe('VS Code wrapper target selection', () => {
       reason: 'manifest-target-is-handed-in',
     });
 
-    const alias = join(root, 'installed-alias');
+    const alias = join(root, `installed-alias${exe}`);
     linkSync(handedIn, alias);
     manifestPath = join(root, 'same-file-manifest.json');
     patched = alias;
@@ -222,11 +225,15 @@ describe('VS Code wrapper target selection', () => {
     expect(decision.notice).toContain(JSON.stringify(manifestPath));
   });
 
-  it.each([
+  const patchedInstallCases: Array<[string, () => void, WrapperTargetReason]> = [
     ['missing', () => rmSync(patched), 'patched-install-unavailable'],
-    ['not executable', () => chmodSync(patched, 0o644), 'patched-install-unavailable'],
     ['changed size', () => writeExecutable(patched, 'larger-patched-output!'), 'patched-install-size-changed'],
-  ] as const)('keeps the handed-in binary when the patched install is %s', (_label, alter, reason) => {
+  ];
+  // Windows has no execute bit; its executable rule is pinned in the requireWrapperExecutable suite.
+  if (process.platform !== 'win32') {
+    patchedInstallCases.push(['not executable', () => chmodSync(patched, 0o644), 'patched-install-unavailable']);
+  }
+  it.each(patchedInstallCases)('keeps the handed-in binary when the patched install is %s', (_label, alter, reason) => {
     writeManifest();
     alter();
 
@@ -244,10 +251,7 @@ describe('VS Code wrapper target selection', () => {
     const prepared = prepareWrapperTarget(handedIn, {
       manifestPath,
       fileOps: {
-        stat: statSync,
-        requireExecutable(path) {
-          if (process.platform !== 'win32') accessSync(path, fsConstants.X_OK);
-        },
+        ...defaultWrapperTargetFileOps,
         sha256(path) {
           if (path === patched) throw denied;
           return digest(path);
@@ -267,10 +271,7 @@ describe('VS Code wrapper target selection', () => {
     const prepared = prepareWrapperTarget(handedIn, {
       manifestPath,
       fileOps: {
-        stat: statSync,
-        requireExecutable(path) {
-          if (process.platform !== 'win32') accessSync(path, fsConstants.X_OK);
-        },
+        ...defaultWrapperTargetFileOps,
         sha256(path) {
           if (path === handedIn) throw Object.assign(new Error('denied'), { code: 'EACCES' });
           return digest(path);
@@ -283,22 +284,29 @@ describe('VS Code wrapper target selection', () => {
     expect(decision.notice).toContain('could not be hashed');
   });
 
-  it('declines substitution when the handed-in file changes during its hash', () => {
+  // Both during-hash replacements carry the ORIGINAL's mtime and size, so mtime alone cannot tell
+  // them apart: what the selector must notice is the new inode (and ctime). A replacement that
+  // happened to get a fresh mtime would let a selector comparing mtime only stay green.
+  const SAME_MTIME = new Date('2020-01-02T03:04:05.000Z');
+
+  function replaceDuringHash(path: string): void {
+    const replacement = `${path}.during-hash`;
+    writeFileSync(replacement, readFileSync(path), { mode: 0o755 });
+    utimesSync(replacement, SAME_MTIME, SAME_MTIME);
+    expect(statSync(replacement).mtimeMs).toBe(statSync(path).mtimeMs);
+    renameSync(replacement, path);
+  }
+
+  it('declines substitution when the handed-in file is replaced during its hash, mtime preserved', () => {
     writeManifest();
+    utimesSync(handedIn, SAME_MTIME, SAME_MTIME);
     const prepared = prepareWrapperTarget(handedIn, {
       manifestPath,
       fileOps: {
-        stat: statSync,
-        requireExecutable(path) {
-          if (process.platform !== 'win32') accessSync(path, fsConstants.X_OK);
-        },
+        ...defaultWrapperTargetFileOps,
         sha256(path) {
           const result = digest(path);
-          if (path === handedIn) {
-            const replacement = `${path}.during-hash`;
-            writeFileSync(replacement, readFileSync(path), { mode: 0o755 });
-            renameSync(replacement, path);
-          }
+          if (path === handedIn) replaceDuringHash(path);
           return result;
         },
       },
@@ -310,22 +318,16 @@ describe('VS Code wrapper target selection', () => {
     });
   });
 
-  it('declines substitution when the candidate changes during its handoff hash', () => {
+  it('declines substitution when the candidate is replaced during its handoff hash, mtime preserved', () => {
     writeManifest();
+    utimesSync(patched, SAME_MTIME, SAME_MTIME);
     const prepared = prepareWrapperTarget(handedIn, {
       manifestPath,
       fileOps: {
-        stat: statSync,
-        requireExecutable(path) {
-          if (process.platform !== 'win32') accessSync(path, fsConstants.X_OK);
-        },
+        ...defaultWrapperTargetFileOps,
         sha256(path) {
           const result = digest(path);
-          if (path === patched) {
-            const replacement = `${path}.during-hash`;
-            writeFileSync(replacement, readFileSync(path), { mode: 0o755 });
-            renameSync(replacement, path);
-          }
+          if (path === patched) replaceDuringHash(path);
           return result;
         },
       },
@@ -353,6 +355,32 @@ describe('VS Code wrapper target selection', () => {
     });
   });
 
+  it('compares file identity without rounding a 64-bit inode', () => {
+    // NTFS file reference numbers carry a 16-bit sequence number above a 48-bit record index; once
+    // the sequence number reaches 32 the value passes 2^53 and a double rounds it, so two distinct
+    // files can compare equal. The selector must read stats as bigints so this never collapses.
+    writeManifest();
+    // The production stat must ask for bigints; the injected one below proves the comparison
+    // never narrows what it is given.
+    expect(typeof defaultWrapperTargetFileOps.stat(handedIn).ino).toBe('bigint');
+    const base = statSync(handedIn, { bigint: true });
+    const highSequence = (BigInt(40) << BigInt(48)) | BigInt(0x123456789ab);
+    expect(Number(highSequence)).toBe(Number(highSequence + BigInt(1)));
+    const stat = (path: string) => {
+      const real = statSync(path, { bigint: true });
+      const ino = path === handedIn ? highSequence : highSequence + BigInt(1);
+      return Object.assign(Object.create(Object.getPrototypeOf(real)), real, { dev: base.dev, ino });
+    };
+
+    const decision = finalizeWrapperTarget(prepareWrapperTarget(handedIn, {
+      manifestPath,
+      fileOps: { ...defaultWrapperTargetFileOps, stat },
+    }));
+
+    // Adjacent inodes past 2^53 are different files: verified, not "manifest-target-is-handed-in".
+    expect(decision).toEqual({ path: patched, reason: 'verified-patched-install' });
+  });
+
   it.each(['handed-in', 'candidate'] as const)(
     'declines substitution when the %s identity changes before handoff',
     (changed) => {
@@ -372,4 +400,34 @@ describe('VS Code wrapper target selection', () => {
       });
     },
   );
+});
+
+describe('requireWrapperExecutable', () => {
+  it.each([
+    ['C:\\Users\\jane\\.vscode\\extensions\\anthropic.claude-code-2.1.273-win32-x64\\resources\\native-binary\\claude.exe', true],
+    ['C:\\nvm4w\\nodejs\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe', true],
+    ['C:\\Users\\jane\\.local\\bin\\CLAUDE.EXE', true],
+    ['C:\\nvm4w\\nodejs\\claude.cmd', false],
+    ['C:\\tools\\claude.bat', false],
+    ['C:\\nvm4w\\nodejs\\claude.ps1', false],
+    ['C:\\nvm4w\\nodejs\\claude', false],
+    ['C:\\odd\\claude.exe.cmd', false],
+  ])('on Windows accepts only a .exe: %s -> %s', (path, accepted) => {
+    const check = () => requireWrapperExecutable(path, 'win32');
+    if (accepted) expect(check).not.toThrow();
+    else expect(check).toThrow(/not a Windows executable/);
+  });
+
+  it.skipIf(process.platform === 'win32')('on POSIX asks the kernel for execute permission', () => {
+    expect(() => requireWrapperExecutable(handedIn, 'linux')).not.toThrow();
+    chmodSync(handedIn, 0o644);
+    expect(() => requireWrapperExecutable(handedIn, 'linux')).toThrow();
+  });
+
+  it('is the check the default file ops apply on this host', () => {
+    const notExecutable = join(root, process.platform === 'win32' ? 'claude.cmd' : 'claude-plain');
+    writeFileSync(notExecutable, 'x', { mode: 0o644 });
+    expect(() => defaultWrapperTargetFileOps.requireExecutable(notExecutable)).toThrow();
+    expect(() => defaultWrapperTargetFileOps.requireExecutable(handedIn)).not.toThrow();
+  });
 });

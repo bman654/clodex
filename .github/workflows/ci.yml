@@ -39,8 +39,9 @@ jobs:
   # The Windows VS Code launcher is native code compiled on the user's machine; nothing on the
   # Linux job can compile or run it. This job builds it with the runner's own .NET Framework
   # csc.exe and drives the resulting clodex-claude.exe the way the extension does (see
-  # tests/vscode-launcher.windows.test.ts). Only that file runs here — the full suite is the
-  # Linux job's business.
+  # tests/vscode-launcher.windows.test.ts), then proves the patched-install substitution through
+  # it on NTFS (tests/wrapper-substitution.windows.test.ts). Only those files run here — the full
+  # suite is the Linux job's business.
   windows-launcher:
     runs-on: windows-latest
     steps:
@@ -51,4 +52,4 @@ jobs:
       - run: corepack enable
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm vitest run tests/vscode-launcher.windows.test.ts
+      - run: pnpm vitest run tests/vscode-launcher.windows.test.ts tests/wrapper-substitution.windows.test.ts

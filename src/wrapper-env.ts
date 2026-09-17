@@ -79,14 +79,19 @@ export function wrapperIsTopLevelVsCodeHost(env: NodeJS.ProcessEnv): boolean {
     && !env['CLAUDECODE'];
 }
 
-/** Whether this wrapper spawn may select the manifest's verified patched install. */
+/**
+ * Whether this wrapper spawn may select the manifest's verified patched install.
+ *
+ * Every supported platform is eligible. Windows was held back until the `windows-launcher` CI job
+ * could prove the selector's file-identity checks on NTFS and drive the substitution end to end
+ * through the native launcher (`tests/wrapper-substitution.windows.test.ts`); what differs there
+ * now lives in `wrapper-target.ts` (`requireWrapperExecutable`), not in this gate.
+ */
 export function wrapperSubstitutionEligible(
-  platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
   state: ServerRuntimeState | null,
 ): boolean {
-  return platform !== 'win32'
-    && wrapperIsTopLevelVsCodeHost(env)
+  return wrapperIsTopLevelVsCodeHost(env)
     && state?.mode === 'proxy';
 }
 

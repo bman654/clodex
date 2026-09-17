@@ -107,7 +107,7 @@ flowchart LR
 > Using Claude Code's agents view or background agents? Ask your Claude Code agent to read [docs/background-agents.md](docs/background-agents.md) and set it up for you — one global `clodex server --proxy` plus the `clodex-claude` wrapper bin bridges every claude process automatically.
 
 > [!TIP]
-> Using the Claude Code VS Code extension? On macOS/Linux, `clodex-claude` launches your verified clodex-patched install in place of the extension's bundled binary, so clodex models appear in its model picker; follow the [VS Code setup](docs/background-agents.md#vs-code-model-picker-on-macoslinux). On Windows, `clodex install-vscode-launcher` builds the `.exe` the extension needs to launch Claude Code through `clodex-claude` — that gets you routing to your running server without proxy values in VS Code settings, but the patched-install substitution is not enabled on Windows yet, so the picker stays the bundled binary's. See [docs/windows-setup.md](docs/windows-setup.md).
+> Using the Claude Code VS Code extension? `clodex-claude` launches your verified clodex-patched install in place of the extension's bundled binary, so clodex models appear in its model picker; follow the [VS Code setup](docs/background-agents.md#vs-code-model-picker). On Windows, `clodex install-vscode-launcher` first builds the `.exe` the extension needs to launch Claude Code through `clodex-claude`; see [docs/windows-setup.md](docs/windows-setup.md).
 
 ## CLI reference
 

@@ -227,10 +227,13 @@ site to each build's own bundle; run it per format when you touch `src/patch-tra
 
 **`claude -p` end-to-end tests are manual only — NEVER add them to the automated suite.**
 
-`tests/vscode-launcher.windows.test.ts` runs only on the `windows-launcher` CI job
-(`windows-latest`, after `pnpm build`): it compiles the Windows VS Code launcher with the runner's
-real `csc.exe` and drives the resulting `.exe`. It is skipped everywhere else; `pnpm test` on macOS
-or Linux says nothing about it. See `.claude/docs/launch-and-wrapper.md`.
+`tests/vscode-launcher.windows.test.ts` and `tests/wrapper-substitution.windows.test.ts` run only
+on the `windows-launcher` CI job (`windows-latest`, after `pnpm build`): the first compiles the
+Windows VS Code launcher with the runner's real `csc.exe` and drives the resulting `.exe`; the
+second patches a compiled fake `claude.exe` with the real `clodex patch` and proves the launcher
+runs it in place of a pristine copy, after pinning what Node reports about files on NTFS. Both are
+skipped everywhere else; `pnpm test` on macOS or Linux says nothing about them. See
+`.claude/docs/launch-and-wrapper.md`.
 
 ## Key constraints
 

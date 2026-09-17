@@ -9,15 +9,15 @@ There are two levels of setup, and they solve different problems:
 | Setup | What you get |
 | --- | --- |
 | [Proxy env vars](#1-route-the-extension-through-clodex) | clodex models **work** in the extension |
-| [Launcher](#2-launch-the-extensions-claude-code-through-clodex) | the extension launches Claude Code **through `clodex-claude`**, which follows your running server on its own — no proxy values to copy into VS Code settings |
+| [Launcher](#2-launch-the-extensions-claude-code-through-clodex) | the extension launches Claude Code **through `clodex-claude`**, which follows your running server on its own — no proxy values to copy into VS Code settings — and runs your **clodex-patched install** in place of the bundled binary, so clodex models appear in the extension's **model picker** |
 
-Neither level puts clodex models in the extension's **model picker** on Windows. On macOS and Linux
-`clodex-claude` replaces the extension's bundled, unpatched Claude Code with your verified
-clodex-patched install, and the picker follows (see the [VS Code setup in
-background-agents.md](background-agents.md#vs-code-model-picker-on-macoslinux)); that substitution
-is **not enabled on Windows**, so on Windows `clodex-claude` runs the bundled binary it is handed
-and the picker stays as it was. The launcher gets you `clodex-claude`'s server discovery and routing
-without the step 1 settings.
+Only the launcher level changes the picker. `clodex-claude` replaces the extension's bundled,
+unpatched Claude Code with your verified clodex-patched install exactly as it does on macOS and
+Linux (see the [VS Code setup in
+background-agents.md](background-agents.md#vs-code-model-picker)): the bundled file's full SHA-256
+must match the pristine hash `clodex patch` recorded, and the patched install must still match its
+recorded output. With the step 1 settings alone the extension launches its own bundled binary and
+the picker stays as it was.
 
 ## 1. Route the extension through clodex
 
@@ -98,14 +98,12 @@ Routing does not depend on the patch. Claude Code sends the model name it was gi
 maps it. The patch is what makes the binary itself aware of clodex models — listing them in the
 picker, accepting them as known aliases, and reporting their context windows.
 
-On macOS and Linux, `clodex-claude` solves this itself: when the extension hands it the bundled
-binary, it substitutes the install recorded in `patch-state.json` — only when the extension's full
-binary hash matches that manifest's pristine hash and the install's full hash still matches the
-recorded patched output (equal version labels or sizes are not enough); a mismatch runs the
-extension's own binary and writes one line to its output channel. **That substitution is not
-enabled on Windows.** On Windows `clodex-claude` always runs the binary it is handed, so the picker
-stays the bundled binary's; the launcher below still gets you server discovery and routing without
-the step 1 settings.
+`clodex-claude` solves this itself: when the extension hands it the bundled binary, it substitutes
+the install recorded in `patch-state.json` — only when the extension's full binary hash matches
+that manifest's pristine hash and the install's full hash still matches the recorded patched
+output (equal version labels or sizes are not enough); a mismatch runs the extension's own binary
+and writes one line to its output channel. On Windows the only missing piece was an executable the
+extension could spawn; the launcher below is that piece.
 
 ### What the launcher is
 
@@ -140,9 +138,14 @@ so there is nothing to download and no prebuilt binary to trust. The resulting
 `clodex-claude` then does what it does for any Claude process: finds your running
 `clodex server --proxy` and bridges the session to it. **The launcher does not choose the Claude
 Code binary.** It hands `clodex-claude` the bundled `claude.exe` the extension named, exactly as the
-extension would — and on Windows `clodex-claude` runs exactly that, because its patched-install
-substitution is enabled only on macOS and Linux. The model picker therefore stays the bundled
-binary's on Windows.
+extension would, and `clodex-claude` applies its usual rule: when that file's full SHA-256 equals
+the pristine hash in `patch-state.json` and your patched `claude.exe` still hashes to the recorded
+patched output, it runs the patched install; otherwise it runs the bundled `claude.exe` and, for
+the chat itself, writes one line to the **Claude VSCode** output channel (helper commands the
+extension runs fall back silently). On Windows both files must be `.exe` programs (a
+`.cmd` launcher is never substituted for or into), and the bundled file (about 200 MB) is hashed on
+every launch — `tests/wrapper-substitution.windows.test.ts` prints the measured time on the CI
+runner; see that job's log for the current number.
 
 ### Build it
 
@@ -167,7 +170,7 @@ Add this to your VS Code settings (Ctrl+Shift+P → Preferences: Open User Setti
 The two paths on the `runs:` line are compiled into the executable. **Re-run the command after
 switching Node versions or moving the clodex install** — it is idempotent and replaces the launcher.
 If the wrapper script it was built against disappears, the launcher exits with code 127 and a
-one-line message naming the command to re-run, which shows up in the extension's `Claude Code`
+one-line message naming the command to re-run, which shows up in the extension's **Claude VSCode**
 output channel.
 
 If the command reports that it cannot find `csc.exe`, your Windows install is missing the .NET
@@ -186,9 +189,14 @@ unbridged.
 ```
 
 Reload the window. `clodex server --proxy` still has to be running — the launcher does not start it.
+Open a new chat: the model picker now lists your clodex favorites and aliases, provided the CLI you
+patched and the extension ship the same Claude Code build. When they drift apart (the extension and
+the CLI update separately), the picker falls back to the bundled list and the **Claude VSCode**
+output channel shows a `From claude: clodex-claude: running ...` line; update the CLI to the
+extension's version and re-run `clodex patch`.
 
 If Claude fails to start, remove the `claudeCode.claudeProcessWrapper` line, save, and reload — that
-returns you to the step 1 setup. The `Claude Code` output channel (View → Output) shows the
+returns you to the step 1 setup. The **Claude VSCode** output channel (View → Output) shows the
 launcher's and wrapper's messages, prefixed `From claude:`.
 
 > [!TIP]
@@ -223,8 +231,8 @@ Earlier versions of this page carried a hand-built Go program to compile yoursel
 patched npm `claude.exe` directly, bypassing `clodex-claude` entirely: it needed the step 1
 environment variables, got no server discovery, and had none of `clodex-claude`'s full-hash
 verification, so its target had to be kept aligned and re-patched by hand. It still works if you
-built one — and on Windows it is currently the only way to get a patched binary in front of the
-extension — but `clodex install-vscode-launcher` is the supported path.
+built one, but `clodex install-vscode-launcher` is the supported path and the only one that verifies
+what it runs.
 
 ## Troubleshooting
 
@@ -249,9 +257,14 @@ with the launcher, sessions started while the server is down run unbridged.
 **Certificate errors** (step 1 setup) — `NODE_EXTRA_CA_CERTS` must match the path the server
 printed, with backslashes escaped in JSON.
 
-**Models route but the picker is empty** — expected on Windows: `clodex-claude` runs the bundled
-binary it is handed there; its patched-install substitution is enabled only on macOS and Linux (see
-[step 2](#2-launch-the-extensions-claude-code-through-clodex)).
+**Models route but the picker is empty** — with the step 1 settings alone that is expected: the
+extension launches its own bundled binary. With the launcher, open View → Output → **Claude VSCode**
+and look for a `From claude: clodex-claude: running ...` line: it names the reason (usually the
+extension and the installed CLI are different Claude Code builds). Align them —
+`npm install -g @anthropic-ai/claude-code@<extension version>` — and re-run `clodex patch`. No
+line at all is not proof either way: a missing or unreadable patch manifest is deliberately silent.
+Run `clodex patch`, and check that `CLODEX_HOME`, if you set it, is also set under
+`claudeCode.environmentVariables` so the wrapper reads the same manifest.
 
 **`CLODEX_CLAUDE_PATH` points at `clodex-claude` or `claude` without an extension, or at a `.ps1`** —
 Node cannot spawn those on Windows at all. Point it at the `.cmd` or at the program's `.exe`.
@@ -287,9 +300,21 @@ whose baked wrapper script was removed exits 127 with the re-run hint. Off Windo
 compiler discovery, source rendering, scratch compile and install are exercised against a fake
 `csc.exe`.
 
-**Not covered by CI, please report on #234 if you can try it:** the real VS Code extension spawning
-the launcher (it is spawned by a test harness in CI), Windows Defender/SmartScreen behaviour on the
-freshly compiled `.exe`, and Windows on ARM.
+The patched-install substitution behind the launcher is verified on the same job by
+`tests/wrapper-substitution.windows.test.ts`: a fake `claude.exe` compiled with the runner's
+`csc.exe` is patched by the real `clodex patch` command, the launcher is handed a pristine copy of
+it and runs the patched one (its output names which copy ran, and the proxy settings and arguments
+reach it intact); a same-size copy with different bytes runs as handed in with exactly one line on
+stderr, written before anything the binary prints; helper spawns (`auth status`,
+`--no-session-persistence` queries) fall back silently; and a dead server disables substitution.
+The same file records what Node reports about files on the runner's NTFS volume (file ids, volume
+serial, change time on an in-place rewrite, the read-only attribute) and prints the time to hash a
+200 MB file.
+
+**Not covered by CI, please report on #245 if you can try it:** the real VS Code extension spawning
+the launcher and showing clodex models in its picker (it is spawned by a test harness in CI, which
+cannot open an editor), Windows Defender/SmartScreen behaviour on the freshly compiled `.exe`, and
+Windows on ARM.
 
 ```powershell
 # 1. Build, and note the three paths it prints.
@@ -302,7 +327,7 @@ Get-Process node, claude -ErrorAction SilentlyContinue | Select-Object Id, Proce
 # Press the stop button in the chat, wait five seconds, run the same line again: the node/claude
 # processes started when the chat began (their StartTime) must be gone. Paste both listings.
 
-# 3. Output channel: View > Output > "Claude Code". Paste any line starting with
+# 3. Output channel: View > Output > "Claude VSCode". Paste any line starting with
 #    "From claude: clodex-claude.exe:" (job-object warnings) — there should be none.
 
 # 4. Defender/SmartScreen: paste any prompt or quarantine notice about

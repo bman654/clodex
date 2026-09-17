@@ -11,7 +11,7 @@ This page explains how to bridge **every** Claude Code process on your machine �
   - endpoint-mode server: `ANTHROPIC_BASE_URL` pointing at the gateway;
   - **no live server: env untouched** — `claude` always launches normally, a stopped server never breaks anything.
 - Setting **`CLAUDE_CODE_PROCESS_WRAPPER`** to `clodex-claude` makes Claude Code invoke it as `clodex-claude <claude-binary-path> <args...>` for every process it spawns — agents view sessions and background agents are bridged automatically.
-- That ordinary process-wrapper route keeps the handed-in binary. A separate VS Code-only path on macOS/Linux (`CLAUDE_CODE_ENTRYPOINT=claude-vscode`, explicit bundled executable, live proxy server) may run the clodex-patched install instead, but only when the patch manifest proves by full SHA-256 that it is the patched output of those exact pristine bytes. Missing or mismatched proof keeps the bundled binary. When the manifest identifies the other install, a refused chat spawn emits one stderr line; refused helper commands stay silent, and the inspected extension source sends chat stderr to VS Code's **Claude VSCode** output channel. Tool, hook, and agent children carry child-session markers, while background pty wrappers lose the `claude-vscode` entrypoint; neither shape substitutes. Endpoint, no-server, and direct launches do not substitute either.
+- That ordinary process-wrapper route keeps the handed-in binary. A separate VS Code-only path (`CLAUDE_CODE_ENTRYPOINT=claude-vscode`, explicit bundled executable, live proxy server; on Windows reached through the launcher from `clodex install-vscode-launcher`) may run the clodex-patched install instead, but only when the patch manifest proves by full SHA-256 that it is the patched output of those exact pristine bytes. Missing or mismatched proof keeps the bundled binary. When the manifest identifies the other install, a refused chat spawn emits one stderr line; refused helper commands stay silent, and the inspected extension source sends chat stderr to VS Code's **Claude VSCode** output channel. Tool, hook, and agent children carry child-session markers, while background pty wrappers lose the `claude-vscode` entrypoint; neither shape substitutes. Endpoint, no-server, and direct launches do not substitute either.
 - For your own terminal sessions, run **`clodex-claude`** instead of `claude` — same auto-discovery, no port or CA path to hardcode anywhere.
 - Set **`CLODEX_REQUIRE_SERVER=1`** in an isolated routed profile when bypassing Clodex must be impossible. `clodex-claude` then exits with an error if no advertised server passes its process and TCP checks. The default remains fail-open for ordinary installations.
 - A live standalone server has already snapshotted its credentials and account selection. If a wrapper launch sets `CLODEX_OAUTH_ACCOUNT` or a nonblank `CLODEX_KEY_*`, `clodex-claude` warns that the variable is ignored and still launches through that server. Restart the server with the selector, or save the provider credential and refresh its models, before launching without the process-only variable. With no live server these variables pass through unchanged.
@@ -21,10 +21,10 @@ This page explains how to bridge **every** Claude Code process on your machine �
   `clodex-claude` invocation does not reconfigure the running server.
 - Proxy-mode wrapper launches remove Anthropic entries from the union of `NO_PROXY` and `no_proxy`, while preserving unrelated bypasses. The manual server output prints the same adjusted values for users who export the proxy settings themselves.
 
-## VS Code model picker on macOS/Linux
+## VS Code model picker
 
 After installing clodex, patch a compatible local Claude Code install and keep
-`clodex server --proxy` running. Find the absolute, extensionless wrapper path:
+`clodex server --proxy` running. On macOS and Linux, find the absolute, extensionless wrapper path:
 
 ```bash
 command -v clodex-claude
@@ -37,6 +37,10 @@ step 3 below instead of an ephemeral or version-specific path:
 ```json
 "claudeCode.claudeProcessWrapper": "/absolute/path/to/clodex-claude"
 ```
+
+On Windows the extension cannot spawn npm's script shims; run `clodex install-vscode-launcher` and
+paste the `.exe` path it prints instead — the same substitution then applies. Full walkthrough in
+[windows-setup.md](windows-setup.md).
 
 The extension and local Claude install update independently. If their pristine bytes no longer
 match, the wrapper keeps the extension's bundled executable; align compatible builds and run
@@ -143,7 +147,7 @@ The check does not launch Claude.
 ## Troubleshooting
 
 - **Is my session bridged?** In a session started via `clodex-claude` (or spawned by Claude Code with the wrapper set), `/model` accepts your `clodex:` model names and aliases (run `clodex models --list` to see them). If those models are rejected and you haven't run `clodex patch`, that's expected for unpatched binaries — but a bridged session still routes them; an unbridged one errors at the API instead.
-- **VS Code routes models but omits picker entries:** open the **Claude VSCode** channel in the Output panel and look for a one-line `From claude: clodex-claude: running ...` fallback notice. Missing or unreadable state that cannot identify another install is deliberately silent, so the absence of a notice is not proof of selection. The extension and installed CLI update separately, and equal version labels do not prove equal artifacts. Align their builds and run `clodex patch` again. On Windows, `clodex install-vscode-launcher` builds the `.exe` the extension needs (npm's `.cmd` shim cannot be configured directly — see [windows-setup.md](windows-setup.md)), but the substitution above is not enabled on Windows: the wrapper runs the bundled binary it is handed, so the picker stays unchanged there.
+- **VS Code routes models but omits picker entries:** open the **Claude VSCode** channel in the Output panel and look for a one-line `From claude: clodex-claude: running ...` fallback notice. Missing or unreadable state that cannot identify another install is deliberately silent, so the absence of a notice is not proof of selection. The extension and installed CLI update separately, and equal version labels do not prove equal artifacts. Align their builds and run `clodex patch` again. On Windows the wrapper setting must be the `.exe` from `clodex install-vscode-launcher` (npm's `.cmd` shim cannot be configured directly — see [windows-setup.md](windows-setup.md)); the notice appears in the same output channel.
 - **Server not running:** `clodex-claude` launches plain `claude` by default. With `CLODEX_REQUIRE_SERVER=1`, it exits instead. Check `cat ~/.clodex/server-runtime.json` — a missing file (or records whose `pid` is no longer alive) means no server is advertised; start `clodex server --proxy`. If a server is running but absent from the file, make sure it was not started with `--no-discovery` / `CLODEX_NO_DISCOVERY=1`.
 - **Wrapper variable empty or stale:** run `echo "$CLAUDE_CODE_PROCESS_WRAPPER"` in a **new login shell**. If it is empty, a `$(command -v ...)` in your profile ran before your Node version manager initialized (see the warning in step 3) — switch to a literal path. If it points at a path that no longer exists (a Node upgrade moved the global bin, an fnm/nvm shim directory expired, or it still names an old hand-written script), spawned processes fail to start or silently skip bridging. Verify with `[ -x "$CLAUDE_CODE_PROCESS_WRAPPER" ] && echo OK`.
 - **Agents fail to spawn / `env: node: No such file or directory`:** the wrapper's `#!/usr/bin/env node` shebang could not find Node, typically because Claude Code was launched from a GUI (Spotlight, Raycast, an IDE) with a minimal PATH. Use the launcher script from step 3, which resolves Node by absolute path, and test it with `env -i HOME="$HOME" PATH=/usr/bin:/bin "$CLAUDE_CODE_PROCESS_WRAPPER" --version`.
