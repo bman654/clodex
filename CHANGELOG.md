@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.14.0](https://github.com/bman654/clodex/compare/v2.13.1...v2.14.0) (2026-09-17)
+
+
+### Features
+
+* **launch:** add a Windows launcher so the VS Code extension can run Claude through clodex ([#243](https://github.com/bman654/clodex/issues/243)) ([a3d8693](https://github.com/bman654/clodex/commit/a3d8693766f8068c3e7b42ec1d17ced8600d0726))
+* **oauth:** log OpenAI usage limits to help diagnose depleted allowances ([#237](https://github.com/bman654/clodex/issues/237)) ([db43de6](https://github.com/bman654/clodex/commit/db43de60a3f7bd5754d6f4fdff23ea7dee3ecd1c))
+
+
+### Bug Fixes
+
+* **launch:** show clodex models in the VS Code extension picker on macOS and Linux ([#244](https://github.com/bman654/clodex/issues/244)) ([97073ce](https://github.com/bman654/clodex/commit/97073cebe2dcaedd8bb0237643cba0b86b3b1abf))
+* **launch:** show clodex models in the VS Code extension picker on Windows ([#246](https://github.com/bman654/clodex/issues/246)) ([f61aca7](https://github.com/bman654/clodex/commit/f61aca7479a40dd8d0533a6fb150b85049392b72))
+* **oauth:** keep conversations cached after tool calls with number or true/false options ([#242](https://github.com/bman654/clodex/issues/242)) ([41541ba](https://github.com/bman654/clodex/commit/41541ba97ca6e03c2b6cf6571df5457cd01ee54d))
+
 ## [2.13.1](https://github.com/bman654/clodex/compare/v2.13.0...v2.13.1) (2026-09-14)
 
 
