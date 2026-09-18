@@ -1,20 +1,33 @@
-// REVIEW HARNESS (PR #247) — PATCH 6's alias-resolver region over every real bundle.
+// REVIEW HARNESS — PATCH 6's alias-resolver region over every real bundle.
 //
-// PR #247 scopes PATCH 6's "is this alias already present?" test from the WHOLE bundle to a region,
-// because `case"<word>":return` is not a rare string — zod's schema walker ships
-// `case"union":return ...`, so an alias named `union` read as natively resolved, its case was never
-// injected, its built-in postcondition could not be captured, and the whole LOCAL PATCH SET was
-// abandoned. The reviewed head spelled the region as:
+// LAST VERIFIED: clodex main @ 6d5b2bd (PR #247 merged as e55555f, PR #250 merged as 2608576),
+// against 57 cached Claude Code bundles spanning 2.1.238 → 2.1.276. Re-stamp this line whenever
+// you re-run it against a newer release.
+//
+// WHAT THIS PINS NOW. PATCH 6 scopes its "is this alias already present?" test from the WHOLE
+// bundle to a region, because `case"<word>":return` is not a rare string — zod's schema walker
+// ships `case"union":return ...`, so an alias named `union` read as natively resolved, its case was
+// never injected, its built-in postcondition could not be captured, and the whole LOCAL PATCH SET
+// was abandoned. The region is spelled, at head:
 //
 //   RESOLVER_ANCHOR = /(case"best":\{[^{}]*\})/
-//   RESOLVER_SWITCH = /case"best":\{[^{}]*\}[\s\S]{0,2000}?default:return/
+//   RESOLVER_BUDGET = 2000 + ALIASES.reduce((n, a) => n + 2 * a.length + 17, 0)
+//   RESOLVER_SWITCH = new RegExp('case"best":\\{[^{}]*\\}[\\s\\S]{0,' + RESOLVER_BUDGET + '}?default:return')
 //   const resolver  = js.match(RESOLVER_SWITCH)?.[0] ?? ''
 //
-// PINNED TO THAT HEAD ON PURPOSE. The regexes below are copies, not imports, because they are
-// locals inside `applyClodexPatches` and cannot be imported. Review asked for the fixed `{0,2000}`
-// to become a budget that accounts for the injected cases, so when #247 lands, RE-POINT the two
-// constants below at whatever shipped and re-run. LENS 2 is the block that proves why the fixed
-// bound was wrong; it should turn GREEN-as-idempotent once the budget is dynamic.
+// The bound is DYNAMIC: 2000 of drift headroom plus exactly the bytes of the cases PATCH 6 itself
+// injects. The harness pins three things about it —
+//   * the region still binds once, in the tier resolver, on every cached build;
+//   * a re-patch is IDEMPOTENT no matter how much alias text the config carries (under the old
+//     FIXED 2000 it was not — that is the bug #247 fixed, preserved below as history); and
+//   * what actually makes a growable bound safe is that `case"best":{` is UNIQUE, not that the
+//     quantifier is lazy. See LENS 2c.
+//
+// The regexes below are COPIES, not imports, because they are locals inside `applyClodexPatches`
+// and cannot be imported. `describe('harness copy vs. the shipped bound')` is what stops the copy
+// from silently drifting from the shipped formula again: it compares the copy's verdict against
+// the shipped predicate's verdict, read back off a real patch, on inputs that DISCRIMINATE the
+// dynamic bound from the old fixed one. If you change the shipped formula, that block reds.
 //
 // Everything here EXECUTES the real applyClodexPatches / captureBuiltInPatchProofs.
 //
@@ -33,18 +46,69 @@ import { captureBuiltInPatchProofs } from '../../src/built-in-patch-proofs.js';
 const ROOT = process.env.REVIEW_BUNDLE_DIR
   ?? join(process.env.HOME ?? '', '.cache', 'clodex-review-bundles');
 
-/** The two regexes exactly as the PR head spells them. */
+/** The anchor exactly as the shipped code spells it. */
 const RESOLVER_ANCHOR = /(case"best":\{[^{}]*\})/;
-const RESOLVER_SWITCH = /case"best":\{[^{}]*\}[\s\S]{0,2000}?default:return/;
 
-/** The presence predicate as it stood on `main` — whole bundle. */
+/** Bytes of one injected `case"<a>":return "<a>";`. Grounded against real output below. */
+const caseCost = (a: string) => 2 * a.length + 17;
+
+/** The shipped bound, mirrored: 2000 of drift headroom + the bytes PATCH 6 injects itself. */
+const DRIFT_HEADROOM = 2000;
+const resolverBudget = (aliases: string[]) =>
+  DRIFT_HEADROOM + aliases.reduce((n, a) => n + caseCost(a), 0);
+const resolverSwitch = (aliases: string[]) =>
+  new RegExp('case"best":\\{[^{}]*\\}[\\s\\S]{0,' + resolverBudget(aliases) + '}?default:return');
+
+/**
+ * The bound as the PRE-#247 head spelled it — a FIXED 2000 that the injected cases had to fit
+ * inside. Kept ONLY to demonstrate the bug #247 fixed; nothing at head behaves this way.
+ */
+const FIXED_2000_SWITCH = /case"best":\{[^{}]*\}[\s\S]{0,2000}?default:return/;
+
+const caseRe = (a: string) => new RegExp('case' + JSON.stringify(a) + ':return');
+
+/** The presence predicate as it stood BEFORE the region existed — whole bundle. */
 const mainMissing = (js: string, aliases: string[]) =>
-  aliases.filter(a => !new RegExp('case' + JSON.stringify(a) + ':return').test(js));
-/** The presence predicate as this PR spells it — region only. */
+  aliases.filter(a => !caseRe(a).test(js));
+/** The presence predicate as head spells it — region only, dynamic bound. */
 const prMissing = (js: string, aliases: string[]) => {
-  const resolver = js.match(RESOLVER_SWITCH)?.[0] ?? '';
-  return aliases.filter(a => !new RegExp('case' + JSON.stringify(a) + ':return').test(resolver));
+  const resolver = js.match(resolverSwitch(aliases))?.[0] ?? '';
+  return aliases.filter(a => !caseRe(a).test(resolver));
 };
+/** The same predicate under the OLD fixed bound. History only. */
+const fixed2000Missing = (js: string, aliases: string[]) => {
+  const resolver = js.match(FIXED_2000_SWITCH)?.[0] ?? '';
+  return aliases.filter(a => !caseRe(a).test(resolver));
+};
+
+const configFor = (aliases: string[]) =>
+  Object.fromEntries(aliases.map((a, i) => [`clodex:openai-oauth:m${i}`, { alias: a }]));
+
+const occurrences = (haystack: string, needle: string) => {
+  let n = 0;
+  for (let i = haystack.indexOf(needle); i !== -1; i = haystack.indexOf(needle, i + needle.length)) n++;
+  return n;
+};
+
+/**
+ * The aliases the SHIPPED predicate judged missing — read back off a real `applyClodexPatches` run
+ * rather than recomputed, so this is evidence about the shipped local and not a second copy of it.
+ *
+ * PATCH 6 emits exactly one `case"<a>":return "<a>";` per alias its `missing` filter kept, so the
+ * DELTA in that string's occurrence count across the patch is the filter's verdict, one alias at a
+ * time. Counting occurrences in the output alone would not do: the aliases already present in the
+ * region are exactly the ones the filter DROPPED, and they are still in the output.
+ */
+function shippedMissing(js: string, aliases: string[]): string[] {
+  const out = applyClodexPatches(js, configFor(aliases)).content;
+  return aliases.filter(a => {
+    const needle = `case${JSON.stringify(a)}:return ${JSON.stringify(a)};`;
+    const delta = occurrences(out, needle) - occurrences(js, needle);
+    expect(delta).toBeGreaterThanOrEqual(0);
+    expect(delta).toBeLessThanOrEqual(1);
+    return delta === 1;
+  });
+}
 
 function bundles(): Array<{ name: string; path: string }> {
   const out: Array<{ name: string; path: string }> = [];
@@ -58,11 +122,49 @@ function bundles(): Array<{ name: string; path: string }> {
 
 const BUNDLES = bundles();
 
+/**
+ * A corpus is not optional. Every lens below reads at least one real bundle, so with zero of them
+ * this file would collect a pile of green-looking nothing — fail LOUDLY and say how to fix it
+ * instead. (An UNDERSIZED corpus is a different matter: see `has a corpus`, which skips.)
+ */
+if (BUNDLES.length === 0) {
+  throw new Error(
+    `no Claude Code bundles under ${ROOT} — this harness cannot run vacuously.\n`
+    + '  Extract them with `node scripts/extract-cc-bundles.mjs`, or point REVIEW_BUNDLE_DIR at a\n'
+    + '  directory of <version>/<build>.js files.',
+  );
+}
+
+/**
+ * How many builds make the per-bundle sweep meaningful. Below this the sweep still RUNS — a
+ * partial corpus is genuinely useful — but `has a corpus` reports a skip so nobody reads a green
+ * run as "verified across every published build". 50 is roughly two years of releases; the
+ * maintainer cache carries 57.
+ */
+const MIN_CORPUS = 50;
+
+/** The newest bundle, used as the base for every synthetic lens. */
+const BASE = BUNDLES.at(-1)!;
+
 const CONFIG = {
   'clodex:openai-oauth:gpt-5.6-sol': { alias: 'sol', context: 272_000, display: 'GPT-5.6 Sol' },
   'clodex:openai-oauth:gpt-5.6-luna': { alias: 'luna', display: 'GPT-5.6 Luna' },
 };
 const ALIASES = ['sol', 'luna'];
+
+/**
+ * `MODEL_ALIAS_PATTERN` (src/model-aliases.ts) is /^[a-z0-9][a-z0-9._-]{0,63}$/ and
+ * `MAX_MODEL_CATALOG` (src/constants.ts) is 20, so the largest alias set clodex's own favorites
+ * UI can hand the patcher is 20 aliases of 64 characters. NOTE: `applyClodexPatches` itself
+ * enforces NEITHER cap — it only requires `/^[a-z0-9][a-z0-9._-]*(\[1m\])?$/` — so a hand-written
+ * patch config can exceed this. It is the realistic ceiling, not a hard one.
+ */
+const MAX_LEGAL_ALIASES = Array.from({ length: 20 }, (_, i) =>
+  `a${String(i).padStart(2, '0')}`.padEnd(64, 'x'));
+const MAX_LEGAL_BUDGET = resolverBudget(MAX_LEGAL_ALIASES); // 2000 + 20 * 145 = 4900
+
+/** 14 × 64 chars: 2030 bytes of cases, i.e. just past a fixed 2000 but a legal config. */
+const LONG_ALIASES = MAX_LEGAL_ALIASES.slice(0, 14);
 
 /**
  * Walk back from `case"best":{` to the enclosing `function NAME(` and return its header text.
@@ -80,7 +182,21 @@ function enclosing(js: string, at: number): { name: string; cases: string[]; hea
 }
 
 describe(`real bundles (${BUNDLES.length})`, () => {
-  it('has a corpus', () => { expect(BUNDLES.length).toBeGreaterThan(50); });
+  it('has a corpus', ctx => {
+    // Never vacuous: zero bundles already threw at import, and this re-states it as an assertion
+    // so the intent survives a refactor of the guard above.
+    expect(BUNDLES.length).toBeGreaterThan(0);
+    if (BUNDLES.length < MIN_CORPUS) {
+      const note = `PARTIAL CORPUS: ${BUNDLES.length} bundle(s) under ${ROOT}, want >= ${MIN_CORPUS}. `
+        + 'The per-bundle sweep below still ran over what is present, but a green run does NOT '
+        + 'mean "verified across every published Claude Code build". Run '
+        + '`node scripts/extract-cc-bundles.mjs` for more.';
+      // eslint-disable-next-line no-console
+      console.warn(note);
+      ctx.skip();
+    }
+    expect(BUNDLES.length).toBeGreaterThanOrEqual(MIN_CORPUS);
+  });
 
   for (const b of BUNDLES) {
     describe(b.name, () => {
@@ -88,10 +204,10 @@ describe(`real bundles (${BUNDLES.length})`, () => {
 
       it('anchor and region each bind exactly once, at the same offset, in the model resolver', () => {
         expect(js.match(new RegExp(RESOLVER_ANCHOR.source, 'g'))).toHaveLength(1);
-        expect(js.match(new RegExp(RESOLVER_SWITCH.source, 'g'))).toHaveLength(1);
+        expect(js.match(new RegExp(resolverSwitch(ALIASES).source, 'g'))).toHaveLength(1);
 
         const anchor = js.match(RESOLVER_ANCHOR)![0];
-        const region = js.match(RESOLVER_SWITCH)![0];
+        const region = js.match(resolverSwitch(ALIASES))![0];
         const aAt = js.indexOf(anchor);
         const rAt = js.indexOf(region);
         expect(rAt).toBe(aAt);                                   // same span start
@@ -101,6 +217,13 @@ describe(`real bundles (${BUNDLES.length})`, () => {
         // The gap between the anchor and the `default:return` the region ends on.
         const gap = region.length - anchor.length - 'default:return'.length;
         expect(gap).toBe(0);                                     // pristine: default is adjacent
+
+        // Because the gap is 0, the region is the SAME span at every budget the shipped formula
+        // can produce — the lazy match stops at the adjacent `default:return` long before the
+        // bound is relevant. This is what makes the size of the bound a non-event on a pristine
+        // build, and it is measured, not assumed.
+        expect(js.match(resolverSwitch(MAX_LEGAL_ALIASES))![0]).toBe(region);
+        expect(js.match(FIXED_2000_SWITCH)![0]).toBe(region);
 
         // Enclosing function, and that it is the tier resolver.
         const fn = enclosing(js, aAt);
@@ -150,16 +273,67 @@ describe(`real bundles (${BUNDLES.length})`, () => {
 });
 
 // ---------------------------------------------------------------------------
-// The regression the PR fixes, and the main-vs-PR delta.
+// The copy this file carries has to mean the same thing as the shipped bound.
+// ---------------------------------------------------------------------------
+describe('harness copy vs. the shipped bound', () => {
+  const base = readFileSync(BASE.path, 'utf8');
+
+  it('caseCost() is the real byte cost of an injected case, not an estimate', () => {
+    const anchor = base.match(RESOLVER_ANCHOR)![0];
+    const out = applyClodexPatches(base, configFor(ALIASES));
+    const at = out.content.indexOf(anchor) + anchor.length;
+    const injected = out.content.slice(at, out.content.indexOf('default:return', at));
+    expect(injected).toBe('case"sol":return "sol";case"luna":return "luna";');
+    expect(injected.length).toBe(ALIASES.reduce((n, a) => n + caseCost(a), 0));
+  });
+
+  // The DISCRIMINATING input: a bundle already patched with 14 × 64-char aliases. The injected
+  // cases are 2030 bytes, so the region overruns a FIXED 2000 but sits inside the dynamic bound.
+  // The two copies therefore disagree here, and only one of them can match the shipped code.
+  it('agrees with the shipped predicate on an input that separates the two bounds', () => {
+    const cfg = configFor(LONG_ALIASES);
+    const once = applyClodexPatches(base, cfg).content;
+
+    // The old bound loses the region entirely and every alias reads as missing …
+    expect(once.match(FIXED_2000_SWITCH)).toBeNull();
+    expect(fixed2000Missing(once, LONG_ALIASES)).toEqual(LONG_ALIASES);
+    // … while the dynamic bound still sees them all.
+    expect(once.match(resolverSwitch(LONG_ALIASES))).not.toBeNull();
+    expect(prMissing(once, LONG_ALIASES)).toEqual([]);
+
+    // And the shipped code, read back off a real re-patch, sides with the dynamic bound.
+    expect(shippedMissing(once, LONG_ALIASES)).toEqual([]);
+  });
+
+  it('agrees with the shipped predicate on a pristine bundle, where both bounds coincide', () => {
+    expect(prMissing(base, LONG_ALIASES)).toEqual(LONG_ALIASES);
+    expect(fixed2000Missing(base, LONG_ALIASES)).toEqual(LONG_ALIASES);
+    expect(shippedMissing(base, LONG_ALIASES)).toEqual(LONG_ALIASES);
+
+    expect(prMissing(base, ALIASES)).toEqual(ALIASES);
+    expect(shippedMissing(base, ALIASES)).toEqual(ALIASES);
+  });
+
+  it('agrees with the shipped predicate on a PARTIALLY patched region', () => {
+    // `sol` already present, `luna` not: the region-scoped predicate must report exactly `luna`.
+    const half = applyClodexPatches(base, { 'clodex:openai-oauth:a': { alias: 'sol' } }).content;
+    expect(prMissing(half, ALIASES)).toEqual(['luna']);
+    expect(shippedMissing(half, ALIASES)).toEqual(['luna']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The regression PATCH 6's region fixes, and the whole-bundle-vs-region delta.
 // ---------------------------------------------------------------------------
 describe('regression: an alias colliding with an unrelated switch', () => {
-  const base = readFileSync(BUNDLES.at(-1)!.path, 'utf8');
+  const base = readFileSync(BASE.path, 'utf8');
 
-  it('main drops the case, the PR injects it', () => {
+  it('a whole-bundle predicate drops the case, the region-scoped one injects it', () => {
     // zod's schema walker, verbatim shape, in the real bundle already:
     expect(base).toMatch(/case"union":return/);
-    expect(mainMissing(base, ['union'])).toEqual([]);   // main: "already present" -> dropped
-    expect(prMissing(base, ['union'])).toEqual(['union']); // PR: missing -> injected
+    expect(mainMissing(base, ['union'])).toEqual([]);       // whole bundle: "already present" -> dropped
+    expect(prMissing(base, ['union'])).toEqual(['union']);  // region: missing -> injected
+    expect(shippedMissing(base, ['union'])).toEqual(['union']);
 
     const cfg = { 'clodex:openai-oauth:m': { alias: 'union' } };
     const out = applyClodexPatches(base, cfg);
@@ -172,21 +346,34 @@ describe('regression: an alias colliding with an unrelated switch', () => {
 // LENS 1 — the `?? ''` fallback. What drift produces it, and what it costs.
 // ---------------------------------------------------------------------------
 describe('LENS 1: RESOLVER_SWITCH fails while RESOLVER_ANCHOR still matches', () => {
-  const base = readFileSync(BUNDLES.at(-1)!.path, 'utf8');
+  const base = readFileSync(BASE.path, 'utf8');
   const anchor = base.match(RESOLVER_ANCHOR)![0];
 
   /** Drift A: upstream wraps the default body in a block -> `default:{return …}`. */
   const driftA = base.replace(anchor + 'default:return', anchor + 'default:{return');
-  /** Drift B: upstream inserts a case whose body exceeds the 2000-char budget. */
-  const filler = 'case"x":{let q=' + '0+'.repeat(1100) + '0;return q}';
+  /**
+   * Drift B: upstream inserts a case whose body overruns the budget. The filler is derived from
+   * the DYNAMIC budget for this config, so it stays an overrun if the formula changes.
+   */
+  const pairs = Math.ceil((resolverBudget(ALIASES) + 100) / 2);
+  const filler = 'case"x":{let q=' + '0+'.repeat(pairs) + '0;return q}';
   const driftB = base.replace(anchor + 'default:return', anchor + filler + 'default:return');
 
-  for (const [label, drifted] of [['A: default:{return', driftA], ['B: >2000-char gap', driftB]] as const) {
+  it('the drift fixtures really are drift', () => {
+    expect(driftA).not.toBe(base);
+    expect(driftB).not.toBe(base);
+    expect(filler.length).toBeGreaterThan(resolverBudget(ALIASES));
+  });
+
+  for (const [label, drifted] of [
+    ['A: default:{return', driftA],
+    ['B: gap beyond the dynamic budget', driftB],
+  ] as const) {
     describe(label, () => {
       it('anchor still matches, region does not -> resolver is the empty string', () => {
         expect(drifted).not.toBe(base);
         expect(drifted.match(new RegExp(RESOLVER_ANCHOR.source, 'g'))).toHaveLength(1);
-        expect(drifted.match(RESOLVER_SWITCH)).toBeNull();
+        expect(drifted.match(resolverSwitch(ALIASES))).toBeNull();
         expect(prMissing(drifted, ALIASES)).toEqual(ALIASES); // every alias reads as missing
       });
 
@@ -214,9 +401,9 @@ describe('LENS 1: RESOLVER_SWITCH fails while RESOLVER_ANCHOR still matches', ()
           .toThrow(/could not capture built-in postcondition/);
       });
 
-      it('main is idempotent on the same drifted bytes (this is a behaviour delta)', () => {
+      it('a whole-bundle predicate is idempotent on the same drifted bytes (this is the delta)', () => {
         const once = applyClodexPatches(drifted, CONFIG);
-        // main's predicate over the once-patched content finds nothing missing:
+        // A whole-bundle predicate over the once-patched content finds nothing missing:
         expect(mainMissing(once.content, ALIASES)).toEqual([]);
       });
     });
@@ -224,56 +411,79 @@ describe('LENS 1: RESOLVER_SWITCH fails while RESOLVER_ANCHOR still matches', ()
 });
 
 // ---------------------------------------------------------------------------
-// LENS 2 — the {0,2000} bound, reached by clodex's OWN injected cases.
+// LENS 2 — the bound and the cases PATCH 6 injects into it.
+//
+// HISTORY: the reviewed head of #247 spelled this bound as a FIXED 2000, which the injected cases
+// had to fit inside. A legal favorites config (20 aliases at the 64-char maximum is 2900 bytes)
+// spent the whole bound, the region stopped matching on the PATCHED output, every alias read as
+// missing, the cases went in a second time, and the built-in verification — which requires a
+// re-run over patched output to be a no-op — rolled the local patch set back. That is what the
+// merged fix changed, and what these tests now assert the ABSENCE of.
 // ---------------------------------------------------------------------------
-describe('LENS 2: the 2000-char budget is spent by the injected cases themselves', () => {
-  const base = readFileSync(BUNDLES.at(-1)!.path, 'utf8');
+describe('LENS 2: the budget grows with the cases PATCH 6 injects', () => {
+  const base = readFileSync(BASE.path, 'utf8');
 
-  /** `case"A":return "A";` costs 2*len(A) + 17 characters. */
-  const cost = (a: string) => 2 * a.length + 17;
-
-  it('20 short aliases fit; a legal long-alias config does not', () => {
+  it('the alias text that used to overrun a fixed 2000 (history)', () => {
     const short = Array.from({ length: 20 }, (_, i) => `a${i}`);
-    expect(short.reduce((s, a) => s + cost(a), 0)).toBeLessThan(2000);
+    expect(short.reduce((s, a) => s + caseCost(a), 0)).toBeLessThan(2000);
 
     // MODEL_ALIAS_PATTERN is /^[a-z0-9][a-z0-9._-]{0,63}$/ — 64 chars is legal.
-    const long = Array.from({ length: 14 }, (_, i) => `a${String(i).padStart(2, '0')}`.padEnd(64, 'x'));
-    expect(long.every(a => /^[a-z0-9][a-z0-9._-]{0,63}$/.test(a))).toBe(true);
-    expect(long.reduce((s, a) => s + cost(a), 0)).toBeGreaterThan(2000);
+    expect(LONG_ALIASES.every(a => /^[a-z0-9][a-z0-9._-]{0,63}$/.test(a))).toBe(true);
+    expect(LONG_ALIASES.reduce((s, a) => s + caseCost(a), 0)).toBeGreaterThan(2000);
+    // …and the largest set the favorites UI can produce is larger still.
+    expect(MAX_LEGAL_ALIASES.reduce((s, a) => s + caseCost(a), 0)).toBe(2900);
   });
 
-  it('after patching with those aliases the region no longer matches — and the re-run duplicates', () => {
-    const long = Array.from({ length: 14 }, (_, i) => `a${String(i).padStart(2, '0')}`.padEnd(64, 'x'));
-    const cfg = Object.fromEntries(long.map((a, i) => [`clodex:openai-oauth:m${i}`, { alias: a }]));
+  it('after patching with those aliases the OLD fixed region no longer matches (the bug)', () => {
+    const cfg = configFor(LONG_ALIASES);
     const once = applyClodexPatches(base, cfg);
     expect(once.results.find(r => r.name.startsWith('PATCH 6'))!.status).toBe('OK');
-    for (const a of long) expect(once.content).toContain(`case${JSON.stringify(a)}:return ${JSON.stringify(a)};`);
+    for (const a of LONG_ALIASES) {
+      expect(once.content).toContain(`case${JSON.stringify(a)}:return ${JSON.stringify(a)};`);
+    }
 
-    // the region is now longer than the bound
-    expect(once.content.match(RESOLVER_SWITCH)).toBeNull();
     expect(once.content.match(new RegExp(RESOLVER_ANCHOR.source, 'g'))).toHaveLength(1);
-
-    // therefore the idempotency re-run duplicates every case
-    const twice = applyClodexPatches(once.content, cfg);
-    expect(twice.content).not.toBe(once.content);
-    expect(twice.content.split(`case${JSON.stringify(long[0])}:return ${JSON.stringify(long[0])};`)).toHaveLength(3);
-    expect(() => captureBuiltInPatchProofs(twice.content, cfg, twice.results))
-      .toThrow(/could not capture built-in postcondition/);
-
-    // main is idempotent on the same input
-    const mainTwice = mainMissing(once.content, long);
-    expect(mainTwice).toEqual([]);
+    expect(once.content.match(FIXED_2000_SWITCH)).toBeNull();      // old bound: region lost
+    expect(once.content.match(resolverSwitch(LONG_ALIASES))).not.toBeNull(); // new bound: intact
   });
 
-  it('the exact alias-count/length frontier', () => {
+  it('at head the re-run is IDEMPOTENT — no duplicate cases, no rollback', () => {
+    const cfg = configFor(LONG_ALIASES);
+    const once = applyClodexPatches(base, cfg);
+    const twice = applyClodexPatches(once.content, cfg);
+
+    expect(twice.content).toBe(once.content);
+    expect(twice.results.find(r => r.name.startsWith('PATCH 6'))!.status).toBe('SKIP');
+    for (const a of LONG_ALIASES) {
+      expect(twice.content.split(`case${JSON.stringify(a)}:return ${JSON.stringify(a)};`)).toHaveLength(2);
+    }
+    expect(() => captureBuiltInPatchProofs(twice.content, cfg, twice.results)).not.toThrow();
+  });
+
+  it('idempotent at the largest alias set the favorites UI can produce, too', () => {
+    const cfg = configFor(MAX_LEGAL_ALIASES);
+    const once = applyClodexPatches(base, cfg);
+    const twice = applyClodexPatches(once.content, cfg);
+    expect(twice.content).toBe(once.content);
+    expect(twice.results.find(r => r.name.startsWith('PATCH 6'))!.status).toBe('SKIP');
+    expect(() => captureBuiltInPatchProofs(twice.content, cfg, twice.results)).not.toThrow();
+  });
+
+  it('the drift headroom left over is exactly 2000 for every alias config', () => {
+    // This is the property the dynamic bound buys: the cases PATCH 6 injects no longer eat into
+    // the allowance reserved for upstream churn, whatever the config looks like.
     const rows: string[] = [];
     for (const len of [8, 16, 24, 32, 40, 48, 56, 64]) {
-      const perCase = 2 * len + 17;
-      rows.push(`len=${len} perCase=${perCase} maxAliasesUnder2000=${Math.floor(2000 / perCase)}`);
+      for (const n of [1, 5, 10, 20]) {
+        const aliases = Array.from({ length: n }, (_, i) => `a${String(i).padStart(2, '0')}`.padEnd(len, 'x'));
+        const spent = aliases.reduce((s, a) => s + caseCost(a), 0);
+        expect(resolverBudget(aliases) - spent).toBe(DRIFT_HEADROOM);
+        rows.push(`n=${String(n).padStart(2)} len=${String(len).padStart(2)} spent=${String(spent).padStart(4)} budget=${resolverBudget(aliases)}`);
+      }
     }
     // eslint-disable-next-line no-console
     console.log(rows.join('\n'));
-    expect(rows).toHaveLength(8);
+    expect(rows).toHaveLength(32);
   });
 });
 
@@ -284,26 +494,165 @@ describe('LENS 2b: lazy match reaching a different switch', () => {
   it('synthetic: it absolutely can', () => {
     const js = 'function R(e){switch(e){case"best":{return 1}default:}}'
       + 'function S(t){switch(t){case"sol":return 9;default:return null}}';
-    const region = js.match(RESOLVER_SWITCH)![0];
+    const region = js.match(resolverSwitch(['sol']))![0];
     expect(region).toContain('case"sol":return 9;'); // foreign switch swallowed
     expect(prMissing(js, ['sol'])).toEqual([]);      // alias `sol` reads as already present
   });
 
-  it('real bundles: the NEXT default:return is always far outside the 2000 bound', () => {
-    const dists: Array<{ name: string; d2: number }> = [];
+  it('real bundles: the foreign margin, measured against the budget actually in force', ctx => {
+    // NOTE: this replaces an earlier claim that the next `default:return` is "always far outside
+    // the 2000 bound". With a DYNAMIC budget there is no single bound to compare against, and the
+    // qualified statement is weaker than the old one — see the assertions below.
+    const rows: Array<{ name: string; own: number; foreign: number }> = [];
     for (const b of BUNDLES) {
       const js = readFileSync(b.path, 'utf8');
       const anchor = js.match(RESOLVER_ANCHOR)![0];
       const end = js.indexOf(anchor) + anchor.length;
       const i1 = js.indexOf('default:return', end);
       const i2 = js.indexOf('default:return', i1 + 1);
-      dists.push({ name: b.name, d2: i2 - end });
+      rows.push({ name: b.name, own: i1 - end, foreign: i2 - end });
     }
-    const min = Math.min(...dists.map(d => d2Of(d)));
+    const minForeign = Math.min(...rows.map(r => r.foreign));
+    const maxForeign = Math.max(...rows.map(r => r.foreign));
     // eslint-disable-next-line no-console
-    console.log(`next foreign default:return — min ${min}, max ${Math.max(...dists.map(d2Of))}`);
-    expect(min).toBeGreaterThan(2000);
-    function d2Of(d: { d2: number }) { return d.d2; }
+    console.log(
+      `own default:return distance — always ${[...new Set(rows.map(r => r.own))].join(',')}\n`
+      + `next FOREIGN default:return — min ${minForeign}, max ${maxForeign}\n`
+      + `budget in force: typical(${ALIASES.join(',')})=${resolverBudget(ALIASES)}  `
+      + `max legal(20x64)=${MAX_LEGAL_BUDGET}`,
+    );
+
+    // (1) The reason the foreign margin does not matter today: the switch's OWN `default:return`
+    //     is ADJACENT to the anchor on every cached build, so the lazy match stops there and the
+    //     size of the bound is never consulted. Reaching a foreign switch needs LENS 1's drift A
+    //     first.
+    for (const r of rows) expect(r.own).toBe(0);
+
+    // (2) For a realistic config the margin is comfortably outside the bound even if drift A
+    //     happened tomorrow.
+    expect(minForeign).toBeGreaterThan(resolverBudget(ALIASES));
+
+    // (3) But it is NOT unconditionally outside. The largest alias set clodex's favorites UI can
+    //     produce pushes the bound to 4900, past the smallest margin in the MAINTAINER corpus. So
+    //     a build that also drifted its own `default:return` into a block COULD have its region
+    //     run into the next switch — the only further requirement being that an alias name
+    //     collide with a `case"<alias>":return` inside the swallowed window. Recorded as a KNOWN
+    //     EXPOSURE, not a safety claim: if upstream margins ever grow past 4900 this reds and the
+    //     caveat can go.
+    //
+    //     This one is a claim about the corpus as a whole, so a partial corpus cannot evaluate
+    //     it — margins vary by two thousand bytes across releases and the newest builds alone
+    //     sit above 4900. Skip rather than mislead.
+    if (BUNDLES.length < MIN_CORPUS) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `PARTIAL CORPUS (${BUNDLES.length} < ${MIN_CORPUS}): not evaluating the known foreign-margin `
+        + `exposure. Smallest margin here is ${minForeign} vs. a maximal budget of ${MAX_LEGAL_BUDGET}.`,
+      );
+      ctx.skip();
+    }
+    expect(MAX_LEGAL_BUDGET).toBeGreaterThan(minForeign);
+  });
+
+  it('composite: drift A + a maximal alias config really does swallow the next switch', ctx => {
+    // The exposure from (3) above, executed rather than argued. The bundle with the smallest
+    // foreign margin is not necessarily BASE, so pick the worst one deliberately.
+    let worst: { js: string; margin: number } | undefined;
+    for (const b of BUNDLES) {
+      const js = readFileSync(b.path, 'utf8');
+      const anchor = js.match(RESOLVER_ANCHOR)![0];
+      const end = js.indexOf(anchor) + anchor.length;
+      const i2 = js.indexOf('default:return', js.indexOf('default:return', end) + 1);
+      const margin = i2 - end;
+      if (!worst || margin < worst.margin) worst = { js, margin };
+    }
+    if (worst!.margin >= MAX_LEGAL_BUDGET) {
+      // No bundle present is close enough for any legal budget to reach its next switch, so there
+      // is nothing to demonstrate. On the maintainer corpus there is.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `No bundle in this corpus has a foreign margin below the maximal legal budget `
+        + `(${worst!.margin} >= ${MAX_LEGAL_BUDGET}) — nothing to demonstrate. This is expected on a `
+        + 'partial corpus; on the full one the smallest margin is 3128.',
+      );
+      ctx.skip();
+    }
+    const { js, margin } = worst!;
+    const anchor = js.match(RESOLVER_ANCHOR)![0];
+    const drifted = js.replace(anchor + 'default:return', anchor + 'default:{return');
+
+    // Typical config: bound is below the margin, so the region simply does not match — LENS 1's
+    // already-pinned `?? ''` behaviour, which is loud (duplicate cases, then a rollback).
+    expect(margin).toBeGreaterThan(resolverBudget(ALIASES));
+    expect(drifted.match(resolverSwitch(ALIASES))).toBeNull();
+
+    // Maximal config: the bound now exceeds the margin, and the region ends inside a DIFFERENT
+    // switch. That is the silent failure mode, and nothing but alias-name luck separates them.
+    expect(MAX_LEGAL_BUDGET).toBeGreaterThan(margin);
+    const wide = drifted.match(resolverSwitch(MAX_LEGAL_ALIASES));
+    expect(wide).not.toBeNull();
+    // The region now ends on the FIRST `default:return` after the drifted one — i.e. the foreign
+    // switch's, exactly `margin` bytes further on (+1 for the `{` drift A inserted).
+    const from = drifted.indexOf(anchor) + anchor.length;
+    const foreignAt = drifted.indexOf('default:return', from);
+    expect(foreignAt - from).toBe(margin + 1);
+    expect(wide![0].length).toBe(anchor.length + (foreignAt - from) + 'default:return'.length);
+    expect(wide![0].slice(anchor.length)).toMatch(/switch\(/); // a foreign switch is inside it
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LENS 2c — why a GROWABLE bound is safe at all.
+//
+// Not because the quantifier is lazy. Laziness fixes where the region ENDS only once its START is
+// fixed; raising the bound can make an EARLIER `case"best":{` viable, and then both ends move. The
+// load-bearing property is that the region's prefix IS the anchor, so a second viable start means a
+// second anchor match — and applyOnce with `required: true` aborts the whole patch on `count > 1`.
+// ---------------------------------------------------------------------------
+describe('LENS 2c: a growable bound is safe because the anchor is UNIQUE', () => {
+  const base = readFileSync(BASE.path, 'utf8');
+
+  /** A decoy anchor whose own `default:return` sits ~2500 chars away: out of reach at a small
+   *  budget, in reach at a large one. */
+  const DECOY = 'function D(e){switch(e){case"best":{return 0}' + 'z'.repeat(2500) + 'default:return null}}';
+
+  it('counterexample: with two anchors, raising the bound MOVES the region, both ends', () => {
+    const real = 'function R(e){switch(e){case"best":{return 1}case"sol":return 9;default:return null}}';
+    const js = DECOY + real;
+
+    const small = js.match(resolverSwitch(ALIASES))!;            // budget 2048
+    const large = js.match(resolverSwitch(MAX_LEGAL_ALIASES))!;  // budget 4900
+    const smallAt = small.index!;
+    const largeAt = large.index!;
+
+    // Both are successful matches; the larger bound did not merely turn a miss into a hit.
+    expect(smallAt).toBeGreaterThan(largeAt);                          // START moved earlier
+    expect(smallAt + small[0].length).not.toBe(largeAt + large[0].length); // END moved too
+    // And the alias fell out of the region — exactly the failure PATCH 6's region exists to stop.
+    expect(small[0]).toContain('case"sol":return 9;');
+    expect(large[0]).not.toContain('case"sol":return 9;');
+    expect(prMissing(js, ['sol'])).toEqual([]);
+    expect(prMissing(js, MAX_LEGAL_ALIASES.concat('sol'))).toContain('sol');
+  });
+
+  it('…which is unreachable, because two anchors abort the patch before any of that runs', () => {
+    expect(DECOY.match(new RegExp(RESOLVER_ANCHOR.source, 'g'))).toHaveLength(1);
+    const two = DECOY + base;
+    expect(two.match(new RegExp(RESOLVER_ANCHOR.source, 'g'))).toHaveLength(2);
+
+    expect(() => applyClodexPatches(two, CONFIG)).toThrow(/ambiguous anchor: PATCH 6/);
+    // The abort does not depend on the budget: it is the anchor count, not the region, that fails.
+    expect(() => applyClodexPatches(two, configFor(MAX_LEGAL_ALIASES)))
+      .toThrow(/ambiguous anchor: PATCH 6/);
+  });
+
+  it('every cached bundle carries exactly one case"best":{ candidate', () => {
+    for (const b of BUNDLES) {
+      const js = readFileSync(b.path, 'utf8');
+      expect(js.match(new RegExp(RESOLVER_ANCHOR.source, 'g'))).toHaveLength(1);
+      // Not just one that the anchor's `[^{}]*}` body happens to accept — one, full stop.
+      expect(js.match(/case"best":\{/g)).toHaveLength(1);
+    }
   });
 });
 
@@ -311,15 +660,15 @@ describe('LENS 2b: lazy match reaching a different switch', () => {
 // LENS 3 — a decoy for `case"best":{`.
 // ---------------------------------------------------------------------------
 describe('LENS 3: decoy for the anchor', () => {
-  const base = readFileSync(BUNDLES.at(-1)!.path, 'utf8');
+  const base = readFileSync(BASE.path, 'utf8');
 
-  it('a second case"best":{ makes PATCH 6 ambiguous and aborts the whole patch (main and PR alike)', () => {
+  it('a second case"best":{ makes PATCH 6 ambiguous and aborts the whole patch', () => {
     const decoy = 'function D(e){switch(e){case"best":{return 0}default:return null}}';
     expect(() => applyClodexPatches(decoy + base, CONFIG))
       .toThrow(/ambiguous anchor: PATCH 6/);
   });
 
-  it('a decoy that REPLACES the real site binds the wrong switch — but that is the pre-existing anchor, unchanged by this PR', () => {
+  it('a decoy that REPLACES the real site binds the wrong switch — a pre-existing anchor property', () => {
     const anchor = base.match(RESOLVER_ANCHOR)![0];
     // move the real site out of the anchor's reach by breaking `case"best":{`
     const withoutReal = base.replace(anchor, anchor.replace('case"best":{', 'case"best" :{'));
@@ -334,11 +683,12 @@ describe('LENS 3: decoy for the anchor', () => {
 // LENS 5 — upstream adds `case"sol":return X;` BEFORE case"best", user has alias `sol`.
 // ---------------------------------------------------------------------------
 describe('LENS 5: a native non-reserved case ahead of case"best"', () => {
-  const base = readFileSync(BUNDLES.at(-1)!.path, 'utf8');
+  const base = readFileSync(BASE.path, 'utf8');
   const withNative = base.replace('case"best":{', 'case"sol":return NATIVE(n);case"best":{');
 
-  it('the region excludes it — PR injects a duplicate, main skips', () => {
+  it('the region excludes it — the case is injected anyway, a whole-bundle predicate would skip', () => {
     expect(prMissing(withNative, ['sol'])).toEqual(['sol']);
+    expect(shippedMissing(withNative, ['sol'])).toEqual(['sol']);
     expect(mainMissing(withNative, ['sol'])).toEqual([]);
   });
 
@@ -353,15 +703,15 @@ describe('LENS 5: a native non-reserved case ahead of case"best"', () => {
     expect(fn('sol')).toBe('native');
   });
 
-  it('main LOSES the built-in postcondition here; the PR keeps it', () => {
+  it('a whole-bundle predicate LOSES the built-in postcondition here; the region keeps it', () => {
     const cfg = { 'clodex:p:m': { alias: 'sol' } };
     const prOut = applyClodexPatches(withNative, cfg);
     expect(() => captureBuiltInPatchProofs(prOut.content, cfg, prOut.results)).not.toThrow();
 
-    // main's output: the case is never injected, so the proof needle is absent.
-    const mainOut = withNative; // PATCH 6 would be a no-op for `sol`
-    expect(mainOut).not.toContain('case"sol":return "sol";');
-    expect(() => captureBuiltInPatchProofs(mainOut, cfg, [
+    // Under a whole-bundle predicate the case is never injected, so the proof needle is absent.
+    const wholeBundleOut = withNative; // PATCH 6 would be a no-op for `sol`
+    expect(wholeBundleOut).not.toContain('case"sol":return "sol";');
+    expect(() => captureBuiltInPatchProofs(wholeBundleOut, cfg, [
       { status: 'OK', name: 'PATCH 6: alias resolver switch' } as never,
     ])).toThrow(/could not capture built-in postcondition/);
   });

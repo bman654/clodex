@@ -589,7 +589,7 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
       version: 13,
-      digest: 'a8891c730a83bda0410482a9b8eea9273be6f7ead3ba23285464d631aeecc537',
+      digest: '957653aa8315627b088345d487648e2f62ca314b31257f6fea695de5129e69e1',
     });
   });
 });
@@ -756,6 +756,72 @@ describe('applyClodexPatches input validation', () => {
     expect((caught as PatchApplyError).results).toEqual([
       { status: 'FAIL', name: 'PATCH 1: Agent tool model enum', extra: 'anchor not found' },
     ]);
+  });
+});
+
+/**
+ * PATCH 6 reads the "is this alias already present?" region from `case"best":{` forward, bounded by
+ * 2000 characters of drift headroom PLUS the bytes of the cases it injects itself. That bound GROWS
+ * with the alias config, and growing it is only safe because `case"best":{` is unique.
+ *
+ * The lazy quantifier is NOT what makes it safe: laziness fixes where the region ends only once its
+ * START is fixed. Given two anchors — an early one whose `default:return` is far away and the real
+ * resolver later — a small bound selects the real resolver and a large bound selects the decoy, so
+ * both ends of the region move and an alias present in the resolver drops out of the region and is
+ * injected a second time. What forecloses that is `applyOnce`'s `count > 1` refusal with
+ * `required: true`: a second viable region start implies a second anchor match, so the patch aborts
+ * before the region is ever consulted.
+ *
+ * Deleting that refusal (or PATCH 6's `required: true`) turns both aborts below into silent
+ * successes.
+ */
+describe('PATCH 6 refuses an ambiguous resolver anchor', () => {
+  const CONFIG = { 'clodex:openai-oauth:gpt-5.6-sol': { alias: 'sol' } };
+
+  /**
+   * An anchor-shaped decoy whose own `default:return` sits 2500 characters away — out of reach of
+   * the bound a small alias config produces (2000 + 23), within reach of the bound the largest
+   * config the favorites UI can produce does (2000 + 20 * 145 = 4900).
+   */
+  const DECOY = `function D(e){switch(e){case"best":{return 0}${'z'.repeat(2500)}default:return null}}`;
+
+  /** 20 aliases at the 64-character `MODEL_ALIAS_PATTERN` maximum. */
+  const MAX_LEGAL_CONFIG = Object.fromEntries(
+    Array.from({ length: 20 }, (_, i) => [
+      `clodex:openai:m${i}`,
+      { alias: `a${String(i).padStart(2, '0')}`.padEnd(64, 'x') },
+    ]),
+  ) as PatchScriptModelConfig;
+
+  it('aborts the whole patch rather than choosing between two case"best":{ anchors', () => {
+    let caught: unknown;
+    try {
+      applyClodexPatches(`${DECOY}\n${CLAUDE_FIXTURE}`, CONFIG);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(PatchApplyError);
+    expect((caught as Error).message)
+      .toBe('clodex patch: ambiguous anchor: PATCH 6: alias resolver switch');
+    expect((caught as PatchApplyError).results).toContainEqual({
+      status: 'FAIL',
+      name: 'PATCH 6: alias resolver switch',
+      extra: 'anchor matched 2 times (expected 1)',
+    });
+  });
+
+  it('aborts at the alias budget that would otherwise re-aim the region at the decoy', () => {
+    expect(() => applyClodexPatches(`${DECOY}\n${CLAUDE_FIXTURE}`, MAX_LEGAL_CONFIG))
+      .toThrow(/ambiguous anchor: PATCH 6/);
+  });
+
+  it('does not fire on the single anchor a real bundle carries, at either budget', () => {
+    for (const config of [CONFIG, MAX_LEGAL_CONFIG]) {
+      const out = applyClodexPatches(CLAUDE_FIXTURE, config);
+      expect(out.results.find(r => r.name.startsWith('PATCH 6'))!.status).toBe('OK');
+    }
+    expect(applyClodexPatches(CLAUDE_FIXTURE, CONFIG).content)
+      .toContain('case"sol":return "sol";');
   });
 });
 

@@ -390,9 +390,21 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     // and the built-in verification, which requires a re-run over patched
     // output to be a no-op, rolled back the local patch set. The 2000 is
     // headroom for upstream drift; the added term is exactly the bytes of our
-    // own `case"<a>":return "<a>";` entries. The quantifier is lazy, so a
-    // larger bound can only turn a miss into a match; it never moves where the
-    // region ends.
+    // own `case"<a>":return "<a>";` entries.
+    //
+    // Growing the bound is only safe because the anchor is UNIQUE, and that is
+    // the load-bearing property — do NOT relax the ambiguity check believing
+    // the lazy quantifier is enough on its own. Laziness fixes the region's END
+    // only once its START is fixed: raising the bound can make an EARLIER
+    // `case"best":{` viable, and then the region starts and ends somewhere else
+    // entirely. With two anchors — an early one whose `default:return` is far
+    // away, and the real resolver later — budget 2000 selects the real
+    // resolver and budget 4900 selects the decoy, which is precisely how an
+    // alias would drop out of the region and be injected twice. What forecloses
+    // that is that the region's prefix IS `RESOLVER_ANCHOR`, so a second viable
+    // region start implies a second anchor match, and `applyOnce` with
+    // `required: true` aborts the entire patch on `count > 1`. Every Claude
+    // Code build we have checked carries exactly one `case"best":{`.
     const RESOLVER_ANCHOR = /(case"best":\{[^{}]*\})/;
     const RESOLVER_BUDGET = 2000 + ALIASES.reduce((n, a) => n + 2 * a.length + 17, 0);
     const RESOLVER_SWITCH = new RegExp(
