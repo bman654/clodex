@@ -219,6 +219,29 @@ describe('fetchTemplateModels', () => {
     expect(result.error).toBe('Connected but no models were returned.');
   });
 
+  it("stores a vLLM model's own max_model_len rather than the id-based estimate", async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        data: [
+          // The id would be estimated at 131072; the server says otherwise.
+          { id: 'llama-3.2-3b-instruct', max_model_len: 8192 },
+          // Every key the chain already read still wins over max_model_len.
+          { id: 'server-explicit', context_length: 32768, max_model_len: 8192 },
+        ],
+      }),
+    } as Response);
+
+    const result = await fetchTemplateModels(openaiCompatTemplate, 'sk-test-key');
+
+    expect(result.error).toBeUndefined();
+    expect(result.models.map(m => [m.id, m.contextWindow])).toEqual([
+      ['llama-3.2-3b-instruct', 8192],
+      ['server-explicit', 32768],
+    ]);
+  });
+
   it('uses provider-specific modelsPath and omits Authorization for anonymous fetches', async () => {
     const anonymousTemplate = template({
       id: 'anon-free',

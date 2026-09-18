@@ -29,6 +29,8 @@ interface ProviderModelListRow {
   context_length?: number;
   contextWindow?: number;
   context_window?: number;
+  /** vLLM's spelling, in each OpenAI `ModelCard` it serves. */
+  max_model_len?: number;
   isFree?: boolean;
   pricing?: Record<string, string | number | undefined>;
   use_responses_lite?: boolean;
@@ -138,6 +140,7 @@ function parseModelList(
       row.context_length ??
       row.contextWindow ??
       row.context_window ??
+      row.max_model_len ??
       resolveContextWindow(id);
     models.push({
       id,
