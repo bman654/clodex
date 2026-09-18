@@ -40,10 +40,13 @@
 // the switch's own `default:return` is ADJACENT to the anchor: the lazy match stops at byte 0 and
 // the size of the bound is never consulted. Both `+ 17` → `+ 16` and `2 * a.length` → `a.length`
 // left this whole harness green. The `near the exact boundary` block was added for exactly that
-// gap: it drives the region onto the boundary the formula computes and one byte past it, where a
-// shipped coefficient smaller or larger than the copy's flips the shipped predicate's verdict. So
-// the block reds on a change to either COEFFICIENT or to the headroom — it is still not a proof
-// that every conceivable rewrite of the formula reds.
+// gap: it drives the region onto the boundary and one byte past it, where a shipped bound smaller
+// or larger than documented flips the shipped predicate's verdict. It does so at THREE
+// configurations (20 × 64, 1 × 64, 1 × 3 chars), because one configuration pins only one total —
+// `1000 + Σ(2·len + 67)` also totals 4900 at 20 × 64 and passed a single-config version. Three
+// independent (count, total length) rows fix the headroom, the per-alias constant and the
+// per-character slope of any LINEAR formula; it is still not a proof that every conceivable
+// non-linear rewrite reds.
 //
 // Everything here EXECUTES the real applyClodexPatches / captureBuiltInPatchProofs.
 //
@@ -416,14 +419,13 @@ describe('harness copy vs. the shipped bound', () => {
    * coefficient agrees with any other, so the block could not tell the shipped formula from a
    * different one: `+ 17` → `+ 16` and `2 * a.length` → `a.length` both left it fully green.
    *
-   * These two drive the region ONTO the boundary the shipped formula computes — the maximum legal
-   * alias payload plus exactly the documented headroom — and one byte past it. On the boundary the
-   * shipped predicate must say "present"; one byte past it, "missing". A shipped coefficient
-   * smaller than the copy's flips the first; larger flips the second.
+   * These drive the region ONTO the boundary — the bytes PATCH 6 really injected plus exactly the
+   * documented headroom — and one byte past it, at three configurations. On the boundary the
+   * shipped predicate must say "present"; one byte past it, "missing". A shipped bound smaller than
+   * documented flips the first; larger flips the second.
    */
   describe('near the exact boundary, where coefficients stop being interchangeable', () => {
     const anchor = base.match(RESOLVER_ANCHOR)![0];
-    const cfg = configFor(MAX_LEGAL_ALIASES);
     /** BASE with `bytes` of upstream churn between the injected cases and `default:return`. */
     const drifted = (bytes: number) =>
       base.replace(anchor + 'default:return', anchor + driftOf(bytes) + 'default:return');
@@ -433,39 +435,62 @@ describe('harness copy vs. the shipped bound', () => {
       return js.indexOf('default:return', at) - at;
     };
 
-    it('the boundary fixture really sits on the boundary', () => {
-      expect(driftOf(DRIFT_HEADROOM)).toHaveLength(DRIFT_HEADROOM);
-      expect(driftOf(DRIFT_HEADROOM)).not.toContain('default:return');
-      expect(drifted(DRIFT_HEADROOM).match(new RegExp(RESOLVER_ANCHOR.source, 'g'))).toHaveLength(1);
-      const once = applyClodexPatches(drifted(DRIFT_HEADROOM), cfg).content;
-      expect(gap(once)).toBe(MAX_LEGAL_BUDGET);             // 2900 injected + 2000 of drift
-      expect(gap(applyClodexPatches(drifted(DRIFT_HEADROOM + 1), cfg).content))
-        .toBe(MAX_LEGAL_BUDGET + 1);
-    });
-
-    it('ON the boundary both predicates say every alias is already present', () => {
-      const once = applyClodexPatches(drifted(DRIFT_HEADROOM), cfg).content;
-      expect(prMissing(once, MAX_LEGAL_ALIASES)).toEqual([]);
-      expect(shippedMissing(once, MAX_LEGAL_ALIASES)).toEqual([]);
-    });
-
-    it('ONE BYTE past it both predicates say every alias is missing', () => {
-      const once = applyClodexPatches(drifted(DRIFT_HEADROOM + 1), cfg).content;
-      expect(prMissing(once, MAX_LEGAL_ALIASES)).toEqual(MAX_LEGAL_ALIASES);
-      expect(shippedMissing(once, MAX_LEGAL_ALIASES)).toEqual(MAX_LEGAL_ALIASES);
-    });
-
-    it('so the re-patch is still the no-op patcher.ts demands, with the region full', () => {
-      const once = applyClodexPatches(drifted(DRIFT_HEADROOM), cfg);
-      const twice = applyClodexPatches(once.content, cfg);
-      expectSameBundle(twice.content, once.content, 're-patch with the region on its boundary');
-      expect(twice.results.find(r => r.name.startsWith('PATCH 6'))!.status).toBe('SKIP');
-      for (const a of MAX_LEGAL_ALIASES) {
-        expect(twice.content.split(`case${JSON.stringify(a)}:return ${JSON.stringify(a)};`))
-          .toHaveLength(2);
+    it('the drift fixtures are exactly the size asked for, and not a second anchor', () => {
+      for (const bytes of [DRIFT_HEADROOM, DRIFT_HEADROOM + 1]) {
+        expect(driftOf(bytes)).toHaveLength(bytes);
+        expect(driftOf(bytes)).not.toContain('default:return');
+        expect(drifted(bytes).match(new RegExp(RESOLVER_ANCHOR.source, 'g'))).toHaveLength(1);
       }
-      expect(() => captureBuiltInPatchProofs(twice.content, cfg, twice.results)).not.toThrow();
     });
+
+    // ONE configuration pins one TOTAL, not the formula: `1000 + Σ(2·len + 67)` also totals 4900
+    // at 20 × 64 and passed a single-config version of this block. Three unknowns (headroom,
+    // per-alias constant, per-character slope) need three configurations with independent
+    // (count, total length) rows — 20 × 64, 1 × 64, 1 × 3.
+    for (const [label, aliases] of [
+      ['20 x 64 chars', MAX_LEGAL_ALIASES],
+      ['1 x 64 chars', MAX_LEGAL_ALIASES.slice(0, 1)],
+      ['1 x 3 chars', ['sol']],
+    ] as const) {
+      describe(label, () => {
+        const cfg = configFor([...aliases]);
+        /** What PATCH 6 really injected, read back off a real patch — NOT the formula under test. */
+        const injected = gap(applyClodexPatches(base, cfg).content);
+
+        it('the boundary fixture really sits on the boundary', () => {
+          expect(injected).toBe(aliases.reduce(
+            (n, a) => n + `case${JSON.stringify(a)}:return ${JSON.stringify(a)};`.length, 0));
+          expect(gap(applyClodexPatches(drifted(DRIFT_HEADROOM), cfg).content))
+            .toBe(injected + DRIFT_HEADROOM);
+          expect(gap(applyClodexPatches(drifted(DRIFT_HEADROOM + 1), cfg).content))
+            .toBe(injected + DRIFT_HEADROOM + 1);
+        });
+
+        it('ON the boundary both predicates say every alias is already present', () => {
+          const once = applyClodexPatches(drifted(DRIFT_HEADROOM), cfg).content;
+          expect(prMissing(once, [...aliases])).toEqual([]);
+          expect(shippedMissing(once, [...aliases])).toEqual([]);
+        });
+
+        it('ONE BYTE past it both predicates say every alias is missing', () => {
+          const once = applyClodexPatches(drifted(DRIFT_HEADROOM + 1), cfg).content;
+          expect(prMissing(once, [...aliases])).toEqual(aliases);
+          expect(shippedMissing(once, [...aliases])).toEqual(aliases);
+        });
+
+        it('so the re-patch is still the no-op patcher.ts demands, with the region full', () => {
+          const once = applyClodexPatches(drifted(DRIFT_HEADROOM), cfg);
+          const twice = applyClodexPatches(once.content, cfg);
+          expectSameBundle(twice.content, once.content, `${label}: re-patch on the boundary`);
+          expect(twice.results.find(r => r.name.startsWith('PATCH 6'))!.status).toBe('SKIP');
+          for (const a of aliases) {
+            expect(twice.content.split(`case${JSON.stringify(a)}:return ${JSON.stringify(a)};`))
+              .toHaveLength(2);
+          }
+          expect(() => captureBuiltInPatchProofs(twice.content, cfg, twice.results)).not.toThrow();
+        });
+      });
+    }
   });
 });
 
@@ -784,15 +809,36 @@ describe('LENS 2b: lazy match reaching a different switch', () => {
     expect(wide![0].length).toBe(anchor.length + (foreignAt - from) + 'default:return'.length);
     expect(wide![0].slice(anchor.length)).toMatch(/switch\(/); // a foreign switch is inside it
 
-    // …and it still costs no alias its case. Every `case"<name>":return` the wider region swallowed
-    // is camelCase, and PATCH 6 lowercases an alias before building its needle, so the SHIPPED
-    // predicate reports each of those names missing. Executed against the real transform.
+    // …and it still costs no alias its case. That rests on a CONJUNCTION — PATCH 6 lowercases an
+    // alias before building its needle, AND its presence test matches case-sensitively — so it is
+    // executed against the SHIPPED predicate rather than argued from the first half alone.
+    //
+    // The config has to be WIDE for this to mean anything. With one alias the shipped budget is
+    // ~2050, short of every foreign margin in the corpus, so the region never reaches the swallowed
+    // labels and "reported missing" holds whether or not matching is case-sensitive. (An earlier
+    // version of this check did exactly that, and stayed green under a case-insensitive mutation.)
+    // Padding with 19 maximal aliases lifts the budget past the margin.
     const swallowed = [...wide![0].matchAll(/case"([^"]*)":return/g)].map(m => m[1]!);
     expect(swallowed.length).toBeGreaterThan(0);
     for (const name of swallowed) {
       const alias = canonicalModelAliasName(name);
       expect(alias).not.toBe(name);
-      expect(shippedMissing(drifted, [alias])).toEqual([alias]);
+      const wideAliases = [...MAX_LEGAL_ALIASES.slice(0, -1), alias];
+      expect(resolverBudget(wideAliases)).toBeGreaterThan(margin + 1);
+
+      // Control: spelled EXACTLY as the alias, the same label IS read as present — proof that the
+      // shipped region, at this config, really reaches it.
+      // Rewrite the occurrence INSIDE the region only; the label also appears elsewhere in the bundle.
+      const label = `case${JSON.stringify(name)}:return`;
+      const inRegion = drifted.indexOf(label, from);
+      expect(inRegion).toBeGreaterThan(from);
+      expect(inRegion).toBeLessThan(foreignAt);
+      const lowered = drifted.slice(0, inRegion) + `case${JSON.stringify(alias)}:return`
+        + drifted.slice(inRegion + label.length);
+      expect(shippedMissing(lowered, wideAliases)).not.toContain(alias);
+
+      // The real bytes: camelCase label, lowercase needle, case-sensitive match -> still missing.
+      expect(shippedMissing(drifted, wideAliases)).toContain(alias);
     }
   });
 });
