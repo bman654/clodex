@@ -231,7 +231,8 @@ export type InferenceResponseLifecycleEvent =
   | 'response_failed'
   | 'response_retried'
   | 'response_client_disconnected'
-  | 'response_usage';
+  | 'response_usage'
+  | 'flag_switch';
 
 export type InferenceResponsePhase =
   | 'preparing_translation'
@@ -260,7 +261,10 @@ export interface InferenceResponseLifecycleLogEntry {
   claudeSessionId?: string;
   modelId: string;
   provider: string;
-  route: 'passthrough' | 'translated';
+  route: 'passthrough' | 'translated' | (string & {});
+  category?: string;
+  tier?: 1 | 2;
+  unavailable?: boolean;
   statusCode?: number;
   phase?: InferenceResponsePhase;
   durationMs?: number;
@@ -468,7 +472,10 @@ export function writeInferenceResponseLifecycleLog(
     ...(claudeSessionId ? { claudeSessionId } : {}),
     modelId: compactLogValue(entry.modelId),
     provider: compactLogValue(entry.provider, 200),
-    route: entry.route,
+    route: compactLogValue(entry.route, 200),
+    ...(entry.category ? { category: compactLogValue(entry.category, 100) } : {}),
+    ...(entry.tier !== undefined ? { tier: entry.tier } : {}),
+    ...(entry.unavailable !== undefined ? { unavailable: entry.unavailable } : {}),
     ...(statusCode !== undefined ? { statusCode } : {}),
     ...(entry.phase ? { phase: entry.phase } : {}),
     ...(durationMs !== undefined ? { durationMs } : {}),

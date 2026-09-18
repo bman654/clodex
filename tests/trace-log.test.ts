@@ -335,6 +335,28 @@ describe('inference request log', () => {
     }
   });
 
+  it('caps custom route ids in response lifecycle records', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-inference-route-log-'));
+    const path = join(dir, 'requests.jsonl');
+    const route = `fallback-${'x'.repeat(250)}`;
+    try {
+      writeInferenceResponseLifecycleLog(path, {
+        event: 'flag_switch',
+        requestId: 'req-route-cap',
+        modelId: 'claude-fable-5-1',
+        provider: 'custom-openrouter',
+        route,
+        tier: 1,
+      });
+
+      const entry = JSON.parse(readFileSync(path, 'utf8').trim());
+      expect(entry.route).toBe(route.slice(0, 200));
+      expect(entry.route).toHaveLength(200);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('writes correlated response lifecycle metadata without response content', () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-inference-lifecycle-'));
     const path = join(dir, 'requests.jsonl');

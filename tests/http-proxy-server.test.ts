@@ -8,7 +8,7 @@ import * as net from 'node:net';
 import * as tls from 'node:tls';
 import { EventEmitter, once } from 'node:events';
 import { PassThrough } from 'node:stream';
-import { gzipSync } from 'node:zlib';
+import { constants, createGzip, gzipSync } from 'node:zlib';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { ensureHttpProxyCaBundle, ensureHttpProxyCertificates } from '../src/http-proxy/ca.js';
 import {
@@ -2040,6 +2040,556 @@ describe('selective HTTP proxy', () => {
   });
 
 
+  describe('flag switch', () => {
+    const SESSION_A = '11111111-1111-4111-8111-111111111111';
+    const SESSION_B = '22222222-2222-4222-8222-222222222222';
+    const FABLE_MODEL = 'claude-fable-5-1';
+    const FLAG_RULES = [{ match: 'claude-fable-*', route: 'kimi-k3' }];
+    const sse = (type: string, data: Record<string, unknown>) =>
+      `event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`;
+    const MESSAGE_START = sse('message_start', {
+      message: {
+        id: 'msg_flag_switch',
+        role: 'assistant',
+        content: [],
+        usage: { input_tokens: 5, output_tokens: 0 },
+      },
+    });
+    const CONTENT_START = sse('content_block_start', {
+      index: 0,
+      content_block: { type: 'text', text: '' },
+    });
+    const TEXT_ONE = sse('content_block_delta', {
+      index: 0,
+      delta: { type: 'text_delta', text: 'partial ' },
+    });
+    const TEXT_TWO = sse('content_block_delta', {
+      index: 0,
+      delta: { type: 'text_delta', text: 'answer' },
+    });
+    const CONTENT_STOP = sse('content_block_stop', { index: 0 });
+    const REFUSAL = sse('message_delta', {
+      delta: {
+        stop_reason: 'refusal',
+        stop_details: { category: 'cyber' },
+      },
+      usage: { output_tokens: 0 },
+    });
+    const END_TURN = sse('message_delta', {
+      delta: { stop_reason: 'end_turn' },
+      usage: { output_tokens: 2 },
+    });
+    const MESSAGE_STOP = sse('message_stop', {});
+    const REFUSAL_BEFORE_CONTENT = MESSAGE_START + REFUSAL + MESSAGE_STOP;
+    const REFUSAL_AFTER_CONTENT =
+      MESSAGE_START + CONTENT_START + TEXT_ONE + TEXT_TWO + CONTENT_STOP + REFUSAL + MESSAGE_STOP;
+    const NORMAL_STREAM =
+      MESSAGE_START + CONTENT_START + TEXT_ONE + CONTENT_STOP + END_TURN + MESSAGE_STOP;
+    const FALLBACK_STREAM =
+      MESSAGE_START
+      + CONTENT_START
+      + sse('content_block_delta', {
+        index: 0,
+        delta: { type: 'text_delta', text: 'from fallback' },
+      })
+      + CONTENT_STOP
+      + END_TURN
+      + MESSAGE_STOP;
+
+    type CapturedRequest = {
+      path: string;
+      headers: http.IncomingHttpHeaders;
+      body: string;
+    };
+    type OriginResponder = (
+      req: http.IncomingMessage,
+      res: http.ServerResponse,
+      body: string,
+    ) => void | Promise<void>;
+
+    function statusLine(response: string): string {
+      return response.slice(0, response.indexOf('\r\n'));
+    }
+
+    function dechunkedResponseBody(response: string): string {
+      const raw = Buffer.from(response);
+      const boundary = raw.indexOf('\r\n\r\n');
+      const headers = raw.subarray(0, boundary).toString();
+      let rest = raw.subarray(boundary + 4);
+      if (!/transfer-encoding: chunked/i.test(headers)) return rest.toString();
+      const parts: Buffer[] = [];
+      for (;;) {
+        const lineEnd = rest.indexOf('\r\n');
+        if (lineEnd < 0) break;
+        const size = parseInt(rest.subarray(0, lineEnd).toString(), 16);
+        if (!size) break;
+        parts.push(rest.subarray(lineEnd + 2, lineEnd + 2 + size));
+        rest = rest.subarray(lineEnd + 2 + size + 2);
+      }
+      return Buffer.concat(parts).toString();
+    }
+
+    async function startFlagSwitchHarness(options: {
+      rules?: Array<{ match: string; route: string }> | null;
+      originResponder?: OriginResponder;
+      adapterStatus?: number;
+      inferenceLogName?: string;
+    } = {}): Promise<{
+      proxyPort: number;
+      ca: string;
+      originRequests: CapturedRequest[];
+      adapterRequests: CapturedRequest[];
+      inferenceLogPath?: string;
+      close: () => Promise<void>;
+    }> {
+      const certificates = ensureHttpProxyCertificates();
+      const originRequests: CapturedRequest[] = [];
+      const adapterRequests: CapturedRequest[] = [];
+      const originResponder = options.originResponder ?? ((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.end(REFUSAL_BEFORE_CONTENT);
+      });
+      const origin = https.createServer({
+        key: certificates.serverKey,
+        cert: certificates.serverCert,
+      }, async (req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', chunk => chunks.push(Buffer.from(chunk)));
+        await once(req, 'end');
+        const body = Buffer.concat(chunks).toString();
+        originRequests.push({ path: req.url ?? '', headers: req.headers, body });
+        await originResponder(req, res, body);
+      });
+      const originPort = await listen(origin);
+
+      const adapterServer = http.createServer(async (req, res) => {
+        const chunks: Buffer[] = [];
+        req.on('data', chunk => chunks.push(Buffer.from(chunk)));
+        await once(req, 'end');
+        const body = Buffer.concat(chunks).toString();
+        adapterRequests.push({ path: req.url ?? '', headers: req.headers, body });
+        if (options.adapterStatus && options.adapterStatus !== 200) {
+          res.writeHead(options.adapterStatus, {
+            'Content-Type': 'application/json',
+            'Connection': 'close',
+          });
+          res.end(JSON.stringify({ error: { message: 'fallback failed' } }));
+          return;
+        }
+        if (req.url === '/v1/messages/count_tokens') {
+          res.writeHead(200, { 'Content-Type': 'application/json', 'Connection': 'close' });
+          res.end(JSON.stringify({ input_tokens: 7 }));
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Connection': 'close' });
+        res.end(FALLBACK_STREAM);
+      });
+      const adapterPort = await listen(adapterServer);
+      const inferenceLogPath = options.inferenceLogName
+        ? join(testHome, options.inferenceLogName)
+        : undefined;
+      const rules = options.rules === undefined ? FLAG_RULES : options.rules;
+      const proxyOptions = {
+        routes: [{
+          aliasId: 'kimi-k3',
+          realModelId: 'moonshotai/kimi-k3',
+          displayName: 'Kimi K3',
+          upstreamUrl: '',
+          apiKey: 'provider-key',
+          modelFormat: 'openai' as const,
+          npm: '@ai-sdk/openai-compatible',
+          providerId: 'custom-openrouter',
+        }],
+        ...(rules === null ? {} : { flagFallback: rules }),
+        adapterHandle: {
+          port: adapterPort,
+          token: 'adapter-local-token',
+          close: () => {},
+        },
+        anthropicOrigin: `https://127.0.0.1:${originPort}`,
+        anthropicRejectUnauthorized: false,
+        ...(inferenceLogPath ? { inferenceLogPath } : {}),
+      };
+      const proxy = await startHttpProxy(proxyOptions);
+
+      return {
+        proxyPort: proxy.port,
+        ca: certificates.caCert,
+        originRequests,
+        adapterRequests,
+        inferenceLogPath,
+        close: async () => {
+          await proxy.close();
+          adapterServer.closeAllConnections();
+          origin.closeAllConnections();
+          await new Promise<void>(resolve => adapterServer.close(() => resolve()));
+          await new Promise<void>(resolve => origin.close(() => resolve()));
+        },
+      };
+    }
+
+    function messagesBody(model = FABLE_MODEL): string {
+      return JSON.stringify({
+        model,
+        max_tokens: 16,
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: true,
+      });
+    }
+
+    it('S1 tier 2 retries a refusal before content through the fallback without leaking refusal bytes', async () => {
+      const harness = await startFlagSwitchHarness();
+      try {
+        const response = await requestMitm(
+          harness.proxyPort,
+          harness.ca,
+          '/v1/messages',
+          messagesBody(),
+          { 'x-claude-code-session-id': SESSION_A },
+        );
+
+        expect(response).toContain('from fallback');
+        expect(response).not.toContain('"refusal"');
+        expect(harness.originRequests).toHaveLength(1);
+        expect(harness.adapterRequests).toHaveLength(1);
+        expect(harness.adapterRequests[0]!.headers['x-clodex-route-override']).toBe('kimi-k3');
+        expect(JSON.parse(harness.adapterRequests[0]!.body)).toMatchObject({ model: FABLE_MODEL });
+      } finally {
+        await harness.close();
+      }
+    });
+
+    it('S2 remembers a switched session and model for its next request', async () => {
+      const harness = await startFlagSwitchHarness();
+      try {
+        for (const content of ['first', 'second']) {
+          const body = JSON.stringify({
+            model: FABLE_MODEL,
+            max_tokens: 16,
+            messages: [{ role: 'user', content }],
+            stream: true,
+          });
+          await requestMitm(
+            harness.proxyPort,
+            harness.ca,
+            '/v1/messages',
+            body,
+            { 'x-claude-code-session-id': SESSION_A },
+          );
+        }
+
+        expect(harness.originRequests).toHaveLength(1);
+        expect(harness.adapterRequests).toHaveLength(2);
+      } finally {
+        await harness.close();
+      }
+    });
+
+    it('S3 tier 1 preserves a refusal after content and switches only the next request', async () => {
+      const harness = await startFlagSwitchHarness({
+        originResponder: (_req, res) => {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.end(REFUSAL_AFTER_CONTENT);
+        },
+      });
+      try {
+        const refused = await requestMitm(
+          harness.proxyPort,
+          harness.ca,
+          '/v1/messages',
+          messagesBody(),
+          { 'x-claude-code-session-id': SESSION_A },
+        );
+        expect(statusLine(refused)).toBe('HTTP/1.1 200 OK');
+        expect(dechunkedResponseBody(refused)).toBe(REFUSAL_AFTER_CONTENT);
+        expect(harness.adapterRequests).toHaveLength(0);
+
+        const next = await requestMitm(
+          harness.proxyPort,
+          harness.ca,
+          '/v1/messages',
+          messagesBody(),
+          { 'x-claude-code-session-id': SESSION_A },
+        );
+        expect(next).toContain('from fallback');
+        expect(harness.originRequests).toHaveLength(1);
+        expect(harness.adapterRequests).toHaveLength(1);
+      } finally {
+        await harness.close();
+      }
+    });
+
+    it('S4 is green before and after: the memory key keeps other models and sessions on Anthropic', async () => {
+      const harness = await startFlagSwitchHarness();
+      try {
+        await requestMitm(
+          harness.proxyPort,
+          harness.ca,
+          '/v1/messages',
+          messagesBody(),
+          { 'x-claude-code-session-id': SESSION_A },
+        );
+        await requestMitm(
+          harness.proxyPort,
+          harness.ca,
+          '/v1/messages',
+          messagesBody('claude-haiku-4-5'),
+          { 'x-claude-code-session-id': SESSION_A },
+        );
+        await requestMitm(
+          harness.proxyPort,
+          harness.ca,
+          '/v1/messages',
+          messagesBody(),
+          { 'x-claude-code-session-id': SESSION_B },
+        );
+
+        const originModels = harness.originRequests.map(request => JSON.parse(request.body).model);
+        expect(originModels.slice(-2)).toEqual(['claude-haiku-4-5', FABLE_MODEL]);
+        expect(harness.originRequests).toHaveLength(3);
+      } finally {
+        await harness.close();
+      }
+    });
+
+    it('S5 is green before and after: normal streams are unchanged with the rule present or absent', async () => {
+      const originResponder: OriginResponder = (_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.end(NORMAL_STREAM);
+      };
+      const configured = await startFlagSwitchHarness({ originResponder });
+      const absent = await startFlagSwitchHarness({ originResponder, rules: null });
+      try {
+        const configuredResponse = await requestMitm(
+          configured.proxyPort,
+          configured.ca,
+          '/v1/messages',
+          messagesBody(),
+          { 'x-claude-code-session-id': SESSION_A },
+        );
+        const absentResponse = await requestMitm(
+          absent.proxyPort,
+          absent.ca,
+          '/v1/messages',
+          messagesBody(),
+          { 'x-claude-code-session-id': SESSION_A },
+        );
+
+        expect(statusLine(configuredResponse)).toBe('HTTP/1.1 200 OK');
+        expect(statusLine(absentResponse)).toBe('HTTP/1.1 200 OK');
+        expect(dechunkedResponseBody(configuredResponse)).toBe(NORMAL_STREAM);
+        expect(dechunkedResponseBody(absentResponse)).toBe(NORMAL_STREAM);
+      } finally {
+        await configured.close();
+        await absent.close();
+      }
+    });
+
+    it('S6 passes through a refusal and logs one unavailable switch when the fallback route is missing', async () => {
+      const harness = await startFlagSwitchHarness({
+        rules: [{ match: 'claude-fable-*', route: 'missing-alias' }],
+        inferenceLogName: 'flag-switch-unavailable.jsonl',
+      });
+      try {
+        const response = await requestMitm(
+          harness.proxyPort,
+          harness.ca,
+          '/v1/messages',
+          messagesBody(),
+          { 'x-claude-code-session-id': SESSION_A },
+        );
+
+        expect(statusLine(response)).toBe('HTTP/1.1 200 OK');
+        expect(dechunkedResponseBody(response)).toBe(REFUSAL_BEFORE_CONTENT);
+        const entries = readFileSync(harness.inferenceLogPath!, 'utf8')
+          .trim()
+          .split('\n')
+          .map(line => JSON.parse(line));
+        expect(entries.filter(entry => entry.event === 'flag_switch')).toEqual([
+          expect.objectContaining({
+            event: 'flag_switch',
+            modelId: FABLE_MODEL,
+            route: 'missing-alias',
+            category: 'cyber',
+            claudeSessionId: SESSION_A,
+            tier: 2,
+            unavailable: true,
+          }),
+        ]);
+      } finally {
+        await harness.close();
+      }
+    });
+
+    it('S7 returns the fallback error without retrying the flagged content on Anthropic', async () => {
+      const harness = await startFlagSwitchHarness({ adapterStatus: 500 });
+      try {
+        const response = await requestMitm(
+          harness.proxyPort,
+          harness.ca,
+          '/v1/messages',
+          messagesBody(),
+          { 'x-claude-code-session-id': SESSION_A },
+        );
+
+        expect(statusLine(response)).toBe('HTTP/1.1 500 Internal Server Error');
+        expect(harness.originRequests).toHaveLength(1);
+        expect(harness.adapterRequests).toHaveLength(1);
+      } finally {
+        await harness.close();
+      }
+    });
+
+    it('S8 sends count_tokens through the remembered fallback route', async () => {
+      const harness = await startFlagSwitchHarness();
+      try {
+        await requestMitm(
+          harness.proxyPort,
+          harness.ca,
+          '/v1/messages',
+          messagesBody(),
+          { 'x-claude-code-session-id': SESSION_A },
+        );
+        await requestMitm(
+          harness.proxyPort,
+          harness.ca,
+          '/v1/messages/count_tokens',
+          JSON.stringify({
+            model: FABLE_MODEL,
+            messages: [{ role: 'user', content: 'count me' }],
+          }),
+          { 'x-claude-code-session-id': SESSION_A },
+        );
+
+        expect(harness.adapterRequests).toHaveLength(2);
+        expect(harness.adapterRequests[1]).toMatchObject({
+          path: '/v1/messages/count_tokens',
+          headers: expect.objectContaining({ 'x-clodex-route-override': 'kimi-k3' }),
+        });
+      } finally {
+        await harness.close();
+      }
+    });
+
+    it('releases more than 64 KiB of pre-content pings and treats a later refusal as tier 1', async () => {
+      let finishOrigin: (() => void) | undefined;
+      const originMayFinish = new Promise<void>(resolve => { finishOrigin = resolve; });
+      const ping = sse('ping', { padding: 'x'.repeat(1_024) });
+      const preRefusal = MESSAGE_START + ping.repeat(65);
+      const originBody = preRefusal + REFUSAL + MESSAGE_STOP;
+      expect(Buffer.byteLength(preRefusal)).toBeGreaterThan(64 * 1_024);
+
+      const harness = await startFlagSwitchHarness({
+        inferenceLogName: 'flag-switch-hold-limit.jsonl',
+        originResponder: async (_req, res) => {
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.write(preRefusal);
+          await originMayFinish;
+          res.end(REFUSAL + MESSAGE_STOP);
+        },
+      });
+      let secure: tls.TLSSocket | undefined;
+      try {
+        secure = await connectMitm(harness.proxyPort, harness.ca);
+        let response = '';
+        secure.on('data', chunk => { response += chunk.toString(); });
+        const payload = Buffer.from(messagesBody());
+        secure.write([
+          'POST /v1/messages HTTP/1.1',
+          'Host: api.anthropic.com',
+          'Authorization: Bearer subscription-oauth-token',
+          'Content-Type: application/json',
+          `Content-Length: ${payload.length}`,
+          'Connection: close',
+          `x-claude-code-session-id: ${SESSION_A}`,
+          '',
+          '',
+        ].join('\r\n'));
+        secure.write(payload);
+
+        const receivedPingWhileOriginOpen = await new Promise<boolean>(resolve => {
+          let timer: ReturnType<typeof setTimeout>;
+          const settle = (received: boolean) => {
+            clearTimeout(timer);
+            secure?.off('data', onData);
+            resolve(received);
+          };
+          const onData = () => {
+            if (response.includes('event: ping')) settle(true);
+          };
+          secure!.on('data', onData);
+          timer = setTimeout(() => settle(false), 2_000);
+          onData();
+        });
+        const responseWhileOriginOpen = response;
+        const closed = once(secure, 'close');
+        finishOrigin!();
+        await closed;
+
+        expect(receivedPingWhileOriginOpen).toBe(true);
+        expect(responseWhileOriginOpen).toContain('event: ping');
+        expect(statusLine(response)).toBe('HTTP/1.1 200 OK');
+        expect(dechunkedResponseBody(response)).toBe(originBody);
+        expect(harness.adapterRequests).toHaveLength(0);
+
+        const entries = readFileSync(harness.inferenceLogPath!, 'utf8')
+          .trim()
+          .split('\n')
+          .map(line => JSON.parse(line));
+        expect(entries.find(entry => entry.event === 'flag_switch')).toMatchObject({ tier: 1 });
+
+        const next = await requestMitm(
+          harness.proxyPort,
+          harness.ca,
+          '/v1/messages',
+          messagesBody(),
+          { 'x-claude-code-session-id': SESSION_A },
+        );
+        expect(next).toContain('from fallback');
+        expect(harness.originRequests).toHaveLength(1);
+        expect(harness.adapterRequests).toHaveLength(1);
+      } finally {
+        finishOrigin?.();
+        secure?.destroy();
+        await harness.close();
+      }
+    });
+
+    it('S9 detects a gzip-compressed refusal before the origin finishes', async () => {
+      const harness = await startFlagSwitchHarness({
+        originResponder: async (_req, res) => {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream',
+            'Content-Encoding': 'gzip',
+          });
+          const gzip = createGzip({ flush: constants.Z_SYNC_FLUSH });
+          gzip.pipe(res);
+          gzip.write(MESSAGE_START);
+          gzip.write(REFUSAL);
+          await new Promise(resolve => setTimeout(resolve, 600));
+          gzip.end(MESSAGE_STOP);
+        },
+      });
+      try {
+        const startedAt = Date.now();
+        const response = await requestMitm(
+          harness.proxyPort,
+          harness.ca,
+          '/v1/messages',
+          messagesBody(),
+          { 'x-claude-code-session-id': SESSION_A },
+        );
+
+        expect(response).toContain('from fallback');
+        expect(Date.now() - startedAt).toBeLessThan(500);
+        expect(harness.originRequests).toHaveLength(1);
+        expect(harness.adapterRequests).toHaveLength(1);
+      } finally {
+        await harness.close();
+      }
+    });
+  });
+
   // A keep-alive pool can hand out a socket the far end closed while it was
   // idle. Every request in this group drives that shape through the real MITM
   // path against a real origin rather than by emitting a synthetic error.
@@ -2084,11 +2634,15 @@ describe('selective HTTP proxy', () => {
       return { server, requestCount: () => requests, bodies };
     }
 
-    function messagesRequest(body: string): string {
+    function messagesRequest(
+      body: string,
+      headers: Record<string, string> = {},
+    ): string {
       return [
         'POST /v1/messages HTTP/1.1',
         'Host: api.anthropic.com',
         'Content-Type: application/json',
+        ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`),
         `Content-Length: ${Buffer.byteLength(body)}`,
         'Connection: keep-alive',
         '',
@@ -2297,8 +2851,33 @@ describe('selective HTTP proxy', () => {
       // delivers a genuine RST, which node reports on the REQUEST -- the one
       // arrival point where a post-header replay could occur. Staged on a
       // REUSED socket so the reuse gate cannot be what produces the result.
+      const { response, requests, entries } = await postHeaderResetResult(
+        'passthrough-retry-after-headers.jsonl',
+      );
+
+      // The client really did receive part of a response before the reset.
+      expect(response).toContain(POST_HEADER_MARKER);
+      // Two client requests, two upstream attempts. A third would mean the
+      // half-delivered response was replayed.
+      expect(requests).toBe(2);
+      expect(entries.some(entry => entry['event'] === 'response_retried')).toBe(false);
+    }, 20_000);
+
+    async function postHeaderResetResult(
+      logName: string,
+      extraProxyOptions: {
+        routes?: Parameters<typeof startHttpProxy>[0]['routes'];
+        adapterHandle?: Parameters<typeof startHttpProxy>[0]['adapterHandle'];
+        flagFallback?: Array<{ match: string; route: string }>;
+      } = {},
+      streamedRequestHeaders: Record<string, string> = {},
+    ): Promise<{
+      response: string;
+      requests: number;
+      entries: Record<string, unknown>[];
+    }> {
       const certificates = ensureHttpProxyCertificates();
-      const inferenceLogPath = join(testHome, 'passthrough-retry-after-headers.jsonl');
+      const inferenceLogPath = join(testHome, logName);
       let requests = 0;
       const perConnection = new WeakMap<net.Socket, number>();
       const rawByPort = new Map<number, net.Socket>();
@@ -2330,6 +2909,7 @@ describe('selective HTTP proxy', () => {
       const originPort = await listen(origin);
       const proxy = await startHttpProxy({
         routes: [],
+        ...extraProxyOptions,
         inferenceLogPath,
         anthropicOrigin: `https://127.0.0.1:${originPort}`,
         anthropicRejectUnauthorized: false,
@@ -2349,22 +2929,59 @@ describe('selective HTTP proxy', () => {
           model: 'claude-opus-4-8',
           messages: [{ role: 'user', content: 'reset after headers' }],
           stream: true,
-        })));
+        }), streamedRequestHeaders));
         await awaitUntil(secure, () => response.includes(POST_HEADER_MARKER),
           () => `expected the partial stream, got: ${response.slice(0, 400)}`);
         await new Promise(resolve => setTimeout(resolve, 250));
         secure.destroy();
 
-        // The client really did receive part of a response before the reset.
-        expect(response).toContain(POST_HEADER_MARKER);
-        // Two client requests, two upstream attempts. A third would mean the
-        // half-delivered response was replayed.
-        expect(requests).toBe(2);
-        const entries = await readLog(inferenceLogPath);
-        expect(entries.some(entry => entry['event'] === 'response_retried')).toBe(false);
+        return { response, requests, entries: await readLog(inferenceLogPath) };
       } finally {
         await proxy.close();
         await new Promise<void>(resolve => origin.close(() => resolve()));
+      }
+    }
+
+    it('S10 is green before and after: releases a held partial response before handling its reset', async () => {
+      let adapterRequests = 0;
+      const adapterServer = http.createServer((req, res) => {
+        adapterRequests += 1;
+        req.resume();
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Connection': 'close' });
+        res.end('event: message_stop\ndata: {"type":"message_stop"}\n\n');
+      });
+      const adapterPort = await listen(adapterServer);
+      try {
+        const { response, requests, entries } = await postHeaderResetResult(
+          'flag-switch-reset-after-headers.jsonl',
+          {
+            routes: [{
+              aliasId: 'kimi-k3',
+              realModelId: 'moonshotai/kimi-k3',
+              displayName: 'Kimi K3',
+              upstreamUrl: '',
+              apiKey: 'provider-key',
+              modelFormat: 'openai',
+              npm: '@ai-sdk/openai-compatible',
+              providerId: 'custom-openrouter',
+            }],
+            flagFallback: [{ match: 'claude-opus-*', route: 'kimi-k3' }],
+            adapterHandle: {
+              port: adapterPort,
+              token: 'adapter-local-token',
+              close: () => {},
+            },
+          },
+          { 'x-claude-code-session-id': '11111111-1111-4111-8111-111111111111' },
+        );
+
+        expect(response.includes(POST_HEADER_MARKER)).toBe(true);
+        expect(requests).toEqual(2);
+        expect(entries.filter(entry => entry['event'] === 'response_retried')).toHaveLength(0);
+        expect(adapterRequests).toBe(0);
+      } finally {
+        adapterServer.closeAllConnections();
+        await new Promise<void>(resolve => adapterServer.close(() => resolve()));
       }
     }, 20_000);
 

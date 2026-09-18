@@ -78,6 +78,7 @@ export function loadPreferences(): UserPreferences {
     recentModelsByProvider: config.recentModelsByProvider,
     favoriteModels: config.favoriteModels,
     modelAliases: config.modelAliases,
+    flagFallback: config.flagFallback,
     modelContextModes: config.modelContextModes,
     claudeBridgeMode: config.claudeBridgeMode,
     serverBridgeMode: config.serverBridgeMode,

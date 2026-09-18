@@ -1,6 +1,7 @@
 // src/types.ts
 
 import type { FreeStatus } from './free-models.js';
+import type { FlagFallbackRule } from './http-proxy/flag-switch.js';
 import type { ModelRuntimeCompatibility } from './model-runtime-compatibility.js';
 
 export type ModelFormat = 'anthropic' | 'openai' | 'unsupported';
@@ -87,6 +88,8 @@ export interface UserPreferences {
   recentModelsByProvider?: Record<string, string[]>;
   favoriteModels?: FavoriteModel[];
   modelAliases?: ModelAlias[];
+  /** First-match rules for moving flagged proxy sessions to configured routes. */
+  flagFallback?: FlagFallbackRule[];
   /** Saved context stop per `<provider-id>:<model-id>`, set by `models --context`. */
   modelContextModes?: Record<string, 'standard' | 'max' | number>;
   /** Remembered bridge mode for `clodex claude` (set by --endpoint / --proxy). */

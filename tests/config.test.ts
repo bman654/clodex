@@ -81,6 +81,20 @@ describe('dotfolder config', () => {
     ]);
   });
 
+  it('loads flag fallback rules from config without adding defaults', () => {
+    const rules = [
+      { match: 'claude-fable-*', route: 'kimi-k3' },
+      { match: '*', route: 'deepseek-flash' },
+    ];
+    savePreferences({ lastProvider: 'openai-oauth' });
+    writeFileSync(getConfigPath(), JSON.stringify({ flagFallback: rules }));
+
+    expect(loadPreferences().flagFallback).toEqual(rules);
+
+    writeFileSync(getConfigPath(), JSON.stringify({}));
+    expect(loadPreferences().flagFallback).toBeUndefined();
+  });
+
   it('persists explicit local-patch opt-in and opt-out', () => {
     savePreferences({ localPatchesEnabled: true });
     expect(loadPreferences().localPatchesEnabled).toBe(true);

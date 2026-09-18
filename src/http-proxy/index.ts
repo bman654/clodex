@@ -6,6 +6,7 @@ import { fetchProviderCatalog, resolveLocalProviderApiKey } from '../provider-ca
 import { providersForTarget } from '../target-compatibility.js';
 import type { ProxyRoute } from '../proxy.js';
 import { buildHttpProxyRoutes, type HttpProxyRouteResult } from './routes.js';
+import type { FlagFallbackRule } from './flag-switch.js';
 import { startHttpProxy, type HttpProxyHandle, type HttpProxyOptions } from './server.js';
 import { ensureHttpProxyCaBundle } from './ca.js';
 import { registerServerRuntimeState, unregisterServerRuntimeState } from '../server-runtime.js';
@@ -23,12 +24,37 @@ import {
 
 export interface LoadedHttpProxyRoutes extends HttpProxyRouteResult {
   favoriteCount: number;
+  flagFallback?: FlagFallbackRule[];
+}
+
+function normalizeFlagFallback(value: unknown): FlagFallbackRule[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new TypeError('Saved flag fallback rules are malformed: "flagFallback" must be an array.');
+  }
+  return value.map((rule, index) => {
+    if (
+      !rule
+      || typeof rule !== 'object'
+      || typeof rule.match !== 'string'
+      || typeof rule.route !== 'string'
+      || !rule.match
+      || !rule.route
+    ) {
+      throw new TypeError(
+        `Saved flag fallback rules are malformed: "flagFallback[${index}]" `
+        + 'must be an object with non-empty string "match" and "route" values.',
+      );
+    }
+    return { match: rule.match, route: rule.route };
+  });
 }
 
 export async function loadHttpProxyRoutes(): Promise<LoadedHttpProxyRoutes> {
   const prefs = loadPreferences();
   const favorites = prefs.favoriteModels ?? [];
   const normalizedAliases = normalizeModelAliases(prefs.modelAliases);
+  const flagFallback = normalizeFlagFallback(prefs.flagFallback);
   if (favorites.length === 0) {
     return {
       routes: [],
@@ -40,6 +66,7 @@ export async function loadHttpProxyRoutes(): Promise<LoadedHttpProxyRoutes> {
         ...normalizedAliases.accepted.flatMap(({ sources }) => sources),
       ],
       favoriteCount: 0,
+      flagFallback,
     };
   }
   const rawCatalog = providersForTarget(await fetchProviderCatalog({ agent: 'claude' }), 'claude');
@@ -50,6 +77,7 @@ export async function loadHttpProxyRoutes(): Promise<LoadedHttpProxyRoutes> {
   return {
     ...buildHttpProxyRoutes(catalog, favorites, prefs.modelAliases),
     favoriteCount: favorites.length,
+    flagFallback,
   };
 }
 
@@ -126,6 +154,7 @@ export function buildConfiguredHttpProxyOptions(
     port,
     routes: loaded.routes,
     modelAliases: loaded.aliases,
+    flagFallback: loaded.flagFallback,
     reservedModelIds: [...new Set([
       ...loaded.aliases.flatMap(alias => alias.sourceNames ?? []),
       ...loaded.unavailableAliases.map(alias => alias.name),

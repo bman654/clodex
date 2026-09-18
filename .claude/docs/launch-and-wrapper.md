@@ -221,8 +221,8 @@ suite records the NTFS facts listed above and prints the SHA-256 time for a 200 
 - Config home `~/.clodex`, override `CLODEX_HOME`. Keychain service `clodex` supports chunked
   entries for Windows credential size limits.
 - Preferences: `lastModel`, `lastProvider`, `recentModelsByProvider`, `favoriteModels`,
-  `modelAliases`, `claudeBridgeMode`, `serverBridgeMode`, `appPathOverrides`, `localPatchesEnabled`,
-  `recentLaunchFolders`, `server*`. All writes skipped when `dryRun`.
+  `modelAliases`, `flagFallback`, `claudeBridgeMode`, `serverBridgeMode`, `appPathOverrides`,
+  `localPatchesEnabled`, `recentLaunchFolders`, `server*`. All writes skipped when `dryRun`.
 - `CLODEX_CLAUDE_PATH` overrides Claude Code binary discovery (`src/claude-binary.ts`, re-exported
   by `src/launch.ts`; the wrapper imports it directly so `launchClaude` stays out of its chunk).
 - `buildChildEnv()` copies `process.env`, deletes conflicting `ANTHROPIC_*`/related vars, and sets
@@ -234,6 +234,55 @@ suite records the NTFS facts listed above and prints the SHA-256 time for a 200 
   `clodex server`, restart that server with the variables set; putting them only on a
   `clodex-claude` wrapper cannot reconfigure it. Request-time notices are immediate on standalone
   server stderr, while `clodex claude` queues them as described below.
+
+### Flag fallback
+
+Proxy mode can move a Claude session to a configured fallback route after Anthropic flags a
+request. Clodex treats a flag as an HTTP 200 streaming response whose `message_delta` has
+`delta.stop_reason: "refusal"`. Detection applies only to streaming `/v1/messages` requests that
+carry a Claude session id (`metadata.user_id`'s session id, or the `x-claude-code-session-id`
+header); a request without one is never held, watched, or switched.
+
+The feature is off unless `~/.clodex/config.json` contains a non-empty `flagFallback` array, and
+clodex ships with no rules. Each rule has the shape `{ "match": "<requested model>", "route":
+"<saved route or alias>" }`. Route names are whatever the user called their saved routes. Rules use
+`*` as their only wildcard, and the first matching rule wins:
+
+```json
+{
+  "flagFallback": [
+    { "match": "claude-fable-*", "route": "my-fallback" },
+    { "match": "*", "route": "my-default-fallback" }
+  ]
+}
+```
+
+A malformed table (not an array, or a rule without non-empty string `match` and `route` values) is
+an error, not a disabled feature: loading the proxy's models fails with `Could not load proxy
+models: Saved flag fallback rules are malformed ...` and clodex exits, so a typo in a hand-edited
+key stops proxy start-up until it is fixed.
+
+Before any content has reached the client, clodex holds the response. A refusal within that hold is
+replaced by the fallback's answer. After content has streamed, a refusal stays in the current
+response and only following requests move to the fallback. The same is true if more than 64 KiB of
+pre-content events release the hold before a refusal arrives.
+
+The switch is kept in memory for each Claude session and requested model. `/clear` starts a new
+session id, and restarting the proxy clears the memory, so either action ends the switch. Once a
+pair is switched, every later request for that session and model goes to the fallback, whether or
+not it streams; this includes `/v1/messages/count_tokens`. The memory holds 256 pairs; past that the
+oldest switch is forgotten and that session's next request goes to Anthropic again. A rule whose
+route is not configured changes no routing and writes a `flag_switch` log row with
+`unavailable: true`.
+
+If the fallback itself fails, its error is what the client receives (an unreachable adapter is a
+`502 Relay adapter unreachable`), and the request is not retried against Anthropic: the refused
+response was already discarded, and Anthropic would refuse the same content again.
+
+The fallback receives the original conversation payload without model or message rewriting. This
+means the whole conversation, including the content that Anthropic flagged, is sent to the fallback
+provider. Clodex does not inspect or enforce the fallback provider's retention or training policy.
+Choosing a rule chooses where flagged conversation content goes.
 
 ## Parent diagnostics while Claude Code runs
 

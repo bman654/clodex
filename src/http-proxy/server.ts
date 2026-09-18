@@ -10,6 +10,13 @@ import type { ProxyHandle, ProxyRoute } from '../proxy.js';
 import { startProxyCatalog } from '../proxy.js';
 import { decodeRequestBody } from '../http-utils.js';
 import { ensureHttpProxyCertificates } from './ca.js';
+import {
+  fallbackRouteFor,
+  flagSignalFromSseBlock,
+  FlagSwitchMemory,
+  type FlagFallbackRule,
+  type FlagSignal,
+} from './flag-switch.js';
 import { normalizeRouteLookupId } from '../context-model-id.js';
 import { listenTcpServer } from '../listener-ready.js';
 import { routeUnavailableMessage } from '../route-unavailable.js';
@@ -39,6 +46,7 @@ const ANTHROPIC_HOST = 'api.anthropic.com';
 const MAX_BODY_BYTES = 50 * 1024 * 1024;
 const MAX_ERROR_BODY_BYTES = 64 * 1024;
 const MAX_USAGE_SSE_BLOCK_BYTES = 64 * 1024;
+const MAX_FLAG_HOLD_BYTES = 64 * 1024;
 
 /**
  * The reset a pooled socket produces when the peer closed it while it sat idle.
@@ -115,7 +123,8 @@ function responseUsageFromSseBlock(block: string): ResponseUsage | undefined {
 }
 
 function createResponseUsageCapture(
-  onUsage: (usage: ResponseUsage) => void,
+  onUsage?: (usage: ResponseUsage) => void,
+  onFlagSignal?: (signal: FlagSignal) => void,
 ): (chunk: Buffer) => void {
   let buffered = '';
 
@@ -127,11 +136,13 @@ function createResponseUsageCapture(
       const block = buffered.slice(0, boundary);
       buffered = buffered.slice(boundary + 2);
       if (Buffer.byteLength(block) > MAX_USAGE_SSE_BLOCK_BYTES) continue;
-      const usage = responseUsageFromSseBlock(block);
-      if (usage) onUsage(usage);
+      const usage = onUsage ? responseUsageFromSseBlock(block) : undefined;
+      if (usage) onUsage?.(usage);
+      const flagSignal = onFlagSignal ? flagSignalFromSseBlock(block) : undefined;
+      if (flagSignal) onFlagSignal?.(flagSignal);
     }
 
-    // Usage events are tiny. Drop an oversized unterminated event rather than
+    // Observed events are tiny. Drop an oversized unterminated event rather than
     // retaining arbitrary streamed response content in this observer.
     if (Buffer.byteLength(buffered) > MAX_USAGE_SSE_BLOCK_BYTES) buffered = '';
   };
@@ -140,16 +151,28 @@ function createResponseUsageCapture(
 function observeResponseUsage(
   upstream: http.IncomingMessage,
   contentEncoding: string | string[] | undefined,
-  onUsage: (usage: ResponseUsage) => void,
-): void {
+  onUsage?: (usage: ResponseUsage) => void,
+  onFlagSignal?: (signal: FlagSignal) => void,
+  onEnd?: () => void,
+): boolean {
   const encoding = (Array.isArray(contentEncoding) ? contentEncoding[0] : contentEncoding)
     ?.trim()
     .toLowerCase();
   if (!encoding || encoding === 'identity') {
-    const capture = createResponseUsageCapture(onUsage);
+    const capture = createResponseUsageCapture(onUsage, onFlagSignal);
+    let finished = false;
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      upstream.off('data', capture);
+      upstream.off('end', finish);
+      upstream.off('close', finish);
+      onEnd?.();
+    };
     upstream.on('data', capture);
-    upstream.once('end', () => upstream.off('data', capture));
-    return;
+    upstream.once('end', finish);
+    upstream.once('close', finish);
+    return true;
   }
 
   const decoder = encoding === 'gzip'
@@ -159,8 +182,9 @@ function observeResponseUsage(
       : encoding === 'deflate'
         ? createInflate()
         : undefined;
-  if (!decoder) return;
+  if (!decoder) return false;
 
+  let finished = false;
   const onCompressedData = (chunk: Buffer) => {
     if (!decoder.destroyed) decoder.write(chunk);
   };
@@ -170,14 +194,26 @@ function observeResponseUsage(
   const cleanup = () => {
     upstream.off('data', onCompressedData);
     upstream.off('end', onCompressedEnd);
+    upstream.off('close', onCompressedClose);
     decoder.destroy();
   };
-  const capture = createResponseUsageCapture(onUsage);
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    onEnd?.();
+    cleanup();
+  };
+  const onCompressedClose = () => {
+    if (!upstream.complete) finish();
+  };
+  const capture = createResponseUsageCapture(onUsage, onFlagSignal);
   decoder.on('data', capture);
-  decoder.once('error', cleanup);
-  decoder.once('end', cleanup);
+  decoder.once('error', finish);
+  decoder.once('end', finish);
   upstream.on('data', onCompressedData);
   upstream.once('end', onCompressedEnd);
+  upstream.once('close', onCompressedClose);
+  return true;
 }
 
 export interface HttpProxyOptions {
@@ -186,6 +222,8 @@ export interface HttpProxyOptions {
   routes: ProxyRoute[];
   /** Short incoming model names mapped to canonical adapter route ids. */
   modelAliases?: ResolvedHttpProxyAlias[];
+  /** First-match rules for moving flagged sessions to configured routes. */
+  flagFallback?: FlagFallbackRule[];
   /** Configured local model ids that must never fall through to Anthropic. */
   reservedModelIds?: string[];
   debug?: boolean;
@@ -249,17 +287,25 @@ function readRawBody(req: http.IncomingMessage): Promise<Buffer> {
   });
 }
 
+interface FlagWatch {
+  hold: boolean;
+  onRefusal: (
+    signal: Extract<FlagSignal, { kind: 'refusal' }>,
+    tier: 1 | 2,
+  ) => void | Promise<void>;
+}
+
 function copyResponse(
   upstream: http.IncomingMessage,
   res: http.ServerResponse,
   onErrorResponse?: (statusCode: number, body: string) => void,
   onResponseUsage?: (usage: ResponseUsage) => void,
-): void {
+  flagWatch?: FlagWatch,
+): () => void {
   const statusCode = upstream.statusCode ?? 502;
   const contentType = upstream.headers['content-type'];
-  if (statusCode < 400 && onResponseUsage && typeof contentType === 'string' && contentType.includes('text/event-stream')) {
-    observeResponseUsage(upstream, upstream.headers['content-encoding'], onResponseUsage);
-  }
+  const isEventStream = typeof contentType === 'string'
+    && contentType.includes('text/event-stream');
   const errorChunks: Buffer[] = [];
   let capturedBytes = 0;
   let truncated = false;
@@ -284,12 +330,80 @@ function copyResponse(
     });
     upstream.once('end', () => logErrorResponse());
   }
-  res.writeHead(statusCode, upstream.statusMessage, upstream.rawHeaders);
   upstream.once('error', err => {
     logErrorResponse(` [stream error: ${err.message}]`);
     res.destroy();
   });
+
+  if (statusCode === 200 && isEventStream && flagWatch) {
+    const held: Buffer[] = [];
+    let heldBytes = 0;
+    let released = !flagWatch.hold;
+    let holdLimitExceeded = false;
+    let contentSeen = false;
+    let refusalSeen = false;
+    const holdChunk = (chunk: Buffer) => {
+      if (released) return;
+      const copy = Buffer.from(chunk);
+      held.push(copy);
+      heldBytes += copy.length;
+      if (heldBytes > MAX_FLAG_HOLD_BYTES) {
+        holdLimitExceeded = true;
+        release();
+      }
+    };
+    const release = () => {
+      if (released) return;
+      released = true;
+      upstream.off('data', holdChunk);
+      res.writeHead(statusCode, upstream.statusMessage, upstream.rawHeaders);
+      for (const chunk of held) res.write(chunk);
+      held.length = 0;
+      heldBytes = 0;
+      if (upstream.readableEnded || upstream.destroyed) res.end();
+      else upstream.pipe(res);
+    };
+    if (flagWatch.hold) upstream.on('data', holdChunk);
+    const observed = observeResponseUsage(
+      upstream,
+      upstream.headers['content-encoding'],
+      onResponseUsage,
+      signal => {
+        if (signal.kind === 'content') {
+          contentSeen = true;
+          release();
+          return;
+        }
+        if (refusalSeen) return;
+        refusalSeen = true;
+        const tier = contentSeen || holdLimitExceeded ? 1 : 2;
+        if (tier === 2 && flagWatch.hold) {
+          released = true;
+          upstream.off('data', holdChunk);
+          held.length = 0;
+          heldBytes = 0;
+          flagWatch.onRefusal(signal, tier);
+          upstream.destroy();
+          return;
+        }
+        flagWatch.onRefusal(signal, tier);
+      },
+      release,
+    );
+    if (!observed) release();
+    if (!flagWatch.hold) {
+      res.writeHead(statusCode, upstream.statusMessage, upstream.rawHeaders);
+      upstream.pipe(res);
+    }
+    return release;
+  }
+
+  if (statusCode < 400 && onResponseUsage && isEventStream) {
+    observeResponseUsage(upstream, upstream.headers['content-encoding'], onResponseUsage);
+  }
+  res.writeHead(statusCode, upstream.statusMessage, upstream.rawHeaders);
   upstream.pipe(res);
+  return () => {};
 }
 
 function requestHeadersWithoutProxyHeaders(req: http.IncomingMessage): string[] {
@@ -319,6 +433,7 @@ function forwardRawAnthropicRequest(
     provider: string;
     progressIntervalMs: number;
   },
+  flagWatch?: FlagWatch,
   isLocalShutdown: () => boolean = () => false,
 ): Promise<void> {
   return new Promise(resolve => {
@@ -334,6 +449,8 @@ function forwardRawAnthropicRequest(
     let responseEnded = false;
     let failed = false;
     let clientDisconnected = false;
+    let responseSwitched = false;
+    let releaseHold: (() => void) | undefined;
     const writeLifecycle = (
       event: Parameters<typeof writeInferenceResponseLifecycleLog>[1]['event'],
       extra: Partial<Parameters<typeof writeInferenceResponseLifecycleLog>[1]> = {},
@@ -436,13 +553,36 @@ function forwardRawAnthropicRequest(
           bytes += chunk.length;
           chunks += 1;
         });
-        copyResponse(upstreamRes, res, onErrorResponse, onResponseUsage);
+        releaseHold = copyResponse(
+          upstreamRes,
+          res,
+          onErrorResponse,
+          onResponseUsage,
+          flagWatch
+            ? {
+                hold: flagWatch.hold,
+                onRefusal: (signal, tier) => {
+                  const switchesCurrentResponse = tier === 2 && flagWatch.hold;
+                  if (switchesCurrentResponse) {
+                    responseSwitched = true;
+                    stopProgress();
+                  }
+                  const switched = flagWatch.onRefusal(signal, tier);
+                  if (switchesCurrentResponse) {
+                    void Promise.resolve(switched).then(done, done);
+                  }
+                  return switched;
+                },
+              }
+            : undefined,
+        );
         upstreamRes.once('end', () => {
           responseEnded = true;
           lastActivityAt = Date.now();
-          done();
+          if (!responseSwitched) done();
         });
         upstreamRes.once('error', err => {
+          if (responseSwitched) return;
           if (clientDisconnected || failed) {
             done();
             return;
@@ -471,6 +611,7 @@ function forwardRawAnthropicRequest(
           done();
           return;
         }
+        if (responseSwitched) return;
         if (isRetryableUpstreamFailure(err, request)) {
           const retriedAt = Date.now();
           writeLifecycle('response_retried', {
@@ -506,6 +647,7 @@ function forwardRawAnthropicRequest(
           reusedSocket: request.reusedSocket === true,
         });
         const detail = upstreamUnreachableDetail(err);
+        releaseHold?.();
         onErrorResponse?.(502, `Anthropic upstream unreachable: ${detail}`);
         if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
         res.end(`Anthropic upstream unreachable: ${detail}`);
@@ -516,7 +658,7 @@ function forwardRawAnthropicRequest(
 
     res.once('finish', () => {
       stopProgress();
-      if (failed || clientDisconnected) return;
+      if (responseSwitched || failed || clientDisconnected) return;
       const now = Date.now();
       writeLifecycle('response_completed', {
         statusCode,
@@ -529,7 +671,7 @@ function forwardRawAnthropicRequest(
     });
     res.once('close', () => {
       stopProgress();
-      if (res.writableFinished || failed) return;
+      if (responseSwitched || res.writableFinished || failed) return;
       clientDisconnected = true;
       const now = Date.now();
       writeLifecycle('response_client_disconnected', {
@@ -566,6 +708,7 @@ function forwardToAdapter(
     progressIntervalMs: number;
   },
   isLocalShutdown: () => boolean = () => false,
+  routeOverride?: string,
 ): Promise<void> {
   return new Promise(resolve => {
     const startedAt = Date.now();
@@ -691,6 +834,7 @@ function forwardToAdapter(
         'Content-Type': 'application/json',
         'Content-Length': String(rawBody.length),
         'x-api-key': adapter.token,
+        ...(routeOverride ? { 'x-clodex-route-override': routeOverride } : {}),
         ...(typeof req.headers['x-claude-code-session-id'] === 'string'
           ? { 'x-claude-code-session-id': req.headers['x-claude-code-session-id'] }
           : {}),
@@ -924,6 +1068,8 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   const certificates = ensureHttpProxyCertificates();
   const routesById = new Map<string, ProxyRoute>();
   const reservedModelIds = new Set<string>();
+  const flagFallback = options.flagFallback?.length ? options.flagFallback : undefined;
+  const flagSwitchMemory = flagFallback ? new FlagSwitchMemory() : undefined;
   for (const route of options.routes) {
     routesById.set(normalizeRouteLookupId(route.aliasId), route);
   }
@@ -1010,6 +1156,17 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         ? extractClaudeSessionId(parsed, claudeSessionIdHeader)
         : undefined;
       const requestedModel = typeof parsed?.model === 'string' ? parsed.model : undefined;
+      let routeOverride: string | undefined;
+      if (!route && requestedModel && claudeSessionId && flagSwitchMemory) {
+        const rememberedRouteId = flagSwitchMemory.get(claudeSessionId, requestedModel);
+        const rememberedRoute = rememberedRouteId
+          ? routesById.get(normalizeRouteLookupId(rememberedRouteId))
+          : undefined;
+        if (rememberedRoute && rememberedRouteId) {
+          route = rememberedRoute;
+          routeOverride = rememberedRouteId;
+        }
+      }
       const unresolvedRoutedModel = !route && requestedModel !== undefined && (
         normalizeRouteLookupId(requestedModel).startsWith(HTTP_PROXY_MODEL_PREFIX)
         || reservedModelIds.has(normalizeRouteLookupId(requestedModel))
@@ -1090,9 +1247,73 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
               }
             : undefined,
           () => shuttingDown,
+          routeOverride,
         );
         return;
       }
+
+      const fallbackRouteId = messagesEndpoint === 'messages'
+        && parsed?.stream === true
+        && requestedModel
+        && claudeSessionId
+        && flagFallback
+        ? fallbackRouteFor(requestedModel, flagFallback)
+        : undefined;
+      const fallbackRoute = fallbackRouteId
+        ? routesById.get(normalizeRouteLookupId(fallbackRouteId))
+        : undefined;
+      const fallbackProvider = fallbackRoute
+        ? (fallbackRoute.providerId ?? fallbackRoute.aliasId.split(':')[1] ?? 'unknown')
+        : 'unknown';
+      const fallbackAdapter = fallbackRoute ? adapter : null;
+      const responseFlagWatch: FlagWatch | undefined = fallbackRouteId
+        && requestedModel
+        && claudeSessionId
+        && flagSwitchMemory
+        ? {
+            hold: Boolean(fallbackRoute && fallbackAdapter),
+            onRefusal: (signal, tier) => {
+              const unavailable = !fallbackRoute || !fallbackAdapter;
+              if (options.inferenceLogPath) {
+                writeInferenceResponseLifecycleLog(options.inferenceLogPath, {
+                  event: 'flag_switch',
+                  requestId,
+                  claudeSessionId,
+                  modelId: requestedModel,
+                  provider: fallbackProvider,
+                  route: fallbackRouteId,
+                  category: signal.category,
+                  tier,
+                  ...(unavailable ? { unavailable: true } : {}),
+                });
+              }
+              if (!fallbackRoute || !fallbackAdapter) return;
+              flagSwitchMemory.set(claudeSessionId, requestedModel, fallbackRouteId);
+              if (tier === 1) return;
+              return forwardToAdapter(
+                req,
+                res,
+                adapterBody,
+                fallbackAdapter,
+                options.adapterRequest,
+                adapterAgent,
+                options.inferenceLogPath
+                  ? {
+                      logPath: options.inferenceLogPath,
+                      requestId,
+                      claudeSessionId,
+                      modelId: requestedModel,
+                      provider: fallbackProvider,
+                      progressIntervalMs: options.responseProgressIntervalMs
+                        ?? INFERENCE_PROGRESS_INTERVAL_MS,
+                    }
+                  : undefined,
+                () => shuttingDown,
+                fallbackRouteId,
+              );
+            },
+          }
+        : undefined;
 
       await forwardRawAnthropicRequest(
         req,
@@ -1132,6 +1353,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
               progressIntervalMs: options.responseProgressIntervalMs ?? INFERENCE_PROGRESS_INTERVAL_MS,
             }
           : undefined,
+        responseFlagWatch,
         () => shuttingDown,
       );
       return;

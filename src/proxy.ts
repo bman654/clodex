@@ -413,10 +413,14 @@ export async function startProxyCatalog(
       const clientWantsStream = Boolean(anthropicBody.stream);
       const relayRequestIdRaw = req.headers['x-relay-request-id'];
       const relayRequestId = Array.isArray(relayRequestIdRaw) ? relayRequestIdRaw[0] : relayRequestIdRaw;
+      const routeOverrideRaw = req.headers['x-clodex-route-override'];
+      const routeOverride = Array.isArray(routeOverrideRaw) ? routeOverrideRaw[0] : routeOverrideRaw;
 
-      // Per-request route resolution: look up the alias, fall back to default
-      const resolvedRoute = typeof originalModel === 'string'
-        ? lookupRoute(byAlias, originalModel)
+      // Per-request route resolution: honour the authenticated local-hop override,
+      // then look up the body model as before and fall back to the default.
+      const routeLookupId = routeOverride ?? originalModel;
+      const resolvedRoute = typeof routeLookupId === 'string'
+        ? lookupRoute(byAlias, routeLookupId)
         : undefined;
       const configuredModelUnavailable = typeof originalModel === 'string'
         && (

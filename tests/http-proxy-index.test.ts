@@ -263,6 +263,57 @@ describe('HTTP proxy startup model list', () => {
     }
   });
 
+  it('passes configured flag fallback rules into the HTTP proxy options', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'clodex-proxy-flag-fallback-'));
+    const previousHome = process.env['CLODEX_HOME'];
+    process.env['CLODEX_HOME'] = home;
+    const rules = [
+      { match: 'claude-fable-*', route: 'kimi-k3' },
+      { match: '*', route: 'deepseek-flash' },
+    ];
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [],
+      flagFallback: rules,
+    }));
+
+    try {
+      const loaded = await loadHttpProxyRoutes();
+      const options = buildConfiguredHttpProxyOptions(loaded, 17645);
+
+      expect(loaded.flagFallback).toEqual(rules);
+      expect(options.flagFallback).toEqual(rules);
+    } finally {
+      if (previousHome === undefined) delete process.env['CLODEX_HOME'];
+      else process.env['CLODEX_HOME'] = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it('fails closed when saved flag fallback rules are malformed', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'clodex-proxy-malformed-flag-fallback-'));
+    const previousHome = process.env['CLODEX_HOME'];
+    process.env['CLODEX_HOME'] = home;
+
+    try {
+      writeFileSync(join(home, 'config.json'), JSON.stringify({ flagFallback: {} }));
+      await expect(loadHttpProxyRoutes()).rejects.toThrow(
+        'Saved flag fallback rules are malformed: "flagFallback" must be an array.',
+      );
+
+      writeFileSync(join(home, 'config.json'), JSON.stringify({
+        flagFallback: [{ match: 'claude-*', route: '' }],
+      }));
+      await expect(loadHttpProxyRoutes()).rejects.toThrow(
+        'Saved flag fallback rules are malformed: "flagFallback[0]" must be an object '
+        + 'with non-empty string "match" and "route" values.',
+      );
+    } finally {
+      if (previousHome === undefined) delete process.env['CLODEX_HOME'];
+      else process.env['CLODEX_HOME'] = previousHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it('fails closed when saved aliases are not stored as an array', async () => {
     const home = mkdtempSync(join(tmpdir(), 'clodex-proxy-malformed-aliases-'));
     const previousHome = process.env['CLODEX_HOME'];
