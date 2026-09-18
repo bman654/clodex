@@ -1,8 +1,14 @@
 // REVIEW HARNESS — PATCH 6's alias-resolver region over every real bundle.
 //
 // LAST VERIFIED: clodex main @ 6d5b2bd (PR #247 merged as e55555f, PR #250 merged as 2608576),
-// against 57 cached Claude Code bundles spanning 2.1.238 → 2.1.276. Re-stamp this line whenever
+// against 57 cached Claude Code bundles spanning 2.1.208 → 2.1.276. Re-stamp this line whenever
 // you re-run it against a newer release.
+//
+// The span is read from FILENAMES, not from directory names: `~/.cache/clodex-review-bundles`
+// files 21 of the 57 under a directory that is not their release (`2.1.263/` alone holds
+// 2.1.208 … 2.1.261), so a per-release claim taken off a directory name is wrong for over a third
+// of the corpus. `versionOf()` below prefers `claude-<x.y.z>[-<hash>].js` and falls back to the
+// directory only for older extractions whose filenames carry a platform and nothing else.
 //
 // WHAT THIS PINS NOW. PATCH 6 scopes its "is this alias already present?" test from the WHOLE
 // bundle to a region, because `case"<word>":return` is not a rare string — zod's schema walker
@@ -24,10 +30,20 @@
 //     quantifier is lazy. See LENS 2c.
 //
 // The regexes below are COPIES, not imports, because they are locals inside `applyClodexPatches`
-// and cannot be imported. `describe('harness copy vs. the shipped bound')` is what stops the copy
-// from silently drifting from the shipped formula again: it compares the copy's verdict against
-// the shipped predicate's verdict, read back off a real patch, on inputs that DISCRIMINATE the
-// dynamic bound from the old fixed one. If you change the shipped formula, that block reds.
+// and cannot be imported. `describe('harness copy vs. the shipped bound')` is what keeps the copy
+// honest: it compares the copy's verdict against the shipped predicate's verdict, read back off a
+// real patch, on inputs that DISCRIMINATE the two.
+//
+// HOW FAR THAT GOES, precisely — the earlier wording here ("if you change the shipped formula,
+// that block reds") was an overclaim and is corrected. The pristine and already-injected inputs
+// alone could NOT tell the shipped coefficients from different ones, because on every cached build
+// the switch's own `default:return` is ADJACENT to the anchor: the lazy match stops at byte 0 and
+// the size of the bound is never consulted. Both `+ 17` → `+ 16` and `2 * a.length` → `a.length`
+// left this whole harness green. The `near the exact boundary` block was added for exactly that
+// gap: it drives the region onto the boundary the formula computes and one byte past it, where a
+// shipped coefficient smaller or larger than the copy's flips the shipped predicate's verdict. So
+// the block reds on a change to either COEFFICIENT or to the headroom — it is still not a proof
+// that every conceivable rewrite of the formula reds.
 //
 // Everything here EXECUTES the real applyClodexPatches / captureBuiltInPatchProofs.
 //
@@ -38,10 +54,12 @@
 //   export REVIEW_BUNDLE_DIR=~/.cache/clodex-review-bundles
 //   npx vitest run --config /tmp/h247.config.ts .claude/harnesses/pr247-patch6-resolver-region-over-real-bundles.harness.ts
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { applyClodexPatches } from '../../src/patch-transforms.js';
 import { captureBuiltInPatchProofs } from '../../src/built-in-patch-proofs.js';
+import { canonicalModelAliasName } from '../../src/model-aliases.js';
 
 const ROOT = process.env.REVIEW_BUNDLE_DIR
   ?? join(process.env.HOME ?? '', '.cache', 'clodex-review-bundles');
@@ -66,6 +84,74 @@ const resolverSwitch = (aliases: string[]) =>
 const FIXED_2000_SWITCH = /case"best":\{[^{}]*\}[\s\S]{0,2000}?default:return/;
 
 const caseRe = (a: string) => new RegExp('case' + JSON.stringify(a) + ':return');
+
+/**
+ * Whole-bundle equality WITHOUT handing vitest two 36 MB strings to diff.
+ *
+ * `expect(twice.content).toBe(once.content)` over real bundles is not merely untidy when it fails:
+ * rendering the character diff exhausted V8's heap and killed the run, which then reported
+ * `Tests (204)` with NO pass/fail counts and NO failing test name. The regression these assertions
+ * exist to catch — reverting #247's dynamic bound — is exactly what triggers it, so the harness was
+ * silently failing to report its own headline finding. Compare length and digest first and only
+ * look at bytes around the first difference, so a regression reports legibly.
+ */
+const fingerprint = (s: string) => `${s.length}:${createHash('sha256').update(s).digest('hex')}`;
+
+function firstDifference(a: string, b: string): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) if (a[i] !== b[i]) return i;
+  return n;
+}
+
+function expectSameBundle(actual: string, expected: string, what: string): void {
+  if (fingerprint(actual) === fingerprint(expected)) return;
+  const at = firstDifference(actual, expected);
+  expect.fail(
+    `${what}: bundles differ (length ${actual.length} vs ${expected.length}), first at offset ${at}\n`
+    + `  actual  : ${JSON.stringify(actual.slice(at, at + 160))}\n`
+    + `  expected: ${JSON.stringify(expected.slice(at, at + 160))}`,
+  );
+}
+
+function expectDifferentBundles(actual: string, other: string, what: string): void {
+  if (fingerprint(actual) !== fingerprint(other)) return;
+  expect.fail(`${what}: bundles are identical (${actual.length} bytes) but were expected to differ`);
+}
+
+/**
+ * The version a bundle actually IS. NOT its directory: `2.1.263/` holds 21 bundles from other
+ * releases (2.1.208 … 2.1.261), so any per-version claim read off a directory name is wrong for
+ * over a third of the corpus. Prefer the version embedded in the FILENAME
+ * (`claude-<x.y.z>[-<hash>].js`) and fall back to the directory only for the older extractions
+ * whose filenames carry a platform and nothing else (`darwin-arm64.js`).
+ */
+function versionOf(name: string): string {
+  const [dir, file] = name.split('/');
+  const m = /(\d+\.\d+\.\d+)/.exec(file ?? '') ?? /(\d+\.\d+\.\d+)/.exec(dir ?? '');
+  if (!m) throw new Error(`cannot determine a Claude Code version for bundle ${name}`);
+  return m[1];
+}
+
+const cmpVersion = (a: string, b: string): number => {
+  const [x, y] = [a, b].map(v => v.split('.').map(Number));
+  return x![0]! - y![0]! || x![1]! - y![1]! || x![2]! - y![2]!;
+};
+
+/**
+ * `bytes` of plausible upstream churn to sit between the injected cases and `default:return`:
+ * native-looking cases that no alias can collide with, no second anchor, no early `default:return`.
+ */
+function driftOf(bytes: number): string {
+  let out = '';
+  for (let i = 0; ; i++) {
+    const tag = String(i).padStart(3, '0');
+    const one = `case"drift${tag}":return "native${tag}";`;
+    if (out.length + one.length > bytes) break;
+    out += one;
+  }
+  const left = bytes - out.length;
+  return out + (left >= 4 ? `/*${'d'.repeat(left - 4)}*/` : ';'.repeat(left));
+}
 
 /** The presence predicate as it stood BEFORE the region existed — whole bundle. */
 const mainMissing = (js: string, aliases: string[]) =>
@@ -265,7 +351,7 @@ describe(`real bundles (${BUNDLES.length})`, () => {
 
         // second pass changes nothing (this is what patcher.ts's verification requires)
         const again = applyClodexPatches(out.content, CONFIG);
-        expect(again.content).toBe(out.content);
+        expectSameBundle(again.content, out.content, `${b.name}: second pass`);
         expect(again.results.find(r => r.name.startsWith('PATCH 6'))!.status).toBe('SKIP');
       });
     });
@@ -320,6 +406,67 @@ describe('harness copy vs. the shipped bound', () => {
     expect(prMissing(half, ALIASES)).toEqual(['luna']);
     expect(shippedMissing(half, ALIASES)).toEqual(['luna']);
   });
+
+  /**
+   * THE NEAR-BOUNDARY DIFFERENTIAL — what makes the rest of this block mean anything.
+   *
+   * Every input above is either pristine (the switch's own `default:return` is ADJACENT to the
+   * anchor on every cached build, so the lazy match stops at byte 0 and the bound is never
+   * consulted) or already-injected text with thousands of bytes of slack. On all of them any
+   * coefficient agrees with any other, so the block could not tell the shipped formula from a
+   * different one: `+ 17` → `+ 16` and `2 * a.length` → `a.length` both left it fully green.
+   *
+   * These two drive the region ONTO the boundary the shipped formula computes — the maximum legal
+   * alias payload plus exactly the documented headroom — and one byte past it. On the boundary the
+   * shipped predicate must say "present"; one byte past it, "missing". A shipped coefficient
+   * smaller than the copy's flips the first; larger flips the second.
+   */
+  describe('near the exact boundary, where coefficients stop being interchangeable', () => {
+    const anchor = base.match(RESOLVER_ANCHOR)![0];
+    const cfg = configFor(MAX_LEGAL_ALIASES);
+    /** BASE with `bytes` of upstream churn between the injected cases and `default:return`. */
+    const drifted = (bytes: number) =>
+      base.replace(anchor + 'default:return', anchor + driftOf(bytes) + 'default:return');
+    /** The gap the region has to span, in already-patched bytes. */
+    const gap = (js: string) => {
+      const at = js.indexOf(anchor) + anchor.length;
+      return js.indexOf('default:return', at) - at;
+    };
+
+    it('the boundary fixture really sits on the boundary', () => {
+      expect(driftOf(DRIFT_HEADROOM)).toHaveLength(DRIFT_HEADROOM);
+      expect(driftOf(DRIFT_HEADROOM)).not.toContain('default:return');
+      expect(drifted(DRIFT_HEADROOM).match(new RegExp(RESOLVER_ANCHOR.source, 'g'))).toHaveLength(1);
+      const once = applyClodexPatches(drifted(DRIFT_HEADROOM), cfg).content;
+      expect(gap(once)).toBe(MAX_LEGAL_BUDGET);             // 2900 injected + 2000 of drift
+      expect(gap(applyClodexPatches(drifted(DRIFT_HEADROOM + 1), cfg).content))
+        .toBe(MAX_LEGAL_BUDGET + 1);
+    });
+
+    it('ON the boundary both predicates say every alias is already present', () => {
+      const once = applyClodexPatches(drifted(DRIFT_HEADROOM), cfg).content;
+      expect(prMissing(once, MAX_LEGAL_ALIASES)).toEqual([]);
+      expect(shippedMissing(once, MAX_LEGAL_ALIASES)).toEqual([]);
+    });
+
+    it('ONE BYTE past it both predicates say every alias is missing', () => {
+      const once = applyClodexPatches(drifted(DRIFT_HEADROOM + 1), cfg).content;
+      expect(prMissing(once, MAX_LEGAL_ALIASES)).toEqual(MAX_LEGAL_ALIASES);
+      expect(shippedMissing(once, MAX_LEGAL_ALIASES)).toEqual(MAX_LEGAL_ALIASES);
+    });
+
+    it('so the re-patch is still the no-op patcher.ts demands, with the region full', () => {
+      const once = applyClodexPatches(drifted(DRIFT_HEADROOM), cfg);
+      const twice = applyClodexPatches(once.content, cfg);
+      expectSameBundle(twice.content, once.content, 're-patch with the region on its boundary');
+      expect(twice.results.find(r => r.name.startsWith('PATCH 6'))!.status).toBe('SKIP');
+      for (const a of MAX_LEGAL_ALIASES) {
+        expect(twice.content.split(`case${JSON.stringify(a)}:return ${JSON.stringify(a)};`))
+          .toHaveLength(2);
+      }
+      expect(() => captureBuiltInPatchProofs(twice.content, cfg, twice.results)).not.toThrow();
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -360,8 +507,8 @@ describe('LENS 1: RESOLVER_SWITCH fails while RESOLVER_ANCHOR still matches', ()
   const driftB = base.replace(anchor + 'default:return', anchor + filler + 'default:return');
 
   it('the drift fixtures really are drift', () => {
-    expect(driftA).not.toBe(base);
-    expect(driftB).not.toBe(base);
+    expectDifferentBundles(driftA, base, 'drift A');
+    expectDifferentBundles(driftB, base, 'drift B');
     expect(filler.length).toBeGreaterThan(resolverBudget(ALIASES));
   });
 
@@ -371,7 +518,7 @@ describe('LENS 1: RESOLVER_SWITCH fails while RESOLVER_ANCHOR still matches', ()
   ] as const) {
     describe(label, () => {
       it('anchor still matches, region does not -> resolver is the empty string', () => {
-        expect(drifted).not.toBe(base);
+        expectDifferentBundles(drifted, base, label);
         expect(drifted.match(new RegExp(RESOLVER_ANCHOR.source, 'g'))).toHaveLength(1);
         expect(drifted.match(resolverSwitch(ALIASES))).toBeNull();
         expect(prMissing(drifted, ALIASES)).toEqual(ALIASES); // every alias reads as missing
@@ -389,7 +536,7 @@ describe('LENS 1: RESOLVER_SWITCH fails while RESOLVER_ANCHOR still matches', ()
       it('(b) RE-PATCH of already-patched bytes injects DUPLICATE cases', () => {
         const once = applyClodexPatches(drifted, CONFIG);
         const twice = applyClodexPatches(once.content, CONFIG);
-        expect(twice.content).not.toBe(once.content);           // NOT idempotent
+        expectDifferentBundles(twice.content, once.content, `${label}: re-patch`); // NOT idempotent
         expect(twice.results.find(r => r.name.startsWith('PATCH 6'))!.status).toBe('OK'); // not SKIP
         expect(twice.content.split('case"sol":return "sol";')).toHaveLength(3); // two copies
       });
@@ -452,7 +599,7 @@ describe('LENS 2: the budget grows with the cases PATCH 6 injects', () => {
     const once = applyClodexPatches(base, cfg);
     const twice = applyClodexPatches(once.content, cfg);
 
-    expect(twice.content).toBe(once.content);
+    expectSameBundle(twice.content, once.content, 're-patch at 14 x 64-char aliases');
     expect(twice.results.find(r => r.name.startsWith('PATCH 6'))!.status).toBe('SKIP');
     for (const a of LONG_ALIASES) {
       expect(twice.content.split(`case${JSON.stringify(a)}:return ${JSON.stringify(a)};`)).toHaveLength(2);
@@ -464,7 +611,7 @@ describe('LENS 2: the budget grows with the cases PATCH 6 injects', () => {
     const cfg = configFor(MAX_LEGAL_ALIASES);
     const once = applyClodexPatches(base, cfg);
     const twice = applyClodexPatches(once.content, cfg);
-    expect(twice.content).toBe(once.content);
+    expectSameBundle(twice.content, once.content, 're-patch at the 20 x 64-char maximum');
     expect(twice.results.find(r => r.name.startsWith('PATCH 6'))!.status).toBe('SKIP');
     expect(() => captureBuiltInPatchProofs(twice.content, cfg, twice.results)).not.toThrow();
   });
@@ -499,25 +646,37 @@ describe('LENS 2b: lazy match reaching a different switch', () => {
     expect(prMissing(js, ['sol'])).toEqual([]);      // alias `sol` reads as already present
   });
 
-  it('real bundles: the foreign margin, measured against the budget actually in force', ctx => {
+  it('real bundles: the foreign margin, per release, against the budget actually in force', ctx => {
     // NOTE: this replaces an earlier claim that the next `default:return` is "always far outside
     // the 2000 bound". With a DYNAMIC budget there is no single bound to compare against, and the
     // qualified statement is weaker than the old one — see the assertions below.
-    const rows: Array<{ name: string; own: number; foreign: number }> = [];
-    for (const b of BUNDLES) {
+    const rows = BUNDLES.map(b => {
       const js = readFileSync(b.path, 'utf8');
       const anchor = js.match(RESOLVER_ANCHOR)![0];
       const end = js.indexOf(anchor) + anchor.length;
       const i1 = js.indexOf('default:return', end);
       const i2 = js.indexOf('default:return', i1 + 1);
-      rows.push({ name: b.name, own: i1 - end, foreign: i2 - end });
-    }
+      return {
+        name: b.name,
+        version: versionOf(b.name),
+        own: i1 - end,
+        foreign: i2 - end,
+        // Everything drift A would make the region swallow BEYOND its own default:return.
+        window: js.slice(i1 + 'default:return'.length, i2),
+      };
+    });
     const minForeign = Math.min(...rows.map(r => r.foreign));
     const maxForeign = Math.max(...rows.map(r => r.foreign));
+    const byVersion = [...new Set(rows.map(r => r.version))].sort(cmpVersion);
     // eslint-disable-next-line no-console
     console.log(
-      `own default:return distance — always ${[...new Set(rows.map(r => r.own))].join(',')}\n`
+      `corpus: ${rows.length} bundles, ${byVersion[0]} -> ${byVersion.at(-1)}\n`
+      + `own default:return distance — always ${[...new Set(rows.map(r => r.own))].join(',')}\n`
       + `next FOREIGN default:return — min ${minForeign}, max ${maxForeign}\n`
+      + byVersion.map(v => {
+        const m = [...new Set(rows.filter(r => r.version === v).map(r => r.foreign))].sort((a, b) => a - b);
+        return `  ${v.padEnd(9)} foreign ${m.join(',')}`;
+      }).join('\n') + '\n'
       + `budget in force: typical(${ALIASES.join(',')})=${resolverBudget(ALIASES)}  `
       + `max legal(20x64)=${MAX_LEGAL_BUDGET}`,
     );
@@ -532,26 +691,49 @@ describe('LENS 2b: lazy match reaching a different switch', () => {
     //     happened tomorrow.
     expect(minForeign).toBeGreaterThan(resolverBudget(ALIASES));
 
-    // (3) But it is NOT unconditionally outside. The largest alias set clodex's favorites UI can
-    //     produce pushes the bound to 4900, past the smallest margin in the MAINTAINER corpus. So
-    //     a build that also drifted its own `default:return` into a block COULD have its region
-    //     run into the next switch — the only further requirement being that an alias name
-    //     collide with a `case"<alias>":return` inside the swallowed window. Recorded as a KNOWN
-    //     EXPOSURE, not a safety claim: if upstream margins ever grow past 4900 this reds and the
-    //     caveat can go.
+    // (3) The residual exposure, stated per RELEASE rather than as one corpus-wide number, because
+    //     the corpus-wide minimum (3128, on 2.1.208–2.1.211) is not representative of anything
+    //     anyone runs. The margin grew across the corpus and crossed the maximal budget at
+    //     2.1.257: every build from there on measures 5489–5758, all of it above 4900, so on any
+    //     currently-shipping Claude Code the maximal budget cannot reach the next switch even
+    //     with drift A. The builds where it could are all 2.1.252 and older.
     //
-    //     This one is a claim about the corpus as a whole, so a partial corpus cannot evaluate
-    //     it — margins vary by two thousand bytes across releases and the newest builds alone
-    //     sit above 4900. Skip rather than mislead.
+    //     A per-release claim needs the whole corpus — margins vary by two thousand bytes across
+    //     releases and only the newest builds sit above 4900. Skip rather than mislead.
     if (BUNDLES.length < MIN_CORPUS) {
       // eslint-disable-next-line no-console
       console.warn(
-        `PARTIAL CORPUS (${BUNDLES.length} < ${MIN_CORPUS}): not evaluating the known foreign-margin `
-        + `exposure. Smallest margin here is ${minForeign} vs. a maximal budget of ${MAX_LEGAL_BUDGET}.`,
+        `PARTIAL CORPUS (${BUNDLES.length} < ${MIN_CORPUS}): not evaluating the per-release margin `
+        + `claim. Smallest margin here is ${minForeign} vs. a maximal budget of ${MAX_LEGAL_BUDGET}.`,
       );
       ctx.skip();
     }
-    expect(MAX_LEGAL_BUDGET).toBeGreaterThan(minForeign);
+    const atRisk = rows.filter(r => r.foreign < MAX_LEGAL_BUDGET);
+    const current = rows.filter(r => cmpVersion(r.version, '2.1.257') >= 0);
+    expect(atRisk.length).toBeGreaterThan(0);             // the exposure is real on OLD builds …
+    expect(current.length).toBeGreaterThan(0);
+    for (const r of current) expect(r.foreign).toBeGreaterThan(MAX_LEGAL_BUDGET); // … and not new ones
+    for (const r of atRisk) expect(cmpVersion(r.version, '2.1.257')).toBeLessThan(0);
+
+    // (4) And on the at-risk builds the exposure is not merely small, it is CLOSED. Swallowing a
+    //     foreign switch can only cost an alias its case if the swallowed text contains
+    //     `case"<alias>":return` for a configured alias — and the alias PATCH 6 builds that needle
+    //     from is always LOWERCASED first (`rawAlias.trim().toLowerCase()`, src/patch-transforms.ts;
+    //     `canonicalModelAliasName` does the same on the config side). Every case name in every
+    //     at-risk window is camelCase, so no configuration can produce a matching needle — not a
+    //     favorites alias and not a hand-written patch config either, since both are lowercased on
+    //     the way in. NOTE: the alias validator does NOT reject uppercase, it canonicalises it, so
+    //     the lowercasing is the whole mechanism. If a future build puts an all-lowercase
+    //     `case"<word>":return` in that window, this reds and the exposure becomes real.
+    const swallowed = new Set<string>();
+    for (const r of atRisk) {
+      for (const m of r.window.matchAll(/case"([^"]*)":return/g)) swallowed.add(m[1]!);
+    }
+    expect([...swallowed].sort()).toEqual(['policySettings', 'projectSettings']);
+    for (const name of swallowed) {
+      // No alias, however spelled, canonicalises to the text in the window.
+      expect(canonicalModelAliasName(name)).not.toBe(name);
+    }
   });
 
   it('composite: drift A + a maximal alias config really does swallow the next switch', ctx => {
@@ -587,7 +769,10 @@ describe('LENS 2b: lazy match reaching a different switch', () => {
     expect(drifted.match(resolverSwitch(ALIASES))).toBeNull();
 
     // Maximal config: the bound now exceeds the margin, and the region ends inside a DIFFERENT
-    // switch. That is the silent failure mode, and nothing but alias-name luck separates them.
+    // switch. Nothing here is silent — an alias wrongly read as present loses its case, its
+    // built-in postcondition cannot be captured, and the whole local patch set is discarded with a
+    // FAIL line. What separates the two configs is the size of the bound, and what stops the wider
+    // one from costing an alias anything is asserted at the end of this test.
     expect(MAX_LEGAL_BUDGET).toBeGreaterThan(margin);
     const wide = drifted.match(resolverSwitch(MAX_LEGAL_ALIASES));
     expect(wide).not.toBeNull();
@@ -598,6 +783,17 @@ describe('LENS 2b: lazy match reaching a different switch', () => {
     expect(foreignAt - from).toBe(margin + 1);
     expect(wide![0].length).toBe(anchor.length + (foreignAt - from) + 'default:return'.length);
     expect(wide![0].slice(anchor.length)).toMatch(/switch\(/); // a foreign switch is inside it
+
+    // …and it still costs no alias its case. Every `case"<name>":return` the wider region swallowed
+    // is camelCase, and PATCH 6 lowercases an alias before building its needle, so the SHIPPED
+    // predicate reports each of those names missing. Executed against the real transform.
+    const swallowed = [...wide![0].matchAll(/case"([^"]*)":return/g)].map(m => m[1]!);
+    expect(swallowed.length).toBeGreaterThan(0);
+    for (const name of swallowed) {
+      const alias = canonicalModelAliasName(name);
+      expect(alias).not.toBe(name);
+      expect(shippedMissing(drifted, [alias])).toEqual([alias]);
+    }
   });
 });
 
