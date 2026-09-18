@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.14.1](https://github.com/bman654/clodex/compare/v2.14.0...v2.14.1) (2026-09-18)
+
+
+### Bug Fixes
+
+* **models:** stop a custom model alias from disappearing when its name matches other code ([#247](https://github.com/bman654/clodex/issues/247)) ([e55555f](https://github.com/bman654/clodex/commit/e55555fbac7ac66be59b26a7109b8358c1917a84))
+* **openai:** stop the wasted failed request after each tool call on non-Anthropic models ([#252](https://github.com/bman654/clodex/issues/252)) ([4c373a1](https://github.com/bman654/clodex/commit/4c373a1de2eb16fcafb88481fb3471c0899dd75c))
+* **proxy:** stop models from forgetting the conversation after a tool call ([#253](https://github.com/bman654/clodex/issues/253)) ([6d5b2bd](https://github.com/bman654/clodex/commit/6d5b2bd8afd97b9c56b3153de85039a33fa3afdf))
+
 ## [2.14.0](https://github.com/bman654/clodex/compare/v2.13.1...v2.14.0) (2026-09-17)
 
 
