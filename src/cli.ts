@@ -475,6 +475,7 @@ ${pc.bold('Providers:')}
   openai         OpenAI API key (platform.openai.com)
   openai-oauth   ChatGPT/Codex plan OAuth — sign in with clodex providers auth openai
   opencode-go    OpenCode Go API key — add with clodex providers add
+  custom-<name>  Any OpenAI-compatible server (OpenRouter, LM Studio, …) — add with clodex providers add
 
 ${pc.bold('Model switching:')}
   Run clodex models to save favorites (max ${MAX_MODEL_CATALOG}).

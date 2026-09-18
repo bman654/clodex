@@ -15,6 +15,19 @@ picker whose Enter default is device code; the chosen method is forwarded to
 Materialization (`materialize.ts`) turns registry providers into `LocalProvider`s with per-model
 `npm`/`baseUrl`/`upstreamModelId`.
 
+A custom OpenAI-compatible server is not a template. `providers add` → *Custom OpenAI-compatible
+server* (`src/providers-custom-add.ts`) calls `addCustomEndpointProvider`
+(`src/registry/custom-endpoint.ts`), which runs the SSRF guard in `url-security.ts`, lists the
+server's models, stores the key, and saves a `templateId: 'custom-openai'` provider — with
+`authRef: 'none:anonymous'` when the key is empty. The same function accepts `kind: 'anthropic'`,
+but no command offers it. The server chooses the model ids, names and error text. Both list
+fetchers (`fetchTemplateModels`, `fetchAnthropicModels`) skip a model whose trimmed id or name
+contains a control character, so neither an add nor `refresh-models` stores one, and the flow prints
+the server's error text with control characters replaced by spaces (`server-text.ts`). The ChatGPT
+OAuth catalog parser (`parseOpenAiModelEntries` in `refresh-models.ts`) has no such check; its host
+is fixed. Custom providers are read by the same materialization and refresh code as template
+providers (`materialize.ts`, `model-source.ts`, `refresh-models.ts`).
+
 Provider templates can declare reusable controls for non-default behavior:
 
 - **`verifyCredential`** runs an optional template-owned probe before a credential is persisted. It

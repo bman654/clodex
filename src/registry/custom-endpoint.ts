@@ -11,6 +11,7 @@ import {
 } from './credential-lifecycle.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
 import { loadRegistryStrict, saveRegistry } from './io.js';
+import { hasControlChars } from './server-text.js';
 import {
   withCredentialMutationLock,
   withProviderMutationLock,
@@ -46,6 +47,8 @@ export interface AddCustomEndpointResult {
   error?: string;
   hint?: string;
   credentialCleanupPending?: boolean;
+  /** True once queued credential deletes were reconciled; unset when the add returned before that. */
+  credentialCleanupReconciled?: boolean;
 }
 
 function npmForKind(kind: CustomEndpointKind): string {
@@ -105,6 +108,9 @@ export async function fetchAnthropicModels(
       for (const row of json.data ?? []) {
         const id = row.id?.trim();
         if (!id) continue;
+        // Same rule as `parseModelList`: an entry a terminal could act on is not
+        // kept, and both strings are checked trimmed, as they are stored.
+        if (hasControlChars(id) || (typeof row.name === 'string' && hasControlChars(row.name.trim()))) continue;
         models.push({
           id,
           name: row.name?.trim() || id,
@@ -287,5 +293,6 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
       result.credentialCleanupPending = true;
     }
   }
+  result.credentialCleanupReconciled = true;
   return result;
 }

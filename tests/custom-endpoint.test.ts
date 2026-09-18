@@ -253,6 +253,40 @@ describe('custom endpoint credential lifecycle', () => {
     expect(new Headers(requestInit.headers).has('x-api-key')).toBe(false);
   });
 
+  it('skips an Anthropic-format model whose id or name carries a control character', async () => {
+    const ESC = String.fromCharCode(0x1b);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: [
+        { id: `claude-x${ESC}[2J`, name: 'Clean name' },
+        { id: 'claude-y', name: `Nice${ESC}]0;PWNED` },
+        { id: 'claude-ok', name: 'Claude OK' },
+      ],
+    }), { status: 200 })));
+
+    const result = await fetchAnthropicModels('https://local.example/v1', 'k');
+
+    expect(result.models.map(model => model.id)).toEqual(['claude-ok']);
+  });
+
+  it('keeps an Anthropic-format model whose name only has whitespace around it, stored trimmed', async () => {
+    const ESC = String.fromCharCode(0x1b);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: [
+        { id: 'claude-nl\n', name: 'Claude Newline\n' },
+        { id: 'claude-tab', name: '\tClaude Tab' },
+        { id: 'claude-inner', name: 'Two\nLines' },
+        { id: 'claude-edge', name: `${ESC}[2JEdge` },
+      ],
+    }), { status: 200 })));
+
+    const result = await fetchAnthropicModels('https://local.example/v1', 'k');
+
+    expect(result.models.map(model => [model.id, model.name])).toEqual([
+      ['claude-nl', 'Claude Newline'],
+      ['claude-tab', 'Claude Tab'],
+    ]);
+  });
+
   it('allocates the provider id from state reloaded after discovery', async () => {
     vi.mocked(fetchTemplateModels).mockImplementation(async () => {
       registryState.current.providers.push({
@@ -299,6 +333,8 @@ describe('custom endpoint credential lifecycle', () => {
       error: 'Network discovery failed.',
       hint: 'Check the endpoint.',
     });
+    // It returned before reconciling queued deletes, and must say so.
+    expect(result.credentialCleanupReconciled).toBeUndefined();
     expect(provisionProviderCredential).not.toHaveBeenCalled();
     expect(saveProviderCredential).not.toHaveBeenCalled();
     expect(deleteProviderCredential).not.toHaveBeenCalled();
@@ -318,6 +354,7 @@ describe('custom endpoint credential lifecycle', () => {
       added: false,
       error: 'Could not save API key to the credential store.',
     });
+    expect(result.credentialCleanupReconciled).toBe(true);
     expect(cleanupJournal.queueCredentialDelete).toHaveBeenCalledWith(authRef);
     expect(provisionProviderCredential).toHaveBeenCalledWith(authRef!, endpointInput.apiKey);
     expect(deleteProviderCredential).toHaveBeenCalledWith(authRef!);
@@ -402,6 +439,7 @@ describe('custom endpoint credential lifecycle', () => {
 
     expect(result.added).toBe(true);
     expect(result.credentialCleanupPending).toBe(true);
+    expect(result.credentialCleanupReconciled).toBe(true);
     expect(registryState.current.providers).toHaveLength(1);
   });
 
