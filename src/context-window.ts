@@ -59,7 +59,9 @@ const HEURISTIC_RULES: Array<[RegExp, number]> = [
 
 let parsedCache: OpencodeCacheFile | null | undefined;
 let cacheIndex: Map<string, number> | undefined;
-const heuristicCache = new Map<string, number>();
+// `undefined` is a memoized MISS — no rule matched — so it is kept with `has`,
+// not `get`, and never collapsed into the default.
+const heuristicCache = new Map<string, number | undefined>();
 
 /** Shared parse of ~/.cache/opencode/models.json — used by model list and context lookup. */
 export function loadOpencodeCache(): OpencodeCacheFile | null {
@@ -112,21 +114,40 @@ function getCacheIndex(): Map<string, number> {
   return cacheIndex;
 }
 
-export function contextWindowFromHeuristics(modelId: string): number {
-  const cached = heuristicCache.get(modelId);
-  if (cached !== undefined) return cached;
+/** The matching rule's window, or `undefined` when no rule claims this id. */
+function matchHeuristicWindow(modelId: string): number | undefined {
+  if (heuristicCache.has(modelId)) return heuristicCache.get(modelId);
   for (const [pattern, size] of HEURISTIC_RULES) {
     if (pattern.test(modelId)) {
       heuristicCache.set(modelId, size);
       return size;
     }
   }
-  heuristicCache.set(modelId, DEFAULT_CONTEXT_WINDOW);
-  return DEFAULT_CONTEXT_WINDOW;
+  heuristicCache.set(modelId, undefined);
+  return undefined;
+}
+
+export function contextWindowFromHeuristics(modelId: string): number {
+  return matchHeuristicWindow(modelId) ?? DEFAULT_CONTEXT_WINDOW;
+}
+
+/**
+ * The window when one is actually KNOWN — curated cache data or a heuristic rule
+ * that claims the id — and `undefined` when neither does.
+ *
+ * `lookupContextWindow` answers the same question but substitutes
+ * `DEFAULT_CONTEXT_WINDOW` for a miss, which is a clodex invention rather than
+ * anything the provider said. Callers that persist a window, or that use one as a
+ * ceiling the user cannot raise, need to tell those two apart: baking the invented
+ * 200,000 in makes it the ceiling for every later `--context` request, so a model
+ * with a real 1,048,576-token window is capped at a number nobody measured.
+ */
+export function lookupKnownContextWindow(modelId: string): number | undefined {
+  return getCacheIndex().get(modelId) ?? matchHeuristicWindow(modelId);
 }
 
 export function lookupContextWindow(modelId: string): number {
-  return getCacheIndex().get(modelId) ?? contextWindowFromHeuristics(modelId);
+  return lookupKnownContextWindow(modelId) ?? DEFAULT_CONTEXT_WINDOW;
 }
 
 /** Prefer an explicit limit.context (or pre-resolved value), else resolve from cache/heuristics. */

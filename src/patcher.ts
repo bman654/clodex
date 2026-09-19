@@ -53,7 +53,7 @@ import {
   selectContextStop,
   type ContextStop,
 } from './context-modes.js';
-import { resolveContextWindow } from './context-window.js';
+import { lookupKnownContextWindow } from './context-window.js';
 import {
   applyLocalPatches,
   inspectLocalPatchSource,
@@ -230,6 +230,10 @@ export function buildPatchModelConfig(
     const alias = aliasByFavorite.get(`${favorite.providerId}:${favorite.modelId}`);
     const entry: PatchScriptModelConfig[string] = {};
     if (alias) entry.alias = alias;
+    // An absent window and an explicit 200_000 must keep producing the SAME entry: both
+    // omit `context`, so `computePatchConfigHash` cannot tell them apart. That equality is
+    // what lets a model stop persisting the invented default without marking every patched
+    // install stale. Distinguishing them here forces a re-patch for every user.
     if (context === undefined || context <= 0) unknownWindows.push(id);
     else if (context !== 200_000) entry.context = context;
     const display = meta?.displayName?.trim();
@@ -330,7 +334,7 @@ export function buildDesiredPatchConfig(
       // A patched binary outlives the process that wrote it, so the patch config
       // reads saved stops only: folding a launch-scoped `--context` in would bake a
       // one-off choice and report every later launch as stale.
-      const limits = contextLimitsFrom(model, resolveContextWindow(model.id));
+      const limits = contextLimitsFrom(model, lookupKnownContextWindow(model.id));
       const stop = resolveContextStop(
         limits,
         options.sessionStops
@@ -1439,7 +1443,11 @@ export async function runPatchCommand(opts: {
     return 1;
   }
   for (const id of desired.unknownWindows) {
-    p.log.warn(`No context window metadata for ${id} — Claude Code will assume the 200k default.`);
+    p.log.warn(
+      `No context window metadata for ${id} — Claude Code will assume the 200k default. `
+      + 'Refresh the provider\'s models, then set a window with '
+      + '`clodex models --context <model=stop> --save`, then re-run `clodex patch`.',
+    );
   }
   reportRejectedModelAliases(desired.rejectedAliasRejections);
 

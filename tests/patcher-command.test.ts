@@ -243,6 +243,25 @@ describe('runPatchCommand patch-target overrides', () => {
   });
 });
 
+describe('runPatchCommand unknown context window warning', () => {
+  // The harness saves a favorite with no provider registry behind it, so the
+  // favorite carries no window metadata — which is exactly the state that produces
+  // this warning. Naming no remedy left the user with a 200k window and nothing to
+  // do about it; both halves of the remedy matter, because a saved stop does not
+  // reach an already-patched binary until `clodex patch` runs again.
+  it('names the command that sets a window and says to re-run the patch', async () => {
+    installClaude('2.1.220');
+
+    expect(await runPatchCommand({})).toBe(0);
+
+    const warning = logs.find(line => line.startsWith('warn: No context window metadata'));
+    expect(warning).toContain('clodex:openai-oauth:gpt-5.6-sol');
+    expect(warning).toContain('Claude Code will assume the 200k default');
+    expect(warning).toContain('clodex models --context <model=stop> --save');
+    expect(warning).toContain('re-run `clodex patch`');
+  });
+});
+
 describe('runPatchCommand version resolution', () => {
   it('patches the resolved install and never downgrades it to a PATH shim\'s version', async () => {
     // The reproduced failure: `claude` on PATH is a wrapper shim reporting an

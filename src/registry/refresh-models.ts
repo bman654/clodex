@@ -42,7 +42,7 @@ import {
 } from '../data/openai-oauth-models.js';
 import { isChatGptOAuthProvider } from './provider-kind.js';
 import { deriveBrand } from '../models.js';
-import { resolveContextWindow } from '../context-window.js';
+import { lookupKnownContextWindow } from '../context-window.js';
 import { getInstalledClaudeVersion } from '../launch.js';
 import { modelPrefersResponsesApi } from '../provider-factory.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
@@ -194,7 +194,7 @@ function buildDynamicOAuthModel(
     upstreamModelId: id,
     family: prefix,
     brand: deriveBrand(prefix),
-    contextWindow: entry.context_window ?? resolveContextWindow(id),
+    contextWindow: entry.context_window ?? lookupKnownContextWindow(id),
     maxContextWindow: entry.max_context_window,
     // Absent means no reduction. clodex reports the window the provider actually
     // gives; deciding how much of it to leave free is the client's job, and Claude

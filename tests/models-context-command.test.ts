@@ -39,6 +39,16 @@ function seedRegistry(): void {
           modelFormat: 'openai',
           npm: '@ai-sdk/openai',
         },
+        // A server that lists its models without saying how much context each one
+        // takes, and an id no heuristic rule claims. Left out of the favorites the
+        // other tests read, so only the tests that ask for it see it.
+        {
+          id: 'zz-house-model-9000',
+          name: 'House Model',
+          upstreamModelId: 'zz-house-model-9000',
+          modelFormat: 'openai',
+          npm: '@ai-sdk/openai',
+        },
       ],
     },
   } as unknown as ProviderRegistry['providers'][number]);
@@ -136,6 +146,58 @@ describe('--context assignments', () => {
       cap.restore();
     }
     expect(cap.stderr.join('\n')).toMatch(/272,000-token pricing boundary|pricing boundary/);
+  });
+
+  // The reported bug: `clodex models --context <model>=1m --save` on a model whose
+  // provider publishes no window was clamped straight back to the 200,000 clodex had
+  // invented, so the user could not reach the rest of a real window.
+  it('honours a saved stop on a model whose provider publishes no window', async () => {
+    savePreferences({
+      favoriteModels: [{ providerId: 'openai-oauth', modelId: 'zz-house-model-9000' }],
+      modelAliases: [{ name: 'house', providerId: 'openai-oauth', modelId: 'zz-house-model-9000' }],
+    });
+
+    const cap = captureJson();
+    try {
+      expect(await main(['models', '--context', 'house=1000k', '--save', '--json'])).toBe(0);
+    } finally {
+      cap.restore();
+    }
+    const reported = cap.stderr.join('\n');
+    expect(reported).toContain('1,000,000');
+    expect(reported).not.toContain('above the model ceiling');
+
+    const after = captureJson();
+    try {
+      expect(await runModelsCommand({ json: true })).toBe(0);
+    } finally {
+      after.restore();
+    }
+    const parsed = JSON.parse(after.stdout.join('')) as Array<Record<string, unknown>>;
+    const entry = parsed.find(m => m['id'] === 'clodex:openai-oauth:zz-house-model-9000');
+    expect((entry!['context'] as Record<string, unknown>)['effective']).toBe(1_000_000);
+  });
+
+  // Under-scope: the loosening must not reach a model that DOES publish a window.
+  it('still clamps a saved stop above a published window and says so', async () => {
+    const cap = captureJson();
+    try {
+      expect(await main(['models', '--context', 'sol=5000k', '--save', '--json'])).toBe(0);
+    } finally {
+      cap.restore();
+    }
+    const reported = cap.stderr.join('\n');
+    expect(reported).toContain('above the model ceiling');
+    expect(reported).toContain('872,000');
+
+    const after = captureJson();
+    try {
+      expect(await runModelsCommand({ json: true })).toBe(0);
+    } finally {
+      after.restore();
+    }
+    const parsed = JSON.parse(after.stdout.join('')) as Array<Record<string, unknown>>;
+    expect((parsed[0]!['context'] as Record<string, unknown>)['effective']).toBe(872_000);
   });
 
   it('rejects an unknown target rather than silently continuing', async () => {

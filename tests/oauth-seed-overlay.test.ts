@@ -178,6 +178,32 @@ describe('legacy OAuth cache overlay', () => {
     }
   });
 
+  // Same reason as the share: the seed list is written straight into the cache on the
+  // Tier-3 discovery-outage path. A seed row that records no window must not be
+  // topped up with clodex's invented 200,000, or that number becomes the ceiling the
+  // user is clamped to for as long as the outage cache survives.
+  it('takes each seed window from the most authoritative tier that claims it', () => {
+    const windows = new Map(buildOpenAiOAuthModels().map(model => [model.id, model.contextWindow]));
+    // Declared on the row itself wins.
+    expect(windows.get('o1')).toBe(200_000);
+    expect(windows.get('o3')).toBe(200_000);
+    expect(windows.get('o1-mini')).toBe(128_000);
+    expect(windows.get('gpt-6-astra')).toBe(272_000);
+    // Not declared, but a heuristic rule claims it.
+    expect(windows.get('o3-mini')).toBe(1_000_000);
+    // Nothing here may be the invented default standing in for a miss.
+    expect([...windows.values()].every(w => typeof w === 'number' && w > 0)).toBe(true);
+  });
+
+  // The builder reads `lookupKnownContextWindow`, which reports `undefined` rather than
+  // inventing 200,000 for a model no tier claims. That property is pinned directly in
+  // tests/context-window.test.ts ('reports nothing for a model neither tier claims').
+  // It cannot also be pinned HERE: every seed row now either declares its own window or
+  // is claimed by a heuristic rule, so `lookupKnownContextWindow` and the inventing
+  // `resolveContextWindow` return the same answer for all of them and the wiring is
+  // unobservable from this seam. Add a seed that no rule claims and this becomes
+  // testable again — and worth testing, because that is the row the invention would hit.
+
   // The migration for installs that refreshed while clodex still imposed a share.
   // A cached 95 is not a provider answer — the Codex catalog reports null for this
   // field on every model, and no clodex command writes it — so it can only be the

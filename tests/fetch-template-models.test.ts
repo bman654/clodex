@@ -242,6 +242,56 @@ describe('fetchTemplateModels', () => {
     ]);
   });
 
+  // Storing clodex's invented 200,000 made it the model's permanent ceiling: every
+  // later `clodex models --context <model>=1048576 --save` was clamped straight back
+  // down to it. Leaving the field absent keeps the same 200k reported by default
+  // while letting the user raise it.
+  it('stores no window when neither the server nor a heuristic rule supplies one', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        data: [
+          { id: 'zz-house-model-9000' },
+          // A rule still claims this one, so it is still stored.
+          { id: 'grok-4.5' },
+        ],
+      }),
+    } as Response);
+
+    const result = await fetchTemplateModels(openaiCompatTemplate, 'sk-test-key');
+
+    expect(result.error).toBeUndefined();
+    expect(result.models.map(m => [m.id, m.contextWindow])).toEqual([
+      ['zz-house-model-9000', undefined],
+      ['grok-4.5', 500_000],
+    ]);
+  });
+
+  // `static-seed` is the arm no template declares today; it is kept deliberately so a
+  // template that adopts it does not fall through to the api-list fetch. Covered here
+  // only so the two write sites stay consistent — this is NOT a reachable user path.
+  it('stores no window for a static-seed model that declares none', async () => {
+    const staticTemplate = template({
+      id: 'static-provider',
+      name: 'Static Provider',
+      npm: '@ai-sdk/openai-compatible',
+      defaultBaseUrl: 'https://static.example/v1',
+      modelSource: 'static-seed',
+      staticModels: [
+        { id: 'zz-house-model-9000', name: 'House', upstreamModelId: 'zz-house-model-9000', modelFormat: 'openai' },
+        { id: 'grok-4.5', name: 'Grok', upstreamModelId: 'grok-4.5', modelFormat: 'openai' },
+      ],
+    });
+
+    const result = await fetchTemplateModels(staticTemplate, 'sk-test');
+
+    expect(result.models.map(m => [m.id, m.contextWindow])).toEqual([
+      ['zz-house-model-9000', undefined],
+      ['grok-4.5', 500_000],
+    ]);
+  });
+
   it('uses provider-specific modelsPath and omits Authorization for anonymous fetches', async () => {
     const anonymousTemplate = template({
       id: 'anon-free',

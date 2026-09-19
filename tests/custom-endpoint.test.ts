@@ -253,6 +253,25 @@ describe('custom endpoint credential lifecycle', () => {
     expect(new Headers(requestInit.headers).has('x-api-key')).toBe(false);
   });
 
+  // An Anthropic-compatible server publishes no window at /v1/models, so every model
+  // it lists used to be stored with clodex's invented 200,000 — which then became a
+  // ceiling the user could not raise with `clodex models --context <model=stop>`.
+  it('stores no window when no rule claims the id, and the heuristic window when one does', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: [
+        { id: 'zz-house-model-9000', name: 'House Model' },
+        { id: 'claude-sonnet-4-6', name: 'Sonnet' },
+      ],
+    }), { status: 200 })));
+
+    const result = await fetchAnthropicModels('https://local.example/v1', 'k');
+
+    expect(result.models.map(model => [model.id, model.contextWindow])).toEqual([
+      ['zz-house-model-9000', undefined],
+      ['claude-sonnet-4-6', 1_000_000],
+    ]);
+  });
+
   it('skips an Anthropic-format model whose id or name carries a control character', async () => {
     const ESC = String.fromCharCode(0x1b);
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({

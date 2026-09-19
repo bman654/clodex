@@ -190,3 +190,76 @@ describe('contextLimitsFrom', () => {
     expect(contextLimitsFrom({ contextWindow: 272_000 }, 200_000).contextWindow).toBe(272_000);
   });
 });
+
+// A model whose provider publishes no window, and which no heuristic rule claims,
+// used to be stored with clodex's invented 200,000. That number then became the
+// ceiling every later `--context` request was clamped to, so an OpenCode Go model
+// with a real 1,048,576-token window was permanently capped at 200,000 with no way
+// to raise it. Nothing is declared here, which is the shape those models now reach
+// the resolver in.
+describe('a model whose window nobody published', () => {
+  const UNKNOWN = {};
+
+  it('still reports the 200k Claude Code assumes for the standard stop', () => {
+    const resolved = resolveContextStop(UNKNOWN, 'standard');
+    expect(resolved.raw).toBe(200_000);
+    expect(resolved.effective).toBe(200_000);
+    expect(resolved.clampedFrom).toBeUndefined();
+  });
+
+  it('does not invent a larger window for the max stop', () => {
+    expect(resolveContextStop(UNKNOWN, 'max').effective).toBe(200_000);
+  });
+
+  it('honours a user stop above the invented default instead of clamping to it', () => {
+    const resolved = resolveContextStop(UNKNOWN, 1_048_576);
+    expect(resolved.raw).toBe(1_048_576);
+    expect(resolved.effective).toBe(1_048_576);
+    expect(resolved.clampedFrom).toBeUndefined();
+    expect(contextClampNotice('go-model', resolved)).toBeNull();
+  });
+
+  it('honours the stop through contextLimitsFrom when no fallback window is known', () => {
+    const limits = contextLimitsFrom({ maxContextWindow: undefined }, undefined);
+    expect(limits.contextWindow).toBeUndefined();
+    expect(resolveContextStop(limits, 1_048_576).raw).toBe(1_048_576);
+  });
+
+  it('treats an omitted fallback the same as an explicit undefined one', () => {
+    expect(contextLimitsFrom({}).contextWindow).toBeUndefined();
+  });
+});
+
+// The loosening above must not reach a model that DOES declare limits. These are
+// the numbers the live Codex catalog reports for GPT-6 Astra.
+describe('a model with a declared ceiling', () => {
+  const ASTRA = { contextWindow: 272_000, maxContextWindow: 872_000 };
+
+  it('still clamps a user stop above the ceiling and still reports it', () => {
+    const resolved = resolveContextStop(ASTRA, 900_000);
+    expect(resolved.raw).toBe(872_000);
+    expect(resolved.effective).toBe(872_000);
+    expect(resolved.clampedFrom).toBe(900_000);
+    expect(contextClampNotice('astra', resolved)).toContain('above the model ceiling');
+  });
+
+  it('clamps even when the declared window itself is the only limit', () => {
+    // Curated or heuristic data IS a claim about the model, so it stays the ceiling
+    // exactly as before. Only a window nobody published stops being one.
+    const resolved = resolveContextStop({ contextWindow: 272_000 }, 900_000);
+    expect(resolved.raw).toBe(272_000);
+    expect(resolved.clampedFrom).toBe(900_000);
+  });
+
+  it('clamps a declared-window model reached through contextLimitsFrom', () => {
+    const limits = contextLimitsFrom({ contextWindow: 262_144 }, undefined);
+    const resolved = resolveContextStop(limits, 1_048_576);
+    expect(resolved.raw).toBe(262_144);
+    expect(resolved.clampedFrom).toBe(1_048_576);
+  });
+
+  it('clamps to a fallback window that a lookup did supply', () => {
+    const limits = contextLimitsFrom({}, 131_072);
+    expect(resolveContextStop(limits, 1_048_576).raw).toBe(131_072);
+  });
+});
