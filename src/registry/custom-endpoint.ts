@@ -3,7 +3,7 @@
 import { provisionProviderCredential } from '../env.js';
 import { credentialInstanceAuthRef } from '../credential-helper.js';
 import { deriveBrand } from '../models.js';
-import { resolveContextWindow } from '../context-window.js';
+import { lookupKnownContextWindow } from '../context-window.js';
 import {
   cancelCredentialDelete,
   journalCredentialWrite,
@@ -117,7 +117,7 @@ export async function fetchAnthropicModels(
           upstreamModelId: id,
           family: id.split('-')[0] ?? id,
           brand: deriveBrand(id),
-          contextWindow: resolveContextWindow(id),
+          contextWindow: lookupKnownContextWindow(id),
           modelFormat: 'anthropic',
           npm: '@ai-sdk/anthropic',
           apiUrl: root,

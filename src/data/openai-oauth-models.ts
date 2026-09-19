@@ -9,7 +9,7 @@
 // nothing. Availability still varies by tier, so the full set is listed and the user
 // discovers what their plan unlocks at inference time.
 
-import { resolveContextWindow } from '../context-window.js';
+import { lookupKnownContextWindow } from '../context-window.js';
 import { deriveBrand } from '../models.js';
 import type { CachedModel } from '../registry/types.js';
 
@@ -82,10 +82,10 @@ const OPENAI_OAUTH_MODEL_SEEDS: OAuthModelSeed[] = [
   { id: 'gpt-5',                name: 'GPT-5',             contextWindow: 272_000, reasoning: true },
   // o-series reasoning (Plus+)
   { id: 'o4-mini',              name: 'o4 Mini',           reasoning: true },
-  { id: 'o3',                   name: 'o3',                reasoning: true },
+  { id: 'o3',                   name: 'o3',                contextWindow: 200_000, reasoning: true },
   { id: 'o3-mini',              name: 'o3 Mini',           reasoning: true },
-  { id: 'o1',                   name: 'o1',                reasoning: true },
-  { id: 'o1-mini',              name: 'o1 Mini',           reasoning: true },
+  { id: 'o1',                   name: 'o1',                contextWindow: 200_000, reasoning: true },
+  { id: 'o1-mini',              name: 'o1 Mini',           contextWindow: 128_000, reasoning: true },
 ];
 
 /** Models priced with a higher-rate band above a documented input size. */
@@ -197,7 +197,7 @@ export function buildOpenAiOAuthModels(): CachedModel[] {
       upstreamModelId: seed.id,
       family: prefix,
       brand: deriveBrand(prefix),
-      contextWindow: resolveContextWindow(seed.id, seed.contextWindow),
+      contextWindow: seed.contextWindow ?? lookupKnownContextWindow(seed.id),
       maxContextWindow: seed.maxContextWindow,
       effectiveContextPercent: seed.effectiveContextPercent,
       pricingBoundary: seed.pricingBoundary ?? pricing.pricingBoundary,

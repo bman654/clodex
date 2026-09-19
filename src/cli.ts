@@ -15,7 +15,7 @@ import {
   resolveContextStop,
   setSessionContextStops,
 } from './context-modes.js';
-import { resolveContextWindow } from './context-window.js';
+import { lookupKnownContextWindow } from './context-window.js';
 import {
   parseContextStopAssignments,
   savedStopsAfter,
@@ -833,7 +833,7 @@ function applyContextStopAssignments(
       return 1;
     }
 
-    const limits = contextLimitsFrom(cached, resolveContextWindow(assignment.modelId));
+    const limits = contextLimitsFrom(cached, lookupKnownContextWindow(assignment.modelId));
     const resolved = resolveContextStop(limits, assignment.stop ?? 'standard');
     const target = modelAliasTarget(assignment);
     // An alias earns the parenthesised target; spelling the full id already showed it.

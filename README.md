@@ -276,6 +276,16 @@ Two things worth knowing about the numbers:
   number first only costs usable context. A provider that declares a share of its own
   is still honoured; clodex just never invents one. Use `--context` if you want a
   smaller window than the provider offers.
+- **A window nobody published is not a ceiling.** Some servers list their models
+  without saying how much context each one takes. Clodex reports the 200,000 Claude
+  Code assumes anyway, but that number is a guess, not a measurement — so
+  `clodex models --context <model>=1m --save` raises it instead of being clamped back
+  down to the guess. Clamping still applies in full wherever a window *is* published,
+  by the provider or by clodex's own catalog. If the model is already baked into a
+  patched binary, re-run `clodex patch` so it picks the new window up. Set this model up
+  before this version? Run `clodex providers refresh-models <provider>` once — an older
+  clodex stored the guess as if the server had published it, and until you refresh it is
+  indistinguishable from a real limit and still clamps.
 - **The account ceiling moves.** It is server-side and per-account, and it has
   changed by more than 2x within a single day in the past. `max` reads whatever the
   catalog reports now and clamps to it, so a stale ceiling shrinks the stop rather

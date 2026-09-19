@@ -163,6 +163,53 @@ describe('buildPatchModelConfig', () => {
     expect(unknownWindows).toEqual([]);
   });
 
+  // Metadata that EXISTS but records no window is the shape a model gets once clodex
+  // stops storing its invented 200,000. It must be reported as unknown, not silently
+  // treated as a window of zero.
+  it('reports a model whose metadata carries no window at all', () => {
+    const { config, unknownWindows } = buildPatchModelConfig(
+      [{ providerId: 'openai', modelId: 'davinci-002' }],
+      [],
+      () => ({ displayName: 'Davinci' }),
+    );
+    expect(config['clodex:openai:davinci-002']).toEqual({ display: 'Davinci' });
+    expect(unknownWindows).toEqual(['clodex:openai:davinci-002']);
+  });
+
+  it('does not report a model whose window is real', () => {
+    const { unknownWindows } = buildPatchModelConfig(
+      [{ providerId: 'openai', modelId: 'davinci-002' }],
+      [],
+      () => ({ contextWindow: 1_048_576 }),
+    );
+    expect(unknownWindows).toEqual([]);
+  });
+
+  // An absent window and a stored 200,000 already produce the same patch config, so
+  // making a window absent cannot change the config hash and cannot mark a patched
+  // install stale. Pinned because a silent re-patch of every install is the kind of
+  // side effect nobody looks for.
+  it('hashes an absent window and a stored 200k identically', () => {
+    const absent = buildPatchModelConfig(
+      [{ providerId: 'openai', modelId: 'davinci-002' }],
+      [],
+      () => ({}),
+    );
+    const stored = buildPatchModelConfig(
+      [{ providerId: 'openai', modelId: 'davinci-002' }],
+      [],
+      () => ({ contextWindow: 200_000 }),
+    );
+    expect(computePatchConfigHash(absent.config)).toBe(computePatchConfigHash(stored.config));
+    // Under-scope: a window that is not the default still changes the hash.
+    const raised = buildPatchModelConfig(
+      [{ providerId: 'openai', modelId: 'davinci-002' }],
+      [],
+      () => ({ contextWindow: 1_048_576 }),
+    );
+    expect(computePatchConfigHash(raised.config)).not.toBe(computePatchConfigHash(absent.config));
+  });
+
   it('omits a blank display label rather than baking an empty string', () => {
     const { config } = buildPatchModelConfig(
       [{ providerId: 'openai', modelId: 'davinci-002' }],
@@ -398,6 +445,47 @@ describe('buildDesiredPatchConfig', () => {
     ]));
     expect(readFileSync(join(home, 'config.json'), 'utf8')).toBe(configBefore);
     expect(readFileSync(join(home, 'providers.json'), 'utf8')).toBe(providersBefore);
+  });
+
+  // What a user gets after `clodex models --context <model>=1m --save` on a model
+  // whose provider publishes no window: the stop has to survive into the patched
+  // binary, and it used to be clamped to the 200,000 clodex had invented for it.
+  it('bakes a saved stop above the invented default for a model with no window', () => {
+    writeInputs({
+      id: 'zz-house-model-9000',
+      upstreamModelId: 'zz-house-model-9000',
+      name: 'House Model',
+      modelFormat: 'openai',
+    });
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId: 'openai', modelId: 'zz-house-model-9000' }],
+      modelContextModes: { 'openai:zz-house-model-9000': 1_000_000 },
+    }));
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(desired.config['clodex:openai:zz-house-model-9000']?.context).toBe(1_000_000);
+    expect(desired.unknownWindows).toEqual([]);
+  });
+
+  // Under-scope for the above: a published window is still the ceiling, so the patch
+  // never bakes a window the provider would reject.
+  it('still clamps a saved stop to a published window', () => {
+    writeInputs({
+      id: 'gpt-5.6-sol',
+      upstreamModelId: 'gpt-5.6-sol',
+      name: 'GPT-5.6 Sol',
+      contextWindow: 272_000,
+      modelFormat: 'openai',
+    });
+    writeFileSync(join(home, 'config.json'), JSON.stringify({
+      favoriteModels: [{ providerId: 'openai', modelId: 'gpt-5.6-sol' }],
+      modelContextModes: { 'openai:gpt-5.6-sol': 5_000_000 },
+    }));
+
+    const desired = buildDesiredPatchConfig();
+
+    expect(desired.config['clodex:openai:gpt-5.6-sol']?.context).toBe(272_000);
   });
 
   it('preserves the native high default when provider metadata defaults to medium', () => {

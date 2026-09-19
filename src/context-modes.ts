@@ -3,12 +3,18 @@
 // request, so the default stop sits under that line and the larger one is opt-in.
 // The field shape mirrors the Codex model catalog.
 
+import { DEFAULT_CONTEXT_WINDOW } from './context-window.js';
+
 export type ContextStopName = 'standard' | 'max';
 export type ContextStop = ContextStopName | number;
 
 export interface ContextLimits {
-  /** Default raw window; the `standard` stop. */
-  contextWindow: number;
+  /**
+   * Default raw window; the `standard` stop. Absent means nobody published one —
+   * neither the provider nor a heuristic — so there is no measured number to
+   * report and no defensible ceiling to hold a user's own choice down to.
+   */
+  contextWindow?: number;
   /** Highest raw window the model accepts. Absent means the default is the ceiling. */
   maxContextWindow?: number;
   /** Share of the raw window to fill, when a provider declares one. Absent means all of it. */
@@ -76,15 +82,25 @@ export function resolveContextStop(
   limits: ContextLimits,
   stop: ContextStop = 'standard',
 ): ResolvedContextStop {
-  const standardRaw = positiveInteger(limits.contextWindow) ?? 0;
-  const ceiling = positiveInteger(limits.maxContextWindow) ?? standardRaw;
+  const declaredWindow = positiveInteger(limits.contextWindow);
+  const declaredCeiling = positiveInteger(limits.maxContextWindow);
+  // Report the 200k Claude Code would assume anyway when nothing is published, so
+  // the default path is unchanged for a model whose window nobody knows.
+  const standardRaw = declaredWindow ?? DEFAULT_CONTEXT_WINDOW;
+  // A declared window IS a claim about the model, so it still caps a larger request
+  // exactly as before — asking for more than a curated 272,000 gets 272,000 and a
+  // clamp notice, because a window the provider will reject is worse than a small
+  // one. Only when NOTHING is declared is there no ceiling: the fallback above is a
+  // clodex invention, and clamping the user to an invented number is how a real
+  // 1,048,576-token model ended up stuck at 200,000.
+  const ceiling = declaredCeiling ?? declaredWindow;
   const requested = stop === 'standard'
     ? standardRaw
     : stop === 'max'
-      ? ceiling
+      ? declaredCeiling ?? standardRaw
       : positiveInteger(stop) ?? standardRaw;
 
-  const raw = Math.min(requested, ceiling);
+  const raw = ceiling === undefined ? requested : Math.min(requested, ceiling);
   const effective = effectiveContextWindow(raw, limits.effectiveContextPercent);
   const boundary = positiveInteger(limits.pricingBoundary);
 
@@ -92,7 +108,7 @@ export function resolveContextStop(
     stop,
     raw,
     effective,
-    ...(requested > ceiling ? { clampedFrom: requested } : {}),
+    ...(ceiling !== undefined && requested > ceiling ? { clampedFrom: requested } : {}),
     crossesPricingBoundary: boundary !== undefined && effective > boundary,
   };
 }
@@ -188,7 +204,8 @@ export function selectContextStop(
 /** Limits carried by a catalog entry, in the shape the resolver needs. */
 export function contextLimitsFrom(
   model: Partial<ContextLimits>,
-  fallbackContextWindow: number,
+  /** Omit, or pass `undefined`, when no window is known for this model. */
+  fallbackContextWindow?: number,
 ): ContextLimits {
   return {
     contextWindow: positiveInteger(model.contextWindow) ?? fallbackContextWindow,

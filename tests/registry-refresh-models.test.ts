@@ -308,6 +308,44 @@ describe('registry/refresh-models', () => {
       }
     });
 
+    // Same rule as the share above: a number the catalog did not report is not
+    // stored. A brand-new slug whose id no heuristic claims used to be saved with
+    // clodex's invented 200,000, which then clamped every `clodex models --context
+    // <model=stop> --save` back down to it.
+    it('stores no window for a live model the catalog gives none for', async () => {
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI (ChatGPT)',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          models: [
+            { slug: 'zz-house-model-9000', title: 'House' },
+            { slug: 'gpt-brand-new', title: 'New', context_window: 272_000 },
+          ],
+        }),
+      } as Response);
+
+      await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
+
+      const saved = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+      const windows = new Map(
+        (saved.providers[0]?.modelsCache?.models ?? []).map(m => [m.id, m.contextWindow]),
+      );
+      expect(windows.get('zz-house-model-9000')).toBeUndefined();
+      expect(windows.get('gpt-brand-new')).toBe(272_000);
+    });
+
     // Scope guard for the default above. Tier 2 is the general ChatGPT catalog — the
     // web model picker — which carries plainly non-reasoning models, so the
     // "only agentic models" premise that justifies the default does not hold there.
