@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.15.0](https://github.com/bman654/clodex/compare/v2.14.1...v2.15.0) (2026-09-19)
+
+
+### Features
+
+* **providers:** add any OpenAI-compatible server, like OpenRouter, from providers add ([#255](https://github.com/bman654/clodex/issues/255)) ([ecd0c28](https://github.com/bman654/clodex/commit/ecd0c28db4ff2f17875e9fb665c0ef08468888ea))
+
 ## [2.14.1](https://github.com/bman654/clodex/compare/v2.14.0...v2.14.1) (2026-09-18)
 
 
