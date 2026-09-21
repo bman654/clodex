@@ -1181,6 +1181,55 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       clientSocket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
       return;
     }
+    const outboundAgent = outboundHttpProxyAgent(`https://${req.url}`);
+    if (outboundAgent) {
+      let upstream: net.Socket | undefined;
+      let proxyConnectStatus: number | undefined;
+      req.once('proxyConnect', (response: { statusCode?: number }) => {
+        proxyConnectStatus = response.statusCode;
+      });
+      clientSocket.once('close', () => {
+        if (upstream && !upstream.destroyed) upstream.destroy();
+      });
+      void outboundAgent.connect(req as unknown as http.ClientRequest, {
+        host: target.host,
+        port: target.port,
+        secureEndpoint: false,
+      }).then(connected => {
+        upstream = connected;
+        if (proxyConnectStatus !== 200 || clientSocket.destroyed) {
+          connected.destroy();
+          if (!clientSocket.destroyed) {
+            clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n', () => clientSocket.destroy());
+          }
+          return;
+        }
+        let tunnelEstablished = false;
+        sockets.add(connected);
+        connected.once('close', () => {
+          sockets.delete(connected);
+          if (tunnelEstablished && !clientSocket.destroyed) clientSocket.destroy();
+        });
+        connected.once('error', () => {
+          if (clientSocket.destroyed) return;
+          if (tunnelEstablished) {
+            clientSocket.destroy();
+            return;
+          }
+          clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n', () => clientSocket.destroy());
+        });
+        tunnelEstablished = true;
+        clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (head.length > 0) connected.write(head);
+        clientSocket.pipe(connected);
+        connected.pipe(clientSocket);
+      }).catch(() => {
+        if (!clientSocket.destroyed) {
+          clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n', () => clientSocket.destroy());
+        }
+      });
+      return;
+    }
     const upstream = net.connect(target.port, target.host);
     let tunnelEstablished = false;
     sockets.add(upstream);

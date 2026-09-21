@@ -394,6 +394,73 @@ describe('selective HTTP proxy', () => {
     expect(shouldInterceptConnect('example.com:443')).toBe(false);
   });
 
+  it('routes passthrough CONNECT tunnels through HTTPS_PROXY', async () => {
+    let observedAuthority: string | undefined;
+    let markConnectObserved!: () => void;
+    const connectObserved = new Promise<void>(resolve => { markConnectObserved = resolve; });
+    const upstreamSockets = new Set<net.Socket>();
+    const upstreamProxy = http.createServer();
+    upstreamProxy.on('connect', (req, socket) => {
+      observedAuthority = req.url;
+      upstreamSockets.add(socket);
+      socket.once('close', () => upstreamSockets.delete(socket));
+      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      markConnectObserved();
+    });
+    const upstreamProxyPort = await listen(upstreamProxy);
+    process.env['HTTPS_PROXY'] = `http://127.0.0.1:${upstreamProxyPort}`;
+    const proxy = await startHttpProxy({ routes: [] });
+    const client = net.connect(proxy.port, proxy.host);
+    client.on('error', () => {});
+
+    try {
+      await once(client, 'connect');
+      client.write(
+        'CONNECT non-anthropic.example:443 HTTP/1.1\r\n'
+        + 'Host: non-anthropic.example:443\r\n\r\n',
+      );
+      const [response] = await once(client, 'data') as [Buffer];
+      await connectObserved;
+
+      expect(response.toString()).toContain('200 Connection Established');
+      expect(observedAuthority).toBe('non-anthropic.example:443');
+    } finally {
+      client.destroy();
+      await proxy.close();
+      for (const socket of upstreamSockets) socket.destroy();
+      await new Promise<void>(resolve => upstreamProxy.close(() => resolve()));
+    }
+  });
+
+  it('dials passthrough CONNECT targets directly without HTTPS_PROXY', async () => {
+    let acceptTarget!: (socket: net.Socket) => void;
+    const targetAccepted = new Promise<net.Socket>(resolve => { acceptTarget = resolve; });
+    const targetServer = net.createServer(socket => acceptTarget(socket));
+    const targetPort = await listen(targetServer);
+    const proxy = await startHttpProxy({ routes: [] });
+    const client = net.connect(proxy.port, proxy.host);
+    client.on('error', () => {});
+    let targetSocket: net.Socket | undefined;
+
+    try {
+      await once(client, 'connect');
+      client.write(
+        `CONNECT 127.0.0.1:${targetPort} HTTP/1.1\r\n`
+        + `Host: 127.0.0.1:${targetPort}\r\n\r\n`,
+      );
+      const [response] = await once(client, 'data') as [Buffer];
+      targetSocket = await targetAccepted;
+
+      expect(response.toString()).toContain('200 Connection Established');
+      expect(targetSocket.remoteAddress).toBe('127.0.0.1');
+    } finally {
+      client.destroy();
+      targetSocket?.destroy();
+      await proxy.close();
+      await new Promise<void>(resolve => targetServer.close(() => resolve()));
+    }
+  });
+
   it('releases both sides of a passthrough CONNECT tunnel when upstream closes', async () => {
     const upstream = net.createServer(socket => socket.end());
     const upstreamPort = await listen(upstream);
