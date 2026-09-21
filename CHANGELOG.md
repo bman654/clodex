@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.16.0](https://github.com/bman654/clodex/compare/v2.15.0...v2.16.0) (2026-09-21)
+
+
+### Features
+
+* **opencode-go:** add the Muse Spark models, which clodex could not reach before ([c68fa2a](https://github.com/bman654/clodex/commit/c68fa2a195192624ed232c87c21d699ddf838300))
+
+
+### Bug Fixes
+
+* **models:** let you raise the context window on a model whose provider publishes none ([#259](https://github.com/bman654/clodex/issues/259)) ([3e2e3df](https://github.com/bman654/clodex/commit/3e2e3df6b81b69c18a36fc198b4ec0a33dcd88e3))
+* **proxy:** send web traffic through your HTTPS_PROXY so it works behind a corporate proxy ([be5f9a4](https://github.com/bman654/clodex/commit/be5f9a4d4530ed684246057f046e76b4224680d7))
+
 ## [2.15.0](https://github.com/bman654/clodex/compare/v2.14.1...v2.15.0) (2026-09-19)
 
 
