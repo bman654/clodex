@@ -44,6 +44,34 @@ function replaceOutboundProxyEnv(httpsProxy?: string): () => void {
   };
 }
 
+/**
+ * Collects lines raised through `emitParentNotice`, the channel these warnings
+ * use so they survive the stderr mute `launchClaude` installs for the child's
+ * lifetime. The channel writes to `process.stderr`, so a console spy no longer
+ * sees them.
+ */
+function captureParentNotices(): {
+  lines: () => string[];
+  clear: () => void;
+  restore: () => void;
+} {
+  const captured: string[] = [];
+  const spy = vi.spyOn(process.stderr, 'write').mockImplementation(((
+    chunk: string | Uint8Array,
+    ...rest: unknown[]
+  ) => {
+    captured.push(String(chunk));
+    const callback = rest.find(arg => typeof arg === 'function');
+    if (typeof callback === 'function') (callback as () => void)();
+    return true;
+  }) as typeof process.stderr.write);
+  return {
+    lines: () => captured.flatMap(chunk => chunk.split('\n')).filter(line => line.length > 0),
+    clear: () => { captured.length = 0; },
+    restore: () => spy.mockRestore(),
+  };
+}
+
 async function listen(server: net.Server): Promise<number> {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -549,7 +577,9 @@ describe('selective HTTP proxy', () => {
     const proxyPort = await listen(reservation);
     await new Promise<void>(resolve => reservation.close(() => resolve()));
     const restoreProxyEnv = replaceOutboundProxyEnv(`http://127.0.0.1:${proxyPort}`);
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // The warning goes through the parent-notice channel, not console.error,
+    // because `launchClaude` mutes the parent's stderr while the child runs.
+    const notices = captureParentNotices();
     const connect = vi.spyOn(HttpsProxyAgent.prototype, 'connect');
     const proxy = await startHttpProxy({ routes: [], port: proxyPort });
     const client = net.connect(proxy.port, proxy.host);
@@ -566,14 +596,14 @@ describe('selective HTTP proxy', () => {
 
       expect(received).toContain('200 Connection Established');
       expect(connect).not.toHaveBeenCalled();
-      expect(error).toHaveBeenCalledWith(
+      expect(notices.lines()).toContain(
         'clodex: HTTP(S)_PROXY points at this proxy; tunneling CONNECT direct',
       );
     } finally {
       client.destroy();
       restoreProxyEnv();
       connect.mockRestore();
-      error.mockRestore();
+      notices.restore();
       await proxy.close();
       await target.close();
     }
@@ -584,11 +614,11 @@ describe('selective HTTP proxy', () => {
     // server does not repeat this line for every tunnel it opens.
     const target = await startEchoTarget();
     const restoreProxyEnv = replaceOutboundProxyEnv('not-a-url');
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const notices = captureParentNotices();
     const proxy = await startHttpProxy({ routes: [] });
     // Startup warns once for the Anthropic passthrough agent; count only what
     // the CONNECT path adds on top of it.
-    error.mockClear();
+    notices.clear();
 
     const tunnel = async (): Promise<string> => {
       const client = net.connect(proxy.port, proxy.host);
@@ -608,13 +638,12 @@ describe('selective HTTP proxy', () => {
       expect(await tunnel()).toContain('200 Connection Established');
       expect(await tunnel()).toContain('200 Connection Established');
 
-      const warnings = error.mock.calls.filter(([first]) =>
-        typeof first === 'string'
-        && first.startsWith('clodex: HTTP(S)_PROXY cannot be used for a CONNECT tunnel'));
+      const warnings = notices.lines().filter(line =>
+        line.startsWith('clodex: HTTP(S)_PROXY cannot be used for a CONNECT tunnel'));
       expect(warnings).toHaveLength(1);
     } finally {
       restoreProxyEnv();
-      error.mockRestore();
+      notices.restore();
       await proxy.close();
       await target.close();
     }

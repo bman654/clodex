@@ -25,6 +25,7 @@
 import type { Agent as HttpAgent } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { emitParentNotice } from './parent-notice.js';
 
 export function hasOutboundProxyEnv(env: NodeJS.ProcessEnv = process.env): boolean {
   return Boolean(
@@ -156,7 +157,11 @@ export function outboundHttpProxyAgent(
     }
     return new HttpsProxyAgent(parsedProxy, { keepAlive: true });
   } catch (err) {
-    console.error(
+    // Reachable from the non-intercepted CONNECT handler, which runs while the
+    // spawned Claude Code owns the terminal and `launchClaude` has muted the
+    // parent's stderr — so this has to go through the parent-notice channel to
+    // be seen at all.
+    emitParentNotice(
       'clodex: HTTP(S)_PROXY cannot be used for a CONNECT tunnel; '
       + `using a direct connection (${err instanceof Error ? err.message : String(err)})`,
     );

@@ -13,6 +13,7 @@ import { ensureHttpProxyCertificates } from './ca.js';
 import { normalizeRouteLookupId } from '../context-model-id.js';
 import { listenTcpServer } from '../listener-ready.js';
 import { routeUnavailableMessage } from '../route-unavailable.js';
+import { emitParentNotice } from '../parent-notice.js';
 import { passthroughUpstreamRetries } from '../upstream-retry.js';
 import {
   outboundHttpProxyAgent,
@@ -1148,7 +1149,6 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   });
 
   const sockets = new Set<Socket>();
-  let listenerAddress: AddressInfo | undefined;
   let warnedConnectSelfProxy = false;
   // One agent per proxy URL. agent.connect() opens a fresh socket on every
   // call, so sharing is safe, and a malformed proxy URL then warns once
@@ -1202,12 +1202,24 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     // alone, every non-intercepted CONNECT would tunnel back into the same
     // handler, which would tunnel again, until the process runs out of
     // descriptors. The raw Anthropic passthrough guards the same way below.
+    //
+    // Read the bound address here rather than caching it after startup:
+    // `listenTcpServer` resolves `listen()` and only then probes the port, so
+    // the socket accepts connections while that probe is still running. A
+    // CONNECT arriving in that window would find an unset cache and disarm the
+    // guard. This handler cannot run before the server is listening, so
+    // `address()` is always populated by the time it does.
+    const bound = proxyServer.address();
     const selfTargeting = outboundProxyUrl !== undefined
-      && listenerAddress !== undefined
-      && proxyUrlTargetsListener(outboundProxyUrl, listenerAddress.address, listenerAddress.port);
+      && bound !== null
+      && typeof bound !== 'string'
+      && proxyUrlTargetsListener(outboundProxyUrl, bound.address, bound.port);
     if (selfTargeting && !warnedConnectSelfProxy) {
       warnedConnectSelfProxy = true;
-      console.error(
+      // `launchClaude` mutes the parent's stderr for the child's lifetime, and
+      // this fires while the child is running, so a bare console.error is never
+      // seen on the `clodex claude` path.
+      emitParentNotice(
         'clodex: HTTP(S)_PROXY points at this proxy; tunneling CONNECT direct',
       );
     }
@@ -1304,8 +1316,6 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     adapter?.close();
     throw err;
   }
-  listenerAddress = address;
-
   if (anthropicProxyUrl && proxyUrlTargetsListener(
     anthropicProxyUrl,
     address.address,

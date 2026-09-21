@@ -160,7 +160,14 @@ describe('outboundHttpProxyAgent', () => {
     'localhost:3128',
     'http://user:private-proxy-token@[invalid',
   ])('warns and falls back to direct for malformed proxy URL %s', async proxyUrl => {
-    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // The warning goes through the parent-notice channel so it survives the
+    // stderr mute `launchClaude` installs; the non-intercepted CONNECT handler
+    // can reach this path while the child owns the terminal.
+    const written: string[] = [];
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(((chunk: unknown) => {
+      written.push(String(chunk));
+      return true;
+    }) as typeof process.stderr.write);
 
     try {
       const agent = await outboundHttpProxyAgent('https://api.example.test', {
@@ -168,13 +175,13 @@ describe('outboundHttpProxyAgent', () => {
       });
 
       expect(agent).toBeUndefined();
-      expect(error).toHaveBeenCalledOnce();
-      expect(error.mock.calls.flat().join(' ')).toMatch(
+      expect(written).toHaveLength(1);
+      expect(written.join(' ')).toMatch(
         /using a direct connection \(Invalid (?:proxy )?URL\)/,
       );
-      expect(error.mock.calls.flat().join(' ')).not.toContain('private-proxy-token');
+      expect(written.join(' ')).not.toContain('private-proxy-token');
     } finally {
-      error.mockRestore();
+      stderr.mockRestore();
     }
   });
 
