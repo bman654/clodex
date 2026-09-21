@@ -1148,6 +1148,21 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   });
 
   const sockets = new Set<Socket>();
+  let listenerAddress: AddressInfo | undefined;
+  let warnedConnectSelfProxy = false;
+  // One agent per proxy URL. agent.connect() opens a fresh socket on every
+  // call, so sharing is safe, and a malformed proxy URL then warns once
+  // instead of on every CONNECT for the life of a standalone server.
+  const connectTunnelAgents = new Map<string, ReturnType<typeof outboundHttpProxyAgent>>();
+  const connectTunnelAgent = (
+    proxyUrl: string,
+    targetUrl: string,
+  ): ReturnType<typeof outboundHttpProxyAgent> => {
+    if (!connectTunnelAgents.has(proxyUrl)) {
+      connectTunnelAgents.set(proxyUrl, outboundHttpProxyAgent(targetUrl));
+    }
+    return connectTunnelAgents.get(proxyUrl);
+  };
   mitmServer.on('upgrade', (req, socket, head) => {
     forwardAnthropicUpgrade(
       req,
@@ -1181,7 +1196,24 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       clientSocket.end('HTTP/1.1 400 Bad Request\r\n\r\n');
       return;
     }
-    const outboundAgent = outboundHttpProxyAgent(`https://${req.url}`);
+    const targetUrl = `https://${req.url}`;
+    const outboundProxyUrl = outboundProxyUrlForTarget(targetUrl);
+    // A bridge URL exported into this shell can name this very listener. Left
+    // alone, every non-intercepted CONNECT would tunnel back into the same
+    // handler, which would tunnel again, until the process runs out of
+    // descriptors. The raw Anthropic passthrough guards the same way below.
+    const selfTargeting = outboundProxyUrl !== undefined
+      && listenerAddress !== undefined
+      && proxyUrlTargetsListener(outboundProxyUrl, listenerAddress.address, listenerAddress.port);
+    if (selfTargeting && !warnedConnectSelfProxy) {
+      warnedConnectSelfProxy = true;
+      console.error(
+        'clodex: HTTP(S)_PROXY points at this proxy; tunneling CONNECT direct',
+      );
+    }
+    const outboundAgent = outboundProxyUrl !== undefined && !selfTargeting
+      ? connectTunnelAgent(outboundProxyUrl, targetUrl)
+      : undefined;
     if (outboundAgent) {
       let upstream: net.Socket | undefined;
       let proxyConnectStatus: number | undefined;
@@ -1272,6 +1304,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     adapter?.close();
     throw err;
   }
+  listenerAddress = address;
 
   if (anthropicProxyUrl && proxyUrlTargetsListener(
     anthropicProxyUrl,
@@ -1303,6 +1336,8 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       for (const socket of sockets) socket.destroy();
       await new Promise<void>(resolve => proxyServer.close(() => resolve()));
       mitmServer.close();
+      for (const agent of connectTunnelAgents.values()) agent?.destroy();
+      connectTunnelAgents.clear();
       anthropicAgent?.destroy();
       adapter?.close();
     },

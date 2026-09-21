@@ -44,12 +44,96 @@ function replaceOutboundProxyEnv(httpsProxy?: string): () => void {
   };
 }
 
-async function listen(server: http.Server | https.Server): Promise<number> {
+async function listen(server: net.Server): Promise<number> {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('test server did not bind');
   return address.port;
+}
+
+/** Accumulates everything a socket receives and waits for a marker within it. */
+function socketReader(socket: net.Socket): {
+  until: (needle: string) => Promise<string>;
+} {
+  let received = '';
+  let check: (() => void) | undefined;
+  socket.on('data', chunk => {
+    received += chunk.toString();
+    check?.();
+  });
+  return {
+    until: async (needle: string) => {
+      if (!received.includes(needle)) {
+        await new Promise<void>(resolve => {
+          check = () => {
+            if (!received.includes(needle)) return;
+            check = undefined;
+            resolve();
+          };
+        });
+      }
+      return received;
+    },
+  };
+}
+
+/** A target that answers every chunk with `echo:<chunk>`, so a tunnel's two directions are separable. */
+async function startEchoTarget(): Promise<{ port: number; close: () => Promise<void> }> {
+  const open = new Set<net.Socket>();
+  const server = net.createServer(socket => {
+    open.add(socket);
+    socket.once('close', () => open.delete(socket));
+    socket.on('error', () => socket.destroy());
+    socket.on('data', chunk => socket.write(Buffer.concat([Buffer.from('echo:'), chunk])));
+  });
+  const port = await listen(server);
+  return {
+    port,
+    close: async () => {
+      for (const socket of open) socket.destroy();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    },
+  };
+}
+
+/** An upstream HTTP proxy that really tunnels, or refuses with a status line. */
+async function startTunnelingProxy(
+  options: { refuseWith?: string } = {},
+): Promise<{ port: number; authorities: string[]; close: () => Promise<void> }> {
+  const authorities: string[] = [];
+  const open = new Set<net.Socket>();
+  const server = http.createServer();
+  server.on('connect', (req, clientSocket, head) => {
+    authorities.push(req.url ?? '');
+    open.add(clientSocket);
+    clientSocket.once('close', () => open.delete(clientSocket));
+    clientSocket.on('error', () => clientSocket.destroy());
+    if (options.refuseWith !== undefined) {
+      clientSocket.end(`HTTP/1.1 ${options.refuseWith}\r\n\r\n`);
+      return;
+    }
+    const [host = '', port = ''] = (req.url ?? '').split(':');
+    const target = net.connect(Number(port), host);
+    open.add(target);
+    target.once('close', () => open.delete(target));
+    target.on('error', () => target.destroy());
+    target.once('connect', () => {
+      clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+      if (head.length > 0) target.write(head);
+      clientSocket.pipe(target);
+      target.pipe(clientSocket);
+    });
+  });
+  const port = await listen(server);
+  return {
+    port,
+    authorities,
+    close: async () => {
+      for (const socket of open) socket.destroy();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    },
+  };
 }
 
 async function connectMitm(proxyPort: number, ca: string): Promise<tls.TLSSocket> {
@@ -394,24 +478,48 @@ describe('selective HTTP proxy', () => {
     expect(shouldInterceptConnect('example.com:443')).toBe(false);
   });
 
-  it('routes passthrough CONNECT tunnels through HTTPS_PROXY', async () => {
-    let observedAuthority: string | undefined;
-    let markConnectObserved!: () => void;
-    const connectObserved = new Promise<void>(resolve => { markConnectObserved = resolve; });
-    const upstreamSockets = new Set<net.Socket>();
-    const upstreamProxy = http.createServer();
-    upstreamProxy.on('connect', (req, socket) => {
-      observedAuthority = req.url;
-      upstreamSockets.add(socket);
-      socket.once('close', () => upstreamSockets.delete(socket));
-      socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-      markConnectObserved();
-    });
-    const upstreamProxyPort = await listen(upstreamProxy);
-    process.env['HTTPS_PROXY'] = `http://127.0.0.1:${upstreamProxyPort}`;
+  it('routes passthrough CONNECT tunnels through HTTPS_PROXY, head and both directions', async () => {
+    // Acknowledging the CONNECT proves only route selection. Replaying a head
+    // and then exchanging bytes is what distinguishes a working tunnel from a
+    // handshake with no pipes behind it.
+    const target = await startEchoTarget();
+    const upstream = await startTunnelingProxy();
+    const restoreProxyEnv = replaceOutboundProxyEnv(`http://127.0.0.1:${upstream.port}`);
     const proxy = await startHttpProxy({ routes: [] });
     const client = net.connect(proxy.port, proxy.host);
     client.on('error', () => {});
+    const reader = socketReader(client);
+
+    try {
+      await once(client, 'connect');
+      client.write(
+        `CONNECT 127.0.0.1:${target.port} HTTP/1.1\r\n`
+        + `Host: 127.0.0.1:${target.port}\r\n\r\nHELLO`,
+      );
+      await reader.until('echo:HELLO');
+      client.write('PING');
+      const received = await reader.until('echo:PING');
+
+      expect(received).toContain('200 Connection Established');
+      expect(upstream.authorities).toEqual([`127.0.0.1:${target.port}`]);
+    } finally {
+      client.destroy();
+      restoreProxyEnv();
+      await proxy.close();
+      await upstream.close();
+      await target.close();
+    }
+  });
+
+  it('answers 502 when the outbound proxy refuses the CONNECT', async () => {
+    const upstream = await startTunnelingProxy({
+      refuseWith: '407 Proxy Authentication Required',
+    });
+    const restoreProxyEnv = replaceOutboundProxyEnv(`http://127.0.0.1:${upstream.port}`);
+    const proxy = await startHttpProxy({ routes: [] });
+    const client = net.connect(proxy.port, proxy.host);
+    client.on('error', () => {});
+    const reader = socketReader(client);
 
     try {
       await once(client, 'connect');
@@ -419,16 +527,96 @@ describe('selective HTTP proxy', () => {
         'CONNECT non-anthropic.example:443 HTTP/1.1\r\n'
         + 'Host: non-anthropic.example:443\r\n\r\n',
       );
-      const [response] = await once(client, 'data') as [Buffer];
-      await connectObserved;
+      const received = await reader.until('502 Bad Gateway');
 
-      expect(response.toString()).toContain('200 Connection Established');
-      expect(observedAuthority).toBe('non-anthropic.example:443');
+      expect(received).not.toContain('200 Connection Established');
+      expect(upstream.authorities).toEqual(['non-anthropic.example:443']);
     } finally {
       client.destroy();
+      restoreProxyEnv();
       await proxy.close();
-      for (const socket of upstreamSockets) socket.destroy();
-      await new Promise<void>(resolve => upstreamProxy.close(() => resolve()));
+      await upstream.close();
+    }
+  });
+
+  it('dials CONNECT targets directly when HTTPS_PROXY names this proxy', async () => {
+    // `clodex server --proxy` prints its own bridge URL as setup instructions
+    // on a fixed default port, so a restart from that shell inherits a proxy
+    // URL addressing its own listener. Tunneling through it would CONNECT back
+    // into this handler, and again, until the process runs out of descriptors.
+    const target = await startEchoTarget();
+    const reservation = net.createServer();
+    const proxyPort = await listen(reservation);
+    await new Promise<void>(resolve => reservation.close(() => resolve()));
+    const restoreProxyEnv = replaceOutboundProxyEnv(`http://127.0.0.1:${proxyPort}`);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const connect = vi.spyOn(HttpsProxyAgent.prototype, 'connect');
+    const proxy = await startHttpProxy({ routes: [], port: proxyPort });
+    const client = net.connect(proxy.port, proxy.host);
+    client.on('error', () => {});
+    const reader = socketReader(client);
+
+    try {
+      await once(client, 'connect');
+      client.write(
+        `CONNECT 127.0.0.1:${target.port} HTTP/1.1\r\n`
+        + `Host: 127.0.0.1:${target.port}\r\n\r\nHELLO`,
+      );
+      const received = await reader.until('echo:HELLO');
+
+      expect(received).toContain('200 Connection Established');
+      expect(connect).not.toHaveBeenCalled();
+      expect(error).toHaveBeenCalledWith(
+        'clodex: HTTP(S)_PROXY points at this proxy; tunneling CONNECT direct',
+      );
+    } finally {
+      client.destroy();
+      restoreProxyEnv();
+      connect.mockRestore();
+      error.mockRestore();
+      await proxy.close();
+      await target.close();
+    }
+  });
+
+  it('warns once about an unusable proxy URL and keeps tunneling direct', async () => {
+    // The agent is built per proxy URL, not per CONNECT, so a standalone
+    // server does not repeat this line for every tunnel it opens.
+    const target = await startEchoTarget();
+    const restoreProxyEnv = replaceOutboundProxyEnv('not-a-url');
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const proxy = await startHttpProxy({ routes: [] });
+    // Startup warns once for the Anthropic passthrough agent; count only what
+    // the CONNECT path adds on top of it.
+    error.mockClear();
+
+    const tunnel = async (): Promise<string> => {
+      const client = net.connect(proxy.port, proxy.host);
+      client.on('error', () => {});
+      const reader = socketReader(client);
+      await once(client, 'connect');
+      client.write(
+        `CONNECT 127.0.0.1:${target.port} HTTP/1.1\r\n`
+        + `Host: 127.0.0.1:${target.port}\r\n\r\nHELLO`,
+      );
+      const received = await reader.until('echo:HELLO');
+      client.destroy();
+      return received;
+    };
+
+    try {
+      expect(await tunnel()).toContain('200 Connection Established');
+      expect(await tunnel()).toContain('200 Connection Established');
+
+      const warnings = error.mock.calls.filter(([first]) =>
+        typeof first === 'string'
+        && first.startsWith('clodex: HTTP(S)_PROXY cannot be used for a CONNECT tunnel'));
+      expect(warnings).toHaveLength(1);
+    } finally {
+      restoreProxyEnv();
+      error.mockRestore();
+      await proxy.close();
+      await target.close();
     }
   });
 
