@@ -55,6 +55,12 @@ describe('OpenCode Go catalog', () => {
     expect(models.filter(model => model.modelFormat === 'openai')).toHaveLength(15);
     expect(models.filter(model => model.npm === '@ai-sdk/openai').map(model => model.id).sort())
       .toEqual(['muse-spark-1.2-contributor', 'muse-spark-1.3-contributor']);
+    // clodex sends graded effort only for recognised OpenAI/Codex families, so
+    // advertising a control here would promise one that never reaches the wire.
+    for (const id of ['muse-spark-1.2-contributor', 'muse-spark-1.3-contributor']) {
+      expect(models.find(model => model.id === id)?.compatibility?.supportsReasoningEffort)
+        .toBe(false);
+    }
   });
 
   it('assigns per-model protocol, endpoint, context, vision, pricing, and compatibility metadata', () => {
