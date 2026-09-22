@@ -502,7 +502,7 @@ ${pc.bold('Examples:')}
   clodex claude --trace --resume abc-123
   clodex claude --endpoint
   clodex claude --endpoint --save-mode
-  clodex claude --provider openai-oauth --model gpt-5.6-sol
+  clodex claude --provider openai-oauth --model gpt-6-sol
   clodex claude -- --print "hello"
   clodex claude -- --dangerously-skip-permissions`;
 }
@@ -592,7 +592,7 @@ Manage favorite models for mid-session switching.
 ${pc.bold('Usage:')}
   clodex favorites
   clodex models --list
-  clodex models --alias sol=clodex:openai-oauth:gpt-5.6-sol
+  clodex models --alias sol=clodex:openai-oauth:gpt-6-sol
   clodex models --unalias sol
   clodex models --context sol=max --save
   clodex models --json
@@ -625,13 +625,13 @@ ${pc.bold('How it works:')}
   Claude Code binary so they pass model validation and report real context.
 
 ${pc.bold('Context stops and cost:')}
-  Some providers price large prompts in bands: GPT-5.6 bills the full request at
+  Some providers price large prompts in bands: GPT-5.6 and GPT-6 bill the full request at
   a higher rate above 272,000 input tokens. The standard stop stays under that
   line, so max is opt-in and reports the boundary when you select it.
 
 ${pc.bold('Examples:')}
   clodex favorites
-  clodex models --alias sol=clodex:openai-oauth:gpt-5.6-sol
+  clodex models --alias sol=clodex:openai-oauth:gpt-6-sol
   clodex models --context sol=max --save
   clodex claude    # switch menu active when favorites are set`;
 }

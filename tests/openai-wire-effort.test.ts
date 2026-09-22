@@ -51,7 +51,7 @@ async function emittedRequestBody(modelId: string, effort: string): Promise<Reco
 }
 
 describe('OpenAI reasoning effort on the wire', () => {
-  it.each(['gpt-6-astra', 'gpt-daybreak-blue-latest'])(
+  it.each(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-daybreak-blue-latest'])(
     'puts the chosen effort in the %s request body',
     async modelId => {
       const body = await emittedRequestBody(modelId, 'high');

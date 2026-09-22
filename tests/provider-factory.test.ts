@@ -196,6 +196,8 @@ describe('getReasoningCapabilities', () => {
     ['gpt-daybreak-blue-latest', ['none', 'low', 'medium', 'high', 'xhigh', 'max']],
     ['gpt-7-example', ['low', 'medium', 'high', 'xhigh', 'max']],
     ['gpt-5.6-sol', ['none', 'low', 'medium', 'high', 'xhigh', 'max']],
+    ['gpt-6-sol', ['none', 'low', 'medium', 'high', 'xhigh', 'max']],
+    ['gpt-6-luna', ['none', 'low', 'medium', 'high', 'xhigh', 'max']],
   ])('offers the patched-client effort menu for %s', (modelId, levels) => {
     expect(getPatchReasoningCapabilities('@ai-sdk/openai', modelId, { reasoning: true }).levels)
       .toEqual(levels);
@@ -222,6 +224,8 @@ describe('getReasoningCapabilities', () => {
     ['gpt-6-astra', false],
     ['gpt-daybreak-blue-latest', true],
     ['gpt-5.6-sol', true],
+    ['gpt-6-sol', true],
+    ['gpt-6-luna', true],
   ])('reports whether %s offers a none effort', (modelId, offersNone) => {
     const levels = getReasoningCapabilities('@ai-sdk/openai', modelId, { reasoning: true }).levels;
     expect(levels.includes('none')).toBe(offersNone);
@@ -510,10 +514,13 @@ describe('effortProviderOptions + deepMergeProviderOptions', () => {
       .toBeUndefined();
   });
 
-  it('keeps the none effort that gpt-daybreak-blue-latest accepts', () => {
-    expect(effortProviderOptions('@ai-sdk/openai', 'none', 'gpt-daybreak-blue-latest', { reasoning: true }))
-      .toEqual({ openai: { reasoningEffort: 'none', forceReasoning: true } });
-  });
+  it.each(['gpt-daybreak-blue-latest', 'gpt-6-sol', 'gpt-6-luna'])(
+    'keeps the none effort that %s accepts',
+    modelId => {
+      expect(effortProviderOptions('@ai-sdk/openai', 'none', modelId, { reasoning: true }))
+        .toEqual({ openai: { reasoningEffort: 'none', forceReasoning: true } });
+    },
+  );
 
   // The maintenance property: the extended range is read off the version, so a
   // family that does not exist yet is already covered.
