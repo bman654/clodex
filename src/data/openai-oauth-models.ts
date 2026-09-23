@@ -168,6 +168,16 @@ function migratedEffectiveContextPercent(cached: number | undefined): number | u
  * knows — the effort selector stayed hidden until they happened to re-run
  * `clodex providers refresh-models`. Only seeded ids are affected; anything absent
  * from the seed keeps its cached value.
+ *
+ * `contextWindow`, `useResponsesLite` and `preferWebSockets` are backfilled, never
+ * overridden: the Codex catalog does report them, so a cached value — `false`
+ * included — is a provider answer. The flags go missing on a row an older clodex wrote
+ * before it seeded the id, through a fallback catalog that does not carry them; left
+ * absent, a Responses-Lite model (GPT-6, Daybreak Blue) is sent without the headers the
+ * backend requires and every request is refused. The window goes missing only on rows
+ * written after refresh stopped persisting an invented default window (earlier rows
+ * carry an explicit 200,000, which is kept). For GPT-6 ids an absent window lets the
+ * 1,050,000 heuristic clamp to the ceiling instead of the standard window.
  */
 export function applyOAuthSeedContextMetadata(models: CachedModel[]): CachedModel[] {
   const seedById = new Map(buildOpenAiOAuthModels().map(model => [model.id, model]));
@@ -176,6 +186,7 @@ export function applyOAuthSeedContextMetadata(models: CachedModel[]): CachedMode
     const pricing = openAiPricingMetadata(model.id);
     return {
       ...model,
+      contextWindow: model.contextWindow ?? seed?.contextWindow,
       maxContextWindow: model.maxContextWindow ?? seed?.maxContextWindow,
       effectiveContextPercent: migratedEffectiveContextPercent(model.effectiveContextPercent),
       pricingBoundary: model.pricingBoundary ?? seed?.pricingBoundary ?? pricing.pricingBoundary,
@@ -184,6 +195,8 @@ export function applyOAuthSeedContextMetadata(models: CachedModel[]): CachedMode
         ?? pricing.pricingBoundaryNote,
       maxOutputTokens: model.maxOutputTokens ?? seed?.maxOutputTokens,
       reasoning: seed?.reasoning ?? model.reasoning,
+      useResponsesLite: model.useResponsesLite ?? seed?.useResponsesLite,
+      preferWebSockets: model.preferWebSockets ?? seed?.preferWebSockets,
     };
   });
 }
