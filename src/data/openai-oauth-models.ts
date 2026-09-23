@@ -38,8 +38,8 @@ interface OAuthModelSeed {
  * full request, not just the overage. That is why the Codex-reported window sits
  * here rather than at the model ceiling.
  */
-const GPT_5_6_PRICING_BOUNDARY = 272_000;
-const GPT_5_6_PRICING_NOTE =
+const GPT_HIGH_CONTEXT_PRICING_BOUNDARY = 272_000;
+const GPT_HIGH_CONTEXT_PRICING_NOTE =
   'Above it, OpenAI prices the full request at 2x input and 1.5x output.';
 
 // Models that the ChatGPT Codex backend (chatgpt.com/backend-api/codex) explicitly rejects
@@ -57,14 +57,15 @@ export const CHATGPT_CODEX_UNSUPPORTED_MODELS = new Set<string>([
 // model spec and varies by plan, so discovery overrides these whenever it answers.
 // A model with no ceiling here has none above its default window.
 const OPENAI_OAUTH_MODEL_SEEDS: OAuthModelSeed[] = [
-  // GPT-6 family. The window and ceiling are what the live Codex catalog returned on
-  // 2026-09-04 and are deliberately NOT the published API numbers: the model card
-  // lists a 1,050,000 context window, but the Codex client is served a smaller one,
-  // and this path is Codex-only. Output limit and the pricing band come from the
-  // card (https://developers.openai.com/api/docs/models/gpt-6-astra), which states
-  // "Prompts with more than 272K input tokens are priced at 2x input and cache rates
-  // and 1.5x output for the full request" — the same boundary the GPT-5.6 family has.
+  // GPT-6 family. The window, ceiling and Responses-Lite flags are what the live
+  // Codex catalog returned (Astra on 2026-09-04, Sol and Luna on 2026-09-22) and are
+  // deliberately NOT the published API numbers: the model cards list a 1,050,000
+  // context window, but the Codex client is served a smaller one, and this path is
+  // Codex-only. All three cards publish a 128,000 output limit and the same 272K
+  // pricing boundary as the GPT-5.6 family.
   { id: 'gpt-6-astra',          name: 'GPT-6 Astra',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
+  { id: 'gpt-6-sol',            name: 'GPT-6 Sol',         contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
+  { id: 'gpt-6-luna',           name: 'GPT-6 Luna',        contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
   // "An alias for our flagship general-purpose models, with safeguards calibrated
   // for defensive cybersecurity work" — access is gated on a separate opt-in
   // program, so most installs will never see this id in their catalog.
@@ -117,8 +118,8 @@ export function openAiPricingMetadata(
 ): { pricingBoundary?: number; pricingBoundaryNote?: string } {
   if (!hasPricingBoundary(id)) return {};
   return {
-    pricingBoundary: GPT_5_6_PRICING_BOUNDARY,
-    pricingBoundaryNote: GPT_5_6_PRICING_NOTE,
+    pricingBoundary: GPT_HIGH_CONTEXT_PRICING_BOUNDARY,
+    pricingBoundaryNote: GPT_HIGH_CONTEXT_PRICING_NOTE,
   };
 }
 

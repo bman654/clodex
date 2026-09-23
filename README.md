@@ -22,8 +22,8 @@ Contributions are welcome — see [CONTRIBUTING.md](./CONTRIBUTING.md) for how t
 npm install -g @bman654/clodex          # 1. install the CLI (Node 22+)
 clodex providers auth openai   # 2. sign in with your ChatGPT/Codex plan (device-code OAuth)
 clodex models                  # 3. pick favorite models and aliases
-clodex models --alias sol=clodex:openai-oauth:gpt-5.6-sol
-clodex models --alias luna=clodex:openai-oauth:gpt-5.6-luna
+clodex models --alias sol=clodex:openai-oauth:gpt-6-sol
+clodex models --alias luna=clodex:openai-oauth:gpt-6-luna
 clodex models --alias terra=clodex:openai-oauth:gpt-5.6-terra
 clodex patch                   # 4. (optional) patch Claude Code so those models are first-class
 clodex claude                  # 5. launch Claude Code on an OpenAI model
@@ -80,7 +80,7 @@ Clodex avoids this. In proxy mode it uses an HTTP proxy to intercept requests bo
 
 Both `clodex claude` and `clodex server` support two bridge modes. A mode flag applies to **that run only**; to change a command's default, add `--save-mode` (e.g. `clodex claude --endpoint --save-mode`). With no flag and nothing saved, both commands default to **proxy** mode, which works with your existing Claude auth.
 
-- **`--proxy`** (the default): a selective man-in-the-middle proxy for `api.anthropic.com`. Claude Code keeps its normal Anthropic login — Anthropic models work untouched — while models named `clodex:<provider-id>:<model-id>` (or their saved aliases) route to the selected configured provider. Switch with `/model clodex:openai-oauth:gpt-5.6-sol` or `/model sol` after patching.
+- **`--proxy`** (the default): a selective man-in-the-middle proxy for `api.anthropic.com`. Claude Code keeps its normal Anthropic login — Anthropic models work untouched — while models named `clodex:<provider-id>:<model-id>` (or their saved aliases) route to the selected configured provider. Switch with `/model clodex:openai-oauth:gpt-6-sol` or `/model sol` after patching.
 - **`--endpoint`**: clodex runs a local Anthropic-format gateway and launches Claude Code with `ANTHROPIC_BASE_URL` pointed at it. All traffic goes through the gateway. With favorites saved, the gateway is multi-route and Claude Code's `/model` menu lists your starting model plus favorites for live switching.
 
 > [!TIP]
@@ -238,7 +238,7 @@ Manage favorite models (max 20) and short aliases. Favorites feed the endpoint-m
 | --- | --- |
 | *(none)* | Interactive manager: search all providers or browse one at a time |
 | `--list` | Print the exact `clodex:<provider-id>:<model-id>` names (and aliases) without opening the manager |
-| `--alias <name=target>` | Save a short name for a favorite, e.g. `--alias sol=clodex:openai-oauth:gpt-5.6-sol` (the `clodex:` prefix is optional in the target) |
+| `--alias <name=target>` | Save a short name for a favorite, e.g. `--alias sol=clodex:openai-oauth:gpt-6-sol` (the `clodex:` prefix is optional in the target) |
 | `--unalias <name>` | Remove a saved short name |
 | `--context <model=stop>` | Choose how much of a model's context window to use: `standard`, `max`, `default` to clear, or a token count such as `500k`. Applies to this run unless `--save` is given |
 | `--save` | With `--context`: store the stop as that model's default |

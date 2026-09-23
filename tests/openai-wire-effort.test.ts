@@ -51,13 +51,25 @@ async function emittedRequestBody(modelId: string, effort: string): Promise<Reco
 }
 
 describe('OpenAI reasoning effort on the wire', () => {
-  it.each(['gpt-6-astra', 'gpt-daybreak-blue-latest'])(
+  it.each(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-daybreak-blue-latest'])(
     'puts the chosen effort in the %s request body',
     async modelId => {
       const body = await emittedRequestBody(modelId, 'high');
       expect(body.reasoning).toMatchObject({ effort: 'high' });
     },
   );
+
+  // 'none' is a per-model opt-in: the Codex backend accepts it for gpt-6-sol and
+  // gpt-6-luna but answers gpt-6-astra with a hard 400 (all measured 2026-09-22).
+  it.each(['gpt-6-sol', 'gpt-6-luna'])('sends the none effort for %s', async modelId => {
+    const body = await emittedRequestBody(modelId, 'none');
+    expect(body.reasoning).toMatchObject({ effort: 'none' });
+  });
+
+  it('never sends the none effort for gpt-6-astra', async () => {
+    const body = await emittedRequestBody('gpt-6-astra', 'none');
+    expect((body.reasoning as { effort?: string } | undefined)?.effort).not.toBe('none');
+  });
 
   // The family that already worked, to show the test is measuring the wire and not
   // just agreeing with itself.
