@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.17.0](https://github.com/bman654/clodex/compare/v2.16.0...v2.17.0) (2026-09-23)
+
+
+### Features
+
+* **models:** add GPT-6 Sol and Luna with their context limits and reasoning levels ([#266](https://github.com/bman654/clodex/issues/266)) ([b9c5613](https://github.com/bman654/clodex/commit/b9c56131c4c53732dde46de94ccac6e9ec209c53))
+
+
+### Bug Fixes
+
+* **oauth:** stop GPT-6 Sol and Luna failing every request on a ChatGPT plan ([#267](https://github.com/bman654/clodex/issues/267)) ([ebfacfe](https://github.com/bman654/clodex/commit/ebfacfe231c616ad156f0b56ce6a6b6616ed288e))
+
 ## [2.16.0](https://github.com/bman654/clodex/compare/v2.15.0...v2.16.0) (2026-09-21)
 
 
