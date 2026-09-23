@@ -57,13 +57,15 @@ export const CHATGPT_CODEX_UNSUPPORTED_MODELS = new Set<string>([
 // model spec and varies by plan, so discovery overrides these whenever it answers.
 // A model with no ceiling here has none above its default window.
 const OPENAI_OAUTH_MODEL_SEEDS: OAuthModelSeed[] = [
-  // Astra's window and ceiling are what the live Codex catalog returned on
-  // 2026-09-04, not the 1,050,000 published API context window. Sol and Luna use the
-  // same fallback values until their per-account Codex catalog entries are fetched.
-  // All three models publish a 128,000 output limit and a 272K pricing boundary.
+  // GPT-6 family. The window, ceiling and Responses-Lite flags are what the live
+  // Codex catalog returned (Astra on 2026-09-04, Sol and Luna on 2026-09-22) and are
+  // deliberately NOT the published API numbers: the model cards list a 1,050,000
+  // context window, but the Codex client is served a smaller one, and this path is
+  // Codex-only. All three cards publish a 128,000 output limit and the same 272K
+  // pricing boundary as the GPT-5.6 family.
   { id: 'gpt-6-astra',          name: 'GPT-6 Astra',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
-  { id: 'gpt-6-sol',            name: 'GPT-6 Sol',         contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true },
-  { id: 'gpt-6-luna',           name: 'GPT-6 Luna',        contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true },
+  { id: 'gpt-6-sol',            name: 'GPT-6 Sol',         contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
+  { id: 'gpt-6-luna',           name: 'GPT-6 Luna',        contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
   // "An alias for our flagship general-purpose models, with safeguards calibrated
   // for defensive cybersecurity work" — access is gated on a separate opt-in
   // program, so most installs will never see this id in their catalog.

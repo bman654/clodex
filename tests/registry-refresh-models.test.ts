@@ -694,19 +694,11 @@ describe('registry/refresh-models', () => {
       // whether the pinned Codex client version is sent at all, and without that
       // header gpt-6-astra is refused outright — so a seed that loses the flag
       // silently disconnects the model from the fix that makes it work.
-      for (const id of ['gpt-6-astra', 'gpt-daybreak-blue-latest']) {
+      for (const id of ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-daybreak-blue-latest']) {
         const model = savedRegistry.providers[0]?.modelsCache?.models.find(m => m.id === id);
         expect(model, `${id} missing from the seed`).toBeDefined();
         expect(model?.useResponsesLite, id).toBe(true);
         expect(model?.preferWebSockets, id).toBe(true);
-        expect(model?.contextWindow, id).toBe(272_000);
-        expect(model?.maxContextWindow, id).toBe(872_000);
-        expect(model?.reasoning, id).toBe(true);
-      }
-
-      for (const id of ['gpt-6-sol', 'gpt-6-luna']) {
-        const model = savedRegistry.providers[0]?.modelsCache?.models.find(m => m.id === id);
-        expect(model, `${id} missing from the seed`).toBeDefined();
         expect(model?.contextWindow, id).toBe(272_000);
         expect(model?.maxContextWindow, id).toBe(872_000);
         expect(model?.reasoning, id).toBe(true);
