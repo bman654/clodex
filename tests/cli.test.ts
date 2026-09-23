@@ -309,6 +309,13 @@ describe('help text', () => {
     expect(patchHelpText()).toContain('executes trusted JavaScript');
   });
 
+  it('marks direct provider/model launches as endpoint mode', () => {
+    const help = claudeHelpText();
+    expect(help).toContain('--provider   Endpoint mode only');
+    expect(help).toContain('--model      Endpoint mode only');
+    expect(help).toContain('clodex claude --endpoint --provider openai-oauth --model gpt-6-sol');
+  });
+
   it('no longer mentions the removed --http-proxy alias', () => {
     for (const help of helps) {
       expect(help).not.toContain('--http-proxy');

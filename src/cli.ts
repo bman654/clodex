@@ -460,8 +460,10 @@ ${pc.bold('Options:')}
   --trace      Write debug logs to ~/.clodex/logs/ and show errors on exit
   --fast       Request Codex fast mode (service_tier=priority) on ChatGPT-OAuth models
                (equivalent to CLODEX_SERVICE_TIER=fast; warns if the SDK omits it)
-  --provider   Boot provider id (skip wizard when paired with --model or in print mode)
-  --model      Boot model id (skip wizard when paired with --provider or in print mode)
+  --provider   Endpoint mode only: boot provider id (skip wizard when paired with
+               --model or in print mode)
+  --model      Endpoint mode only: boot model id (skip wizard when paired with
+               --provider or in print mode)
   --context    <model=stop> use a different share of a model's window for this
                launch only (standard, max, default, or a token count). Nothing is
                saved. It reaches Claude Code through the exported catalog, so a
@@ -502,7 +504,7 @@ ${pc.bold('Examples:')}
   clodex claude --trace --resume abc-123
   clodex claude --endpoint
   clodex claude --endpoint --save-mode
-  clodex claude --provider openai-oauth --model gpt-6-sol
+  clodex claude --endpoint --provider openai-oauth --model gpt-6-sol
   clodex claude -- --print "hello"
   clodex claude -- --dangerously-skip-permissions`;
 }
