@@ -12,7 +12,8 @@ describe('Mach-O signing with a failing codesign process', () => {
     ['verify', '#!/bin/sh\ncase "$1" in --verify) echo "codesign failure detail" >&2; exit 42;; esac\nexit 0\n'],
   ])('rejects the candidate when %s exits non-zero', (_stage, script) => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-codesign-process-'));
-    const binary = join(dir, 'claude');
+    const binary = join(dir, 'private-candidate');
+    const installPath = join(dir, 'claude');
     const codesign = join(dir, 'codesign');
     const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
     const originalPath = process.env.PATH;
@@ -23,7 +24,17 @@ describe('Mach-O signing with a failing codesign process', () => {
       process.env.PATH = dir + delimiter + (originalPath ?? '');
       Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
 
-      expect(() => signAndVerifyMachOCandidate(binary)).toThrow(/codesign failure detail/);
+      let failure: unknown;
+      try {
+        signAndVerifyMachOCandidate(binary, installPath);
+      } catch (error) {
+        failure = error;
+      }
+      expect(failure).toBeInstanceOf(Error);
+      expect((failure as Error).message).toBe(
+        `Mach-O signing or verification failed for ${installPath}: codesign failure detail. `
+        + 'Claude Code was left unchanged.',
+      );
     } finally {
       Object.defineProperty(process, 'platform', originalPlatform);
       if (originalPath === undefined) delete process.env.PATH;

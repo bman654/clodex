@@ -23,7 +23,9 @@ export function signAndVerifyMachOCandidate(path: string, installPath: string = 
     execFileSync('codesign', ['-s', '-', '-f', path], { stdio: 'pipe' });
     execFileSync('codesign', ['--verify', '--strict', path], { stdio: 'pipe' });
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
+    const stderr = (error as { stderr?: Buffer | string } | null)?.stderr;
+    const detail = String(stderr ?? '').trim()
+      || (error instanceof Error ? error.message.trimEnd() : String(error).trimEnd());
     throw new Error(
       `Mach-O signing or verification failed for ${installPath}: ${detail}. `
       + 'Claude Code was left unchanged.',
