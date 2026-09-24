@@ -307,7 +307,7 @@ listener's next CONNECT uses a marked agent and terminates it. Inbound marker va
 before forwarding to the real upstream, including raw Anthropic requests and upgrades. The plain
 HTTP and intercepted TLS refusal sites are defence-in-depth for manually supplied markers, not
 reachable loops from clodex's own CONNECT headers. With `NODE_USE_ENV_PROXY=1`, forwarded plain-HTTP
-requests are not protected from proxy loops by the marker (tracked as a follow-up issue). A middle
+requests can still loop even when `HTTP_PROXY` uses literal `127.0.0.1` (see #285). A middle
 proxy that removes the header, or that originates its own CONNECT instead of relaying ours
 (including another clodex), defeats this guard;
 only literal spellings remain protected in that case. The passthrough agent checks once at bind
