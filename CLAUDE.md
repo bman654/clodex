@@ -178,9 +178,10 @@ These bite from outside the subsystem that owns them, so they live here rather t
   continuation and translation logic took extensive real-world testing. Surgical changes only.
 - **`~/.claude/settings.json` is never touched by clodex.** Launch config is env-var-only (plus
   `--model`), child process only.
-- **tweakcc 4.3.3 uses node-lief 1.3.2, whose runtime loaders import their native prebuilds by
-  path.** The old direct `node-gyp-build` dependency was required for node-lief 1.3.1, but is
-  no longer needed; recheck the loader before changing the dependency graph. See
+- **tweakcc 4.3.3 resolves node-lief 1.3.2 here; its loaders import prebuilds by path.** The old
+  direct `node-gyp-build` dependency is no longer needed. npm users have no lockfile: a new
+  node-lief 1.x resolved at install time can repeat the 1.3.1 fault without a clodex change. If a
+  fresh install reports `Could not extract JS`, check node-lief's loader first. See
   `.claude/docs/patcher.md`.
 - **clodex always installs package undici's global fetch dispatcher with HTTP/2 disabled**
   (`installOutboundDispatcher()` at the top of `main()`), proxy env or not. Node 26's bundled

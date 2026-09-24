@@ -138,10 +138,11 @@ what changed in 2.1.242), and tweakcc finds it **by name**:
 
 (2.1.228 was the last release recognized by the earlier tweakcc 4.3.0, and 2.1.230 was
 never published for any platform package, so 2.1.229 is where the rename actually landed.
-Confirmed on linux-x64 and darwin-arm64.) 2.1.229+ formerly failed extraction with "Failed to
-extract JavaScript from native installation". tweakcc 4.3.3 recognizes `/cli` directly, so clodex
-no longer renames the entry module before reading or writing the binary. Future unknown names have
-no shim fallback; tweakcc must add recognition upstream.
+Confirmed on linux-x64 and darwin-arm64.) Under tweakcc 4.3.0–4.3.2 without clodex's former
+entry-module rename, 2.1.229+ failed extraction with "Failed to extract JavaScript from native
+installation". clodex's rename kept those releases patchable. tweakcc 4.3.3 recognizes `/cli`
+directly, so clodex no longer renames the entry module before reading or writing the binary. Future
+unknown names have no shim fallback; tweakcc must add recognition upstream.
 
 Two things that are easy to assume wrongly about the blob:
 

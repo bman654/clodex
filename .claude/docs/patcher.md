@@ -24,8 +24,13 @@ surface; re-verify when bumping the pin. tweakcc 4.3.3 declares `node-lief: ^1.3
 resolves 1.3.2 only. Both its CommonJS loader and ESM loader import the platform prebuild by path;
 neither requires `node-gyp-build`. The direct `node-gyp-build` dependency was necessary for older
 node-lief releases (1.3.1 still required it at runtime after demoting it to a devDependency) but is
-now removed. Reinspect the package loader and the full lock graph before reintroducing or removing
-this dependency on a future tweakcc upgrade.
+now removed. npm users do not install from this lockfile: tweakcc's `^1.3.2` range resolves a new
+node-lief 1.x at user install time, even without a clodex release. A repeat of the 1.3.1 packaging
+fault would be swallowed by tweakcc's lazy loader and surface as
+`Patch failed: Could not extract JS from native binary`, the same generic error as an unknown entry
+name. For a failing fresh install, run `node -e "require('node-lief')"` inside the installed package;
+if that throws `Cannot find module 'node-gyp-build'`, re-add `node-gyp-build` as an exact-pinned
+direct dependency. Recheck the loader and lock graph on every tweakcc bump too.
 
 The built-ins bake favorites + aliases into the binary: model validation, `/model` listing, alias
 resolution, context windows via a `/*ccpatch:ctx*/`-marked map, per-model effort

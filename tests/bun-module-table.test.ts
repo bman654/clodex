@@ -105,7 +105,7 @@ describe('Bun module table reader', () => {
       });
     });
 
-    it('rejects a module table extending past the blob', () => {
+    it('returns null when the module table length runs past the file', () => {
       withBinary(corrupted((blob, at) => blob.writeUInt32LE(0xffff, at + 12)), path => {
         expect(readBunModuleTable(path)).toBeNull();
       });
@@ -117,7 +117,7 @@ describe('Bun module table reader', () => {
       });
     });
 
-    it('rejects a blob start before the file start', () => {
+    it('returns null when the blob start offset is out of range', () => {
       withBinary(corrupted((blob, at) => blob.writeBigUInt64LE(1n << 40n, at)), path => {
         expect(readBunModuleTable(path)).toBeNull();
       });

@@ -853,9 +853,9 @@ nothing and ran no check. The other matrix modes name the strongest additional t
              resolves the version by EXECUTING the binary, so a foreign binary can only go through
              the real command this way.
   probe      no execution tier was available; the universal probe is the whole result.
-A failure confined to one executable format (ELF, Mach-O, PE) points at src/bun-module-table.ts, src/patch-signature.ts, or
-tweakcc's repack, not at the patch anchors. A patch-site failure on every checked platform points at
-the anchors in src/patch-transforms.ts.
+A failure confined to one executable format (ELF, Mach-O, PE) points at src/bun-module-table.ts,
+src/patch-signature.ts, or tweakcc's repack, not at the patch anchors. A patch-site failure on every
+checked platform points at the anchors in src/patch-transforms.ts.
 
 A \`compact-prompt-markers\` failure is NOT a patch failure: no patch site is broken. On a complete
 bundle extraction it means Claude Code reworded its compaction prompt, so clodex's text-only guard
