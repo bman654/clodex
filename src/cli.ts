@@ -81,6 +81,7 @@ import {
 import { runPatchCommand, runLaunchPatchCheck } from './patcher.js';
 import { installOutboundDispatcher } from './outbound-proxy.js';
 import { runInstallVscodeLauncherCommand } from './vscode-launcher.js';
+import { CHECKED_EDITORS_DESCRIPTION } from './editor-extension-version.js';
 const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--trace', '--fast', '--endpoint', '--proxy', '--save-mode', '--help', '-h', '--version', '-v']);
 const CLODEX_LAUNCH_FLAGS = new Set(['--provider', '--model', '--context']);
 
@@ -670,7 +671,13 @@ ${pc.bold('Behavior:')}
   Local patches execute after the built-ins as an all-or-none set. Enabling
   them executes trusted JavaScript from local-patches.mjs with your full user
   permissions. Local failures are reported but never block the built-ins.
-  Run clodex patch again after every claude update.`;
+  Run clodex patch again after every claude update.
+
+  An editor launching Claude Code through clodex-claude runs this patched
+  install only when its Claude Code extension is the same build. When an
+  installed extension is a different version, clodex patch warns and prints the
+  commands that align them. Editors checked:
+    ${CHECKED_EDITORS_DESCRIPTION}`;
 }
 
 export function installVscodeLauncherHelpText(): string {
@@ -701,6 +708,8 @@ ${pc.bold('Behavior:')}
   As on macOS and Linux, clodex-claude then runs your clodex-patched install in
   place of the bundled claude.exe when the two builds match, so clodex models
   appear in the extension's model picker; re-run clodex patch after updates.
+  Like clodex patch, it warns when an installed Claude Code extension is a
+  different version from the Claude Code clodex last patched.
 
   The paths to node.exe and to the clodex install are compiled in: re-run this
   command after switching Node versions or moving the clodex install.

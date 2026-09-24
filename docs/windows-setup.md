@@ -195,6 +195,27 @@ the CLI update separately), the picker falls back to the bundled list and the **
 output channel shows a `From claude: clodex-claude: running ...` line; update the CLI to the
 extension's version and re-run `clodex patch`.
 
+You do not have to find that line yourself: `clodex patch` and `clodex install-vscode-launcher`
+read the installed extension's version and, when it differs from the Claude Code clodex patched,
+say so with the commands to run, for example:
+
+```
+VS Code's Claude Code extension is 2.1.276, but the Claude Code clodex patched is 2.1.267 (C:\Users\<you>\AppData\Roaming\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe).
+When VS Code launches Claude Code through clodex-claude (claudeCode.claudeProcessWrapper), its chats run the extension's own bundled 2.1.276 binary and clodex models will not appear in its model picker.
+To fix it, run:
+  npm install -g @anthropic-ai/claude-code@2.1.276
+  clodex patch
+```
+
+The commands are printed on separate lines because Windows PowerShell 5.1 does not accept `&&`.
+The editors checked are VS Code, VS Code Insiders, the VS Code remote server, VSCodium, Cursor and
+Windsurf, each in its default extensions directory under `%USERPROFILE%` (`.vscode\extensions`,
+`.vscode-insiders\extensions`, and so on); an editor started with `--extensions-dir`, a portable
+install, or a non-default VS Code profile is not checked. The installed version comes from the
+directory's `extensions.json` (older versions VS Code has not cleaned up yet are ignored). The
+check only reads that directory, prints nothing when no editor has the extension, and compares
+version numbers only — equal versions with different bytes still fall back, as described above.
+
 If Claude fails to start, remove the `claudeCode.claudeProcessWrapper` line, save, and reload — that
 returns you to the step 1 setup. The **Claude VSCode** output channel (View → Output) shows the
 launcher's and wrapper's messages, prefixed `From claude:`.
@@ -210,10 +231,11 @@ These were read from the extension's own code rather than observed in a running 
 
 - **A post-update activation health/telemetry probe is skipped.** This is not the VS Code
   marketplace updater and does not show that extension auto-updates stop. The extension can still
-  update separately from the CLI, so keep the CLI you patch aligned with the extension you run:
+  update separately from the CLI, so keep the CLI you patch aligned with the extension you run —
+  `clodex patch` prints the exact version to install when they differ:
 
   ```powershell
-  npm install -g @anthropic-ai/claude-code@latest
+  npm install -g @anthropic-ai/claude-code@<extension version>
   clodex patch
   ```
 
@@ -260,8 +282,9 @@ printed, with backslashes escaped in JSON.
 **Models route but the picker is empty** — with the step 1 settings alone that is expected: the
 extension launches its own bundled binary. With the launcher, open View → Output → **Claude VSCode**
 and look for a `From claude: clodex-claude: running ...` line: it names the reason (usually the
-extension and the installed CLI are different Claude Code builds). Align them —
-`npm install -g @anthropic-ai/claude-code@<extension version>` — and re-run `clodex patch`. No
+extension and the installed CLI are different Claude Code builds). Run `clodex patch`: if the
+versions differ it says so and prints the commands to align them —
+`npm install -g @anthropic-ai/claude-code@<extension version>`, then `clodex patch` again. No
 line at all is not proof either way: a missing or unreadable patch manifest is deliberately silent.
 Run `clodex patch`, and check that `CLODEX_HOME`, if you set it, is also set under
 `claudeCode.environmentVariables` so the wrapper reads the same manifest.

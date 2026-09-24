@@ -69,6 +69,7 @@ import { projectProviderCachedModels } from './registry/materialize.js';
 import { isRetainedOpenCodeGoProvider } from './registry/resolve-template.js';
 import { findModelsDevModel } from './registry/models-dev.js';
 import { findClaudeBinary, getClaudeVersionForBinary } from './launch.js';
+import { claudeExtensionDriftWarnings } from './editor-extension-version.js';
 import { resolveThroughNpmShims } from './npm-shim.js';
 import {
   inspectClaudeNativeBinaryPlaceholder,
@@ -1408,6 +1409,11 @@ function runRestoreCommand(target: ClaudePatchTarget): number {
   return 0;
 }
 
+/** One loud warning per editor whose Claude Code extension differs from what was just patched. */
+function warnOnEditorExtensionDrift(binaryPath: string, version: string): void {
+  for (const warning of claudeExtensionDriftWarnings({ binaryPath, version })) p.log.warn(warning);
+}
+
 export async function runPatchCommand(opts: {
   restore?: boolean;
   trace?: boolean;
@@ -1469,6 +1475,9 @@ export async function runPatchCommand(opts: {
 
   if (state === 'current') {
     p.log.success(`claude ${version} is already patched with the current model config — nothing to do.`);
+    // The reporter's case in #257: the extension updated, the CLI did not, and this is the run
+    // that would otherwise say all is well.
+    warnOnEditorExtensionDrift(binaryPath, version);
     return 0;
   }
 
@@ -1520,6 +1529,7 @@ export async function runPatchCommand(opts: {
     if (!opts.trace) {
       for (const line of outcome.detailLines ?? []) p.log.info(pc.dim(line));
     }
+    warnOnEditorExtensionDrift(binaryPath, version);
     return 0;
   } finally {
     release();

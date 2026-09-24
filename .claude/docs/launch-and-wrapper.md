@@ -130,6 +130,25 @@ align the builds and re-run `clodex patch`; re-run it after favorites or patch c
 as well. Equal version labels are not enough because supported same-version distributions have
 shipped different bytes.
 
+The wrapper stays silent about that drift beyond its one output-channel line, by design: it runs on
+every spawn and must stay fast and fail-open. The loud warning lives in the two user-run commands
+instead (#257): `clodex patch` (after a successful patch and on the "already patched" no-op, which
+is the run a user makes after the extension self-updated) and `clodex install-vscode-launcher` (on
+every platform, against the manifest's `claudeVersion`/`binaryPath`; no manifest, no check).
+`src/editor-extension-version.ts` reads the installed version from each editor's default extensions
+directory under `os.homedir()` — VS Code, Insiders, `.vscode-server`, VSCodium, Cursor, Windsurf —
+preferring `extensions.json` (superseded version directories linger) and falling back to a numeric
+version sort of `anthropic.claude-code-<version>[-<platform>]` directories minus `.obsolete`. It
+only reads, prints nothing when no editor has the extension, and compares version labels only, so
+its silence is not proof of equal bytes. The fix command follows the patched install: a global
+npm install gets `npm install -g @anthropic-ai/claude-code@<v>` — decided by comparing the patched
+path against `npm root -g` (spawned once, only when a warning is printed; a shell on Windows for
+`npm.cmd`; any failure means the generic text), because a path-shape rule also matched Claude Code's
+npm-local `~/.claude/local/node_modules`, project `node_modules`, and other Node versions' roots,
+none of which `npm install -g` updates. The native installer (`.local/share/claude/versions/<v>`)
+gets `claude install <v>`; anything else gets a generic instruction naming the path. Every variant
+ends with `clodex patch` on its own line (Windows PowerShell 5.1 rejects `&&`).
+
 **The wrapper must `exec` into claude (`process.execve`), never spawn it as a child.** Claude Code
 starts each background pty host with `detached: true`, then delivers resizes to that process group
 via `process.kill(-process.pid, 'SIGWINCH')`. A wrapper that parents claude keeps the group-leader
