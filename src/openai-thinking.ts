@@ -56,8 +56,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * undefined is a legacy/provider signature. An invalid owned envelope yields no reasoning:
- * never mistake our metadata for provider ciphertext, including on a model switch.
+ * undefined means the signature is not ours — another provider's (Claude's, after a model
+ * switch) or a clodex <= 2.11.3 raw ciphertext; the caller must not send it to OpenAI (#274).
+ * An invalid owned envelope yields no reasoning: never mistake our metadata for provider
+ * ciphertext, including on a model switch.
  */
 export function restoreOpenAiThinking(
   text: string,

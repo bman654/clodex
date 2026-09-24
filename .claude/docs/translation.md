@@ -28,14 +28,28 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   change what goes back to OpenAI. This duplicates summary text in client requests and transcripts
   and retains any intermediate ciphertext the SDK exposes; only each item's final ciphertext goes
   upstream. The envelope itself is never sent upstream. No process-local registry or provider
-  ciphertext rewriting is involved. Legacy raw signatures remain readable. An unknown or malformed
-  envelope is omitted, never forwarded as ciphertext; switching a valid envelope to another
-  translated provider retains only the display text. Older clodex builds cannot decode these new
-  signatures and would forward the envelope as provider ciphertext, which can cause upstream errors.
+  ciphertext rewriting is involved. An unknown or malformed envelope is omitted, never forwarded as
+  ciphertext; switching a valid envelope to another translated provider retains only the display
+  text. Older clodex builds cannot decode these new signatures and would forward the envelope as
+  provider ciphertext, which can cause upstream errors.
   Resume such transcripts with an envelope-aware build rather than downgrading the bridge. This does not
   change non-streaming responses' existing omission of reasoning, or the transport's prohibition
   on replaying already-emitted model output. The guarantee covers SDK-visible summary text,
   grouping and encrypted content, not output-only fields the SDK omits (such as `status`).
+
+  **On `@ai-sdk/openai`, a thinking block whose signature is not a clodex envelope is dropped
+  whole** — text and signature. Claude Code (2.1.281; not 2.1.276), under a server-side flag, keeps
+  Claude's own signed thinking in the history when the user switches model (Opus then an OpenAI
+  model, or `opusplan`) — see `claude-code-internals.md`. OpenAI answers a request carrying that
+  signature as `encrypted_content` with 400 "could not be verified", and every later OpenAI turn in
+  the session failed (#274). Sending the text without the signature is not an
+  alternative: the SDK skips a reasoning part that has neither an item id nor encrypted content.
+  The discriminator is provenance clodex controls — its own envelope — not the ciphertext's
+  format, which neither provider documents. The cost: clodex <= 2.11.3 stored OpenAI's raw
+  ciphertext as the signature, and those old turns' hidden reasoning is no longer replayed. Visible
+  text and tool calls are unaffected, and a live WebSocket chain still continues (its
+  `omitted_reasoning` match). `@ai-sdk/openai-compatible` reads no `openai` part options, so a
+  foreign block's text still goes up as `reasoning_content` there and its signature never did.
 - **A tool schema's regexes are dropped when they hit a known Python incompatibility**, on every
   route but Anthropic-format ones (`src/tool-schema-sanitize.ts`). OpenAI rejects the same
   constructs python-jsonschema does — its 400 reads `'<pattern>' is not a 'regex'`, that library's
