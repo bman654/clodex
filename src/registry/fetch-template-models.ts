@@ -2,6 +2,7 @@
 
 import { TEST_TIMEOUT_MS } from '../constants.js';
 import { OPENCODE_GO_PROVIDER_ID } from '../data/opencode-go-models.js';
+import { openAiPricingMetadata } from '../data/openai-oauth-models.js';
 import { deriveBrand } from '../models.js';
 import { lookupKnownContextWindow } from '../context-window.js';
 import type { ProviderTemplate } from '../provider-templates.js';
@@ -151,6 +152,7 @@ function parseModelList(
       family,
       brand: deriveBrand(family),
       contextWindow,
+      ...(npm === '@ai-sdk/openai' ? openAiPricingMetadata(id) : {}),
       cost,
       isFree: isFreeStatus(freeStatus),
       freeStatus,
@@ -174,6 +176,9 @@ function materializeTemplateModel(
   const { id, upstreamModelId: normalizedUpstream } = normalizeGoogleModelId(model.id, npm);
   const family = model.family ?? (id.split(/[-/:]/)[0] ?? id);
   const freeStatus = model.freeStatus ?? classifyFreeStatus({ model });
+  const pricing = npm === '@ai-sdk/openai'
+    ? openAiPricingMetadata(model.upstreamModelId ?? id)
+    : {};
 
   return {
     ...model,
@@ -183,6 +188,8 @@ function materializeTemplateModel(
     family,
     brand: model.brand ?? deriveBrand(family),
     contextWindow: model.contextWindow ?? lookupKnownContextWindow(id),
+    pricingBoundary: model.pricingBoundary ?? pricing.pricingBoundary,
+    pricingBoundaryNote: model.pricingBoundaryNote ?? pricing.pricingBoundaryNote,
     isFree: model.isFree ?? isFreeStatus(freeStatus),
     freeStatus,
     modelFormat: model.modelFormat ?? modelFormatForNpm(npm),

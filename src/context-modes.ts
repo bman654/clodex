@@ -1,6 +1,7 @@
 // Context-window stops for models whose provider prices large prompts differently.
 // GPT-5.6 and GPT-6 bill prompts above 272,000 input tokens at higher rates for the
-// whole request, so the default stop sits under that line and the larger one is opt-in.
+// whole request. Codex catalogs reporting a 272,000-token default keep standard at
+// that line and make larger windows opt-in; API-key defaults can exceed the boundary.
 // The field shape mirrors the Codex model catalog.
 
 import { DEFAULT_CONTEXT_WINDOW } from './context-window.js';
@@ -129,7 +130,7 @@ export function pricingBoundaryWarning(
   return `${modelLabel}: a ${withThousands(resolved.effective)}-token window can grow past the `
     + `${withThousands(boundary)}-token pricing boundary.`
     + (note ? ` ${note}` : '')
-    + ' Use the standard stop to stay under it.';
+    + ' Choose a smaller context stop to reduce the chance of higher-rate requests.';
 }
 
 /** Message for a requested window that exceeded the model ceiling, else null. */
@@ -169,8 +170,8 @@ let sessionContextStops: Record<string, ContextStop> = Object.create(null);
 /**
  * Saved stops, primed once from preferences at process start. The registry layer
  * deliberately does not read configuration, so the value is handed to it rather
- * than fetched. An unprimed process resolves every model to `standard`, which is
- * the current behavior and the safe side of a pricing boundary.
+ * than fetched. An unprimed process resolves every model to `standard`, the default
+ * window, which may exceed a pricing boundary.
  */
 let savedContextStops: Record<string, unknown> | undefined;
 

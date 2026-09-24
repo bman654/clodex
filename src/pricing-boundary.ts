@@ -34,7 +34,7 @@ export function formatPricingBoundaryWarning(
   return `clodex: ${modelLabel} request counted ${withThousands(inputTokens)} input tokens, `
     + `above the ${withThousands(boundary)}-token pricing boundary. `
     + 'The provider prices the full request at a higher rate above this point. '
-    + 'Set this model to the standard context stop to stay under it.';
+    + 'Choose a smaller context stop to reduce the chance of higher-rate requests.';
 }
 
 /**
