@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { projectProviderCachedModels } from '../src/registry/materialize.js';
+import { materializeRegistry, projectProviderCachedModels } from '../src/registry/materialize.js';
 import { buildOpenAiOAuthModels } from '../src/data/openai-oauth-models.js';
-import type { RegistryProvider } from '../src/registry/types.js';
+import type { CachedModel, ProviderRegistry, RegistryProvider } from '../src/registry/types.js';
 
 /**
  * A catalog cached before the context-budget fields existed carries none of them.
@@ -241,5 +241,130 @@ describe('legacy OAuth cache overlay', () => {
     expect(sol?.contextWindow).toBe(272_000);
     expect(sol?.effectiveContextPercent).toBeUndefined();
     expect(sol?.maxContextWindow).toBeUndefined();
+  });
+});
+
+/**
+ * Rows for the Responses-Lite models written by a clodex that did not yet seed them.
+ * Before an id was seeded, a refresh that fell back to the general ChatGPT catalog wrote
+ * it through the unseeded branch, which carries no Codex-only `use_responses_lite` /
+ * `prefer_websockets` — true of all four ids. Without the flag clodex never sends the
+ * Responses-Lite headers and the backend refuses every request.
+ *
+ * The window differs by when the row was written. Before #259 the unseeded branch
+ * persisted an invented 200,000 default, so Astra / Daybreak rows from before their
+ * seeding, and Sol / Luna rows from before #259, carry an explicit 200,000. v2.16.0
+ * (after #259, before Sol / Luna were seeded in #266) had no GPT-6 heuristic, so it
+ * wrote gpt-6-sol / gpt-6-luna with NO window; today the 1,050,000 GPT-6 heuristic would
+ * clamp that to the 872,000 ceiling instead of the 272,000 standard window.
+ *
+ * The bare-row cases below pin the absent-field contract for every id, not what the
+ * historical producer emitted for each one; the legacy-window case pins the explicit
+ * 200,000 shape.
+ */
+const RESPONSES_LITE_IDS = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-daybreak-blue-latest'];
+
+function bareRow(id: string, extra: Partial<CachedModel> = {}): CachedModel {
+  return { id, name: id, upstreamModelId: id, modelFormat: 'openai', npm: '@ai-sdk/openai', ...extra };
+}
+
+function providerWithRows(models: CachedModel[]): RegistryProvider {
+  return providerWithLegacyCache({
+    modelsCache: { fetchedAt: '2026-09-01T00:00:00.000Z', models },
+  });
+}
+
+describe('Responses-Lite fields missing from an older cache', () => {
+  it.each(RESPONSES_LITE_IDS)('backfills the flags and standard window for %s', id => {
+    const model = projectProviderCachedModels(providerWithRows([bareRow(id)]))[0];
+    expect(model?.useResponsesLite).toBe(true);
+    expect(model?.preferWebSockets).toBe(true);
+    expect(model?.contextWindow).toBe(272_000);
+    expect(model?.maxContextWindow).toBe(872_000);
+  });
+
+  // What the user actually runs on: the launch-time model. Without the window
+  // backfill the heuristic 1,050,000 is clamped to the ceiling and reported as 872,000.
+  it('reports the 272,000 standard window and the header flag on the launch model', () => {
+    const registry = {
+      schemaVersion: 4,
+      providers: [providerWithRows(RESPONSES_LITE_IDS.map(id => bareRow(id)))],
+    } as unknown as ProviderRegistry;
+    const [local] = materializeRegistry(registry, () => 'oauth-token');
+    for (const id of RESPONSES_LITE_IDS) {
+      const model = local?.models.find(m => m.id === id);
+      expect(model?.contextWindow, id).toBe(272_000);
+      expect(model?.useResponsesLite, id).toBe(true);
+      expect(model?.preferWebSockets, id).toBe(true);
+    }
+  });
+
+  // The shape older clodex actually persisted for Astra / Daybreak (and for Sol / Luna
+  // before #259): an explicit legacy 200,000 window and no flags. The flags must be
+  // repaired; the window is left alone because the cache cannot tell an invented
+  // default from a catalog-reported value.
+  it('repairs the flags on a legacy row that carries an explicit 200,000 window', () => {
+    const rows = RESPONSES_LITE_IDS.map(id => bareRow(id, { contextWindow: 200_000 }));
+    const projected = projectProviderCachedModels(providerWithRows(rows));
+    const registry = {
+      schemaVersion: 4,
+      providers: [providerWithRows(rows)],
+    } as unknown as ProviderRegistry;
+    const [local] = materializeRegistry(registry, () => 'oauth-token');
+    for (const id of RESPONSES_LITE_IDS) {
+      const cached = projected.find(m => m.id === id);
+      expect(cached?.useResponsesLite, id).toBe(true);
+      expect(cached?.preferWebSockets, id).toBe(true);
+      expect(cached?.contextWindow, id).toBe(200_000);
+      const model = local?.models.find(m => m.id === id);
+      expect(model?.useResponsesLite, id).toBe(true);
+      expect(model?.preferWebSockets, id).toBe(true);
+      expect(model?.contextWindow, id).toBe(200_000);
+    }
+  });
+
+  // The catalog does report these fields, so whatever it sent is a provider answer.
+  // `false` must survive: a truthiness fallback would silently turn it back on.
+  it('keeps an explicit false flag and an explicit window from the catalog', () => {
+    const row = bareRow('gpt-6-sol', {
+      useResponsesLite: false,
+      preferWebSockets: false,
+      contextWindow: 400_000,
+    });
+    const model = projectProviderCachedModels(providerWithRows([row]))[0];
+    expect(model?.useResponsesLite).toBe(false);
+    expect(model?.preferWebSockets).toBe(false);
+    expect(model?.contextWindow).toBe(400_000);
+  });
+
+  // Under-scope: seeds that carry no flags must not grow one, and a model the seed does
+  // not know keeps exactly what discovery wrote.
+  it('invents nothing for a seed without the flags or an unseeded model', () => {
+    const models = projectProviderCachedModels(providerWithRows([
+      bareRow('gpt-5.6-sol'),
+      bareRow('gpt-6-unreleased'),
+    ]));
+    const sol = models.find(m => m.id === 'gpt-5.6-sol');
+    expect(sol?.useResponsesLite).toBeUndefined();
+    expect(sol?.preferWebSockets).toBeUndefined();
+    expect(sol?.contextWindow).toBe(272_000);
+    const unseeded = models.find(m => m.id === 'gpt-6-unreleased');
+    expect(unseeded?.useResponsesLite).toBeUndefined();
+    expect(unseeded?.preferWebSockets).toBeUndefined();
+    expect(unseeded?.contextWindow).toBeUndefined();
+  });
+
+  // Only the ChatGPT OAuth path is Codex. An API-key provider must not be sent the
+  // Codex-internal Responses-Lite headers because its model id matches a seed.
+  it('does not backfill for a non-OAuth provider', () => {
+    const provider = providerWithLegacyCache({
+      id: 'openai',
+      authType: 'api',
+      authRef: 'keyring:provider:openai',
+      modelsCache: { fetchedAt: '2026-09-01T00:00:00.000Z', models: [bareRow('gpt-6-sol')] },
+    });
+    const [sol] = projectProviderCachedModels(provider);
+    expect(sol?.useResponsesLite).toBeUndefined();
+    expect(sol?.contextWindow).toBeUndefined();
   });
 });
