@@ -255,12 +255,13 @@ describe('legacy OAuth cache overlay', () => {
 });
 
 /**
- * Rows for the Responses-Lite models written by a clodex that did not yet seed them.
- * Before an id was seeded, a refresh that fell back to the general ChatGPT catalog wrote
- * it through the unseeded branch, which carries no Codex-only `use_responses_lite` /
- * `prefer_websockets`. Without use_responses_lite clodex never sends the
- * Responses-Lite headers; prefer_websockets is recorded for catalog parity (all
- * OAuth Responses requests already use WebSocket transport).
+ * Flagless rows can have different origins. GPT-5.6 Sol and Terra were already seeded,
+ * so their rows did not come from the unseeded branch: Tier-2 can persist `entry ?? seed`
+ * with both flags undefined, and Tier-3 can persist flagless rows too. Older GPT-6 rows
+ * written before their ids were seeded came through the unseeded branch, which carries no
+ * Codex-only `use_responses_lite` / `prefer_websockets`. Without use_responses_lite clodex
+ * never sends the Responses-Lite headers; prefer_websockets is recorded for catalog parity
+ * (all OAuth Responses requests already use WebSocket transport).
  *
  * The window differs by when the row was written. Before #259 the unseeded branch
  * persisted an invented 200,000 default, so GPT-6 Astra / Daybreak rows from before
