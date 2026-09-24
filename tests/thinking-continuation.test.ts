@@ -379,8 +379,11 @@ describe('OpenAI thinking round-trip through the WebSocket chain', () => {
     });
     await expect(first.finished).resolves.toBeUndefined();
 
-    // A session resumed from an older clodex: the thinking block carries the raw
+    // A session resumed from clodex <= 2.11.3: the thinking block carries the raw
     // encrypted blob as its signature, with no item or summary structure at all.
+    // Nothing distinguishes that from another provider's signature, so it is not
+    // replayed (#274); the chain still continues because the reasoning it would
+    // have echoed is already held upstream under previous_response_id.
     const legacyAssistant = {
       role: 'assistant',
       content: [
@@ -395,11 +398,12 @@ describe('OpenAI thinking round-trip through the WebSocket chain', () => {
     ]);
 
     expect(client.headDecisions.at(-1)).toMatchObject({
-      decision: 'continuation', continuationMatchMode: 'exact',
+      decision: 'continuation', continuationMatchMode: 'omitted_reasoning',
     });
     expect(second.socket).toBe(first.socket);
     expect(second.payload.previous_response_id).toBe('resp_legacy');
     expect(second.payload.input).toEqual([userItem('next')]);
+    expect(JSON.stringify(second.payload)).not.toContain('enc_legacy');
 
     completeResponse(second.socket, {
       responseId: 'resp_legacy_2', reasoning: [{ itemId: 'rs_2', encrypted: 'enc_l2', summaries: ['done'] }], text: 'ok',
@@ -455,5 +459,152 @@ describe('OpenAI thinking round-trip through the WebSocket chain', () => {
       responseId: 'resp_mine_2', reasoning: [{ itemId: 'rs_2', encrypted: 'enc_m2', summaries: ['done'] }], text: 'ok',
     });
     await expect(resumed.finished).resolves.toBeUndefined();
+  });
+});
+
+// ── #274: Claude's thinking in the history of an OpenAI turn ─────────────────
+// Claude Code keeps every earlier assistant turn's thinking block, with its
+// signature, when the user switches model. A Claude signature is protobuf bytes
+// in base64 (the report shows `CAQS...AQ==`); OpenAI answers any request that
+// carries one as encrypted reasoning with 400 "could not be verified".
+const CLAUDE_SIGNATURE = Buffer.from([
+  0x08, 0x04, 0x12, 0xa0, 0x03, ...Array.from({ length: 420 }, (_, i) => (i * 37 + 11) & 0xff),
+]).toString('base64');
+const CLAUDE_THINKING = 'The user asks whether 1000003 is prime. Trial division up to 1000...';
+
+const claudeTurn = (...rest: Record<string, any>[]) => ({
+  role: 'assistant',
+  content: [{ type: 'thinking', thinking: CLAUDE_THINKING, signature: CLAUDE_SIGNATURE }, ...rest],
+});
+const userText = (text: string) => ({ role: 'user', content: [{ type: 'text', text }] });
+
+function expectNoClaudeReasoning(payload: Record<string, any>): void {
+  const wire = JSON.stringify(payload);
+  expect(wire).not.toContain(CLAUDE_SIGNATURE);
+  expect(wire).not.toContain(CLAUDE_THINKING);
+  expect((payload.input as Array<{ type?: string }>).filter(item => item.type === 'reasoning'))
+    .toEqual([]);
+}
+
+describe('Claude thinking in an OpenAI turn (#274)', () => {
+  beforeEach(() => {
+    resetResponsesWebSocketConnectionsForTests();
+    resetReasoningGapWarningsForTests();
+    resetToolArgumentGapWarningsForTests();
+    fakeSockets.length = 0;
+    sentFrames.length = 0;
+  });
+
+  it('leaves a Claude turn\'s signed thinking out of the first OpenAI request', async () => {
+    const client = createClient({ accountId: 'acct-claude-first' });
+    const turn = await startTurn(client.provider, [
+      userText('Is 1000003 prime?'),
+      claudeTurn({ type: 'text', text: 'yes' }),
+      userText('Reply with just OK.'),
+    ]);
+
+    expect(turn.payload.input).toEqual([
+      userItem('Is 1000003 prime?'),
+      assistantItem('yes'),
+      userItem('Reply with just OK.'),
+    ]);
+    expectNoClaudeReasoning(turn.payload);
+
+    completeResponse(turn.socket, {
+      responseId: 'resp_after_claude', reasoning: [{ itemId: 'rs_1', encrypted: 'enc_1', summaries: ['ok'] }], text: 'OK',
+    });
+    await expect(turn.finished).resolves.toBeUndefined();
+  });
+
+  it('hands a Claude tool call to OpenAI mid-loop without Claude\'s reasoning', async () => {
+    // opusplan: Opus thinks and calls a tool, the OpenAI model answers the result.
+    const client = createClient({ accountId: 'acct-claude-tool' });
+    const turn = await startTurn(client.provider, [
+      userText('list the files'),
+      claudeTurn({ type: 'tool_use', id: 'toolu_01AbCdEf', name: 'Bash', input: { command: 'ls' } }),
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_01AbCdEf', content: 'a.txt' }] },
+    ]);
+
+    expect(turn.payload.input.map((item: { type?: string; role?: string }) => item.type ?? item.role))
+      .toEqual(['user', 'function_call', 'function_call_output']);
+    expect(turn.payload.input[1]).toMatchObject({ call_id: 'toolu_01AbCdEf', name: 'Bash' });
+    expectNoClaudeReasoning(turn.payload);
+
+    completeResponse(turn.socket, {
+      responseId: 'resp_tool', reasoning: [{ itemId: 'rs_1', encrypted: 'enc_1', summaries: ['ok'] }], text: 'a.txt',
+    });
+    await expect(turn.finished).resolves.toBeUndefined();
+  });
+
+  it('continues the OpenAI chain across a Claude turn and keeps OpenAI\'s own reasoning', async () => {
+    const client = createClient({ accountId: 'acct-openai-claude-openai' });
+    const first = await startTurn(client.provider, [userText('go')]);
+    completeResponse(first.socket, {
+      responseId: 'resp_openai_1',
+      reasoning: [{ itemId: 'rs_1', encrypted: 'enc_one', summaries: THREE }],
+      text: 'answer',
+    });
+    await expect(first.finished).resolves.toBeUndefined();
+    const openAiTurn = assembleAssistantMessage(first.sse.text);
+
+    const history = [
+      userText('go'), openAiTurn,
+      userText('now you, Claude'), claudeTurn({ type: 'text', text: 'claude answer' }),
+      userText('back to OpenAI'),
+    ];
+    const third = await startTurn(client.provider, history);
+
+    // OpenAI's own reasoning matched exactly, so the chain continues and only
+    // the turns after it cross the wire — with Claude's reasoning left out.
+    expect(client.headDecisions.at(-1)).toMatchObject({
+      decision: 'continuation', continuationMatchMode: 'exact',
+    });
+    expect(third.socket).toBe(first.socket);
+    expect(third.payload.previous_response_id).toBe('resp_openai_1');
+    expect(third.payload.input).toEqual([
+      userItem('now you, Claude'), assistantItem('claude answer'), userItem('back to OpenAI'),
+    ]);
+    expectNoClaudeReasoning(third.payload);
+
+    completeResponse(third.socket, {
+      responseId: 'resp_openai_2', reasoning: [{ itemId: 'rs_2', encrypted: 'enc_two', summaries: ['done'] }], text: 'ok',
+    });
+    await expect(third.finished).resolves.toBeUndefined();
+  });
+
+  it('resends OpenAI\'s own reasoning, but not Claude\'s, when the chain is gone', async () => {
+    let now = 5_000;
+    const client = createClient({ accountId: 'acct-full-context', idleTtlMs: 100, now: () => now });
+    const first = await startTurn(client.provider, [userText('go')]);
+    completeResponse(first.socket, {
+      responseId: 'resp_full_1',
+      reasoning: [{ itemId: 'rs_1', encrypted: 'enc_one', summaries: THREE }],
+      text: 'answer',
+    });
+    await expect(first.finished).resolves.toBeUndefined();
+    const openAiTurn = assembleAssistantMessage(first.sse.text);
+
+    now += 101;
+    const third = await startTurn(client.provider, [
+      userText('go'), openAiTurn,
+      userText('now you, Claude'), claudeTurn({ type: 'text', text: 'claude answer' }),
+      userText('back to OpenAI'),
+    ]);
+
+    expect(third.payload.previous_response_id).toBeUndefined();
+    expect(third.payload.input).toEqual([
+      userItem('go'),
+      reasoningItem('rs_1', 'enc_one', THREE),
+      assistantItem('answer'),
+      userItem('now you, Claude'),
+      assistantItem('claude answer'),
+      userItem('back to OpenAI'),
+    ]);
+    expect(JSON.stringify(third.payload)).not.toContain(CLAUDE_SIGNATURE);
+
+    completeResponse(third.socket, {
+      responseId: 'resp_full_2', reasoning: [{ itemId: 'rs_2', encrypted: 'enc_two', summaries: ['done'] }], text: 'ok',
+    });
+    await expect(third.finished).resolves.toBeUndefined();
   });
 });

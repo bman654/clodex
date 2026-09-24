@@ -160,10 +160,13 @@ describe('OpenAI thinking round-trip metadata', () => {
     }
   });
 
-  it('retains legacy raw OpenAI signatures and independent non-OpenAI thinking blocks', async () => {
-    expect(echo([{ type: 'thinking', thinking: 'Legacy summary', signature: 'legacy-cipher' }])).toEqual([{
-      role: 'assistant', content: [{ type: 'reasoning', text: 'Legacy summary', providerOptions: { openai: { reasoningEncryptedContent: 'legacy-cipher' } } }],
-    }]);
+  it('never replays a signature clodex did not wrap, and keeps independent non-OpenAI blocks', async () => {
+    // A pre-envelope clodex transcript's raw ciphertext is indistinguishable from
+    // another provider's signature, which OpenAI rejects for the whole request.
+    expect(echo([
+      { type: 'thinking', thinking: 'Legacy summary', signature: 'legacy-cipher' },
+      { type: 'text', text: 'answer' },
+    ] as never)).toEqual([{ role: 'assistant', content: [{ type: 'text', text: 'answer' }] }]);
     const blocks = await display([
       { type: 'reasoning-start', id: 'a' }, delta('a', 'Google one'),
       { type: 'reasoning-end', id: 'a', providerMetadata: { google: { thoughtSignature: 'google-one' } } },

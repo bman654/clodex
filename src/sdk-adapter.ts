@@ -331,16 +331,15 @@ function thinkingToSdkPart(
   block: AnthropicBlock,
   npm: string,
 ): Record<string, unknown> | null {
-  const text = block.thinking ?? '';
-  if (npm === '@ai-sdk/openai' && !block.signature && !text.trim()) return null;
+  // OpenAI reasoning clodex produced is restored from its own envelope before this
+  // point. Anything left is not provably OpenAI's: sent as encrypted content, a
+  // Claude signature fails the whole request (#274), and without it the SDK skips
+  // the part anyway. The cost is a clodex <= 2.11.3 transcript's raw ciphertext.
+  if (npm === '@ai-sdk/openai') return null;
 
-  const part: Record<string, unknown> = { type: 'reasoning', text };
-  if (block.signature) {
-    if (npm === '@ai-sdk/google') {
-      part.providerOptions = { google: { thoughtSignature: block.signature } };
-    } else if (npm === '@ai-sdk/openai' || npm === '@ai-sdk/openai-compatible') {
-      part.providerOptions = { openai: { reasoningEncryptedContent: block.signature } };
-    }
+  const part: Record<string, unknown> = { type: 'reasoning', text: block.thinking ?? '' };
+  if (block.signature && npm === '@ai-sdk/google') {
+    part.providerOptions = { google: { thoughtSignature: block.signature } };
   }
   return part;
 }
