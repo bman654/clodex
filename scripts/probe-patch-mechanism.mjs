@@ -61,6 +61,7 @@ import path from 'node:path';
 import {
   listBunModuleNames,
   readBunModuleTable,
+  tweakccRecognizesModuleName,
 } from '../src/bun-module-table.ts';
 import { signAndVerifyMachOCandidate } from '../src/patch-signature.ts';
 // bun-compiled-pointer.ts imports nothing relative either, so a static import is safe here.
@@ -291,6 +292,12 @@ try {
   // Reading the candidate must never alter the pristine bytes.
   const pristineModules = pristineTable.names;
   info.entryModuleName = pristineModules[pristineTable.entryPointId];
+  const entryRecognized = pristineModules.some(tweakccRecognizesModuleName);
+  record('entry-recognized', entryRecognized,
+    entryRecognized
+      ? `tweakcc recognizes a module in this build (entry ${JSON.stringify(info.entryModuleName)})`
+      : `no module is recognized by tweakcc (entry ${JSON.stringify(info.entryModuleName)}); update clodex`);
+  if (!entryRecognized) throw new Error('nothing further can be probed');
   const installation = await tryDetectInstallation({ path: scratch });
   record(
     'tweakcc-detects',

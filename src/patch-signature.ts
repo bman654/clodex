@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { closeSync, openSync, readSync } from 'node:fs';
 
 /** Only native Mach-O binaries on macOS require a signature; npm, ELF and PE do not. */
-export function signAndVerifyMachOCandidate(path: string): void {
+export function signAndVerifyMachOCandidate(path: string, installPath: string = path): void {
   if (process.platform !== 'darwin') return;
   const fd = openSync(path, 'r');
   let machO = false;
@@ -24,6 +24,9 @@ export function signAndVerifyMachOCandidate(path: string): void {
     execFileSync('codesign', ['--verify', '--strict', path], { stdio: 'pipe' });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
-    throw new Error(`Mach-O signing or verification failed for ${path}: ${detail}`);
+    throw new Error(
+      `Mach-O signing or verification failed for ${installPath}: ${detail}. `
+      + 'Claude Code was left unchanged.',
+    );
   }
 }

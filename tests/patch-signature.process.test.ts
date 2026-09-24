@@ -8,8 +8,8 @@ import { signAndVerifyMachOCandidate } from '../src/patch-signature.js';
 // failure as a warning, but the patcher must refuse the candidate on either failed command.
 describe('Mach-O signing with a failing codesign process', () => {
   it.skipIf(process.platform === 'win32').each([
-    ['sign', '#!/bin/sh\nexit 42\n'],
-    ['verify', '#!/bin/sh\ncase "$1" in --verify) exit 42;; esac\nexit 0\n'],
+    ['sign', '#!/bin/sh\necho "codesign failure detail" >&2\nexit 42\n'],
+    ['verify', '#!/bin/sh\ncase "$1" in --verify) echo "codesign failure detail" >&2; exit 42;; esac\nexit 0\n'],
   ])('rejects the candidate when %s exits non-zero', (_stage, script) => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-codesign-process-'));
     const binary = join(dir, 'claude');
@@ -23,7 +23,7 @@ describe('Mach-O signing with a failing codesign process', () => {
       process.env.PATH = dir + delimiter + (originalPath ?? '');
       Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
 
-      expect(() => signAndVerifyMachOCandidate(binary)).toThrow(/Mach-O signing or verification failed/);
+      expect(() => signAndVerifyMachOCandidate(binary)).toThrow(/codesign failure detail/);
     } finally {
       Object.defineProperty(process, 'platform', originalPlatform);
       if (originalPath === undefined) delete process.env.PATH;

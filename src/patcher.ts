@@ -82,6 +82,7 @@ import {
 } from './bun-compiled-pointer.js';
 import {
   applyBundleWritePlan,
+  assertRecognizedEntryModule,
   planBundleWrite,
   readClaudeBundle,
   splitBundleSource,
@@ -885,6 +886,9 @@ export async function applyPatch(
       copyFileSync(from, candidatePath);
       // Keep the seed byte-identical to `from`: the snapshot path publishes these exact bytes
       // as a content-addressed pristine backup. tweakcc 4.3.3 reads /cli without renaming it.
+      // A parsed table with no writable name must fail before tweakcc's detection/extraction,
+      // whose error depends on whether the candidate has a version-shaped file name.
+      assertRecognizedEntryModule(candidatePath);
       const installation = await tryDetectInstallation({ path: candidatePath });
       // Claude Code 2.1.242 split the bundle across ~1,370 modules, and tweakcc's
       // `readContent` returns only the one it recognizes by name — since that
@@ -1155,7 +1159,7 @@ export async function applyPatch(
     }
     // tweakcc warns and continues on a signing failure. This must instead be fatal before the
     // candidate can replace the live install; publishing the blob may also invalidate its signature.
-    signAndVerifyMachOCandidate(candidatePath);
+    signAndVerifyMachOCandidate(candidatePath, binaryPath);
     patchedSize = statSync(candidatePath).size;
     patchedSha256 = sha256File(candidatePath);
     renameSync(candidatePath, binaryPath);

@@ -32,7 +32,8 @@ extraction; clodex then reports
 ``Patch failed: `repackNativeInstallation()` called but `node-lief` is not available``.
 With another file name (Homebrew, npm-native, or a copy named `claude`), tweakcc attempts extraction
 and reports `Patch failed: Could not extract JS from native binary: <candidate path>`.
-For a failing fresh install, run `node -e "require('node-lief')"` inside the installed package;
+For a failing fresh install, run `cd node_modules/tweakcc && node --input-type=module -e
+"await import('node-lief')"` from the installed clodex package;
 if that throws `Cannot find module 'node-gyp-build'`, re-add `node-gyp-build` as an exact-pinned
 direct dependency. Recheck the loader and lock graph on every tweakcc bump too.
 
@@ -132,8 +133,8 @@ So the blob is published, not rebuilt:
   changed: +7.5 MB on 2.1.246 (230,824,016 to 238,390,496 on darwin-arm64; +7.5 MB on win32-x64),
   and +28 MB on a pre-split release where the one module IS the bundle. **On ELF the published
   binary is ~1.75x pristine** (247,389,632 to 434,470,336 on linux-arm64 2.1.246) because tweakcc
-  relocates the whole blob to the end of the file and strands the original — that predates this
-  change and predates the shim, and what this change adds to it is the same appended sources. On
+  relocates the whole blob to the end of the file and strands the original — that is tweakcc's
+  existing repack behavior, and what the append-and-publish path adds is the patched sources. On
   2.1.233 linux-x64, the older tweakcc repack produced 770 MB from 324 MB pristine, with roughly
   2 GB live while candidate, backup and tweakcc's temp coexist; the in-memory blob copy adds
   ~164 MB on 2.1.246 or ~290 MB on a pre-split release. The relocation does not compound: the
@@ -247,15 +248,12 @@ actual reader and writer before any future bump.
 
 The extractor reads pristine backups directly instead of writing a scratch copy. The older
 `discoverable`/`needs-shim`/`unparseable` diagnostic split is gone: `needs-shim` is no longer an
-actionable state. If the blob parses but tweakcc does not recognize its entry-module name, the
-error depends on the install's file name:
-
-- Version-named native install (`~/.local/share/claude/versions/<version>`, the native-installer
-  default): tweakcc gets the version from the file name and skips extraction; clodex reads the
-  bundle itself, then reports `Patch failed: no module of the patch candidate carries a name
-  tweakcc can write to`.
-- Another file name (Homebrew, npm-native, or a copy named `claude`): tweakcc attempts extraction
-  and reports `Patch failed: Could not extract JS from native binary: <candidate path>`.
+actionable state. If the blob parses but no module name is recognized by tweakcc, clodex refuses
+before tweakcc's detection, regardless of whether the install is version-named
+(`~/.local/share/claude/versions/<version>`) or named `claude` (Homebrew/npm-native):
+`Patch failed: Claude Code entry module "/$bunfs/root/entry" is not recognized by tweakcc.
+Update clodex and try again. Claude Code was left unchanged.` The entry name shown is the one
+actually parsed from the binary; the candidate is discarded without replacing the install.
 
 A node-lief loader fault on the version-named install instead reports
 ``Patch failed: `repackNativeInstallation()` called but `node-lief` is not available``;
@@ -276,10 +274,11 @@ relocates the Bun section and strands its old copy; that is independent of the r
   node scripts/probe-patch-mechanism.mjs <claude-binary> --label linux-x64 --expect-version 2.1.233
   ```
 
-  It checks that the binary parses, that the seeded candidate is byte-identical to the release
-  (what the content-addressed pristine backup depends on), that the entry-module name remains
-  unchanged, that a repacked Mach-O still verifies under `codesign` on macOS, and that the published
-  bytes read back carrying what was written.
+  It checks that the binary parses, that tweakcc recognizes a module name (`entry-recognized`),
+  that the seeded candidate is byte-identical to the release (what the content-addressed pristine
+  backup depends on), that the entry-module name remains unchanged, that a repacked Mach-O still
+  verifies under `codesign` on macOS, and that the published bytes read back carrying what was
+  written.
 
   **It also applies every patch site to that build's own bundle** (`scripts/probe-patch-sites.mjs`,
   which calls the real `applyClodexPatches` with a synthetic config that activates all of them), and

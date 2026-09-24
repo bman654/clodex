@@ -148,6 +148,11 @@ describe('Bun module table reader', () => {
       '/$bunfs/root/src/entrypoints/cli.js']) {
       expect(tweakccRecognizesModuleName(name)).toBe(true);
     }
-    expect(tweakccRecognizesModuleName('/$bunfs/root/chunk.js')).toBe(false);
+    for (const name of [
+      '/$bunfs/root/chunk.js', '/$bunfs/root/cli.js', '/$bunfs/root/client.js',
+      '/$bunfs/root/foo-cli', 'clix', '/$bunfs/root/claude-code',
+    ]) {
+      expect(tweakccRecognizesModuleName(name)).toBe(false);
+    }
   });
 });

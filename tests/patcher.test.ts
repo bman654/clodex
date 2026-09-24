@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { tweakccRecognizesModuleName } from '../src/bun-module-table.js';
+import { readBunModuleTable, tweakccRecognizesModuleName } from '../src/bun-module-table.js';
 import { BUNDLE_MODULE_SEPARATOR } from '../src/bun-bundle.js';
 import {
   CLAUDE_CORE_FIXTURE,
@@ -1484,7 +1484,9 @@ describe('applyPatch', () => {
           unknownWindows: [],
         }, 'desired-config-hash', { trace: false, manifest: null });
         expect(outcome.ok).toBe(false);
-        expect(outcome.message).toMatch(/Mach-O signing or verification failed/);
+        expect(outcome.message).toContain(`Mach-O signing or verification failed for ${binaryPath}:`);
+        expect(outcome.message).toContain('fake codesign exited 42');
+        expect(outcome.message).toContain('Claude Code was left unchanged.');
         expect(tweakccMocks.readContent).toHaveBeenCalledTimes(layout === 'fallback' ? 1 : 0);
         expect(readFileSync(binaryPath)).toEqual(pristine);
         expect(existsSync(getPatchManifestPath())).toBe(false);
@@ -1498,6 +1500,99 @@ describe('applyPatch', () => {
       }
     },
   );
+
+  it.each(['claude', '2.1.281'])('refuses an unknown entry before tweakcc detection (%s install)', async filename => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-unknown-entry-'));
+    const binaryPath = join(dir, filename);
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    const pristine = Buffer.concat([MACHO_MAGIC, buildFakeNativeClaude('test-version', [
+      { name: '/$bunfs/root/entry', contents: CLAUDE_FIXTURE },
+      { name: '/$bunfs/root/image-processor.js', contents: 'native helper' },
+    ])]);
+    mkdirSync(join(dir, 'tweakcc-home'));
+    writeFileSync(binaryPath, pristine, { mode: 0o755 });
+    process.env.CLODEX_HOME = dir;
+    process.env.TWEAKCC_CONFIG_DIR = join(dir, 'tweakcc-home');
+    tweakccMocks.tryDetectInstallation.mockReset().mockRejectedValue(new Error('tweakcc extraction failed'));
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+
+    try {
+      const outcome = await applyPatch(binaryPath, 'test-version', {
+        config: { 'clodex:test:extended': { alias: 'extended' } },
+        unknownWindows: [],
+      }, 'desired-config-hash', { trace: false, manifest: null });
+      expect(outcome.ok).toBe(false);
+      expect(outcome.message).toContain('entry module "/$bunfs/root/entry" is not recognized by tweakcc');
+      expect(outcome.message).toContain('Update clodex and try again. Claude Code was left unchanged.');
+      expect(tweakccMocks.tryDetectInstallation).not.toHaveBeenCalled();
+      expect(readFileSync(binaryPath)).toEqual(pristine);
+      expect(existsSync(getPatchManifestPath())).toBe(false);
+    } finally {
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('still refuses if a candidate loses its writable name after the seed check', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-entry-after-seed-'));
+    const binaryPath = join(dir, 'claude');
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    const pristine = Buffer.concat([MACHO_MAGIC, buildFakeNativeClaude('test-version', [
+      { name: '/$bunfs/root/cli', contents: CLAUDE_FIXTURE },
+      { name: '/$bunfs/root/image-processor.js', contents: 'native helper' },
+    ])]);
+    const patched = Buffer.from('previously-patched-native');
+    const backupPath = join(dir, 'tweakcc-home',
+      `claude-test-version-${createHash('sha256').update(pristine).digest('hex').slice(0, 16)}.orig`);
+    mkdirSync(join(dir, 'tweakcc-home'));
+    writeFileSync(binaryPath, patched, { mode: 0o755 });
+    writeFileSync(backupPath, pristine);
+    process.env.CLODEX_HOME = dir;
+    process.env.TWEAKCC_CONFIG_DIR = join(dir, 'tweakcc-home');
+    tweakccMocks.tryDetectInstallation.mockReset().mockImplementation(
+      async ({ path }: { path: string }) => {
+        // Simulate a change between the early seed check and the publish-time writable check.
+        const table = readBunModuleTable(path)!;
+        const candidate = readFileSync(path);
+        candidate.write('/$bunfs/root/foo', table.offsets[table.entryPointId]!);
+        writeFileSync(path, candidate);
+        return { path, version: 'test-version', kind: 'native' };
+      },
+    );
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+
+    try {
+      const outcome = await applyPatch(binaryPath, 'test-version', {
+        config: { 'clodex:test:extended': { alias: 'extended' } },
+        unknownWindows: [],
+      }, 'desired-config-hash', { trace: false, manifest: {
+        binaryPath,
+        claudeVersion: 'test-version',
+        configHash: 'previous-config-hash',
+        patchedSize: patched.length,
+        patchedSha256: createHash('sha256').update(patched).digest('hex'),
+        backupPath,
+        pristineSha256: createHash('sha256').update(pristine).digest('hex'),
+        patchedAt: '2026-01-01T00:00:00.000Z',
+      } });
+      expect(outcome.ok).toBe(false);
+      expect(outcome.message).toContain('no module of the patch candidate carries a name tweakcc can write to');
+      expect(readFileSync(binaryPath)).toEqual(patched);
+    } finally {
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   /**
    * tweakcc 4.3.3 recognizes Claude Code's /cli entry directly. Drive the patcher with a

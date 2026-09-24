@@ -67,6 +67,18 @@ export function writableModuleIndex(path: string): number | null {
   return index < 0 ? null : index;
 }
 
+/** Refuse an unknown native entry name before tweakcc's file-name-dependent extraction errors. */
+export function assertRecognizedEntryModule(path: string): void {
+  const table = readBunModuleTable(path);
+  if (table && !table.names.some(tweakccRecognizesModuleName)) {
+    const entry = table.names[table.entryPointId];
+    throw new Error(
+      `Claude Code entry module ${JSON.stringify(entry)} is not recognized by tweakcc. `
+      + 'Update clodex and try again. Claude Code was left unchanged.',
+    );
+  }
+}
+
 /**
  * What the modules are joined with: a line-delimited block comment, so the joined document stays
  * parseable JavaScript and reads as a boundary to anyone looking at it.

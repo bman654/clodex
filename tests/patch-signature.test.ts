@@ -40,7 +40,11 @@ describe('candidate signature', () => {
         }
         return '';
       }) as unknown as typeof execFileSync);
-      expect(() => signAndVerifyMachOCandidate(binary)).toThrow(/Mach-O signing or verification failed/);
+      const install = join(join(binary, '..'), 'installed-claude');
+      expect(() => signAndVerifyMachOCandidate(binary, install)).toThrow(
+        `Mach-O signing or verification failed for ${install}: fake codesign exited 42. `
+        + 'Claude Code was left unchanged.',
+      );
       expect(vi.mocked(execFileSync).mock.calls).toHaveLength(stage === 'sign' ? 1 : 2);
     });
   });

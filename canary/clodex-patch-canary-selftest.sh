@@ -228,22 +228,22 @@ matrix_check() { # matrix_check <name> <expected> <actual>
   else fail=$((fail + 1)); printf 'FAIL %s\n  want %s\n  got  %s\n' "$1" "$2" "$3"; fi
 }
 
-# 9. The shape the real ELF break had: four platforms, one cause, macOS untouched.
+# 9. Four platforms fail from one shared entry-name error while macOS stays unaffected.
 write_matrix \
   "darwin-arm64:host:pass" "darwin-x64:probe:pass" \
-  "linux-x64:probe:fail:the entry-module stand-in survived restoration" \
-  "linux-arm64:container:fail:the entry-module stand-in survived restoration" \
-  "linux-x64-musl:probe:fail:the entry-module stand-in survived restoration" \
-  "linux-arm64-musl:container:fail:the entry-module stand-in survived restoration" \
+  "linux-x64:probe:fail:the entry module was not recognized by tweakcc" \
+  "linux-arm64:container:fail:the entry module was not recognized by tweakcc" \
+  "linux-x64-musl:probe:fail:the entry module was not recognized by tweakcc" \
+  "linux-arm64-musl:container:fail:the entry module was not recognized by tweakcc" \
   "win32-x64:probe:pass" "win32-arm64:probe:pass"
 
-matrix_check "ELF break: failing platforms" \
+matrix_check "Linux entry drift: failing platforms" \
   "linux-x64 linux-arm64 linux-x64-musl linux-arm64-musl" "$(matrix_platforms fail)"
-matrix_check "ELF break: host is unaffected" "pass" "$(matrix_status_of darwin-arm64)"
-matrix_check "ELF break: 4 of 8 failed" "4 8" "$(matrix_count fail) $(matrix_total)"
+matrix_check "Linux entry drift: host is unaffected" "pass" "$(matrix_status_of darwin-arm64)"
+matrix_check "Linux entry drift: 4 of 8 failed" "4 8" "$(matrix_count fail) $(matrix_total)"
 # One cause reported by four platforms must collapse to ONE line — the alert is read on a phone.
-matrix_check "ELF break: one shared cause is one line" \
-  "- the entry-module stand-in survived restoration [linux-x64, linux-arm64, linux-x64-musl, linux-arm64-musl]" \
+matrix_check "Linux entry drift: one shared cause is one line" \
+  "- the entry module was not recognized by tweakcc [linux-x64, linux-arm64, linux-x64-musl, linux-arm64-musl]" \
   "$(matrix_reason_groups)"
 
 # 10. Distinct causes must NOT be collapsed together.
@@ -432,6 +432,7 @@ matrix_check "--no-container is not reported as Docker being down" "0" \
 #      picker options` had stopped matching on that build; and the canary reported win32-arm64 as
 #      a clean pass while reporting the same break on the two Linux builds that DO have images.
 MECHANISM_CHECKS='[{"name":"pristine-parses","ok":true,"detail":"1837 Bun modules"},
+                   {"name":"entry-recognized","ok":true,"detail":"tweakcc recognizes a module in this build"},
                    {"name":"read-content","ok":true,"detail":"28147627 bytes of JavaScript"},
                    {"name":"compact-prompt-markers","ok":true,"detail":"both strict compaction prompt markers are present"},
                    {"name":"published-content","ok":true,"detail":"byte-for-byte"}]'
