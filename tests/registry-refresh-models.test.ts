@@ -540,7 +540,7 @@ describe('registry/refresh-models', () => {
       expect(mockRegistry.providers[0]?.modelsCache?.models[0]?.id).toBe('cached-model');
     });
 
-    it('captures use_responses_lite / prefer_websockets flags from the live Codex endpoint', async () => {
+    it('keeps live capability flags authoritative even if the catalog changes to false', async () => {
       const mockRegistry: ProviderRegistry = {
         version: 1,
         providers: [{
@@ -560,7 +560,8 @@ describe('registry/refresh-models', () => {
         json: async () => ({
           models: [
             { slug: 'gpt-5.6-luna', title: 'GPT-5.6 Luna', context_window: 272_000, use_responses_lite: true, prefer_websockets: true },
-            { slug: 'gpt-5.6-sol', title: 'GPT-5.6 Sol', context_window: 272_000 },
+            { slug: 'gpt-5.6-sol', title: 'GPT-5.6 Sol', context_window: 272_000,
+              use_responses_lite: false, prefer_websockets: false },
           ],
         }),
       } as Response);
@@ -575,9 +576,9 @@ describe('registry/refresh-models', () => {
       expect(luna?.preferWebSockets).toBe(true);
       expect(luna?.contextWindow).toBe(272_000);
       expect(sol?.contextWindow).toBe(272_000);
-      // A model the backend does not flag stays on the HTTP path.
-      expect(sol?.useResponsesLite).toBeUndefined();
-      expect(sol?.preferWebSockets).toBeUndefined();
+      // A live catalog answer overrides the seed even when the answer is false.
+      expect(sol?.useResponsesLite).toBe(false);
+      expect(sol?.preferWebSockets).toBe(false);
     });
 
     // A catalog that omits the ceiling is not one reporting there is none. Treating
@@ -690,11 +691,13 @@ describe('registry/refresh-models', () => {
       expect(luna?.useResponsesLite).toBe(true);
       expect(luna?.preferWebSockets).toBe(true);
 
-      // The same guarantee for the newer families. useResponsesLite is what decides
-      // whether the pinned Codex client version is sent at all, and without that
-      // header gpt-6-astra is refused outright — so a seed that loses the flag
-      // silently disconnects the model from the fix that makes it work.
-      for (const id of ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-daybreak-blue-latest']) {
+      // useResponsesLite decides whether the pinned Codex client version is sent at
+      // all. A stale seed silently drops the headers the catalog asks for (gpt-6-astra
+      // is refused outright without them).
+      for (const id of [
+        'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-daybreak-blue-latest',
+        'gpt-5.6-sol', 'gpt-5.6-terra',
+      ]) {
         const model = savedRegistry.providers[0]?.modelsCache?.models.find(m => m.id === id);
         expect(model, `${id} missing from the seed`).toBeDefined();
         expect(model?.useResponsesLite, id).toBe(true);

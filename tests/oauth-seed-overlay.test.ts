@@ -168,6 +168,16 @@ describe('legacy OAuth cache overlay', () => {
     },
   );
 
+  it('keeps the Codex catalog limits and transport flags for seeded GPT-5.5', () => {
+    const model = buildOpenAiOAuthModels().find(row => row.id === 'gpt-5.5');
+    expect(model).toMatchObject({
+      contextWindow: 272_000,
+      maxContextWindow: 272_000,
+      preferWebSockets: true,
+      useResponsesLite: false,
+    });
+  });
+
   // The seed list is written straight into the cache on the Tier-3 discovery-outage
   // path, so a share injected here would be persisted even though projection strips it
   // on the way back out. Assert the source, not just the projection, or the injection
@@ -248,21 +258,25 @@ describe('legacy OAuth cache overlay', () => {
  * Rows for the Responses-Lite models written by a clodex that did not yet seed them.
  * Before an id was seeded, a refresh that fell back to the general ChatGPT catalog wrote
  * it through the unseeded branch, which carries no Codex-only `use_responses_lite` /
- * `prefer_websockets` — true of all four ids. Without the flag clodex never sends the
- * Responses-Lite headers and the backend refuses every request.
+ * `prefer_websockets`. Without use_responses_lite clodex never sends the
+ * Responses-Lite headers; prefer_websockets is recorded for catalog parity (all
+ * OAuth Responses requests already use WebSocket transport).
  *
  * The window differs by when the row was written. Before #259 the unseeded branch
- * persisted an invented 200,000 default, so Astra / Daybreak rows from before their
- * seeding, and Sol / Luna rows from before #259, carry an explicit 200,000. v2.16.0
- * (after #259, before Sol / Luna were seeded in #266) had no GPT-6 heuristic, so it
- * wrote gpt-6-sol / gpt-6-luna with NO window; today the 1,050,000 GPT-6 heuristic would
- * clamp that to the 872,000 ceiling instead of the 272,000 standard window.
+ * persisted an invented 200,000 default, so GPT-6 Astra / Daybreak rows from before
+ * their seeding, and GPT-6 Sol / Luna rows from before #259, carry an explicit 200,000.
+ * v2.16.0 (after #259, before GPT-6 Sol / Luna were seeded in #266) had no GPT-6
+ * heuristic, so it wrote those two with NO window; today the 1,050,000 GPT-6 heuristic
+ * would clamp that to the 872,000 ceiling instead of the 272,000 standard window.
  *
  * The bare-row cases below pin the absent-field contract for every id, not what the
  * historical producer emitted for each one; the legacy-window case pins the explicit
  * 200,000 shape.
  */
-const RESPONSES_LITE_IDS = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-daybreak-blue-latest'];
+const RESPONSES_LITE_IDS = [
+  'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-daybreak-blue-latest',
+  'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+];
 
 function bareRow(id: string, extra: Partial<CachedModel> = {}): CachedModel {
   return { id, name: id, upstreamModelId: id, modelFormat: 'openai', npm: '@ai-sdk/openai', ...extra };
@@ -325,29 +339,31 @@ describe('Responses-Lite fields missing from an older cache', () => {
 
   // The catalog does report these fields, so whatever it sent is a provider answer.
   // `false` must survive: a truthiness fallback would silently turn it back on.
-  it('keeps an explicit false flag and an explicit window from the catalog', () => {
-    const row = bareRow('gpt-6-sol', {
-      useResponsesLite: false,
-      preferWebSockets: false,
-      contextWindow: 400_000,
-    });
-    const model = projectProviderCachedModels(providerWithRows([row]))[0];
-    expect(model?.useResponsesLite).toBe(false);
-    expect(model?.preferWebSockets).toBe(false);
-    expect(model?.contextWindow).toBe(400_000);
-  });
+  it.each(['gpt-6-sol', 'gpt-5.6-sol', 'gpt-5.6-terra'])(
+    'keeps explicit false flags and an explicit window for %s', id => {
+      const row = bareRow(id, {
+        useResponsesLite: false,
+        preferWebSockets: false,
+        contextWindow: 400_000,
+      });
+      const model = projectProviderCachedModels(providerWithRows([row]))[0];
+      expect(model?.useResponsesLite).toBe(false);
+      expect(model?.preferWebSockets).toBe(false);
+      expect(model?.contextWindow).toBe(400_000);
+    },
+  );
 
   // Under-scope: seeds that carry no flags must not grow one, and a model the seed does
   // not know keeps exactly what discovery wrote.
   it('invents nothing for a seed without the flags or an unseeded model', () => {
     const models = projectProviderCachedModels(providerWithRows([
-      bareRow('gpt-5.6-sol'),
+      bareRow('gpt-5.4'),
       bareRow('gpt-6-unreleased'),
     ]));
-    const sol = models.find(m => m.id === 'gpt-5.6-sol');
-    expect(sol?.useResponsesLite).toBeUndefined();
-    expect(sol?.preferWebSockets).toBeUndefined();
-    expect(sol?.contextWindow).toBe(272_000);
+    const legacy = models.find(m => m.id === 'gpt-5.4');
+    expect(legacy?.useResponsesLite).toBeUndefined();
+    expect(legacy?.preferWebSockets).toBeUndefined();
+    expect(legacy?.contextWindow).toBe(272_000);
     const unseeded = models.find(m => m.id === 'gpt-6-unreleased');
     expect(unseeded?.useResponsesLite).toBeUndefined();
     expect(unseeded?.preferWebSockets).toBeUndefined();
