@@ -13,7 +13,13 @@ wizard — ask instead through `promptOAuthMethod` (`providers-command.ts`), a d
 picker whose Enter default is device code; the chosen method is forwarded to
 `authenticateProvider`. `refresh-models.ts` fetches the model list (3-tier fetch for OAuth).
 Materialization (`materialize.ts`) turns registry providers into `LocalProvider`s with per-model
-`npm`/`baseUrl`/`upstreamModelId`.
+`npm`/`baseUrl`/`upstreamModelId`. For ChatGPT OAuth, projection fills absent minimums from seeds
+and hides Responses-Lite models whose `minimalClientVersion` exceeds the bundled request version.
+Refresh warns about those models; their cache entries remain intact so a later version increase
+can restore availability. The check uses the cached `useResponsesLite` flag, which discovery resolves
+from the live catalog with seed fallback. Explicit `false` overrides a seed. Non-Lite models are not
+restricted because their requests omit the version header. Missing or malformed minimums are not
+evidence of incompatibility.
 
 A custom OpenAI-compatible server is not a template. `providers add` → *Custom OpenAI-compatible
 server* (`src/providers-custom-add.ts`) calls `addCustomEndpointProvider`

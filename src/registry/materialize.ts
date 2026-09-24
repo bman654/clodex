@@ -2,6 +2,7 @@
 
 import { shouldHideModel, type CompatibilityAgent } from '../model-compatibility.js';
 import { deriveBrand } from '../models.js';
+import { requiresNewerCodexClient } from '../codex-client-version.js';
 import {
   contextLimitsFrom,
   resolveContextStop,
@@ -64,7 +65,11 @@ export { openCodeGoPinnedApiUrl } from './resolve-template.js';
  */
 export function projectProviderCachedModels(provider: RegistryProvider): CachedModel[] {
   const cached = provider.modelsCache?.models ?? [];
-  if (isChatGptOAuthProvider(provider)) return applyOAuthSeedContextMetadata(cached);
+  if (isChatGptOAuthProvider(provider)) {
+    // Preserve unavailable entries in storage so a newer clodex pin restores them
+    // without another refresh. All picker, patch and runtime catalogs use this view.
+    return applyOAuthSeedContextMetadata(cached).filter(model => !requiresNewerCodexClient(model));
+  }
   if (!isRetainedOpenCodeGoProvider(provider)) {
     if (!cached.some(model => (model.npm ?? provider.api.npm) === '@ai-sdk/openai')) return cached;
     return cached.map(model => {

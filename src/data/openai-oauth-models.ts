@@ -31,6 +31,7 @@ interface OAuthModelSeed {
   /** Backend capability seed — mirrors the live use_responses_lite/prefer_websockets flags. */
   useResponsesLite?: boolean;
   preferWebSockets?: boolean;
+  minimalClientVersion?: string;
 }
 
 /**
@@ -56,6 +57,7 @@ export const CHATGPT_CODEX_UNSUPPORTED_MODELS = new Set<string>([
 // Ceilings are what the Codex catalog reports, which is lower than the published
 // model spec and varies by plan, so discovery overrides these whenever it answers.
 // A model with no ceiling here has none above its default window.
+// Minimum client versions measured from the live catalog on 2026-09-22 (#271).
 const OPENAI_OAUTH_MODEL_SEEDS: OAuthModelSeed[] = [
   // GPT-6 family. The window, ceiling and Responses-Lite flags are what the live
   // Codex catalog returned (Astra on 2026-09-04, Sol and Luna on 2026-09-22) and are
@@ -63,17 +65,17 @@ const OPENAI_OAUTH_MODEL_SEEDS: OAuthModelSeed[] = [
   // context window, but the Codex client is served a smaller one, and this path is
   // Codex-only. All three cards publish a 128,000 output limit and the same 272K
   // pricing boundary as the GPT-5.6 family.
-  { id: 'gpt-6-astra',          name: 'GPT-6 Astra',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
-  { id: 'gpt-6-sol',            name: 'GPT-6 Sol',         contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
-  { id: 'gpt-6-luna',           name: 'GPT-6 Luna',        contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
+  { id: 'gpt-6-astra',          name: 'GPT-6 Astra',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.153.0' },
+  { id: 'gpt-6-sol',            name: 'GPT-6 Sol',         contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.155.0' },
+  { id: 'gpt-6-luna',           name: 'GPT-6 Luna',        contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.155.0' },
   // "An alias for our flagship general-purpose models, with safeguards calibrated
   // for defensive cybersecurity work" — access is gated on a separate opt-in
   // program, so most installs will never see this id in their catalog.
-  { id: 'gpt-daybreak-blue-latest', name: 'GPT Daybreak Blue', contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
+  { id: 'gpt-daybreak-blue-latest', name: 'GPT Daybreak Blue', contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.144.0' },
   // GPT-5.6 family (Sol / Terra / Luna)
-  { id: 'gpt-5.6-sol',          name: 'GPT-5.6 Sol',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true },
-  { id: 'gpt-5.6-terra',        name: 'GPT-5.6 Terra',     contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true },
-  { id: 'gpt-5.6-luna',         name: 'GPT-5.6 Luna',      contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true },
+  { id: 'gpt-5.6-sol',          name: 'GPT-5.6 Sol',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, minimalClientVersion: '0.144.0' },
+  { id: 'gpt-5.6-terra',        name: 'GPT-5.6 Terra',     contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, minimalClientVersion: '0.144.0' },
+  { id: 'gpt-5.6-luna',         name: 'GPT-5.6 Luna',      contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.144.0' },
   // GPT-5.5 family (Pro)
   { id: 'gpt-5.5',              name: 'GPT-5.5',           contextWindow: 272_000, maxOutputTokens: 128_000, reasoning: true },
   // GPT-5.4 family
@@ -197,6 +199,7 @@ export function applyOAuthSeedContextMetadata(models: CachedModel[]): CachedMode
       reasoning: seed?.reasoning ?? model.reasoning,
       useResponsesLite: model.useResponsesLite ?? seed?.useResponsesLite,
       preferWebSockets: model.preferWebSockets ?? seed?.preferWebSockets,
+      minimalClientVersion: model.minimalClientVersion ?? seed?.minimalClientVersion,
     };
   });
 }
@@ -222,6 +225,7 @@ export function buildOpenAiOAuthModels(): CachedModel[] {
       reasoning: seed.reasoning,
       useResponsesLite: seed.useResponsesLite,
       preferWebSockets: seed.preferWebSockets,
+      minimalClientVersion: seed.minimalClientVersion,
     };
   });
 }

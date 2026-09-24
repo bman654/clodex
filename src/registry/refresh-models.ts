@@ -1,6 +1,7 @@
 // src/registry/refresh-models.ts — user-initiated model list refresh per modelSource
 
 import { isDeepStrictEqual } from 'node:util';
+import { codexClientVersionWarning, readCodexClientVersion } from '../codex-client-version.js';
 import { getOAuthAccountSlot } from './oauth-account-storage.js';
 import { fetchAnthropicModels } from './custom-endpoint.js';
 import { fetchTemplateModels } from './fetch-template-models.js';
@@ -36,6 +37,7 @@ import {
 import { OAUTH_ACCOUNT_ENV } from '../oauth-account-selection.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from './types.js';
 import {
+  applyOAuthSeedContextMetadata,
   buildOpenAiOAuthModels,
   CHATGPT_CODEX_UNSUPPORTED_MODELS,
   openAiPricingMetadata,
@@ -97,6 +99,7 @@ interface OpenAiModelEntry {
   /** Backend flags: model needs the Responses-Lite shape / WebSocket transport. */
   useResponsesLite?: boolean;
   preferWebSockets?: boolean;
+  minimalClientVersion?: string;
 }
 
 function positiveInteger(value: unknown): number | undefined {
@@ -116,11 +119,12 @@ function readContextFields(
 }
 
 /** Read the Responses-Lite / WebSocket capability flags off a raw model entry. */
-function readCapabilityFlags(m: Record<string, unknown>): Pick<OpenAiModelEntry, 'useResponsesLite' | 'preferWebSockets'> {
+function readCapabilityFlags(m: Record<string, unknown>): Pick<OpenAiModelEntry, 'useResponsesLite' | 'preferWebSockets' | 'minimalClientVersion'> {
   const bool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined);
   return {
     useResponsesLite: bool(m['use_responses_lite']),
     preferWebSockets: bool(m['prefer_websockets']),
+    minimalClientVersion: readCodexClientVersion(m['minimal_client_version']),
   };
 }
 
@@ -184,6 +188,7 @@ function buildDynamicOAuthModel(
       maxOutputTokens: entry.max_output_tokens ?? seed.maxOutputTokens,
       useResponsesLite: entry.useResponsesLite ?? seed.useResponsesLite,
       preferWebSockets: entry.preferWebSockets ?? seed.preferWebSockets,
+      minimalClientVersion: entry.minimalClientVersion ?? seed.minimalClientVersion,
     };
   }
   const { id } = entry;
@@ -219,6 +224,7 @@ function buildDynamicOAuthModel(
     reasoning: codexCatalog ? true : modelPrefersResponsesApi(id),
     useResponsesLite: entry.useResponsesLite,
     preferWebSockets: entry.preferWebSockets,
+    minimalClientVersion: entry.minimalClientVersion,
   };
 }
 
@@ -259,7 +265,7 @@ async function fetchJsonWithAuth(
  *
  * 1. chatgpt.com/backend-api/codex/models — Codex-specific endpoint.
  *    If it exists, it returns ONLY models the Codex API actually supports,
- *    so no filtering is needed. Self-updating as OpenAI changes Codex availability.
+ *    including their minimum client versions. Projection hides incompatible models.
  *
  * 2. chatgpt.com/backend-api/models — all ChatGPT models, filtered by the
  *    confirmed-bad set. Used when the Codex endpoint doesn't exist or returns nothing.
@@ -314,6 +320,11 @@ async function refreshOpenAiOAuthModels(
     failureReason: credentialFailure ?? chatGptResult.error ?? codexResult.error,
     credentialRejected: credentialFailure !== undefined,
   };
+}
+
+function warningSuffix(models: CachedModel[]): string {
+  const warning = codexClientVersionWarning(applyOAuthSeedContextMetadata(models));
+  return warning ? ` ${warning}` : '';
 }
 
 async function refreshApiListProvider(
@@ -627,7 +638,8 @@ export async function refreshProviderModels(
         return skipWithCachedModels(
           cacheProvider,
           `Live model discovery failed${failureDetail} — kept your existing cached model list instead of `
-          + "overwriting it with clodex's built-in fallback list. Try refreshing again later.",
+          + "overwriting it with clodex's built-in fallback list. Try refreshing again later."
+          + warningSuffix(cacheProvider.modelsCache!.models),
         );
       }
       if (oauthResult.source === 'seed') {
@@ -736,7 +748,9 @@ export async function refreshProviderModels(
       ok: true,
       modelCount: enriched.length,
       previousModelCount: hadPreviousRefresh ? previousModelCount : undefined,
-      reason: oauthFallbackReason,
+      reason: isChatGptOAuthProvider(provider)
+        ? [oauthFallbackReason, codexClientVersionWarning(models)].filter(Boolean).join(' ') || undefined
+        : undefined,
     };
   } catch (err) {
     return {
