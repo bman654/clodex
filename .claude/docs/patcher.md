@@ -26,9 +26,13 @@ neither requires `node-gyp-build`. The direct `node-gyp-build` dependency was ne
 node-lief releases (1.3.1 still required it at runtime after demoting it to a devDependency) but is
 now removed. npm users do not install from this lockfile: tweakcc's `^1.3.2` range resolves a new
 node-lief 1.x at user install time, even without a clodex release. A repeat of the 1.3.1 packaging
-fault would be swallowed by tweakcc's lazy loader and surface as
-`Patch failed: Could not extract JS from native binary`, the same generic error as an unknown entry
-name. For a failing fresh install, run `node -e "require('node-lief')"` inside the installed package;
+fault would be swallowed by tweakcc's lazy loader. On a version-named native install (the default
+`~/.local/share/claude/versions/<version>`), tweakcc gets the version from the file name and skips
+extraction; clodex then reports
+``Patch failed: `repackNativeInstallation()` called but `node-lief` is not available``.
+With another file name (Homebrew, npm-native, or a copy named `claude`), tweakcc attempts extraction
+and reports `Patch failed: Could not extract JS from native binary: <candidate path>`.
+For a failing fresh install, run `node -e "require('node-lief')"` inside the installed package;
 if that throws `Cannot find module 'node-gyp-build'`, re-add `node-gyp-build` as an exact-pinned
 direct dependency. Recheck the loader and lock graph on every tweakcc bump too.
 
@@ -244,9 +248,20 @@ actual reader and writer before any future bump.
 The extractor reads pristine backups directly instead of writing a scratch copy. The older
 `discoverable`/`needs-shim`/`unparseable` diagnostic split is gone: `needs-shim` is no longer an
 actionable state. If the blob parses but tweakcc does not recognize its entry-module name, the
-patch command reports only `Patch failed: Could not extract JS from native binary: <candidate path>`.
-Check the parsed names against `tweakccRecognizesModuleName` when diagnosing that message; a new
-entry name requires an upstream tweakcc fix, not a local rename fallback. On ELF, tweakcc still
+error depends on the install's file name:
+
+- Version-named native install (`~/.local/share/claude/versions/<version>`, the native-installer
+  default): tweakcc gets the version from the file name and skips extraction; clodex reads the
+  bundle itself, then reports `Patch failed: no module of the patch candidate carries a name
+  tweakcc can write to`.
+- Another file name (Homebrew, npm-native, or a copy named `claude`): tweakcc attempts extraction
+  and reports `Patch failed: Could not extract JS from native binary: <candidate path>`.
+
+A node-lief loader fault on the version-named install instead reports
+``Patch failed: `repackNativeInstallation()` called but `node-lief` is not available``;
+with another file name it reports the same `Could not extract JS from native binary` error above.
+Check the parsed names against `tweakccRecognizesModuleName` when diagnosing an unknown entry; a
+new entry name requires an upstream tweakcc fix, not a local rename fallback. On ELF, tweakcc still
 relocates the Bun section and strands its old copy; that is independent of the removed name shim.
 
 - **`scripts/probe-patch-mechanism.mjs` is how you check this on a platform you are not running.**

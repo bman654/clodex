@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { tweakccRecognizesModuleName } from '../src/bun-module-table.js';
+import { BUNDLE_MODULE_SEPARATOR } from '../src/bun-bundle.js';
 import {
   CLAUDE_CORE_FIXTURE,
   CLAUDE_FIXTURE,
@@ -1428,9 +1429,13 @@ describe('applyPatch', () => {
     }
   });
 
-  // A failed sign or verify must leave the installed binary and manifest untouched.
-  it.each(['sign', 'verify'] as const)(
-    'refuses to publish a Mach-O when codesign %s fails', async failing => {
+  // A failed sign or verify must leave the installed binary and manifest untouched on both
+  // the bundle repack and tweakcc's single-module fallback path.
+  it.each([
+    ['sign', 'bundle'], ['verify', 'bundle'],
+    ['sign', 'fallback'], ['verify', 'fallback'],
+  ] as const)(
+    'refuses to publish a Mach-O when codesign %s fails via %s', async (failing, layout) => {
       const dir = mkdtempSync(join(tmpdir(), 'clodex-signing-failure-'));
       const binaryPath = join(dir, 'claude');
       const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
@@ -1438,7 +1443,8 @@ describe('applyPatch', () => {
       const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
       const pristine = Buffer.concat([MACHO_MAGIC, buildFakeNativeClaude('test-version', [
         { name: '/$bunfs/root/cli', contents: CLAUDE_FIXTURE },
-        { name: '/$bunfs/root/image-processor.js', contents: 'native helper' },
+        { name: '/$bunfs/root/image-processor.js', contents: layout === 'fallback'
+          ? `native helper${BUNDLE_MODULE_SEPARATOR}` : 'native helper' },
       ])]);
       mkdirSync(join(dir, 'tweakcc-home'));
       writeFileSync(binaryPath, pristine, { mode: 0o755 });
@@ -1479,6 +1485,7 @@ describe('applyPatch', () => {
         }, 'desired-config-hash', { trace: false, manifest: null });
         expect(outcome.ok).toBe(false);
         expect(outcome.message).toMatch(/Mach-O signing or verification failed/);
+        expect(tweakccMocks.readContent).toHaveBeenCalledTimes(layout === 'fallback' ? 1 : 0);
         expect(readFileSync(binaryPath)).toEqual(pristine);
         expect(existsSync(getPatchManifestPath())).toBe(false);
       } finally {
