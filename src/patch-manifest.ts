@@ -34,8 +34,8 @@ export interface PatchManifest {
 /** The complete manifest shape required before the wrapper may execute another file. */
 export type WrapperPatchManifest = PatchManifest & { pristineSha256: string };
 
-export function getPatchManifestPath(): string {
-  return join(getAppHome(), 'patch-state.json');
+export function getPatchManifestPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(getAppHome(env), 'patch-state.json');
 }
 
 /**

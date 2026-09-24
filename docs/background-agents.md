@@ -44,7 +44,9 @@ paste the `.exe` path it prints instead — the same substitution then applies. 
 
 The extension and local Claude install update independently. If their pristine bytes no longer
 match, the wrapper keeps the extension's bundled executable; align compatible builds and run
-`clodex patch` again. A fallback notice appears in VS Code's **Claude VSCode** output channel, not
+`clodex patch` again. `clodex patch` (and `clodex install-vscode-launcher`) warn when an installed
+extension's version differs from the Claude Code clodex patched and print the commands that align
+them; the check compares versions only, so equal versions without a warning are not proof. A fallback notice appears in VS Code's **Claude VSCode** output channel, not
 as a toast; main-chat lines use the `From claude: ...` prefix.
 
 At least two extension behaviors relevant to this setup change when `claudeProcessWrapper` is set;

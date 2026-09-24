@@ -20,9 +20,11 @@
 
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { claudeExtensionDriftWarnings, compareVersionKeys, readNpmGlobalRoot } from './editor-extension-version.js';
+import { getPatchManifestPath, readPatchManifest } from './patch-manifest.js';
 import { getAppHome } from './paths.js';
 import { publishFileByRename } from './patcher.js';
 
@@ -102,14 +104,6 @@ function frameworkVersionKey(name: string): number[] {
   return name.slice(1).split('.').map(part => Number.parseInt(part, 10) || 0);
 }
 
-function compareVersionKeys(a: number[], b: number[]): number {
-  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
-    const diff = (a[i] ?? 0) - (b[i] ?? 0);
-    if (diff !== 0) return diff;
-  }
-  return 0;
-}
-
 /**
  * Finds csc.exe: the 64-bit Framework directory first, then the 32-bit one, and within each the
  * newest `v4.*` runtime directory that actually contains the compiler. Older runtimes (v2/v3.5)
@@ -178,6 +172,8 @@ export interface InstallVscodeLauncherOptions {
   launcherSourcePath?: string;
   compile?: CompileRunner;
   tempRoot?: string;
+  /** The home directory whose editor extension directories are checked; defaults to `os.homedir()`. */
+  homeDir?: string;
 }
 
 export type InstallVscodeLauncherResult =
@@ -332,6 +328,24 @@ export function successReport(result: Extract<InstallVscodeLauncherResult, { ok:
   ];
 }
 
+/**
+ * One warning per editor whose Claude Code extension is a different version from the install
+ * `clodex patch` last patched (read from the patch manifest). Nothing patched means nothing for
+ * the wrapper to substitute, so no manifest means no warnings.
+ */
+export function launcherExtensionDriftWarnings(
+  opts: Pick<InstallVscodeLauncherOptions, 'env' | 'homeDir'> = {},
+): string[] {
+  const env = opts.env ?? process.env;
+  const manifest = readPatchManifest(getPatchManifestPath(env));
+  if (!manifest || typeof manifest.claudeVersion !== 'string') return [];
+  return claudeExtensionDriftWarnings(
+    { binaryPath: manifest.binaryPath, version: manifest.claudeVersion },
+    opts.homeDir ?? homedir(),
+    () => readNpmGlobalRoot(env),
+  );
+}
+
 /** The `clodex install-vscode-launcher` command: install, print, return the exit code. */
 export function runInstallVscodeLauncherCommand(opts: InstallVscodeLauncherOptions = {}): number {
   const result = installVscodeLauncher(opts);
@@ -339,8 +353,12 @@ export function runInstallVscodeLauncherCommand(opts: InstallVscodeLauncherOptio
   if (!result.ok) {
     console.error(`clodex: ${result.message}`);
     if (result.detail) console.error(result.detail);
-    return 1;
+  } else {
+    console.log(successReport(result).join('\n'));
   }
-  console.log(successReport(result).join('\n'));
-  return 0;
+  // Checked whatever the build's outcome — including off Windows, where the command only says how
+  // to point the setting at clodex-claude — because this is a moment the user is setting the
+  // editor up, and a drifted extension is exactly what would make that setup look broken.
+  for (const drift of launcherExtensionDriftWarnings(opts)) console.error(`clodex: warning: ${drift}`);
+  return result.ok ? 0 : 1;
 }
