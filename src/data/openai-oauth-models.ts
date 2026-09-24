@@ -110,8 +110,8 @@ function hasPricingBoundary(id: string): boolean {
 }
 
 /**
- * Pricing-band metadata for a Codex model id, applied to discovered models too so a
- * model that is not in the seed still reports its boundary.
+ * Pricing-band metadata for OpenAI model ids on both API keys and Codex plans.
+ * Applied to discovered models too so models outside the seed report their boundary.
  */
 export function openAiPricingMetadata(
   id: string,

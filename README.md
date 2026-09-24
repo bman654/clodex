@@ -251,9 +251,13 @@ A context window is a cost dial as much as a capacity number. OpenAI prices GPT-
 and later prompts above **272,000 input tokens at 2x input and 1.5x output for the
 full request**, which is why the Codex catalog reports a 272,000 window rather than
 the model's ceiling. Newer families inherit the same boundary, so a model released
-after this was written is covered without a clodex update. Clodex follows that: the
-default `standard` stop stays under the line, and a larger window is something you
-ask for.
+after this was written is covered without a clodex update. For ChatGPT/Codex-plan
+models whose catalog reports that window, the default `standard` stop stays at the
+line and a larger window is something you ask for. **OpenAI API-key models retain
+their full API context window by default**, so their `standard` stop can already
+exceed the pricing boundary. Choose a smaller numeric stop if you want to limit
+exposure to the higher rate, for example
+`clodex models --context clodex:openai:gpt-6-sol=250k --save`.
 
 ```sh
 clodex models --context sol=max --save     # this model's default, with a cost warning
@@ -266,7 +270,9 @@ window a client should fill, and the account ceiling a larger stop can reach. A 
 above the ceiling is clamped and says so. When a request's own reported token count
 crosses the boundary, clodex warns once per model for the life of the process,
 because the client's token count and the provider's differ after translation and only
-the provider's settles it.
+the provider's settles it. This warning covers both OpenAI API keys and ChatGPT/Codex
+plans, including model lists saved before pricing warnings were supported; no manual
+model refresh is needed.
 
 Two things worth knowing about the numbers:
 

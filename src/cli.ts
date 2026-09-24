@@ -628,8 +628,11 @@ ${pc.bold('How it works:')}
 
 ${pc.bold('Context stops and cost:')}
   Some providers price large prompts in bands: GPT-5.6 and GPT-6 bill the full request at
-  a higher rate above 272,000 input tokens. The standard stop stays under that
-  line, so max is opt-in and reports the boundary when you select it.
+  a higher rate above 272,000 input tokens. For ChatGPT/Codex-plan models whose
+  catalog reports a 272,000-token window, standard stays at that line and a
+  larger window is opt-in. OpenAI API-key models retain their full window, so
+  standard may already cross the boundary. Choose a smaller numeric stop such
+  as 250k to limit exposure to the higher rate.
 
 ${pc.bold('Examples:')}
   clodex favorites

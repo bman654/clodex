@@ -7,7 +7,7 @@ import {
   resolveContextStop,
   selectContextStop,
 } from '../context-modes.js';
-import { applyOAuthSeedContextMetadata } from '../data/openai-oauth-models.js';
+import { applyOAuthSeedContextMetadata, openAiPricingMetadata } from '../data/openai-oauth-models.js';
 import { isChatGptOAuthProvider } from './provider-kind.js';
 import { lookupKnownContextWindow } from '../context-window.js';
 import type { LocalProvider, LocalProviderModel } from '../types.js';
@@ -59,13 +59,26 @@ export { openCodeGoPinnedApiUrl } from './resolve-template.js';
 
 /**
  * Project persisted model caches onto the authority that owns their provider identity.
- * Ordinary and custom providers retain their cache array unchanged; retained OpenCode
- * identities are fail-closed against the committed template catalog.
+ * OpenAI API-key caches gain missing pricing metadata without requiring a refresh;
+ * retained OpenCode identities are fail-closed against the committed template catalog.
  */
 export function projectProviderCachedModels(provider: RegistryProvider): CachedModel[] {
   const cached = provider.modelsCache?.models ?? [];
   if (isChatGptOAuthProvider(provider)) return applyOAuthSeedContextMetadata(cached);
-  if (!isRetainedOpenCodeGoProvider(provider)) return cached;
+  if (!isRetainedOpenCodeGoProvider(provider)) {
+    if (!cached.some(model => (model.npm ?? provider.api.npm) === '@ai-sdk/openai')) return cached;
+    return cached.map(model => {
+      // A compatible endpoint can use the same ids without OpenAI's prices.
+      // Match the effective SDK just as runtime routing does, not the id alone.
+      if ((model.npm ?? provider.api.npm) !== '@ai-sdk/openai') return model;
+      const pricing = openAiPricingMetadata(model.upstreamModelId ?? model.id);
+      return {
+        ...model,
+        pricingBoundary: model.pricingBoundary ?? pricing.pricingBoundary,
+        pricingBoundaryNote: model.pricingBoundaryNote ?? pricing.pricingBoundaryNote,
+      };
+    });
+  }
   const template = retainedOpenCodeGoTemplate();
   return template ? applyTemplateModelMetadata(template, cached) : [];
 }
