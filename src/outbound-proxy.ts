@@ -20,7 +20,8 @@
 // Proxy bridge mode sets HTTPS_PROXY only in the CHILD's env, but a server can
 // still inherit a previously exported bridge URL from its shell. Raw
 // passthrough checks that resolved URL against its bound listener before it
-// creates an agent, preventing a CONNECT loop through the same MITM.
+// creates an agent, catching literal spellings of the same MITM. Aliases and
+// A→B→A loops are caught by OUTBOUND_PROXY_HOP_HEADER below.
 
 import type { Agent as HttpAgent } from 'node:http';
 import { randomUUID } from 'node:crypto';

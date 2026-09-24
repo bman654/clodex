@@ -306,8 +306,10 @@ marker is ignored. Undici fetch CONNECTs do not carry the marker: if a fetch ent
 listener's next CONNECT uses a marked agent and terminates it. Inbound marker values are removed
 before forwarding to the real upstream, including raw Anthropic requests and upgrades. The plain
 HTTP and intercepted TLS refusal sites are defence-in-depth for manually supplied markers, not
-reachable loops from clodex's own CONNECT headers. A middle proxy that removes the header, or that
-originates its own CONNECT instead of relaying ours (including another clodex), defeats this guard;
+reachable loops from clodex's own CONNECT headers. With `NODE_USE_ENV_PROXY=1`, forwarded plain-HTTP
+requests are not protected from proxy loops by the marker (tracked as a follow-up issue). A middle
+proxy that removes the header, or that originates its own CONNECT instead of relaying ours
+(including another clodex), defeats this guard;
 only literal spellings remain protected in that case. The passthrough agent checks once at bind
 time; the CONNECT handler must re-check per request and reads `proxyServer.address()` **inside the
 handler rather than caching it at startup**, because `listenTcpServer` resolves `listen()` and only
