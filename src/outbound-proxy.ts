@@ -23,9 +23,22 @@
 // creates an agent, preventing a CONNECT loop through the same MITM.
 
 import type { Agent as HttpAgent } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { networkInterfaces } from 'node:os';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { emitParentNotice } from './parent-notice.js';
+
+// Private to this process. Sent only to an outbound proxy (not to the origin)
+// and removed if a request returns to our listener, regardless of its value.
+export const OUTBOUND_PROXY_HOP_HEADER = 'x-clodex-proxy-hop';
+const outboundProxyHopNonce = randomUUID();
+export function isOwnOutboundProxyHop(value: string | string[] | undefined): boolean {
+  // Node joins duplicate unknown headers with commas. A middle proxy may add
+  // its own marker without removing ours; only our exact nonce is a match.
+  return (Array.isArray(value) ? value : [value]).some(entry =>
+    entry?.split(',').some(part => part.trim() === outboundProxyHopNonce));
+}
+const proxyHopHeaders = { [OUTBOUND_PROXY_HOP_HEADER]: outboundProxyHopNonce };
 
 export function hasOutboundProxyEnv(env: NodeJS.ProcessEnv = process.env): boolean {
   return Boolean(
@@ -96,7 +109,17 @@ export function proxyUrlTargetsListener(
     : parsed.protocol === 'https:' ? 443 : parsed.protocol === 'http:' ? 80 : undefined;
   if (proxyPort !== listenerPort) return false;
 
-  const normalizeHost = (host: string): string => host.toLowerCase().replace(/^\[|\]$/g, '');
+  const normalizeHost = (host: string): string => {
+    const plain = host.toLowerCase().replace(/^\[|\]$/g, '');
+    // URL.hostname canonicalizes ::ffff:127.0.0.1 to [::ffff:7f00:1].
+    const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(plain);
+    if (mapped) {
+      const high = parseInt(mapped[1]!, 16);
+      const low = parseInt(mapped[2]!, 16);
+      return `${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`;
+    }
+    return plain.replace(/^::ffff:(?=\d+\.)/, '').replace(/^localhost\.$/, 'localhost');
+  };
   const proxyHost = normalizeHost(parsed.hostname);
   const boundHost = normalizeHost(listenerHost);
   if (proxyHost === boundHost) return true;
@@ -128,6 +151,10 @@ export async function installOutboundDispatcher(): Promise<boolean> {
   if (dispatcherInstalled) return true;
   try {
     const { Agent, EnvHttpProxyAgent, setGlobalDispatcher } = await import('undici');
+    // EnvHttpProxyAgent shares its headers object between HTTP and HTTPS
+    // ProxyAgents; undici writes URL credentials into it. Do not pass a shared
+    // marker object here or one proxy's credentials can reach another proxy.
+    // A fetch entering a self-loop is refused on its next (marked) CONNECT.
     const dispatcher = hasOutboundProxyEnv()
       ? new EnvHttpProxyAgent({ allowH2: false })
       : new Agent({ allowH2: false });
@@ -155,7 +182,7 @@ export function outboundHttpProxyAgent(
     if (!parsedProxy.hostname || !['http:', 'https:'].includes(parsedProxy.protocol)) {
       throw new TypeError('Invalid proxy URL');
     }
-    return new HttpsProxyAgent(parsedProxy, { keepAlive: true });
+    return new HttpsProxyAgent(parsedProxy, { keepAlive: true, headers: { ...proxyHopHeaders } });
   } catch (err) {
     // Reachable from the non-intercepted CONNECT handler, which runs while the
     // spawned Claude Code owns the terminal and `launchClaude` has muted the

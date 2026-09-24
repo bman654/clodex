@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { once } from 'node:events';
 import * as http from 'node:http';
+import * as https from 'node:https';
 import * as http2 from 'node:http2';
 import * as net from 'node:net';
 import type { AddressInfo } from 'node:net';
@@ -200,6 +201,11 @@ describe('proxyUrlTargetsListener', () => {
   it('matches loopback aliases and wildcard listeners only on the bound port', () => {
     expect(proxyUrlTargetsListener('http://127.0.0.1:17645', '127.0.0.1', 17645)).toBe(true);
     expect(proxyUrlTargetsListener('http://localhost:17645', '127.0.0.1', 17645)).toBe(true);
+    expect(proxyUrlTargetsListener('http://localhost.:17645', '127.0.0.1', 17645)).toBe(true);
+    expect(proxyUrlTargetsListener('http://[::ffff:127.0.0.1]:17645', '127.0.0.1', 17645)).toBe(true);
+    expect(proxyUrlTargetsListener('http://[::ffff:127.0.0.2]:17645', '0.0.0.0', 17645)).toBe(true);
+    expect(proxyUrlTargetsListener('http://[::ffff:127.0.0.1]:17645', '::1', 17645)).toBe(true);
+    expect(proxyUrlTargetsListener('http://127.0.0.1:17645', '::ffff:127.0.0.1', 17645)).toBe(true);
     expect(proxyUrlTargetsListener('http://127.0.0.2:17645', '0.0.0.0', 17645)).toBe(true);
     expect(proxyUrlTargetsListener(
       'http://192.0.2.10:17645',
@@ -271,10 +277,14 @@ describe('installOutboundDispatcher', () => {
     const upstream = startVersionServer(versions);
     const upstreamPort = await listen(upstream);
     const connectTargets: string[] = [];
+    const proxyHopHeaders: (string | undefined)[] = [];
+    const originHopHeaders: (string | string[] | undefined)[] = [];
+    upstream.on('request', req => originHopHeaders.push(req.headers['x-clodex-proxy-hop']));
     const tunnelSockets = new Set<net.Socket>();
     const connectProxy = http.createServer();
     connectProxy.on('connect', (req, clientSocket, head) => {
       connectTargets.push(req.url ?? '');
+      proxyHopHeaders.push(req.headers['x-clodex-proxy-hop']);
       const upstreamSocket = net.connect(upstreamPort, '127.0.0.1');
       testSockets.add(clientSocket);
       testSockets.add(upstreamSocket);
@@ -303,8 +313,61 @@ describe('installOutboundDispatcher', () => {
     testDispatchers.add(getGlobalDispatcher());
     expect(await (await fetch(`https://127.0.0.1:${upstreamPort}`)).text()).toBe('ok');
 
-    expect(connectTargets).toEqual([`127.0.0.1:${upstreamPort}`]);
-    expect(versions).toEqual(['1.1']);
+    // Raw passthrough and WebSocket agents use the same proxy-only CONNECT header.
+    for (const agent of [
+      outboundHttpProxyAgent(`https://127.0.0.1:${upstreamPort}`),
+      outboundWsProxyAgent(`wss://127.0.0.1:${upstreamPort}`),
+    ]) {
+      expect(agent).toBeDefined();
+      const body = await new Promise<string>((resolve, reject) => {
+        https.get(`https://127.0.0.1:${upstreamPort}`, { agent, rejectUnauthorized: false }, res => {
+          const chunks: Buffer[] = [];
+          res.on('data', chunk => chunks.push(Buffer.from(chunk)));
+          res.on('end', () => resolve(Buffer.concat(chunks).toString()));
+        }).on('error', reject);
+      });
+      expect(body).toBe('ok');
+      agent?.destroy();
+    }
+
+    expect(connectTargets).toEqual(Array(3).fill(`127.0.0.1:${upstreamPort}`));
+    // The fetch tunnels through this proxy; the explicit agents mark their
+    // CONNECTs. No proxy-only header should reach the origin.
+    expect(proxyHopHeaders.slice(1)).toEqual(Array(2).fill(expect.stringMatching(/^[0-9a-f-]{36}$/)));
+    expect(new Set(proxyHopHeaders.slice(1)).size).toBe(1);
+    expect(originHopHeaders).toEqual([undefined, undefined, undefined]);
+    expect(versions).toEqual(['1.1', '1.1', '1.1']);
     for (const socket of tunnelSockets) socket.destroy();
+  });
+});
+
+// Split proxy settings must not copy credentials from one proxy to another.
+describe('outbound proxy credential isolation', () => {
+  it('does not send HTTP_PROXY credentials on HTTPS fetch or agent CONNECTs', async () => {
+    const auth: (string | undefined)[] = [];
+    const proxy = http.createServer();
+    proxy.on('connect', (req, socket) => {
+      auth.push(req.headers['proxy-authorization']);
+      socket.on('error', () => {});
+      socket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n');
+    });
+    const port = await listen(proxy);
+    process.env['HTTP_PROXY'] = 'http://userA:secretA@127.0.0.1:9';
+    process.env['HTTPS_PROXY'] = `http://127.0.0.1:${port}`;
+    await installOutboundDispatcher();
+    testDispatchers.add(getGlobalDispatcher());
+    await fetch('https://example.invalid/').catch(() => {});
+    const agent = outboundHttpProxyAgent('https://example.invalid/');
+    try {
+      await new Promise<void>(resolve => {
+        https.get('https://example.invalid/', { agent }, res => {
+          res.resume();
+          res.on('end', resolve);
+        }).on('error', () => resolve());
+      });
+    } finally {
+      agent?.destroy();
+    }
+    expect(auth).toEqual([undefined, undefined]);
   });
 });

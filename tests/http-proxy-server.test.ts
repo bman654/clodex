@@ -995,6 +995,7 @@ describe('selective HTTP proxy', () => {
     const certificates = ensureHttpProxyCertificates();
     let receivedPath: string | undefined;
     let receivedAuthorization: string | undefined;
+    let receivedProxyHop: string | string[] | undefined;
     let receivedBody = Buffer.alloc(0);
     const origin = https.createServer({
       key: certificates.serverKey,
@@ -1006,6 +1007,7 @@ describe('selective HTTP proxy', () => {
       receivedBody = Buffer.concat(chunks);
       receivedPath = req.url;
       receivedAuthorization = req.headers.authorization;
+      receivedProxyHop = req.headers['x-clodex-proxy-hop'];
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Connection': 'close' });
       res.write('event: message_start\ndata: {"type":"message_start"}\n\n');
       res.end('event: message_stop\ndata: {"type":"message_stop"}\n\n');
@@ -1014,6 +1016,7 @@ describe('selective HTTP proxy', () => {
 
     let connectLine: string | undefined;
     let proxyAuthorization: string | undefined;
+    let proxyHop: string | undefined;
     const tunnelSockets = new Set<net.Socket>();
     const upstreamProxy = net.createServer(client => {
       tunnelSockets.add(client);
@@ -1026,6 +1029,8 @@ describe('selective HTTP proxy', () => {
         client.removeListener('data', readConnect);
         const headerLines = buffered.subarray(0, boundary).toString('ascii').split('\r\n');
         connectLine = headerLines[0];
+        proxyHop = headerLines.find(line => line.toLowerCase().startsWith('x-clodex-proxy-hop:'))
+          ?.split(': ', 2)[1];
         proxyAuthorization = headerLines
           .find(line => line.toLowerCase().startsWith('proxy-authorization:'))
           ?.slice('proxy-authorization:'.length)
@@ -1069,6 +1074,8 @@ describe('selective HTTP proxy', () => {
       expect(response).toContain('event: message_stop');
       expect(connectLine).toBe(`CONNECT 127.0.0.1:${originPort} HTTP/1.1`);
       expect(proxyAuthorization).toBe('Basic dGVzdC11c2VyOnRlc3QtcGFzcw==');
+      expect(proxyHop).toMatch(/^[0-9a-f-]{36}$/);
+      expect(receivedProxyHop).toBeUndefined();
       expect(receivedPath).toBe('/v1/messages');
       expect(receivedAuthorization).toBe('Bearer subscription-oauth-token');
       expect(receivedBody.toString()).toBe('{"model":"claude-test","stream":true}');

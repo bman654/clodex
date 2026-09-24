@@ -186,6 +186,7 @@ describe('first-party WebSocket passthrough', () => {
       client.write(upgradeRequest([
         'Proxy-Authorization: Basic synthetic-local-proxy-token',
         'Proxy-Connection: keep-alive',
+        'X-Clodex-Proxy-Hop: foreign-nonce',
         'X-Voice-Test: first',
         'X-Voice-Test: second',
       ]));
@@ -208,6 +209,7 @@ describe('first-party WebSocket passthrough', () => {
       });
       expect(request?.headers['proxy-authorization']).toBeUndefined();
       expect(request?.headers['proxy-connection']).toBeUndefined();
+      expect(request?.headers['x-clodex-proxy-hop']).toBeUndefined();
       expect(request?.rawHeaders.filter(value => value === 'X-Voice-Test')).toHaveLength(2);
       client.write(clientFrame);
       expect(await received!.waitFor(bytes => bytes.length >= clientFrame.length)).toEqual(clientFrame);

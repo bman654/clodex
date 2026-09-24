@@ -294,13 +294,25 @@ Three transports do not use the undici dispatcher and share the same resolver in
   CONNECT (a fresh socket each time, so sharing is safe); the map is destroyed and cleared on close.
   Without the agent the handler falls back to the direct `net.connect()` it always used.
 
-Each of the three resolves its proxy per target, so `NO_PROXY` still applies. Each also guards
-against naming the local listener — by exact address, loopback alias, or a local interface behind a
-wildcard bind — and connects directly rather than recursively tunnelling through itself. The
-passthrough agent checks once at bind time; the CONNECT handler must re-check per request and reads
-`proxyServer.address()` **inside the handler rather than caching it at startup**, because
-`listenTcpServer` resolves `listen()` and only then probes the port, so a CONNECT arriving during
-that probe would find an unset cache and disarm the guard. Its warning is emitted once per server.
+Each of the three resolves its proxy per target, so `NO_PROXY` still applies. The raw passthrough
+and CONNECT handler guard against naming the local listener — by exact address, literal loopback
+spellings (including `localhost.` and IPv4-mapped IPv6), or a local interface behind a wildcard
+bind — and connect directly rather than recursively tunnelling through themselves. For other
+aliases and A→B→A cycles, the CONNECTs from the raw passthrough, pass-through tunnels, and WebSocket
+agents carry a per-process random `x-clodex-proxy-hop` header. The CONNECT handler refuses its own
+marker with HTTP 508 only where it would otherwise re-dial through the outbound proxy, and emits a
+diagnostic naming the proxy env var; a literal self-target instead tunnels direct. An unrecognized
+marker is ignored. Undici fetch CONNECTs do not carry the marker: if a fetch enters a loop, the
+listener's next CONNECT uses a marked agent and terminates it. Inbound marker values are removed
+before forwarding to the real upstream, including raw Anthropic requests and upgrades. The plain
+HTTP and intercepted TLS refusal sites are defence-in-depth for manually supplied markers, not
+reachable loops from clodex's own CONNECT headers. A middle proxy that removes the header, or that
+originates its own CONNECT instead of relaying ours (including another clodex), defeats this guard;
+only literal spellings remain protected in that case. The passthrough agent checks once at bind
+time; the CONNECT handler must re-check per request and reads `proxyServer.address()` **inside the
+handler rather than caching it at startup**, because `listenTcpServer` resolves `listen()` and only
+then probes the port, so a CONNECT arriving during that probe would find an unset cache and disarm
+the guard. Its warning is emitted once per server.
 
 Malformed proxy URLs also warn and fall back to direct connections. All of these warnings go through
 `emitParentNotice`, not `console.error`: the CONNECT paths fire while the spawned Claude Code owns
