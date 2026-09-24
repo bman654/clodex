@@ -97,6 +97,8 @@ export interface CachedModel {
   useResponsesLite?: boolean;
   /** Backend capability: model must use the WebSocket Responses transport instead of HTTP. */
   preferWebSockets?: boolean;
+  /** Minimum Codex client version reported by the ChatGPT catalog. */
+  minimalClientVersion?: string;
   /** Supported input modalities preserved from curated provider metadata. */
   modalities?: ('text' | 'image')[];
   /** Provider-neutral per-model wire quirks. */

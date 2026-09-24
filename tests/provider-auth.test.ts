@@ -597,6 +597,17 @@ describe('authenticateProvider', () => {
     },
   );
 
+  it('prints a compatibility warning after a successful model refresh', async () => {
+    const reason = 'Hidden ChatGPT-plan models: future-model (requires 1.0.0). Update clodex.';
+    vi.mocked(refreshProviderModels).mockResolvedValueOnce({
+      id: 'openai-oauth', name: 'OpenAI', ok: true, modelCount: 1, reason,
+    });
+
+    await authenticateProvider('openai');
+
+    expect(prompts.log.warn).toHaveBeenCalledWith(reason);
+  });
+
   it('reports a returned model-refresh failure instead of claiming success', async () => {
     const stop = vi.fn();
     vi.mocked(prompts.spinner)

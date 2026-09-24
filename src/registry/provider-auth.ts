@@ -434,6 +434,7 @@ export async function authenticateProvider(
       refreshSpinner.stop(`Models not refreshed${refreshResult.reason ? ` — ${refreshResult.reason}` : ''}`);
     } else if (refreshResult.ok) {
       refreshSpinner.stop('Models refreshed');
+      if (refreshResult.reason) p.log.warn(refreshResult.reason);
     } else {
       refreshSpinner.stop(`Could not refresh models${refreshResult.reason ? ` — ${refreshResult.reason}` : ''}`);
     }
