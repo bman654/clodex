@@ -16,6 +16,8 @@ import { routeUnavailableMessage } from '../route-unavailable.js';
 import { emitParentNotice } from '../parent-notice.js';
 import { passthroughUpstreamRetries } from '../upstream-retry.js';
 import {
+  OUTBOUND_PROXY_HOP_HEADER,
+  isOwnOutboundProxyHop,
   outboundHttpProxyAgent,
   outboundProxyUrlForTarget,
   proxyUrlTargetsListener,
@@ -297,7 +299,8 @@ function requestHeadersWithoutProxyHeaders(req: http.IncomingMessage): string[] 
   const headers: string[] = [];
   for (let i = 0; i < req.rawHeaders.length; i += 2) {
     const name = req.rawHeaders[i]!;
-    if (/^proxy-(authorization|connection)$/i.test(name)) continue;
+    if (/^proxy-(authorization|connection)$/i.test(name)
+      || name.toLowerCase() === OUTBOUND_PROXY_HOP_HEADER) continue;
     headers.push(name, req.rawHeaders[i + 1] ?? '');
   }
   return headers;
@@ -945,6 +948,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   const anthropicOrigin = new URL(options.anthropicOrigin ?? 'https://api.anthropic.com');
   const anthropicProxyUrl = outboundProxyUrlForTarget(anthropicOrigin.href);
   let anthropicAgent: https.Agent | undefined;
+  let anthropicViaProxy = false;
   let adapter: ProxyHandle | null = options.adapterHandle ?? null;
   if (options.routes.length > 0) {
     adapter ??= await startProxyCatalog(
@@ -959,12 +963,32 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
   }
   const adapterAgent = adapter ? new http.Agent({ keepAlive: true }) : undefined;
   let shuttingDown = false;
+  let warnedProxyLoop = false;
+  const rejectProxyLoop = (target: string): void => {
+    if (warnedProxyLoop) return;
+    warnedProxyLoop = true;
+    // Name the setting that routed this request back here, without logging
+    // the nonce or any proxy URL credentials.
+    const secure = target.startsWith('https:');
+    const candidates = secure ? ['HTTPS_PROXY', 'https_proxy'] : ['HTTP_PROXY', 'http_proxy'];
+    const name = candidates.find(key => process.env[key]?.trim()) ?? candidates[0];
+    emitParentNotice(`clodex: outbound proxy loop detected; check ${name} (request returned to this proxy)`);
+  };
 
   const mitmServer = https.createServer({
     key: certificates.serverKey,
     cert: certificates.serverCert,
     minVersion: 'TLSv1.2',
   }, async (req, res) => {
+    if (isOwnOutboundProxyHop(req.headers[OUTBOUND_PROXY_HOP_HEADER])) {
+      rejectProxyLoop('https://api.anthropic.com');
+      res.writeHead(508, { 'Content-Type': 'text/plain' });
+      res.end('Outbound proxy loop detected');
+      return;
+    }
+    // Keep the inbound marker out of diagnostic logs; rawHeaders are stripped
+    // separately by requestHeadersWithoutProxyHeaders before upstream forwarding.
+    delete req.headers[OUTBOUND_PROXY_HOP_HEADER];
     let rawBody: Buffer;
     try {
       rawBody = await readRawBody(req);
@@ -1164,6 +1188,12 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     return connectTunnelAgents.get(proxyUrl);
   };
   mitmServer.on('upgrade', (req, socket, head) => {
+    if (isOwnOutboundProxyHop(req.headers[OUTBOUND_PROXY_HOP_HEADER])) {
+      rejectProxyLoop('https://api.anthropic.com');
+      socket.once('error', () => socket.destroy());
+      socket.end('HTTP/1.1 508 Loop Detected\r\nConnection: close\r\n\r\n', () => socket.destroy());
+      return;
+    }
     forwardAnthropicUpgrade(
       req,
       socket,
@@ -1174,13 +1204,32 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
       sockets,
     );
   });
-  const proxyServer = http.createServer(forwardPlainHttp);
+  const proxyServer = http.createServer((req, res) => {
+    if (isOwnOutboundProxyHop(req.headers[OUTBOUND_PROXY_HOP_HEADER])) {
+      rejectProxyLoop(req.url ?? '');
+      res.writeHead(508, { 'Content-Type': 'text/plain' });
+      res.end('Outbound proxy loop detected');
+      return;
+    }
+    forwardPlainHttp(req, res);
+  });
   proxyServer.on('connection', socket => {
     sockets.add(socket);
     socket.once('close', () => sockets.delete(socket));
   });
   proxyServer.on('connect', (req, clientSocket, head) => {
+    const ownHop = isOwnOutboundProxyHop(req.headers[OUTBOUND_PROXY_HOP_HEADER]);
+    const rejectOwnHop = (): void => {
+      rejectProxyLoop(`https://${req.url ?? ''}`);
+      clientSocket.once('error', () => clientSocket.destroy());
+      const body = 'Outbound proxy loop detected';
+      clientSocket.end(
+        `HTTP/1.1 508 Loop Detected\r\nContent-Type: text/plain\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
+        () => clientSocket.destroy(),
+      );
+    };
     if (shouldInterceptConnect(req.url ?? '')) {
+      if (ownHop && anthropicViaProxy) { rejectOwnHop(); return; }
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head.length > 0) clientSocket.unshift(head);
       mitmServer.emit('connection', clientSocket);
@@ -1226,6 +1275,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     const outboundAgent = outboundProxyUrl !== undefined && !selfTargeting
       ? connectTunnelAgent(outboundProxyUrl, targetUrl)
       : undefined;
+    if (ownHop && outboundAgent) { rejectOwnHop(); return; }
     if (outboundAgent) {
       let upstream: net.Socket | undefined;
       let proxyConnectStatus: number | undefined;
@@ -1244,7 +1294,9 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
         if (proxyConnectStatus !== 200 || clientSocket.destroyed) {
           connected.destroy();
           if (!clientSocket.destroyed) {
-            clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n', () => clientSocket.destroy());
+            clientSocket.end(proxyConnectStatus === 508
+              ? 'HTTP/1.1 508 Loop Detected\r\n\r\n'
+              : 'HTTP/1.1 502 Bad Gateway\r\n\r\n', () => clientSocket.destroy());
           }
           return;
         }
@@ -1326,6 +1378,7 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
     );
   } else {
     anthropicAgent = outboundHttpProxyAgent(anthropicOrigin.href);
+    anthropicViaProxy = anthropicAgent !== undefined;
   }
   // Without this the passthrough falls back to https.globalAgent, whose pool is
   // shared with every other https client in the process and outlives close().
