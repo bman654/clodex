@@ -35,7 +35,7 @@ describe('Codex client version precedence', () => {
 });
 
 describe('offline seeded Codex version contract', () => {
-  it('retains the minimums measured in the live catalog on 2026-09-22', () => {
+  it('retains the minimums measured in the live catalog on 2026-09-24', () => {
     const models = buildOpenAiOAuthModels();
     const measured = {
       'gpt-6-sol': '0.155.0',
@@ -45,6 +45,7 @@ describe('offline seeded Codex version contract', () => {
       'gpt-5.6-sol': '0.144.0',
       'gpt-5.6-terra': '0.144.0',
       'gpt-5.6-luna': '0.144.0',
+      'gpt-5.5': '0.124.0',
     };
     for (const [id, minimum] of Object.entries(measured)) {
       expect(models.find(model => model.id === id)?.minimalClientVersion, id).toBe(minimum);
