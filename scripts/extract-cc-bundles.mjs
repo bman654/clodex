@@ -22,22 +22,13 @@ import {
   writeFileSync,
   existsSync,
   mkdirSync,
-  mkdtempSync,
   statSync,
-  copyFileSync,
-  rmSync,
 } from 'node:fs';
 import { registerHooks } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
-import { inspectEntryModule, shimEntryModuleName } from '../src/bun-entry-module.ts';
-
-// `src/` spells its own imports the TypeScript way — `./bun-entry-module.js` for a file that is
-// really `./bun-entry-module.ts`. tsup and vitest understand that; bare `node` does not, and
-// resolves it to a file that does not exist. bun-entry-module.ts imports nothing relative, which is
-// why the static import above works; bun-bundle.ts does, so it is loaded dynamically BELOW this
-// hook — a static import would be resolved before this line ever runs. Same pattern, and the same
-// reason, as scripts/probe-patch-mechanism.mjs.
+// `src/` uses .js specifiers for TypeScript siblings. tsup and vitest resolve them, but bare
+// Node needs this hook before dynamically importing bun-bundle.ts.
 registerHooks({
   resolve(specifier, context, nextResolve) {
     if (specifier.startsWith('.') && specifier.endsWith('.js') && context.parentURL) {
@@ -116,25 +107,10 @@ for (const f of files) {
     }
     console.log(`re-extracting ${f}: cached file is only ${size} bytes`);
   }
-  // Claude Code 2.1.229 renamed the module tweakcc looks for. The rename that makes it
-  // readable again is a write, so it happens on a scratch copy — these backups are the only
-  // pristine bytes on the machine and nothing here may touch them.
-  let readFrom = path.join(srcDir, f);
-  let scratchDir;
+  // tweakcc 4.3.3 recognizes /cli directly. Read the pristine backup without copying or
+  // rewriting it: it is the only original set of bytes available for this installation.
+  const readFrom = path.join(srcDir, f);
   try {
-    const state = inspectEntryModule(readFrom);
-    if (state === 'unparseable') {
-      // Distinguishing this from a name mismatch matters: tweakcc reports the same
-      // "Failed to extract JavaScript" for both, and for the unrelated node-gyp-build fault.
-      console.log(`NOTE ${f} has no readable Bun module list — extraction below is unshimmed`);
-    }
-    if (state === 'needs-shim') {
-      scratchDir = mkdtempSync(path.join(tmpdir(), 'cc-bundle-'));
-      const scratch = path.join(scratchDir, f);
-      copyFileSync(readFrom, scratch);
-      shimEntryModuleName(scratch);
-      readFrom = scratch;
-    }
     const inst = await tryDetectInstallation({ path: readFrom });
     if (!inst) throw new Error('tweakcc did not recognize the binary');
     // Since Claude Code 2.1.242 the bundle is split across ~1,370 modules and tweakcc's
@@ -160,8 +136,6 @@ for (const f of files) {
   } catch (e) {
     console.log('FAIL', f, String(e).slice(0, 200));
     failed++;
-  } finally {
-    if (scratchDir) rmSync(scratchDir, { recursive: true, force: true });
   }
 }
 

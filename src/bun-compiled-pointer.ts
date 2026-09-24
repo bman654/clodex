@@ -1,10 +1,9 @@
 // Keeps tweakcc's ELF repack able to find the address it expects to rewrite when it moves Bun's
 // embedded blob.
 //
-// Read `.claude/docs/patcher.md` first. This file exists for the same reason `bun-entry-module.ts`
-// does: tweakcc identifies something in the binary by a rule that a Claude Code release quietly
-// stopped satisfying, and the cheapest correct answer is a reversible byte-level stand-in around
-// the repack rather than a fork of tweakcc.
+// Read `.claude/docs/patcher.md` first. tweakcc's ELF repack searches for a pointer at a
+// 16 KiB-aligned location, but newer Claude Code builds moved the real pointer off that boundary.
+// A reversible byte-level stand-in lets tweakcc repack the blob without forking its ELF writer.
 //
 // THE RULE. A Bun standalone ELF stores the virtual address of its `.bun` section in an 8-byte
 // little-endian global. `repackELFSection` moves `.bun` to a fresh page past the end of the file

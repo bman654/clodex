@@ -178,8 +178,9 @@ These bite from outside the subsystem that owns them, so they live here rather t
   continuation and translation logic took extensive real-world testing. Surgical changes only.
 - **`~/.claude/settings.json` is never touched by clodex.** Launch config is env-var-only (plus
   `--model`), child process only.
-- **`node-gyp-build` is a deliberate direct dependency that no clodex source imports.** Routine
-  "remove the unused dependency" cleanup breaks fresh installs. Reason in
+- **tweakcc 4.3.3 uses node-lief 1.3.2, whose runtime loaders import their native prebuilds by
+  path.** The old direct `node-gyp-build` dependency was required for node-lief 1.3.1, but is
+  no longer needed; recheck the loader before changing the dependency graph. See
   `.claude/docs/patcher.md`.
 - **clodex always installs package undici's global fetch dispatcher with HTTP/2 disabled**
   (`installOutboundDispatcher()` at the top of `main()`), proxy env or not. Node 26's bundled
@@ -210,7 +211,7 @@ Interactive launch flow and real-provider behavior are verified manually.
 **Nothing automated touches a real Claude Code binary, so nothing automated can see a break that is
 specific to one executable format.** That is not hypothetical: `clodex patch` was broken on every
 ELF build of Claude Code across two releases while macOS stayed green. Before changing
-`src/bun-entry-module.ts` or anything else in the read/repack/restore path, run
+`src/bun-module-table.ts` or anything else in the read/repack/publish path, run
 `scripts/probe-patch-mechanism.mjs` against a build for each format — Mach-O, ELF and PE. It needs
 no Linux or Windows host, because it never executes the binary. See `.claude/docs/patcher.md`.
 

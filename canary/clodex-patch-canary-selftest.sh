@@ -431,7 +431,7 @@ matrix_check "--no-container is not reported as Docker being down" "0" \
 #      image, so it is always a probe; the probe exercised zero patch sites; `PATCH 5: model
 #      picker options` had stopped matching on that build; and the canary reported win32-arm64 as
 #      a clean pass while reporting the same break on the two Linux builds that DO have images.
-MECHANISM_CHECKS='[{"name":"pristine-parses","ok":true,"detail":"entry module is needs-shim"},
+MECHANISM_CHECKS='[{"name":"pristine-parses","ok":true,"detail":"1837 Bun modules"},
                    {"name":"read-content","ok":true,"detail":"28147627 bytes of JavaScript"},
                    {"name":"compact-prompt-markers","ok":true,"detail":"both strict compaction prompt markers are present"},
                    {"name":"published-content","ok":true,"detail":"byte-for-byte"}]'
@@ -440,7 +440,7 @@ MECHANISM_CHECKS='[{"name":"pristine-parses","ok":true,"detail":"entry module is
 write_probe_json() {
   jq -n --argjson checks "$MECHANISM_CHECKS" --arg verdict "$2" --argjson sites "$3" \
         --argjson reasons "${4:-[]}" --argjson extra "${5:-null}" \
-    '{label: "win32-arm64", format: "pe", entryState: "needs-shim", shimUsed: true,
+    '{label: "win32-arm64", format: "pe", entryModuleName: "/$bunfs/root/cli",
       pristineSize: 322051744, publishedSize: 322133550, growth: 1, detectedVersion: "2.1.238",
       sourceBytes: 28147627, durationMs: 33016, verdict: $verdict, reasons: $reasons,
       checks: ($checks + (if $extra == null then [] else [$extra] end)),

@@ -23,7 +23,7 @@ import {
   readBunJavaScriptModules,
   readBunModuleTable,
   tweakccRecognizesModuleName,
-} from '../src/bun-entry-module.js';
+} from '../src/bun-module-table.js';
 import { closeSync, openSync, writeSync } from 'node:fs';
 import { buildFakeNativeClaude, parseBunBlob, rebuildFakeNativeClaude } from './bun-blob-fixture.js';
 import { applyClodexPatches } from '../src/patch-transforms.js';
@@ -330,9 +330,8 @@ describe('planBundleWrite', () => {
   });
 
   it('refuses more than one module tweakcc would write to', () => {
-    // tweakcc puts its buffer into EVERY recognized module, and the size the placeholder is
-    // computed for assumes exactly one. The entry-module shim declines to fire when a recognized
-    // name already exists precisely so that stays true.
+    // tweakcc puts its buffer into EVERY recognized module, and placeholder sizing assumes
+    // exactly one. A second match must fail rather than silently replacing both.
     const twoRecognized = MODULES.map((module, index) => index === 0
       ? { ...module, name: '/$bunfs/root/src/entrypoints/cli.js' }
       : module);
@@ -347,6 +346,22 @@ describe('planBundleWrite', () => {
 });
 
 describe('applyBundleWritePlan', () => {
+  it('targets the renamed /cli entry without rewriting its name', () => {
+    const renamed = MODULES.map((module, index) => index === WRITABLE_ID
+      ? { ...module, name: '/$bunfs/root/cli' }
+      : module);
+    withBinary(renamed, path => {
+      const bundle = readClaudeBundle(path)!;
+      const patched = bundle.modules.map(module => module.source);
+      patched[0] = 'export const a=111;';
+      expect(writableModuleIndex(path)).toBe(WRITABLE_ID);
+      const plan = planBundleWrite(path, bundle, patched, WRITABLE_ID);
+      fakeWriteContent(path, plan.content);
+      applyBundleWritePlan(path, plan);
+      expect(readBunModuleTable(path)!.names[WRITABLE_ID]).toBe('/$bunfs/root/cli');
+      expect(readBunJavaScriptModules(path)![0]!.source).toBe('export const a=111;');
+    });
+  });
   it('publishes every module at its patched source over the repacked section', () => {
     withBinary(MODULES, path => {
       const bundle = readClaudeBundle(path)!;

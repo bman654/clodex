@@ -75,11 +75,7 @@ import {
   inspectClaudeNativeBinaryPlaceholder,
   type ClaudeNativePackageState,
 } from './claude-native-placeholder.js';
-import {
-  resignMachOBinary,
-  restoreEntryModuleName,
-  shimEntryModuleName,
-} from './bun-entry-module.js';
+import { signAndVerifyMachOCandidate } from './patch-signature.js';
 import {
   restoreBunCompiledPointer,
   shimBunCompiledPointer,
@@ -887,13 +883,8 @@ export async function applyPatch(
       from: string,
     ): Promise<{ installation: Installation; source: string; bundle: ClaudeBundle | null }> => {
       copyFileSync(from, candidatePath);
-      // Claude Code 2.1.229 renamed the module tweakcc looks for; the shim is a
-      // same-length rename that only has to be in place while tweakcc reads. It
-      // is undone immediately so the seeded candidate stays byte-identical to
-      // `from` — the snapshot path publishes these exact bytes as the pristine
-      // backup under a content address, so re-signing here (which would swap
-      // Claude Code's signature for an ad-hoc one) must not happen.
-      const shim = shimEntryModuleName(candidatePath);
+      // Keep the seed byte-identical to `from`: the snapshot path publishes these exact bytes
+      // as a content-addressed pristine backup. tweakcc 4.3.3 reads /cli without renaming it.
       const installation = await tryDetectInstallation({ path: candidatePath });
       // Claude Code 2.1.242 split the bundle across ~1,370 modules, and tweakcc's
       // `readContent` returns only the one it recognizes by name — since that
@@ -916,7 +907,6 @@ export async function applyPatch(
         );
       }
       const source = bundle ? bundle.source : await readContent(installation);
-      if (shim) restoreEntryModuleName(candidatePath, shim, { resign: false });
       return { installation, source, bundle };
     };
 
@@ -1033,8 +1023,8 @@ export async function applyPatch(
       // holds these bytes, so an existing file at this content address is a
       // corrupt one being replaced by the bytes its name asserts.
       //
-      // The candidate has been read from and written to by now (the entry-module shim, at least),
-      // so prove it still IS those bytes rather than assuming it. `plan.pristineSha256` is the
+      // The candidate has been read by tweakcc; prove its bytes stayed pristine rather than
+      // assuming every read path is side-effect free. `plan.pristineSha256` is the
       // live binary's hash and the name this is about to be filed under, so a mismatch would mean
       // publishing a backup that lies about its own contents — which only a much later run would
       // notice, as a backup nobody can trust.
@@ -1136,12 +1126,6 @@ export async function applyPatch(
       local = discardLocalPatchOutcome(builtIn.content, local.results);
     }
     results = [...results, ...local.results];
-    // Repacking reads the module list back off the candidate, so the shim has to
-    // be in place again — and undone again before the candidate is published,
-    // because Claude Code's sibling native modules resolve against the entry
-    // module's own path.
-    const writeShim = shimEntryModuleName(candidatePath);
-    let publishedBlob = false;
     if (loaded.bundle) {
       // One repack, however many modules the patch touched — and the repack is used only to RESIZE
       // the binary's Bun section. What it rebuilds is thrown away: Bun's blob carries structures no
@@ -1164,16 +1148,14 @@ export async function applyPatch(
       await writeContent(loaded.installation, plan.content);
       if (bunPointerShim) restoreBunCompiledPointer(candidatePath, bunPointerShim);
       applyBundleWritePlan(candidatePath, plan);
-      publishedBlob = true;
     } else {
       const bunPointerShim = shimBunCompiledPointer(candidatePath);
       await writeContent(loaded.installation, local.content);
       if (bunPointerShim) restoreBunCompiledPointer(candidatePath, bunPointerShim);
     }
-    if (writeShim) restoreEntryModuleName(candidatePath, writeShim, { resign: true });
-    // The repack signs on its way out, so publishing the blob after it leaves an invalid signature.
-    // Restoring the entry-module name re-signs already; this covers the binary that needed no shim.
-    else if (publishedBlob) resignMachOBinary(candidatePath);
+    // tweakcc warns and continues on a signing failure. This must instead be fatal before the
+    // candidate can replace the live install; publishing the blob may also invalidate its signature.
+    signAndVerifyMachOCandidate(candidatePath);
     patchedSize = statSync(candidatePath).size;
     patchedSha256 = sha256File(candidatePath);
     renameSync(candidatePath, binaryPath);

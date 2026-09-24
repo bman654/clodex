@@ -846,14 +846,14 @@ $(jq -s -r 'map("  \(.platform)\t[\(.mode)]\t\(.status)")[]' "$MATRIX")
 
 Every matrix row whose mode is not \`none\` first ran scripts/probe-patch-mechanism.mjs. It checks
 exact compaction-prompt markers, applies every clodex patch site to that build's extracted bundle,
-and runs the shim/read/repack/restore cycle without executing the result. A \`none\` row downloaded
+and runs the read/repack/publish/sign cycle without executing the result. A \`none\` row downloaded
 nothing and ran no check. The other matrix modes name the strongest additional tier available:
   host       the real \`clodex patch\` on this Mac, all patch sites end to end.
   container  the real \`clodex patch\` inside a native-arch Linux container. \`clodex patch\`
              resolves the version by EXECUTING the binary, so a foreign binary can only go through
              the real command this way.
   probe      no execution tier was available; the universal probe is the whole result.
-A failure confined to one executable format (ELF, Mach-O, PE) points at src/bun-entry-module.ts or
+A failure confined to one executable format (ELF, Mach-O, PE) points at src/bun-module-table.ts, src/patch-signature.ts, or
 tweakcc's repack, not at the patch anchors. A patch-site failure on every checked platform points at
 the anchors in src/patch-transforms.ts.
 
