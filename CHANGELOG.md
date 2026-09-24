@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.18.0](https://github.com/bman654/clodex/compare/v2.17.0...v2.18.0) (2026-09-24)
+
+
+### Features
+
+* **vscode:** warn and print the fix when a Claude Code extension update hides clodex models ([#280](https://github.com/bman654/clodex/issues/280)) ([0b53171](https://github.com/bman654/clodex/commit/0b5317185a6eea372cd0df4bfbaaefcb739345ee))
+
+
+### Bug Fixes
+
+* **help:** stop the clodex claude --provider/--model example from failing by default ([#275](https://github.com/bman654/clodex/issues/275)) ([1484242](https://github.com/bman654/clodex/commit/1484242c3b3eedf20fd89f3be567635ef2993d81))
+* **models:** hide unsupported ChatGPT-plan models to prevent repeated request failures ([#277](https://github.com/bman654/clodex/issues/277)) ([ac28ad4](https://github.com/bman654/clodex/commit/ac28ad466a975dc5eeed411b78cbaebfa7196b63))
+* **oauth:** keep GPT-6 and Daybreak Blue usable after upgrading from an older model list ([#276](https://github.com/bman654/clodex/issues/276)) ([70c681e](https://github.com/bman654/clodex/commit/70c681e574d622958d58901ca59408a1b68f350a))
+* **openai:** stop OpenAI models failing every turn after a Claude reply that used thinking ([#278](https://github.com/bman654/clodex/issues/278)) ([ca22d2b](https://github.com/bman654/clodex/commit/ca22d2bcd5e8ff3fbb7a2794026eaac2ab11612f))
+* **openai:** warn API-key users when large prompts trigger higher prices ([#279](https://github.com/bman654/clodex/issues/279)) ([2d92b18](https://github.com/bman654/clodex/commit/2d92b18cd0065c90b36b0f2ee3be29436a9479d3))
+
 ## [2.17.0](https://github.com/bman654/clodex/compare/v2.16.0...v2.17.0) (2026-09-23)
 
 
