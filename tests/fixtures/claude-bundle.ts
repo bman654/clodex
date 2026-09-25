@@ -31,6 +31,17 @@ export function contextResolver(modelParam: string, windowParam: string): string
     + `if(EHi(${modelParam},${windowParam}))return Dve;return $Ac(${modelParam},${windowParam})}`;
 }
 
+/**
+ * The /model picker's entry point, as Claude Code 2.1.274+ minifies it: the served catalog's
+ * builder, `??`-ed with the legacy builder PATCH 5 patches, and then the custom-model env option
+ * appended to whichever array came back. PATCH 11 keys on that pair. The legacy builder's own
+ * choke point is `opts` above — the two sites are deliberately different functions here, because
+ * that is what they are in the bundle and patching one has never patched the other.
+ */
+export const PICKER_ENTRY_POINT =
+  'function mkOpts(e,n){let r=fromCatalog(e,n),s=r??opts(e),d=env.ANTHROPIC_CUSTOM_MODEL_OPTION;'
+  + 'if(d&&!s.some((x)=>x.value===d))s.push({value:d,label:d,description:"Custom"});return s}';
+
 export const CLAUDE_CORE_FIXTURE = [
   ENUM_AND_DESCRIPTION,
   'var KNOWN=["sonnet","opus","haiku","fable","opusplan"];',
@@ -39,6 +50,7 @@ export const CLAUDE_CORE_FIXTURE = [
   CONTEXT_RESOLVER,
   'function cwdOf(){let p=process.env.PWD;return p}',
   'function childEnv(){let e=extra(),t=Object.keys(e).length>0,n=Object.keys(e).length>0,s=flag(process.env.CLAUDE_CODE_REMOTE)?remote():{};let o=[process.env.CLAUDE_CODE_OAUTH_TOKEN,process.env.CLAUDE_CODE_SUBSCRIPTION_TYPE,process.env.CLAUDE_BG_PTY_AUTH,"OTEL_",process.env.CLAUDE_CODE_OTEL_DIAG_STDERR],u=["CLAUDE_CODE_OAUTH_TOKEN"];if(!t&&!n&&!o[0])return process.env;let v={...process.env,...e,...s};for(let k of u)delete v[k],delete v[`INPUT_${k}`];return v}function mcpAllow(){let e=process.env.CLAUDE_CODE_MCP_ALLOWLIST_ENV;return e}',
+  PICKER_ENTRY_POINT,
 ].join('\n');
 
 export const CLAUDE_FIXTURE = [

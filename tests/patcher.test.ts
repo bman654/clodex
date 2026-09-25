@@ -679,8 +679,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 13,
-      digest: '957653aa8315627b088345d487648e2f62ca314b31257f6fea695de5129e69e1',
+      version: 14,
+      digest: '9adf389fbe3fc39045ddbd5896e070a811ea63f79412ab2bf4f19cb148b5c0c1',
     });
   });
 });
@@ -3373,7 +3373,11 @@ describe('patch script identity naming', () => {
       name: 'PATCH 5: model picker options',
       extra: 'model selection appears 2 times (expected 1)',
     });
-    expect(result.content, 'nothing was injected').not.toContain('{value:"sol",label:"Sol"');
+    // PATCH 11 injects at the picker's entry point, which these fixtures do not touch, so the row
+    // is present once. What must NOT happen is a second copy — PATCH 5 patching a builder it
+    // cannot identify.
+    expect(result.content.match(/\{value:"sol",label:"Sol"/g), 'only the entry point was patched')
+      .toHaveLength(1);
     expect(result.content, 'the competitor is left exactly as it was').toContain(DECOY_SELECTING);
   });
 
@@ -3384,7 +3388,9 @@ describe('patch script identity naming', () => {
     const result = applyClodexPatches(CLAUDE_FIXTURE_GENERIC_DECOY, config);
 
     expect(pickerSite(result)?.status).toBe('OK');
-    expect(result.content.match(/\{value:"sol",label:"Sol"/g)).toHaveLength(1);
+    // Twice: the legacy builder (PATCH 5) and the picker's entry point (PATCH 11). The decoy is
+    // neither.
+    expect(result.content.match(/\{value:"sol",label:"Sol"/g)).toHaveLength(2);
     expect(result.content, 'the competitor is left exactly as it was').toContain(DECOY_GENERIC);
     expect(executePicker(result.content)).toContain('sol');
     expect(executePicker(result.content, 'zzGeneric'), 'the competitor gained no entries')
@@ -3403,7 +3409,8 @@ describe('patch script identity naming', () => {
       name: 'PATCH 5: model picker options',
       extra: 'anchor not found',
     });
-    expect(result.content).not.toContain('{value:"sol",label:"Sol"');
+    expect(result.content.match(/\{value:"sol",label:"Sol"/g), 'only the entry point was patched')
+      .toHaveLength(1);
     expect(result.content, 'the competitor is left exactly as it was').toContain(DECOY_GENERIC);
   });
 
@@ -3431,7 +3438,8 @@ describe('patch script identity naming', () => {
       name: 'PATCH 5: model picker options',
       extra: 'anchor not found',
     });
-    expect(result.content).not.toContain('{value:"sol",label:"Sol"');
+    expect(result.content.match(/\{value:"sol",label:"Sol"/g), 'only the entry point was patched')
+      .toHaveLength(1);
   });
 
   it('supports aliases that match object prototype property names', () => {
@@ -3485,6 +3493,7 @@ describe('patch script identity naming', () => {
       ['PATCH 3: known-alias validator list', 'OK'],
       ['PATCH 6: alias resolver switch', 'OK'],
       ['PATCH 5: model picker options', 'OK'],
+      ['PATCH 11: catalog picker options', 'OK'],
       ['PATCH 4: Agent tool model description', 'OK'],
       ['PATCH 7: per-model context window', 'OK'],
       ['PATCH 8a: effort capability', 'OK'],
@@ -3499,6 +3508,7 @@ describe('patch script identity naming', () => {
       ['PATCH 3: known-alias validator list', 'SKIP'],
       ['PATCH 6: alias resolver switch', 'SKIP'],
       ['PATCH 5: model picker options', 'SKIP'],
+      ['PATCH 11: catalog picker options', 'SKIP'],
       ['PATCH 4: Agent tool model description', 'SKIP'],
       // PATCH 7 re-runs through the in-place refresh path; an unchanged config
       // rewrites the identical table, which reports as already patched.
@@ -3647,15 +3657,16 @@ describe('patch script identity naming', () => {
 
     expect(patched.content).toContain('.enum(["sonnet","opus","haiku","fable","sol","clodex:openai:mystery"])');
     expect(patched.content).toContain('/*ccpatch:ctx*/');
-    expect(patched.results.slice(0, 6).map(result => [result.name, result.status])).toEqual([
+    expect(patched.results.slice(0, 7).map(result => [result.name, result.status])).toEqual([
       ['PATCH 1: Agent tool model enum', 'OK'],
       ['PATCH 3: known-alias validator list', 'OK'],
       ['PATCH 6: alias resolver switch', 'OK'],
       ['PATCH 5: model picker options', 'OK'],
+      ['PATCH 11: catalog picker options', 'OK'],
       ['PATCH 4: Agent tool model description', 'OK'],
       ['PATCH 7: per-model context window', 'OK'],
     ]);
-    expect(patched.results.slice(6, -1)).toEqual([
+    expect(patched.results.slice(7, -1)).toEqual([
       { status: 'FAIL', name: 'PATCH 8a: effort capability', extra: 'anchor not found' },
       { status: 'FAIL', name: 'PATCH 8b: xhigh effort capability', extra: 'anchor not found' },
       { status: 'FAIL', name: 'PATCH 8c: max effort capability', extra: 'anchor not found' },
