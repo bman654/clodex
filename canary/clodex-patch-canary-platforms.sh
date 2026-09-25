@@ -16,8 +16,8 @@
 #                    linux-x64, linux-x64-musl and win32-x64 and NOT on linux-arm64,
 #                    linux-arm64-musl or win32-arm64. Every build's anchors are now checked
 #                    against that build's own bundle.
-#   the container    the entry-module shim, tweakcc's read, the repack, the restore and the
-#                    Mach-O re-sign all depend on the executable format — and that is the half
+#   the container    tweakcc's read, the repack, and Mach-O signing depend on the
+#                    executable format — and that is the half
 #                    that broke. Every ELF build of Claude Code from 2.1.229 on was unpatchable
 #                    across two clodex releases while macOS stayed green, because the canary only
 #                    ever tested the host. An outside contributor reported it, not us.
@@ -28,7 +28,7 @@
 #   probe      scripts/probe-patch-mechanism.mjs from the clodex checkout under test: it applies
 #              every clodex patch site to the bundle it extracts from THAT build, checks the exact
 #              compaction-prompt markers, repacks what those transforms produced, and runs the same
-#              shim/read/repack/restore cycle the patcher runs. It never executes the binary, so it
+#              read/repack/publish/sign cycle the patcher runs. It never executes the binary, so it
 #              works from macOS against every format.
 #   host       the real `clodex patch` on this Mac, after the probe — the authoritative "is it safe
 #              for me to update" answer, and the only leg that patches AND then starts the binary
@@ -531,7 +531,7 @@ evaluate_probe_leg() { # evaluate_probe_leg <platform> <probe.json> <exit-code> 
     return 0
   fi
 
-  LEG_DETAIL="$(jq -c '{format, entryState, shimUsed, pristineSize, publishedSize, growth,
+  LEG_DETAIL="$(jq -c '{format, entryModuleName, pristineSize, publishedSize, growth,
                         detectedVersion, sourceBytes, durationMs, patchSites: (.patchSiteSummary // null)}' "$json")"
   # Both sets of names, in one map, because both are checks that must keep holding: the mechanism
   # checks are what the baseline comparison has always watched, and the patch sites are what this

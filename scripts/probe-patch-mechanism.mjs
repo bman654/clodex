@@ -6,8 +6,8 @@
 // itself needs, since it resolves the version by executing the binary; that is why full-patch
 // coverage for Linux needs a container and this does not.)
 //
-//   the container   the entry-module shim, tweakcc's read, the repack, the restore and the Mach-O
-//                   re-sign all depend on the executable format. Every ELF build of Claude Code
+//   the container   tweakcc's read, the repack, and Mach-O signing all depend on the
+//                   executable format. Every ELF build of Claude Code
 //                   from 2.1.229 onward was unpatchable across two clodex releases while macOS
 //                   stayed green, because nothing tested an ELF binary.
 //   the patch sites the anchors clodex matches in the extracted JavaScript. These were long
@@ -59,13 +59,11 @@ import { registerHooks } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
-  inspectEntryModule,
   listBunModuleNames,
   readBunModuleTable,
-  resignMachOBinary,
-  restoreEntryModuleName,
-  shimEntryModuleName,
-} from '../src/bun-entry-module.ts';
+  tweakccRecognizesModuleName,
+} from '../src/bun-module-table.ts';
+import { signAndVerifyMachOCandidate } from '../src/patch-signature.ts';
 // bun-compiled-pointer.ts imports nothing relative either, so a static import is safe here.
 import {
   restoreBunCompiledPointer,
@@ -75,7 +73,7 @@ import { checkClaudeCodeCompactPromptMarkers } from '../src/claude-code-compact-
 
 // `src/` spells its own imports the TypeScript way — `./model-aliases.js` for a file that is
 // really `./model-aliases.ts`. tsup and vitest both understand that; bare `node` does not, and
-// resolves it to a file that does not exist. bun-entry-module.ts happens to import nothing
+// resolves it to a file that does not exist. bun-module-table.ts imports nothing
 // relative, which is why the static import above works; patch-transforms.ts does, so it is loaded
 // dynamically BELOW this hook — a static import would be resolved before this line ever runs.
 // Guarded on the sibling .ts actually existing, so a real .js file is never redirected.
@@ -111,8 +109,8 @@ if (args.length === 0 || args.includes('-h') || args.includes('--help')) {
       '  --expect-version V  fail unless the binary is that Claude Code release\n' +
       '  --scratch DIR       where the ~300 MB working copy goes\n' +
       '  --keep              leave the scratch copy behind\n\n' +
-      'Applies every clodex patch site to this build\'s own bundle and runs the shim/read/repack/\n' +
-      'restore cycle `clodex patch` runs — without executing the binary, so a build for any\n' +
+      'Applies every clodex patch site to this build\'s own bundle and runs the read/repack/\n' +
+      'publish cycle `clodex patch` runs — without executing the binary, so a build for any\n' +
       'platform can be probed from any host. It does NOT start the patched binary. Exits 0 only\n' +
       'if every check passed.',
   );
@@ -236,39 +234,14 @@ function containerFormat(file) {
     if (head.toString('latin1') === '\x7fELF') return 'elf';
     if (head.toString('latin1', 0, 2) === 'MZ') return 'pe';
     const magic = head.readUInt32BE(0);
-    // Kept in step with isMachO in src/bun-entry-module.ts: thin 32/64 in both byte orders, plus
-    // both fat wrappers. A magic this list misses is reported as unknown, which silently skips the
-    // signature check on a binary the patcher does re-sign.
+    // Kept in step with patch-signature.ts: thin 32/64 in both byte orders, plus both fat wrappers.
+    // A magic this list misses is reported as unknown, silently skipping the signature check on a
+    // binary the patcher does re-sign.
     const MACH_O_MAGIC = [
       0xfeedface, 0xfeedfacf, 0xcefaedfe, 0xcffaedfe, 0xcafebabe, 0xcafebabf, 0xbebafeca,
     ];
     if (MACH_O_MAGIC.includes(magic)) return 'macho';
     return `unknown(0x${magic.toString(16)})`;
-  } finally {
-    closeSync(fd);
-  }
-}
-
-// Every byte occurrence of `needle`, module name or not. Streaming, because these binaries are
-// ~300 MB and a match can straddle any read boundary.
-function countOccurrences(file, needle) {
-  const fd = openSync(file, 'r');
-  try {
-    const size = statSync(file).size;
-    const pattern = Buffer.from(needle);
-    const chunkBytes = 8 * 1024 * 1024;
-    let carry = Buffer.alloc(0);
-    let found = 0;
-    for (let position = 0; position < size; ) {
-      const length = Math.min(chunkBytes, size - position);
-      const buf = Buffer.alloc(length);
-      readSync(fd, buf, 0, length, position);
-      const window = carry.length > 0 ? Buffer.concat([carry, buf]) : buf;
-      for (let at = window.indexOf(pattern); at >= 0; at = window.indexOf(pattern, at + 1)) found++;
-      carry = Buffer.from(window.subarray(Math.max(0, window.length - (pattern.length - 1))));
-      position += length;
-    }
-    return found;
   } finally {
     closeSync(fd);
   }
@@ -310,22 +283,21 @@ try {
   const pristineSha = await sha256(scratch);
 
   // ---- 1. can the pristine binary be read at all? -------------------------------------------
-  info.entryState = inspectEntryModule(scratch);
-  record(
-    'pristine-parses',
-    info.entryState !== 'unparseable',
-    `entry module is ${info.entryState}`,
-  );
-  if (info.entryState === 'unparseable') throw new Error('nothing further can be probed');
+  const pristineTable = readBunModuleTable(scratch);
+  record('pristine-parses', pristineTable !== null,
+    pristineTable ? `${pristineTable.names.length} Bun modules` : 'no readable Bun module table');
+  if (!pristineTable) throw new Error('nothing further can be probed');
 
   // ---- 2. seed the candidate, exactly as patcher.ts does ------------------------------------
-  // The shim is undone immediately so the seeded copy is byte-identical to the source: clodex
-  // publishes these bytes as the pristine backup under a content address, so a shim left in place
-  // (or a stray re-sign) would poison a backup that is supposed to be Claude Code's own bytes.
-  const pristineModules = listBunModuleNames(scratch) ?? [];
-  const readShim = shimEntryModuleName(scratch);
-  info.shimUsed = readShim !== null;
-  info.entryModuleName = readShim?.original ?? null;
+  // Reading the candidate must never alter the pristine bytes.
+  const pristineModules = pristineTable.names;
+  info.entryModuleName = pristineModules[pristineTable.entryPointId];
+  const entryRecognized = pristineModules.some(tweakccRecognizesModuleName);
+  record('entry-recognized', entryRecognized,
+    entryRecognized
+      ? `tweakcc recognizes a module in this build (entry ${JSON.stringify(info.entryModuleName)})`
+      : `no module is recognized by tweakcc (entry ${JSON.stringify(info.entryModuleName)}); update clodex`);
+  if (!entryRecognized) throw new Error('nothing further can be probed');
   const installation = await tryDetectInstallation({ path: scratch });
   record(
     'tweakcc-detects',
@@ -384,7 +356,6 @@ try {
     ],
   );
 
-  if (readShim) restoreEntryModuleName(scratch, readShim, { resign: false });
   record(
     'seed-round-trip',
     (await sha256(scratch)) === pristineSha,
@@ -418,8 +389,6 @@ try {
   // container half is still measured; `patch-sites-apply` above has already reported the abort.
   const repackStarted = Date.now();
   const written = `${patch.patchedSource ?? source}\n${PROBE_MARKER}${PROBE_PADDING}`;
-  const writeShim = shimEntryModuleName(scratch);
-  let publishedBlob = false;
   let publishedPlan = null;
   if (bundle) {
     const writable = writableModuleIndex(scratch);
@@ -433,22 +402,14 @@ try {
     if (bunPointerShim) restoreBunCompiledPointer(scratch, bunPointerShim);
     publishedPlan = plan;
     applyBundleWritePlan(scratch, plan);
-    publishedBlob = true;
   } else {
     const bunPointerShim = shimBunCompiledPointer(scratch);
     await writeContent(installation, written);
     if (bunPointerShim) restoreBunCompiledPointer(scratch, bunPointerShim);
   }
-  let restoreError = null;
-  if (writeShim) {
-    try {
-      restoreEntryModuleName(scratch, writeShim, { resign: true });
-    } catch (err) {
-      restoreError = err instanceof Error ? err.message : String(err);
-    }
-  } else if (publishedBlob) {
-    resignMachOBinary(scratch);
-  }
+  // tweakcc may warn instead of failing on codesign; clodex signs and verifies the candidate
+  // after ALL writes, before publishing it. The probe exercises that same function.
+  signAndVerifyMachOCandidate(scratch);
   info.repackMs = Date.now() - repackStarted;
   info.publishedSize = statSync(scratch).size;
   info.growth = Number((info.publishedSize / info.pristineSize).toFixed(3));
@@ -481,29 +442,9 @@ try {
           + `placeholder for ${expected} (drift ${info.blobSizeDrift})`,
     );
   }
-  record(
-    'restore-entry-name',
-    restoreError === null,
-    restoreError
-      ?? (writeShim
-        ? 'the real entry-module name went back on after the repack'
-        : 'no shim was needed, so there was no entry-module name to put back'),
-  );
-
   // ---- 5. is the binary that WOULD be published actually sound? -----------------------------
   // Reading OK from the steps above is not evidence of that: the checks below are on the bytes
   // that would be renamed over the live install.
-  if (writeShim) {
-    info.standInSurvivors = countOccurrences(scratch, writeShim.marker);
-    record(
-      'no-stand-in',
-      info.standInSurvivors === 0,
-      info.standInSurvivors === 0
-        ? `no ${writeShim.marker} left in the published bytes`
-        : `${info.standInSurvivors} copy/copies of ${writeShim.marker} survived; if any of them is a module name, Claude Code fails to resolve its sibling native modules`,
-    );
-  }
-
   // The probe never runs the binary, so a Mach-O whose signature the repack invalidated would
   // otherwise sail through here and only be caught on the one platform that executes it. codesign
   // reads any Mach-O, so this covers darwin-x64 from an arm64 host too.
@@ -525,7 +466,7 @@ try {
       signatureError === null,
       // Not "so it can be executed": a signed Mach-O with mode 0644 verifies and still will not
       // run. The executable bit is checked separately, below.
-      signatureError ?? 'the Mach-O signature verifies after the repack and the name restore',
+      signatureError ?? 'the Mach-O signature verifies after the final blob write',
     );
   }
 
@@ -548,99 +489,64 @@ try {
     );
   }
 
-  const publishedState = inspectEntryModule(scratch);
+  const publishedTable = readBunModuleTable(scratch);
+  record('published-parses', publishedTable !== null,
+    publishedTable ? `${publishedTable.names.length} Bun modules` : 'no readable Bun module table');
+  record('entry-name-unchanged', publishedTable?.names[publishedTable.entryPointId] === info.entryModuleName,
+    `pristine ${JSON.stringify(info.entryModuleName)}, published ${JSON.stringify(
+      publishedTable?.names[publishedTable.entryPointId])}`);
+
+  const verifyInstallation = await tryDetectInstallation({ path: scratch });
+  const republishedBundle = readClaudeBundle(scratch);
+  const republished = republishedBundle
+    ? republishedBundle.source
+    : (verifyInstallation ? await readContent(verifyInstallation) : '');
+  // Exact equality, not "the marker is in there". Checking only for the marker passed a mutation
+  // that dropped the first byte of Claude Code's entry JavaScript: a repack that flips, drops,
+  // duplicates or re-encodes source bytes while carrying the marker through is precisely the
+  // silent corruption this is here to catch, and it would ship a broken install reporting OK.
+  let mismatch = '';
+  if (!republished) mismatch = 'the published binary yields no JavaScript at all';
+  else if (republished.length !== written.length) {
+    mismatch = `read back ${republished.length} bytes, wrote ${written.length}`;
+  } else if (republished !== written) {
+    let at = 0;
+    while (at < written.length && written[at] === republished[at]) at++;
+    mismatch = `the bytes differ from what was written, first at offset ${at}`;
+  }
   record(
-    'published-parses',
-    publishedState === info.entryState,
-    publishedState === info.entryState
-      ? `entry module is ${publishedState}, as it was before`
-      : `entry module went from ${info.entryState} to ${publishedState}`,
+    'published-content',
+    mismatch === '',
+    mismatch || `${republished.length} bytes read back, byte-for-byte what was written`,
   );
 
-  // The published binary carries Claude Code's own module name, so it has to be shimmed again to
-  // be readable — and unshimmed again afterwards, or this leaves behind a binary that cannot run
-  // and reports a failure that is the probe's own doing.
-  const verifyShim = shimEntryModuleName(scratch);
-  record(
-    'entry-name-restored',
-    !writeShim || verifyShim?.original === writeShim.original,
-    verifyShim
-      ? `published entry module is named ${JSON.stringify(verifyShim.original)}`
-      : 'published binary needs no shim (its entry module is already one tweakcc recognizes)',
-  );
-  try {
-    const verifyInstallation = await tryDetectInstallation({ path: scratch });
-    const republishedBundle = readClaudeBundle(scratch);
-    const republished = republishedBundle
-      ? republishedBundle.source
-      : (verifyInstallation ? await readContent(verifyInstallation) : '');
-    // Exact equality, not "the marker is in there". Checking only for the marker passed a mutation
-    // that dropped the first byte of Claude Code's entry JavaScript: a repack that flips, drops,
-    // duplicates or re-encodes source bytes while carrying the marker through is precisely the
-    // silent corruption this is here to catch, and it would ship a broken install reporting OK.
-    let mismatch = '';
-    if (!republished) mismatch = 'the published binary yields no JavaScript at all';
-    else if (republished.length !== written.length) {
-      mismatch = `read back ${republished.length} bytes, wrote ${written.length}`;
-    } else if (republished !== written) {
-      let at = 0;
-      while (at < written.length && written[at] === republished[at]) at++;
-      mismatch = `the bytes differ from what was written, first at offset ${at}`;
-    }
+  // `published-content` compares the readback against what this probe CHOSE to write, so it is
+  // silent about whether that was the patched bundle or the pristine one — repack the wrong
+  // string and it stays green. This is the independent half: the bytes that would be published
+  // must carry the markers clodex's own transforms emitted, which is the same evidence the host
+  // and container legs take from the real patched binary.
+  //
+  // Read off the patched bundle rather than hard-coded, so a new marker is covered the day it
+  // is added and a renamed one does not fail here for a reason that has nothing to do with the
+  // release.
+  const emitted = [...new Set(patch.patchedSource?.match(/ccpatch:[a-zA-Z0-9_-]+/g) ?? [])];
+  info.patchMarkers = emitted;
+  if (emitted.length === 0) {
+    // Only reachable when the patch aborted; `patch-sites-apply` has already said so.
+    info.notChecked = [...(info.notChecked ?? []), 'published-carries-patch'];
+    note('published-carries-patch was NOT checked: the patch produced no bundle to look for');
+  } else {
+    const absent = emitted.filter((marker) => !republished.includes(marker));
     record(
-      'published-content',
-      mismatch === '',
-      mismatch || `${republished.length} bytes read back, byte-for-byte what was written`,
+      'published-carries-patch',
+      absent.length === 0,
+      absent.length === 0
+        ? `the published bytes carry all ${emitted.length} clodex patch markers (${emitted.join(', ')})`
+        : `the published bytes are missing ${absent.join(', ')} — what was repacked is not what the patch produced`,
     );
-
-    // `published-content` compares the readback against what this probe CHOSE to write, so it is
-    // silent about whether that was the patched bundle or the pristine one — repack the wrong
-    // string and it stays green. This is the independent half: the bytes that would be published
-    // must carry the markers clodex's own transforms emitted, which is the same evidence the host
-    // and container legs take from the real patched binary.
-    //
-    // Read off the patched bundle rather than hard-coded, so a new marker is covered the day it
-    // is added and a renamed one does not fail here for a reason that has nothing to do with the
-    // release.
-    const emitted = [...new Set(patch.patchedSource?.match(/ccpatch:[a-zA-Z0-9_-]+/g) ?? [])];
-    info.patchMarkers = emitted;
-    if (emitted.length === 0) {
-      // Only reachable when the patch aborted; `patch-sites-apply` has already said so.
-      info.notChecked = [...(info.notChecked ?? []), 'published-carries-patch'];
-      note('published-carries-patch was NOT checked: the patch produced no bundle to look for');
-    } else {
-      const absent = emitted.filter((marker) => !republished.includes(marker));
-      record(
-        'published-carries-patch',
-        absent.length === 0,
-        absent.length === 0
-          ? `the published bytes carry all ${emitted.length} clodex patch markers (${emitted.join(', ')})`
-          : `the published bytes are missing ${absent.join(', ')} — what was repacked is not what the patch produced`,
-      );
-    }
-  } finally {
-    // Undoing the verification shim is housekeeping, not a check: leaving it on would hand an
-    // investigator a binary that cannot run and a symptom the probe invented. When it fails for
-    // the same reason `restore-entry-name` already reported, saying so twice only pads the alert.
-    try {
-      if (verifyShim) restoreEntryModuleName(scratch, verifyShim, { resign: true });
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
-      if (info.checks.every((c) => c.name !== 'restore-entry-name' || c.ok)) {
-        record('cleanup-restore', false, detail);
-      } else {
-        note(`cleanup restore also failed: ${detail}`);
-      }
-    }
   }
 
-  // Taken here, on the bytes that would actually be published — after the verification shim is
-  // undone. Read while that shim is on, the entry module still carries the stand-in name and this
-  // reports a change that is the probe's own doing.
-  //
-  // A repack can rebuild a perfectly valid module table and still lose or reorder a sibling — an
-  // image or audio helper, say. The entry module reads, the signature verifies, every check above
-  // is green, and the feature that needed the missing module fails in front of a user.
+  // A repack can rebuild a valid module table while losing or reordering a native sibling.
   const publishedModules = listBunModuleNames(scratch) ?? [];
   const lost = pristineModules.filter((n) => !publishedModules.includes(n));
   const gained = publishedModules.filter((n) => !pristineModules.includes(n));

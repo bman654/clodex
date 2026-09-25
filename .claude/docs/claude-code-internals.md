@@ -128,22 +128,21 @@ and drops all of it. That is what broke `clodex patch` on 2.1.246 on every platf
 
 The bundle lived in a Bun data blob as one module among ~15 (see the code-split section above for
 what changed in 2.1.242), and tweakcc finds it **by name**:
-`/claude`, `claude`, `/claude.exe`, `claude.exe`, `/src/entrypoints/cli.js`, `src/entrypoints/cli.js`.
+`/claude`, `claude`, `/claude.exe`, `claude.exe`, `/src/entrypoints/cli.js`,
+`src/entrypoints/cli.js`, `/cli`, `cli` (tweakcc 4.3.3).
 
 | Version | Entry module |
 | --- | --- |
 | 2.1.224, 2.1.226, 2.1.228 | `/$bunfs/root/src/entrypoints/cli.js` |
 | 2.1.229, 2.1.231–2.1.234, 2.1.241–2.1.243 | `/$bunfs/root/cli` |
 
-(2.1.228 is the last release clodex's pinned tweakcc 4.3.0 — and clodex's own mirrored copy of its
-name list — can discover, and 2.1.230 was never published for any platform package, so 2.1.229 is
-where the rename actually landed. Confirmed on linux-x64 and darwin-arm64.)
-
-2.1.229 and later match none of them, so `readContent` threw and every patch failed with
-"Failed to extract JavaScript from native installation" — which reads like the `node-gyp-build`
-packaging fault described in `patcher.md` and is not it. tweakcc carried the old list through
-4.3.2; **4.3.3** added `/cli`, but clodex mirrors the list itself and is still pinned to 4.3.0, so
-`src/bun-entry-module.ts` works around it; see `patcher.md`.
+(2.1.228 was the last release recognized by the earlier tweakcc 4.3.0, and 2.1.230 was
+never published for any platform package, so 2.1.229 is where the rename actually landed.
+Confirmed on linux-x64 and darwin-arm64.) Under tweakcc 4.3.0–4.3.2 without clodex's former
+entry-module rename, 2.1.229+ failed extraction with "Failed to extract JavaScript from native
+installation". clodex's rename kept those releases patchable. tweakcc 4.3.3 recognizes `/cli`
+directly, so clodex no longer renames the entry module before reading or writing the binary. Future
+unknown names have no shim fallback; tweakcc must add recognition upstream.
 
 Two things that are easy to assume wrongly about the blob:
 

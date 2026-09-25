@@ -53,19 +53,30 @@ import {
   type BunModuleRange,
   type BunModuleSnapshot,
   type BunModuleTable,
-} from './bun-entry-module.js';
+} from './bun-module-table.js';
 
 /**
  * Position in the blob's module table of the module tweakcc will overwrite: the first one whose
- * name it recognizes. Null when it would find nothing, which is the case the entry-module shim
- * exists to prevent — so callers apply the shim first and treat null as "tweakcc cannot write
- * this binary".
+ * name it recognizes. Null when tweakcc would find nothing, so callers refuse to write rather
+ * than publishing a bundle whose section could not be resized.
  */
 export function writableModuleIndex(path: string): number | null {
   const table = readBunModuleTable(path);
   if (!table) return null;
   const index = table.names.findIndex(tweakccRecognizesModuleName);
   return index < 0 ? null : index;
+}
+
+/** Refuse an unknown native entry name before tweakcc's file-name-dependent extraction errors. */
+export function assertRecognizedEntryModule(path: string): void {
+  const table = readBunModuleTable(path);
+  if (table && !table.names.some(tweakccRecognizesModuleName)) {
+    const entry = table.names[table.entryPointId];
+    throw new Error(
+      `Claude Code entry module ${JSON.stringify(entry)} is not recognized by tweakcc. `
+      + 'Update clodex and try again. Claude Code was left unchanged.',
+    );
+  }
 }
 
 /**
@@ -283,9 +294,8 @@ export function planBundleWrite(
   const table = readBunModuleTable(path);
   if (!table) throw new Error(`cannot read the Bun module table of ${path}`);
   // tweakcc writes its buffer into EVERY module it recognizes, and the size arithmetic above is
-  // built around exactly one. The entry-module shim declines to fire when a recognized name
-  // already exists precisely so there is only ever one, so a second is a state nothing here
-  // understands rather than a case to muddle through.
+  // built around exactly one. Refuse a binary with two matches rather than planning against
+  // one and silently replacing both.
   const recognized = table.names.filter(tweakccRecognizesModuleName);
   if (recognized.length !== 1) {
     throw new Error(

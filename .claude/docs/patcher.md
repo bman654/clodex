@@ -1,11 +1,11 @@
 <!-- Read when changing src/patcher.ts, patch-transforms.ts, patch-backup.ts, local-patches.ts,
-     built-in-patch-proofs.ts, bun-entry-module.ts, bun-bundle.ts, npm-shim.ts,
+     built-in-patch-proofs.ts, bun-module-table.ts, bun-bundle.ts, npm-shim.ts,
      claude-native-placeholder.ts, or anything about `clodex patch`. -->
 
 # Patcher
 
 `src/patcher.ts` + `src/patch-transforms.ts` + `src/built-in-patch-proofs.ts` +
-`src/local-patches.ts` + `src/patch-backup.ts` + `src/bun-entry-module.ts` + `src/bun-bundle.ts` +
+`src/local-patches.ts` + `src/patch-backup.ts` + `src/bun-module-table.ts` + `src/bun-bundle.ts` +
 `src/npm-shim.ts` + `src/claude-native-placeholder.ts`.
 
 `clodex patch` uses tweakcc's programmatic API — an exact-pinned, declared runtime dependency
@@ -16,22 +16,26 @@ config)` (in-process pure function applying built-in PATCH 1–10 sites) → opt
 `applyLocalPatches` transaction with built-in postcondition verification → `writeContent` (repacks
 the native binary, here only to resize its Bun section) → `applyBundleWritePlan` (publishes the
 pristine blob with every patched module's source appended over that section). Both
-layers return per-site OK/SKIP/FAIL results shown by `--trace`. Since 2.1.229, the reads and the
-repack are each wrapped in the entry-module shim below, without which tweakcc cannot find the
-bundle at all.
+layers return per-site OK/SKIP/FAIL results shown by `--trace`. tweakcc 4.3.3 recognizes
+Claude Code 2.1.229+ `/cli` entry modules without rewriting their names.
 
 tweakcc ships no `.d.ts` despite its `types` field — `src/tweakcc.d.ts` declares the verified API
-surface; re-verify when bumping the pin. `node-gyp-build` is a deliberate direct dependency even
-though no clodex source imports it: a node-lief release demoted it to a devDependency while still
-`require`-ing it at runtime (reported against 1.3.1; the lockfile currently resolves 1.3.0), so
-fresh installs resolved a node-lief throwing
-`Cannot find module 'node-gyp-build'` — which tweakcc's lazy loader swallows into a null and clodex
-surfaces as the misleading "Failed to extract JavaScript from native installation" (the same message
-a module-name mismatch produces, so read the entry-module section below before chasing this one).
-Declaring it
-ourselves guarantees it lands somewhere node-lief's `require` can resolve — that is the invariant to
-check any alternative fix against, which matters because this repo uses pnpm's strict non-hoisted
-layout with exact pins. Keep it even after node-lief fixes the packaging.
+surface; re-verify when bumping the pin. tweakcc 4.3.3 declares `node-lief: ^1.3.2`, and this lock
+resolves 1.3.2 only. Both its CommonJS loader and ESM loader import the platform prebuild by path;
+neither requires `node-gyp-build`. The direct `node-gyp-build` dependency was necessary for older
+node-lief releases (1.3.1 still required it at runtime after demoting it to a devDependency) but is
+now removed. npm users do not install from this lockfile: tweakcc's `^1.3.2` range resolves a new
+node-lief 1.x at user install time, even without a clodex release. A repeat of the 1.3.1 packaging
+fault would be swallowed by tweakcc's lazy loader. On a version-named native install (the default
+`~/.local/share/claude/versions/<version>`), tweakcc gets the version from the file name and skips
+extraction; clodex then reports
+``Patch failed: `repackNativeInstallation()` called but `node-lief` is not available``.
+With another file name (Homebrew, npm-native, or a copy named `claude`), tweakcc attempts extraction
+and reports `Patch failed: Could not extract JS from native binary: <candidate path>`.
+For a failing fresh install, run `cd node_modules/tweakcc && node --input-type=module -e
+"await import('node-lief')"` from the installed clodex package;
+if that throws `Cannot find module 'node-gyp-build'`, re-add `node-gyp-build` as an exact-pinned
+direct dependency. Recheck the loader and lock graph on every tweakcc bump too.
 
 The built-ins bake favorites + aliases into the binary: model validation, `/model` listing, alias
 resolution, context windows via a `/*ccpatch:ctx*/`-marked map, per-model effort
@@ -129,17 +133,25 @@ So the blob is published, not rebuilt:
   changed: +7.5 MB on 2.1.246 (230,824,016 to 238,390,496 on darwin-arm64; +7.5 MB on win32-x64),
   and +28 MB on a pre-split release where the one module IS the bundle. **On ELF the published
   binary is ~1.75x pristine** (247,389,632 to 434,470,336 on linux-arm64 2.1.246) because tweakcc
-  relocates the whole blob to the end of the file and strands the original — that predates this
-  change and predates the shim, and what this change adds to it is the same appended sources. The
-  candidate IS the published binary on every format: `patcher.ts` renames it into place.
+  relocates the whole blob to the end of the file and strands the original — that is tweakcc's
+  existing repack behavior, and what the append-and-publish path adds is the patched sources. On
+  2.1.233 linux-x64, the older tweakcc repack produced 770 MB from 324 MB pristine, with roughly
+  2 GB live while candidate, backup and tweakcc's temp coexist; the in-memory blob copy adds
+  ~164 MB on 2.1.246 or ~290 MB on a pre-split release. The relocation does not compound: the
+  candidate is reseeded from pristine on every run. **Do not add a size sanity bound:** any
+  plausible cap would refuse valid ELF binaries that tweakcc relocates. The candidate IS the
+  published binary on every format: `patcher.ts` renames it into place.
 - `applyBundleWritePlan` refuses rather than publishing a doubtful blob: the module tweakcc wrote
   has to hold exactly the placeholder (which is also what proves the located blob is the one the
   repack just wrote, not a stale trailer left above it), the module table has to have the same
   names in the same order, the section has to be big enough, and afterwards every patched module is
   read back through the same parser Bun's loader agrees with.
-- **The publish is a write AFTER tweakcc's repack, which signs on its way out.** Restoring the
-  entry-module name re-signs and covers the normal path; `resignMachOBinary` covers the binary that
-  needed no shim. Skip either and macOS refuses to start the result.
+- **The publish is a write AFTER tweakcc's repack, which signs on its way out.** The patcher signs
+  and verifies every Mach-O candidate after its final write and before renaming it over the live
+  install. tweakcc warns and returns success on a signing failure, so its own signature is not a
+  sufficient check. If either `codesign -s - -f` or `codesign --verify --strict` fails, the private
+  candidate is discarded and the live binary is unchanged. ELF, PE and npm-script candidates are
+  not signed.
 - The sizing arithmetic in `repackedBlobBytes` mirrors code clodex does not own. It is a hint, not a
   contract: a tweakcc whose repack lays the blob out differently produces a section that is too
   small, and the patch refuses instead of publishing a truncated blob. 64 KiB of slack absorbs
@@ -224,110 +236,37 @@ ones. Refusing beats guessing for that reason, not the other one.
 `scripts/probe-patch-mechanism.mjs` and the canary's container leg cover a real 300 MB build, and
 only the container leg starts the result.
 
-## The entry-module shim (`bun-entry-module.ts`)
+## Module names and the read-only table parser (`bun-module-table.ts`)
 
-tweakcc finds the module holding the bundle **by name**, and Claude Code 2.1.229 renamed it from
-`/$bunfs/root/src/entrypoints/cli.js` to `/$bunfs/root/cli`, which none of tweakcc's six accepted
-names match — so `readContent` threw and 2.1.229 and later could not be patched at all. (2.1.228 is
-the last `discoverable` release; 2.1.230 was never published.)
-tweakcc **4.3.3** added `/cli` to that list, but bumping the pin alone changes nothing: clodex
-mirrors the accepted-name list in `tweakccRecognizesModuleName` and it has no `/cli`, so the shim
-keeps firing until it is deleted. `.claude/docs/claude-code-internals.md` has the bundle-side
-detail. **Delete this shim once the tweakcc pin reaches 4.3.3, or once tweakcc identifies the module
-by `entryPointId`.**
+Claude Code 2.1.229 renamed its entry module to `/$bunfs/root/cli`. tweakcc 4.3.3 reads and writes
+`/cli` and `cli` directly. The former equal-length name shim and its restoration sweep are gone:
+no code modifies the entry-module name, so local-patch text that resembles the old stand-in is no
+longer rewritten accidentally. The module-table parser remains, because `bun-bundle.ts` uses its
+validated offsets to read all JavaScript modules and publish the patched blob. The mirrored
+`tweakccRecognizesModuleName` selector includes `/cli` and `cli` and must agree with tweakcc's
+actual reader and writer before any future bump.
 
-The name is used for identification only, so `shimEntryModuleName` swaps it for a stand-in of
-**identical byte length** (`/clodex--/claude` for a 16-byte original) that tweakcc does recognize,
-and `restoreEntryModuleName` puts the real name back. Equal length is the whole safety argument: no
-offset, length, or size field in the blob changes, so the edit is a pure byte overwrite that
-tweakcc's own repack reads back as an ordinary module name.
+The extractor reads pristine backups directly instead of writing a scratch copy. The older
+`discoverable`/`needs-shim`/`unparseable` diagnostic split is gone: `needs-shim` is no longer an
+actionable state. If the blob parses but no module name is recognized by tweakcc, clodex refuses
+before tweakcc's detection, regardless of whether the install is version-named
+(`~/.local/share/claude/versions/<version>`) or named `claude` (Homebrew/npm-native):
+`Patch failed: Claude Code entry module "/$bunfs/root/entry" is not recognized by tweakcc.
+Update clodex and try again. Claude Code was left unchanged.` The entry name shown is the one
+actually parsed from the binary; the candidate is discarded without replacing the install.
 
-- **The shim must never survive into a published binary.** Claude Code's other modules
-  (`image-processor.node`, `audio-capture.node`, …) live at `/$bunfs/root/*` and resolve against the
-  entry module's own directory, so shipping the stand-in name would break them. It is applied twice —
-  around `readContent`, and again around `writeContent`, which re-parses the candidate — and undone
-  after each.
-- **`restoreEntryModuleName`'s `resign` flag is load-bearing, and `false` is not the safe default.**
-  Re-signing is *required* after a repack, because the write invalidates the ad-hoc signature and an
-  unsigned Mach-O will not run. It is *forbidden* on the read path, because `codesign` replaces
-  Claude Code's own signature: the seeded candidate stops being byte-identical to the install it came
-  from, and the bootstrap path publishes exactly those bytes as the content-addressed pristine
-  backup. In development this produced a backup whose content hash did not match the hash in its
-  own name; it never shipped, and only an end-to-end run caught it, because a synthetic non-Mach-O
-  fixture never reaches `codesign`. The candidate is now re-hashed against `plan.pristineSha256`
-  immediately before it is published as a backup, so drifted bytes fail loudly instead.
-- **Only rename when tweakcc would otherwise find nothing.** If any module name already matches, the
-  shim is a no-op — a second match could hand tweakcc a different module than it picks today, and
-  every release before 2.1.229 must keep behaving exactly as it did. This is also what makes the
-  two selectors agree: tweakcc *reads* the first name-matching module but *rewrites every* one,
-  while the shim renames the entry module specifically. Refusing to fire when a match already
-  exists guarantees exactly one match, so all three always mean the same module.
-- Locating the name parses the Bun blob directly (scan back from EOF for the trailer, recover the
-  blob start from its own `byteCount`) rather than the executable container, so it needs no
-  `node-lief`. **Verified on Mach-O only** — ELF and PE are inferred from tweakcc's own reader.
-  Every derived offset is bounds-checked and every name must be printable and NUL-terminated: a
-  misparse returns null — leaving tweakcc's own error — instead of overwriting sixteen bytes at a
-  guessed offset.
-- **More than one trailer can be in the file, so the scan validates rather than trusting position.**
-  Repacking is not size-neutral (an identity repack of 2.1.231 on Mach-O *shrinks* the blob by 61
-  bytes; ELF relocates instead, see below) and
-  the replacement section content is written over the old, so the previous blob's trailer survives at
-  a **higher** offset. Real binaries also carry a decoy `---- Bun! ----` around 55 MB — Bun's runtime
-  ships the literal in `__TEXT`. Candidates are therefore tried from EOF backwards and the first one
-  that validates wins. `TAIL_SCAN_BYTES` is a cost bound with a hard floor: the last trailer sits
-  683–802 KB from EOF on real binaries, and a window below that silently disables the shim.
-- **Restoration is swept, not assumed.** Locating the blob is a search, so "I wrote the name where I
-  found the marker" is weaker than it sounds — it is also true of a write into a stale copy while the
-  live blob stays shimmed. So after the parse-directed write the whole file is scanned and the real
-  name goes back over **every remaining copy that is a module name**, then a second scan proves none
-  is left. That is what holds the never-publish-the-stand-in rule up, and it does not depend on the
-  parse having picked the live blob: the stale-copy case gets the real name too.
-  Read that rule precisely: it is *never publish a binary that resolves its entry module to the
-  stand-in*, not *never let those sixteen bytes appear anywhere*. Inert copies may legitimately
-  remain — a local patch is allowed to contain the literal — and they are harmless because Bun's
-  parser only accepts a NUL-terminated name.
-  Refusing to publish on any surviving copy — the earlier behaviour — could not distinguish that
-  case from a benign one, and **every ELF build produces the benign one on every patch**. tweakcc
-  branches on container format, and only the ELF-with-a-`.bun`-section path *relocates* the section
-  to `align(nextVirtualAddress())` and repoints `BUN_COMPILED`; the original bytes are stranded
-  rather than overwritten, so the previous module table survives with one orphan copy of the
-  stand-in at its original offset, below the relocated blob, while the live table is correct.
-  Mach-O and PE assign in place and leave none. That refusal made every Linux install — x64 and
-  arm64, glibc and musl — unpatchable from clodex 2.5.2 on, for every Claude Code release since
-  2.1.229; macOS and Windows were never affected.
-  Relocation is also why an ELF candidate is ~2.4x the pristine binary (324 MB → 770 MB on
-  linux-x64 2.1.233; measured again on 2.1.246, 248 MB → 435 MB, ~1.75x now that the blob is a
-  smaller share of the file), with roughly 2 GB live while candidate, backup and tweakcc's temp
-  coexist — plus, since the write stopped rebuilding the blob, one more copy of the blob's data
-  region held in memory across the repack (~164 MB on 2.1.246, ~290 MB on a pre-split release).
-  That predates the shim — 2.1.228, which needs no shim at all, balloons identically — and it does
-  not compound, because the candidate is reseeded from pristine bytes on every run. Do not add a
-  size sanity bound: any plausible cap would recreate the refusal this replaced. Note that the
-  candidate is renamed into place, so on ELF this ratio is what the USER ends up with — the "+7.5 MB
-  of appended sources" figure above is a Mach-O and PE number, and on ELF that growth rides on top
-  of the relocation rather than replacing it.
-  Rewriting is sound only while every rewritten copy is one the shim wrote, so `isModuleNameAt`
-  requires a trailing NUL and `shimEntryModuleName` declines a binary whose blob already carries a
-  marker *as a module name*. Without that test the sweep reached content the guard could never have
-  seen, because a local patch's output only lands in the file at `writeContent`, long after the
-  guard ran — a patch emitting the stand-in literal had it rewritten to the real name in the
-  published binary while `clodex patch` reported success. Both halves need the same predicate:
-  narrowing only the sweep would leave the literal in place and then trip the guard on the next run,
-  making the binary unreadable.
-  **The NUL test narrows this case; it does not eliminate it.** Bun NUL-terminates every string
-  field in the blob, not only module names, so a local patch that emits the stand-in immediately
-  before a NUL is still rewritten — reproduced against a real repack. Proving an occurrence is a
-  module name means parsing the stale table it belongs to, which is not worth adding to a module
-  that disappears entirely once tweakcc recognizes `/cli` and the rename goes away. Deleting the
-  shim closes this by construction; until then it is a known, opt-in-only limitation — tracked in
-  issue #129, which also records the one behaviour the deletion must not silently drop.
-- `scripts/extract-cc-bundles.mjs` needs the same shim to read a 2.1.229-or-later bundle. It shims a
-  **scratch copy**; the `.orig` backups are the only pristine bytes on the machine and nothing may write to
-  them.
+A node-lief loader fault on the version-named install instead reports
+``Patch failed: `repackNativeInstallation()` called but `node-lief` is not available``;
+with another file name it reports the same `Could not extract JS from native binary` error above.
+Check the parsed names against `tweakccRecognizesModuleName` when diagnosing an unknown entry; a
+new entry name requires an upstream tweakcc fix, not a local rename fallback. On ELF, tweakcc still
+relocates the Bun section and strands its old copy; that is independent of the removed name shim.
+
 - **`scripts/probe-patch-mechanism.mjs` is how you check this on a platform you are not running.**
-  The refusal above shipped because every check we had ran on Mach-O, where the ELF behaviour it
-  turned on cannot occur. The probe drives the same shim → `readContent` → repack → restore cycle
-  `applyPatches` runs, against a Claude Code build for any platform, **without executing it** — so
+  A stand-in refusal once broke every Linux install because all prior checks ran on Mach-O, where
+  the ELF relocation that triggered it cannot occur. The probe drives the same read → repack →
+  publish → sign/verify cycle `applyPatch` runs, against a Claude Code build for any platform,
+  **without executing it** — so
   a linux-arm64 or win32-x64 binary can be checked from macOS, and it calls the exported functions
   rather than a copy so it cannot drift.
 
@@ -335,10 +274,11 @@ tweakcc's own repack reads back as an ordinary module name.
   node scripts/probe-patch-mechanism.mjs <claude-binary> --label linux-x64 --expect-version 2.1.233
   ```
 
-  It checks that the binary parses, that the seeded candidate is byte-identical to the release
-  (what the content-addressed pristine backup depends on), that the restore leaves no stand-in
-  behind, that a repacked Mach-O still verifies under `codesign`, and that the published bytes read
-  back carrying what was written.
+  It checks that the binary parses, that tweakcc recognizes a module name (`entry-recognized`),
+  that the seeded candidate is byte-identical to the release (what the content-addressed pristine
+  backup depends on), that the entry-module name remains unchanged, that a repacked Mach-O still
+  verifies under `codesign` on macOS, and that the published bytes read back carrying what was
+  written.
 
   **It also applies every patch site to that build's own bundle** (`scripts/probe-patch-sites.mjs`,
   which calls the real `applyClodexPatches` with a synthetic config that activates all of them), and
