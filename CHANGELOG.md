@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.18.1](https://github.com/bman654/clodex/compare/v2.18.0...v2.18.1) (2026-09-25)
+
+
+### Bug Fixes
+
+* **models:** call GPT-5.6 Sol and Terra as OpenAI expects when the model list can't load ([#282](https://github.com/bman654/clodex/issues/282)) ([c413fde](https://github.com/bman654/clodex/commit/c413fde7c7e482d6c506c9341cc1b170a9b303a1))
+* **patch:** refuse to replace Claude Code on a Mac unless its signature verifies ([#284](https://github.com/bman654/clodex/issues/284)) ([add05c7](https://github.com/bman654/clodex/commit/add05c7e873b59ea37913e00fdf8dab0ea96357c))
+* **proxy:** stop clodex from hanging when proxy settings loop back to itself ([#283](https://github.com/bman654/clodex/issues/283)) ([ee7fc06](https://github.com/bman654/clodex/commit/ee7fc0644d6cad6ba1bd163d6ecfe35a3b084edf))
+
 ## [2.18.0](https://github.com/bman654/clodex/compare/v2.17.0...v2.18.0) (2026-09-24)
 
 
