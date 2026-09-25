@@ -1538,6 +1538,42 @@ describe('applyPatch', () => {
     }
   });
 
+  it('accepts a recognized sibling when the entry itself has an unknown name', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'clodex-sibling-entry-'));
+    const binaryPath = join(dir, 'claude');
+    const previousAppHome = process.env.CLODEX_HOME;
+    const previousTweakccHome = process.env.TWEAKCC_CONFIG_DIR;
+    const pristine = Buffer.concat([MACHO_MAGIC, buildFakeNativeClaude('test-version', [
+      { name: '/$bunfs/root/entry', contents: CLAUDE_FIXTURE },
+      { name: '/$bunfs/root/claude', contents: 'recognized sibling' },
+    ])]);
+    mkdirSync(join(dir, 'tweakcc-home'));
+    writeFileSync(binaryPath, pristine, { mode: 0o755 });
+    process.env.CLODEX_HOME = dir;
+    process.env.TWEAKCC_CONFIG_DIR = join(dir, 'tweakcc-home');
+    tweakccMocks.tryDetectInstallation.mockReset().mockRejectedValue(new Error('tweakcc extraction failed'));
+    tweakccMocks.readContent.mockReset();
+    tweakccMocks.writeContent.mockReset();
+
+    try {
+      const outcome = await applyPatch(binaryPath, 'test-version', {
+        config: { 'clodex:test:extended': { alias: 'extended' } },
+        unknownWindows: [],
+      }, 'desired-config-hash', { trace: false, manifest: null });
+      expect(tweakccMocks.tryDetectInstallation).toHaveBeenCalledOnce();
+      expect(outcome.ok).toBe(false);
+      expect(outcome.message).toContain('tweakcc extraction failed');
+      expect(readFileSync(binaryPath)).toEqual(pristine);
+      expect(existsSync(getPatchManifestPath())).toBe(false);
+    } finally {
+      if (previousAppHome === undefined) delete process.env.CLODEX_HOME;
+      else process.env.CLODEX_HOME = previousAppHome;
+      if (previousTweakccHome === undefined) delete process.env.TWEAKCC_CONFIG_DIR;
+      else process.env.TWEAKCC_CONFIG_DIR = previousTweakccHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('still refuses if a candidate loses its writable name after the seed check', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-entry-after-seed-'));
     const binaryPath = join(dir, 'claude');

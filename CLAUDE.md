@@ -181,7 +181,7 @@ These bite from outside the subsystem that owns them, so they live here rather t
 - **tweakcc's current node-lief loaders import prebuilds by path.** The old direct
   `node-gyp-build` dependency is no longer needed. npm users have no lockfile: a new node-lief
   1.x resolved at install time can repeat the 1.3.1 fault without a clodex change. If a fresh
-  install reports `Could not extract JS` or `` `node-lief` is not available``, check node-lief's
+  install reports `Could not extract JS` or `` `node-lief` is not available ``, check node-lief's
   loader first. See `.claude/docs/patcher.md`.
 - **clodex always installs package undici's global fetch dispatcher with HTTP/2 disabled**
   (`installOutboundDispatcher()` at the top of `main()`), proxy env or not. Node 26's bundled

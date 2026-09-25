@@ -25,6 +25,8 @@ export function signAndVerifyMachOCandidate(path: string, installPath: string = 
   } catch (error) {
     const stderr = (error as { stderr?: Buffer | string } | null)?.stderr;
     const detail = String(stderr ?? '').trim()
+      .split(`${path}: `).join('')
+      .split(/\r?\n/).filter(line => line !== 'replacing existing signature').join('\n').trim()
       || (error instanceof Error ? error.message.trimEnd() : String(error).trimEnd());
     throw new Error(
       `Mach-O signing or verification failed for ${installPath}: ${detail}. `

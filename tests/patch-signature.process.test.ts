@@ -8,8 +8,8 @@ import { signAndVerifyMachOCandidate } from '../src/patch-signature.js';
 // failure as a warning, but the patcher must refuse the candidate on either failed command.
 describe('Mach-O signing with a failing codesign process', () => {
   it.skipIf(process.platform === 'win32').each([
-    ['sign', '#!/bin/sh\necho "codesign failure detail" >&2\nexit 42\n'],
-    ['verify', '#!/bin/sh\ncase "$1" in --verify) echo "codesign failure detail" >&2; exit 42;; esac\nexit 0\n'],
+    ['sign', '#!/bin/sh\necho "$4: replacing existing signature" >&2\necho "$4: main executable failed strict validation" >&2\nexit 42\n'],
+    ['verify', '#!/bin/sh\ncase "$1" in --verify) echo "$3: main executable failed strict validation" >&2; exit 42;; esac\nexit 0\n'],
   ])('rejects the candidate when %s exits non-zero', (_stage, script) => {
     const dir = mkdtempSync(join(tmpdir(), 'clodex-codesign-process-'));
     const binary = join(dir, 'private-candidate');
@@ -32,9 +32,10 @@ describe('Mach-O signing with a failing codesign process', () => {
       }
       expect(failure).toBeInstanceOf(Error);
       expect((failure as Error).message).toBe(
-        `Mach-O signing or verification failed for ${installPath}: codesign failure detail. `
-        + 'Claude Code was left unchanged.',
+        `Mach-O signing or verification failed for ${installPath}: `
+        + 'main executable failed strict validation. Claude Code was left unchanged.',
       );
+      expect((failure as Error).message).not.toContain(binary);
     } finally {
       Object.defineProperty(process, 'platform', originalPlatform);
       if (originalPath === undefined) delete process.env.PATH;
