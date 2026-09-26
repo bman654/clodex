@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.18.2](https://github.com/bman654/clodex/compare/v2.18.1...v2.18.2) (2026-09-26)
+
+
+### Bug Fixes
+
+* **models:** show clodex models in /model when Claude Code gets its model list from Anthropic ([#291](https://github.com/bman654/clodex/issues/291)) ([5de5fec](https://github.com/bman654/clodex/commit/5de5fec431c53491620642cdae74ee5c4525a855))
+
 ## [2.18.1](https://github.com/bman654/clodex/compare/v2.18.0...v2.18.1) (2026-09-25)
 
 
