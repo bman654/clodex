@@ -467,10 +467,17 @@ function hasSupportedParameter(metadata: ReasoningMetadata | undefined, param: s
   return (metadata?.supportedParameters ?? []).some(p => p === param);
 }
 
-function isOpenRouterRoute(npm: string, metadata?: ReasoningMetadata): boolean {
+export function isOpenRouterRoute(
+  npm: string,
+  metadata?: ReasoningMetadata,
+  modelId?: string,
+): boolean {
   return npm === '@openrouter/ai-sdk-provider'
     || metadata?.providerId === 'openrouter'
-    || metadata?.apiBaseUrl?.includes('openrouter.ai') === true;
+    || metadata?.providerId === 'custom-openrouter'
+    || metadata?.apiBaseUrl?.includes('openrouter.ai') === true
+    || (typeof modelId === 'string' && modelId.startsWith('openrouter/'))
+    || (typeof metadata?.upstreamModelId === 'string' && metadata.upstreamModelId.startsWith('openrouter/'));
 }
 
 function openRouterReasoningCapabilities(metadata?: ReasoningMetadata): ReasoningCapabilities {

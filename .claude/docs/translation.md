@@ -17,6 +17,8 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   responses in testing.
 - Cache reads and GPT-5.6 cache writes map to Anthropic
   `cache_read_input_tokens`/`cache_creation_input_tokens`.
+- On tool turns where Claude Code omits thinking blocks from assistant history, `src/sdk-adapter.ts` restores captured reasoning from `toolReasoningRegistry` as `{ type: 'reasoning', text }` parts. SDK serializers (such as `@ai-sdk/openai-compatible` for DeepSeek) emit `reasoning_content` on the wire, preserving provider prefix cache hits across tool turns. The registry is bounded to 1,000 entries (~500 tool turns, registering raw and stripped IDs); eviction is oldest-first (FIFO), dropping earliest conversation turns when the cap is reached.
+- On OpenRouter routes (`custom-openrouter` provider or `openrouter/*` model IDs), requests attach an `x-session-id` header carrying Claude Code's session UUID (with a stable system+tools prompt cache key fallback). This enforces backend instance affinity across turns so node-level prompt caches remain hot.
 - Consecutive OpenAI Responses reasoning summaries/items stream into **one Anthropic thinking
   block** until text, a tool, or successful completion closes it. A thinking-only WebSocket drop
   leaves that block open, so an earlier summary cannot disable Claude Code's mid-stream retry.

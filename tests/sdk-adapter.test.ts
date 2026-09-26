@@ -1,4 +1,5 @@
 import { createOpenAI } from '@ai-sdk/openai';
+import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
 import { describe, it, expect, vi } from 'vitest';
 import {
   annotateToolNames,
@@ -19,6 +20,7 @@ import {
   silenceSdkWarnings,
 } from '../src/sdk-adapter.js';
 import { installParentNoticeSink } from '../src/parent-notice.js';
+import { rememberToolReasoning, resetToolReasoningRegistryForTests } from '../src/proxy-shared.js';
 
 describe('sdkTranslationErrorSignature', () => {
   it('classifies missing stream parts without exposing their dynamic ids', () => {
@@ -315,6 +317,65 @@ describe('translateMessages', () => {
     expect(out[0].content[0].mediaType).toBe('image/png');
     expect(out[0].content[0].data.type).toBe('data');
     expect(Buffer.isBuffer(out[0].content[0].data.data)).toBe(true);
+  });
+
+  it('restores preserved reasoning for assistant tool_use when thinking block is absent', () => {
+    resetToolReasoningRegistryForTests();
+    rememberToolReasoning('call_read_1', 'Considering which file to inspect.');
+
+    const messages = [
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'tool_use', id: 'call_read_1', name: 'Read', input: { path: 'file.txt' } },
+        ],
+      },
+    ];
+    const out = translateMessages(messages, '@ai-sdk/openai-compatible') as any[];
+    expect(out[0].role).toBe('assistant');
+    expect(out[0].content).toHaveLength(2);
+    expect(out[0].content[0]).toEqual({ type: 'reasoning', text: 'Considering which file to inspect.' });
+    expect(out[0].content[1]).toEqual({ type: 'tool-call', toolCallId: 'call_read_1', toolName: 'Read', input: { path: 'file.txt' } });
+  });
+
+  it('does not duplicate reasoning when assistant already contains a thinking block', () => {
+    resetToolReasoningRegistryForTests();
+    rememberToolReasoning('call_read_2', 'Preserved thinking');
+
+    const messages = [
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'thinking', thinking: 'Original thinking' },
+          { type: 'tool_use', id: 'call_read_2', name: 'Read', input: { path: 'file.txt' } },
+        ],
+      },
+    ];
+    const out = translateMessages(messages, '@ai-sdk/openai-compatible') as any[];
+    expect(out[0].content).toHaveLength(2);
+    expect(out[0].content[0]).toEqual({ type: 'reasoning', text: 'Original thinking' });
+    expect(out[0].content[1].type).toBe('tool-call');
+  });
+
+  it('prepends reasoning once for parallel tool calls in one assistant message', () => {
+    resetToolReasoningRegistryForTests();
+    rememberToolReasoning('call_a', 'Evaluating both paths in parallel.');
+    rememberToolReasoning('call_b', 'Evaluating both paths in parallel.');
+
+    const messages = [
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'tool_use', id: 'call_a', name: 'Read', input: { path: 'a.txt' } },
+          { type: 'tool_use', id: 'call_b', name: 'Read', input: { path: 'b.txt' } },
+        ],
+      },
+    ];
+    const out = translateMessages(messages, '@ai-sdk/openai-compatible') as any[];
+    expect(out[0].content).toHaveLength(3);
+    expect(out[0].content[0]).toEqual({ type: 'reasoning', text: 'Evaluating both paths in parallel.' });
+    expect(out[0].content[1].type).toBe('tool-call');
+    expect(out[0].content[2].type).toBe('tool-call');
   });
 });
 
@@ -2401,6 +2462,170 @@ describe('translateRequest openai promptCacheKey', () => {
 
   it('omits the key for non-OpenAI providers', () => {
     expect(keyOf(req(), '@ai-sdk/xai')).toBeUndefined();
+  });
+});
+
+describe('translateRequest OpenRouter session stickiness', () => {
+  const sessionId = '927b8642-15d2-4535-ab27-1430ae54c4aa';
+
+  it('sends x-session-id header for OpenRouter when claudeSessionId is provided', () => {
+    const params = translateRequest({
+      model: 'deepseek/deepseek-v4.1-flash',
+      messages: [{ role: 'user', content: 'hello' }],
+    }, '@ai-sdk/openai-compatible', {
+      claudeSessionId: sessionId,
+      reasoningMetadata: { providerId: 'openrouter', apiBaseUrl: 'https://openrouter.ai/api/v1' },
+    });
+
+    expect(params.headers?.['x-session-id']).toBe(sessionId);
+  });
+
+  it('falls back to stable system/tools hash for OpenRouter when session ID is omitted', () => {
+    const params = translateRequest({
+      model: 'deepseek/deepseek-v4.1-flash',
+      system: 'system prompt',
+      messages: [{ role: 'user', content: 'hello' }],
+    }, '@ai-sdk/openai-compatible', {
+      reasoningMetadata: { providerId: 'openrouter' },
+    });
+
+    expect(params.headers?.['x-session-id']).toMatch(/^relay-[0-9a-f]{32}$/);
+  });
+
+  it('recognizes OpenRouter by model prefix', () => {
+    const params = translateRequest({
+      model: 'openrouter/deepseek/deepseek-v4.1-flash',
+      messages: [{ role: 'user', content: 'hello' }],
+    }, '@ai-sdk/openai-compatible', {
+      claudeSessionId: sessionId,
+    });
+
+    expect(params.headers?.['x-session-id']).toBe(sessionId);
+  });
+
+  it('recognizes custom-openrouter provider id', () => {
+    const params = translateRequest({
+      model: 'deepseek/deepseek-v4.1-flash',
+      messages: [{ role: 'user', content: 'hello' }],
+    }, '@ai-sdk/openai-compatible', {
+      claudeSessionId: sessionId,
+      reasoningMetadata: { providerId: 'custom-openrouter' },
+    });
+
+    expect(params.headers?.['x-session-id']).toBe(sessionId);
+  });
+
+  it('does not send x-session-id header for non-OpenRouter routes', () => {
+    const params = translateRequest({
+      model: 'tencent/hy3',
+      messages: [{ role: 'user', content: 'hello' }],
+    }, '@ai-sdk/openai-compatible', {
+      claudeSessionId: sessionId,
+      reasoningMetadata: { providerId: 'kilo', apiBaseUrl: 'https://api.kilo.ai/api/gateway' },
+    });
+
+    expect(params.headers).toBeUndefined();
+  });
+
+  it('serializes restored tool reasoning to reasoning_content via @ai-sdk/openai-compatible', async () => {
+    resetToolReasoningRegistryForTests();
+    rememberToolReasoning('call_probe_1', 'Analyzing repository structure');
+
+    const params = translateRequest({
+      model: 'deepseek/deepseek-v4.1-flash',
+      messages: [
+        { role: 'user', content: 'check files' },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', id: 'call_probe_1', name: 'ls', input: {} },
+          ],
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'call_probe_1', content: 'file.txt' },
+          ],
+        },
+      ],
+    }, '@ai-sdk/openai-compatible');
+
+    let requestBody: any;
+    const customFetch = async (_url: any, init: any) => {
+      requestBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({
+        id: 'chatcmpl-test',
+        choices: [{ message: { role: 'assistant', content: 'OK' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    const provider = createOpenAICompatible({
+      name: 'openrouter',
+      baseURL: 'https://openrouter.ai/api/v1',
+      fetch: customFetch as any,
+    });
+    const model = provider('deepseek/deepseek-v4.1-flash');
+    await model.doGenerate({
+      inputFormat: 'messages',
+      mode: { type: 'regular' },
+      prompt: params.messages,
+    });
+
+    expect(requestBody).toBeDefined();
+    const assistantWireMsg = requestBody.messages.find((m: any) => m.role === 'assistant');
+    expect(assistantWireMsg.role).toBe('assistant');
+    expect(assistantWireMsg.reasoning_content).toBe('Analyzing repository structure');
+    expect(assistantWireMsg.tool_calls[0].id).toBe('call_probe_1');
+    expect(assistantWireMsg.tool_calls[0].function.name).toBe('ls');
+  });
+});
+
+describe('stream reasoning roundtrip across tool turns', () => {
+  it('captures streamed reasoning during tool calls and restores it on the subsequent assistant turn', async () => {
+    resetToolReasoningRegistryForTests();
+
+    // Turn 1: model streams reasoning followed by tool call
+    const chunks: string[] = [];
+    const write = (chunk: string) => { chunks.push(chunk); };
+
+    async function* fakeStream() {
+      yield { type: 'reasoning-start' };
+      yield { type: 'reasoning-delta', text: 'Analyzing file hierarchy to find relevant files.' };
+      yield { type: 'reasoning-end' };
+      yield { type: 'tool-input-start', id: 'call_ls_1', toolName: 'bash' };
+      yield { type: 'tool-input-delta', id: 'call_ls_1', delta: '{"command":"ls"}' };
+      yield { type: 'tool-input-end', id: 'call_ls_1' };
+      yield { type: 'tool-call', toolCallId: 'call_ls_1', toolName: 'bash', input: { command: 'ls' } };
+      yield { type: 'finish', finishReason: 'tool-calls' };
+    }
+
+    await writeAnthropicStream(fakeStream() as any, 'deepseek/deepseek-v4.1-flash', write);
+
+    // Turn 2: Claude Code sends back the assistant turn without thinking
+    const turn2Messages = [
+      {
+        role: 'assistant' as const,
+        content: [
+          { type: 'tool_use', id: 'call_ls_1', name: 'bash', input: { command: 'ls' } },
+        ],
+      },
+      {
+        role: 'user' as const,
+        content: [
+          { type: 'tool_result', tool_use_id: 'call_ls_1', content: 'package.json\nsrc/' },
+        ],
+      },
+    ];
+
+    const translated = translateMessages(turn2Messages, '@ai-sdk/openai-compatible') as any[];
+    expect(translated[0].role).toBe('assistant');
+    expect(translated[0].content).toHaveLength(2);
+    expect(translated[0].content[0]).toEqual({
+      type: 'reasoning',
+      text: 'Analyzing file hierarchy to find relevant files.',
+    });
+    expect(translated[0].content[1].type).toBe('tool-call');
   });
 });
 

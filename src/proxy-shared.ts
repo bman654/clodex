@@ -52,6 +52,41 @@ function rememberToolSignature(rawId: string, thoughtSignature: string): void {
   if (oldest) toolSignatureRegistry.delete(oldest);
 }
 
+/**
+ * Bounded registry for retaining model reasoning across tool-calling turns.
+ * Claude Code drops thinking blocks from assistant history on tool results;
+ * storing reasoning by toolCallId allows re-injecting it as a reasoning part
+ * Capped at 1,000 entries (effective depth of ~500 tool turns, registering raw
+ * and stripped IDs). Eviction is oldest-first (FIFO), dropping the earliest
+ * conversation turns when the cap is reached.
+ */
+const MAX_STORED_TOOL_REASONING = 1000;
+const toolReasoningRegistry = new Map<string, string>();
+
+export function rememberToolReasoning(toolCallId: string, reasoning: string): void {
+  if (!toolCallId || !reasoning) return;
+  const rawId = stripToolUseIdSuffix(toolCallId);
+  toolReasoningRegistry.set(toolCallId, reasoning);
+  if (rawId !== toolCallId) {
+    toolReasoningRegistry.set(rawId, reasoning);
+  }
+  while (toolReasoningRegistry.size > MAX_STORED_TOOL_REASONING) {
+    const oldest = toolReasoningRegistry.keys().next().value as string | undefined;
+    if (oldest) toolReasoningRegistry.delete(oldest);
+    else break;
+  }
+}
+
+export function getToolReasoning(toolCallId: string): string | undefined {
+  if (!toolCallId) return undefined;
+  return toolReasoningRegistry.get(toolCallId)
+    ?? toolReasoningRegistry.get(stripToolUseIdSuffix(toolCallId));
+}
+
+export function resetToolReasoningRegistryForTests(): void {
+  toolReasoningRegistry.clear();
+}
+
 export function parseToolArguments(value: unknown): Record<string, unknown> {
   if (value === null || value === undefined) return {};
   if (typeof value === 'object' && !Array.isArray(value)) return value as Record<string, unknown>;

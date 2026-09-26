@@ -10,11 +10,14 @@ import {
   silenceSdkWarnings,
   type FullStreamPart,
   grabRoundTripSignature,
+  rememberToolReasoning,
+  getToolReasoning,
 } from './proxy-shared.js';
 import {
   deepMergeProviderOptions,
   effortProviderOptions,
   thinkingProviderOptions,
+  isOpenRouterRoute,
   type ReasoningMetadata,
 } from './provider-factory.js';
 import { resolveUpstreamTools } from './tool-search.js';
@@ -415,12 +418,14 @@ export function translateMessages(
       if (userParts.length) out.push({ role: 'user', content: userParts } as unknown as ModelMessage);
     } else if (msg.role === 'assistant') {
       const parts: Array<Record<string, unknown>> = [];
+      let hasThinking = false;
       for (const b of blocks) {
         if (b.type === 'text') {
           // The OpenAI Responses API currently accepts breakpoints on input
           // content, not prior assistant output_text items.
           parts.push({ type: 'text', text: b.text ?? '' });
         } else if (b.type === 'thinking') {
+          hasThinking = true;
           const restored = restoreOpenAiThinking(b.thinking ?? '', b.signature, npm);
           if (restored) parts.push(...restored);
           else {
@@ -434,6 +439,21 @@ export function translateMessages(
           };
           if (thoughtSignature && isGoogle) part.providerOptions = { google: { thoughtSignature } };
           parts.push(part);
+        }
+      }
+      if (!hasThinking) {
+        for (const b of blocks) {
+          if (b.type === 'tool_use' && b.id) {
+            const preserved = getToolReasoning(b.id);
+            if (preserved) {
+              const part = thinkingToSdkPart({ type: 'thinking', thinking: preserved }, npm);
+              if (part) {
+                parts.unshift(part);
+                hasThinking = true;
+                break;
+              }
+            }
+          }
         }
       }
       if (parts.length) out.push({ role: 'assistant', content: parts } as unknown as ModelMessage);
@@ -714,18 +734,18 @@ export function translateRequest(
     maxOutputTokens: options?.openAiOAuth ? undefined : body.max_tokens,
     temperature: body.temperature,
     providerOptions,
+    ...(isOpenRouterRoute(npm, options?.reasoningMetadata, body.model)
+      ? {
+          headers: {
+            'x-session-id':
+              extractClaudeSessionId(body, options?.claudeSessionId)
+              ?? openAiPromptCacheKey(baseSystem, upstreamTools),
+          },
+        }
+      : {}),
   };
 }
 
-/**
- * Service tier for ChatGPT-OAuth (Codex backend) requests — Codex "fast mode"
- * (Codex CLI config `service_tier = "fast"`; wire value `priority`). Applied
- * ONLY on the OAuth route, and only after alias/remap resolution, so an alias
- * that resolves to a ChatGPT model gets the tier while the same worker slot
- * remapped to a non-OpenAI provider never sends it. API-key OpenAI is
- * deliberately excluded: on the public API `priority` is a billable per-token
- * surcharge, not a plan feature. Absence preserves the backend default exactly.
- */
 /**
  * Whether a route is the ChatGPT-OAuth (Codex) backend — the only one that
  * carries a service tier.
@@ -744,6 +764,15 @@ const SERVICE_TIERS = new Set(['auto', 'default', 'flex', 'priority']);
 let warnedInvalidServiceTier = false;
 let warnedUnsupportedServiceTier = false;
 
+/**
+ * Service tier for ChatGPT-OAuth (Codex backend) requests — Codex "fast mode"
+ * (Codex CLI config `service_tier = "fast"`; wire value `priority`). Applied
+ * ONLY on the OAuth route, and only after alias/remap resolution, so an alias
+ * that resolves to a ChatGPT model gets the tier while the same worker slot
+ * remapped to a non-OpenAI provider never sends it. API-key OpenAI is
+ * deliberately excluded: on the public API `priority` is a billable per-token
+ * surcharge, not a plan feature. Absence preserves the backend default exactly.
+ */
 export function oauthServiceTier(): string | undefined {
   const raw = process.env.CLODEX_SERVICE_TIER;
   if (raw === undefined || raw.trim() === '') return undefined;
@@ -912,6 +941,7 @@ export async function writeAnthropicStream(
   const flushedTools = new Set<string>();
   let openToolId: string | null = null;
   let finishReason = 'end_turn';
+  let turnReasoning = '';
   let usage: AnthropicUsage = {
     input_tokens: observer?.initialInputTokens ?? 0,
     output_tokens: 0,
@@ -999,13 +1029,16 @@ export async function writeAnthropicStream(
           openBlock('thinking', { type: 'thinking', thinking: '', signature: '' });
         }
         break;
-      case 'reasoning-delta':
+      case 'reasoning-delta': {
         if (openType !== 'thinking') openBlock('thinking', { type: 'thinking', thinking: '', signature: '' });
+        const thinkingDelta = openAiThinking ? openAiThinking.append(part) : part.text ?? '';
+        turnReasoning += thinkingDelta;
         emit('content_block_delta', {
           type: 'content_block_delta', index: blockIndex,
-          delta: { type: 'thinking_delta', thinking: openAiThinking ? openAiThinking.append(part) : part.text ?? '' },
+          delta: { type: 'thinking_delta', thinking: thinkingDelta },
         });
         break;
+      }
       case 'reasoning-end': {
         if (openAiThinking) openAiThinking.end(part);
         else {
@@ -1029,6 +1062,9 @@ export async function writeAnthropicStream(
 
       case 'tool-input-start': {
         const sig = grabRoundTripSignature(part);
+        if (part.id && turnReasoning) {
+          rememberToolReasoning(part.id, turnReasoning);
+        }
         openBlock('tool', {
           type: 'tool_use', id: encodeToolUseId(part.id ?? '', sig), name: part.toolName, input: {},
         });
@@ -1046,6 +1082,9 @@ export async function writeAnthropicStream(
       case 'tool-call': {
         finishReason = 'tool_use';
         const id = part.toolCallId ?? '';
+        if (id && turnReasoning) {
+          rememberToolReasoning(id, turnReasoning);
+        }
         if (idToBlock.has(id)) {
           // Streamed input: emit the sanitized complete input as one delta,
           // falling back to the buffered raw JSON if the SDK gave no parsed input.
@@ -1074,6 +1113,9 @@ export async function writeAnthropicStream(
         } else if (openType !== 'tool') {
           // Non-streamed tool call (no input-start/delta arrived): emit a full block.
           const sig = grabRoundTripSignature(part);
+          if (id && turnReasoning) {
+            rememberToolReasoning(id, turnReasoning);
+          }
           openBlock('tool', {
             type: 'tool_use', id: encodeToolUseId(id, sig), name: part.toolName, input: {},
           });
@@ -1215,11 +1257,13 @@ export async function generateAnthropicResponse(
   let finishReason: string;
   let usage: SdkUsage | undefined;
   let warnings: unknown;
+  let generatedReasoning: string | undefined;
   const { idleTimeoutMs, totalTimeoutMs, maxRetries } = upstreamRequestBudget({
     idleTimeoutMs: options?.forceStream ? options.idleTimeoutMs : undefined,
   });
   const attempts = trackUpstreamAttempts(model);
 
+  const streamedReasoning: string[] = [];
   if (options?.forceStream) {
     // Some upstreams (e.g. ChatGPT's Codex backend) reject non-streaming requests
     // outright. Request a real stream from the SDK and collect it into one
@@ -1265,6 +1309,7 @@ export async function generateAnthropicResponse(
             : new Error(typeof part.error === 'string' ? part.error : 'Upstream stream failed');
         }
         if (part.type === 'text-delta') streamedText.push(part.text ?? '');
+        else if (part.type === 'reasoning-delta') streamedReasoning.push(part.text ?? '');
         else if (part.type === 'tool-call') {
           streamedToolCalls.push({
             toolCallId: part.toolCallId ?? '',
@@ -1308,6 +1353,13 @@ export async function generateAnthropicResponse(
         abortSignal: generateAbort.signal,
       } as Parameters<typeof generateText>[0]);
       ({ text, toolCalls, finishReason, usage, warnings } = r);
+      if (typeof (r as { reasoningText?: unknown }).reasoningText === 'string') {
+        generatedReasoning = (r as { reasoningText: string }).reasoningText;
+      } else if (Array.isArray((r as { reasoning?: unknown }).reasoning)) {
+        generatedReasoning = (r as { reasoning: Array<{ text?: string }> }).reasoning
+          .map(item => item.text ?? '')
+          .join('');
+      }
     } catch (error) {
       if (generateAbort.signal.aborted) throw streamAbortError(generateAbort.signal);
       throw error;
@@ -1315,6 +1367,13 @@ export async function generateAnthropicResponse(
       stopForwardingAbort();
       clearTimeout(totalTimer);
       if (!generateAbort.signal.aborted) generateAbort.abort();
+    }
+  }
+
+  const reasoningText = streamedReasoning.join('') || generatedReasoning;
+  if (reasoningText && toolCalls?.length) {
+    for (const tc of toolCalls) {
+      if (tc.toolCallId) rememberToolReasoning(tc.toolCallId, reasoningText);
     }
   }
 
