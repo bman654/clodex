@@ -37,14 +37,15 @@ function captureNeedle(
   source: string,
   name: string,
   needle: string,
+  expected = 1,
 ): BuiltInPatchProof {
-  if (countExactOccurrences(source, needle) !== 1) {
+  if (countExactOccurrences(source, needle) !== expected) {
     throw new Error(`clodex patch: could not capture built-in postcondition: ${name}`);
   }
   return {
     name,
     protectedText: needle,
-    occurrences: 1,
+    occurrences: expected,
   };
 }
 
@@ -133,18 +134,30 @@ export function captureBuiltInPatchProofs(
       ));
     }
   }
-  if (protectsResult(results, 'PATCH 5: model picker options')) {
+  // Both picker sites emit the SAME row literal — PATCH 5 into the legacy builder, PATCH 11 into
+  // the entry point the served-catalog builder returns through — so the row is proof of however
+  // many of them applied, and pinning it at one occurrence would fail the moment both do.
+  const pickerSites = [
+    'PATCH 5: model picker options',
+    'PATCH 11: catalog picker options',
+  ].filter(name => protectsResult(results, name));
+  if (pickerSites.length > 0) {
     for (const { alias, id, display } of aliases) {
       const entry = '{value:' + JSON.stringify(alias)
         + ',label:' + JSON.stringify(alias.charAt(0).toUpperCase() + alias.slice(1))
         + ',description:' + JSON.stringify(display ?? `Custom model (${id})`) + '}';
       proofs.push(captureNeedle(
         source,
-        `PATCH 5: model picker options (${alias})`,
+        `model picker options (${alias})`,
         entry,
+        pickerSites.length,
       ));
     }
   }
+  addPattern(
+    'PATCH 11: catalog picker options',
+    /,_ccpick=\/\*ccpatch:picker\*\/\[[\s\S]*?\]\.forEach\(function\(_o\)\{if\(![\w$]+\.some\(function\(_i\)\{return _i\.value===_o\.value\}\)\)[\w$]+\.push\(_o\)\}\)/,
+  );
 
   addPattern(
     'PATCH 7: per-model context window',

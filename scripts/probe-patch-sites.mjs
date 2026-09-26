@@ -50,6 +50,7 @@ export const EXPECTED_PATCH_SITES = Object.freeze([
   'PATCH 3: known-alias validator list',
   'PATCH 6: alias resolver switch',
   'PATCH 5: model picker options',
+  'PATCH 11: catalog picker options',
   'PATCH 4: Agent tool model description',
   'PATCH 7: per-model context window',
   'PATCH 8a: effort capability',

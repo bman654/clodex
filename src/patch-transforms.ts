@@ -86,8 +86,16 @@ import {
  * bumped because the rule above says a changed anchor is bumped — an install
  * patched by an older clodex is not wrong, but it was produced by a transform set
  * whose anchors are narrower, so it re-reads as stale rather than current.
+ *
+ * 14 — PATCH 11 is new, and it is the first site added since the /model picker
+ * gained a second builder. Claude Code assembles the picker from a served model
+ * catalog when the account is served one, and only falls back to the hardcoded
+ * builder PATCH 5 patches when it is not; on a served account every row PATCH 5
+ * injects is unreachable and /model shows no clodex model at all. Existing
+ * installs have to repatch to receive the new site, which is exactly what the
+ * bump is for.
  */
-export const PATCH_TRANSFORMS_VERSION = 13;
+export const PATCH_TRANSFORMS_VERSION = 14;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -156,7 +164,7 @@ export function formatPatchSiteLine(result: PatchSiteResult): string {
 }
 
 /**
- * Apply the clodex patch sites (PATCH 1–10) to the Claude Code source.
+ * Apply the clodex patch sites (PATCH 1–11) to the Claude Code source.
  * Pure: source string in → patched string + per-site results out. Throws
  * `PatchApplyError` when the config is invalid or a required site fails —
  * nothing should be written to the binary in that case.
@@ -438,6 +446,16 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     }
   }
 
+  /**
+   * One picker row, as both picker patches spell it.
+   * value = the alias (the name the user types and the binary sends);
+   * description = the real model label, e.g. "GPT-5.6 Sol (OpenAI (ChatGPT))".
+   * (tweakcc's writeContent round-trips utf8 faithfully — verified — so the
+   * old adhoc-patch ASCII-only constraint no longer applies.)
+   */
+  const pickerRow = (a: string) =>
+    '{value:' + q(a) + ',label:' + q(a.charAt(0).toUpperCase() + a.slice(1)) + ',description:' + q(displayFor(a, ALIAS_TO_ID[a]!)) + '}';
+
   // ---------------------------------------------------------------------------
   // PATCH 5 — interactive /model picker.
   // The picker is assembled through a single choke-point function; we insert,
@@ -494,15 +512,7 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // ---------------------------------------------------------------------------
   {
     const missing = ALIASES.filter((a) => !new RegExp('value:' + reEsc(q(a))).test(js));
-    const entries = missing
-      .map(
-        // value = the alias (the name the user types and the binary sends);
-        // description = the real model label, e.g. "GPT-5.6 Sol (OpenAI (ChatGPT))".
-        // (tweakcc's writeContent round-trips utf8 faithfully — verified — so the
-        // old adhoc-patch ASCII-only constraint no longer applies.)
-        (a) => '{value:' + q(a) + ',label:' + q(a.charAt(0).toUpperCase() + a.slice(1)) + ',description:' + q(displayFor(a, ALIAS_TO_ID[a]!)) + '}'
-      )
-      .join(',');
+    const entries = missing.map(pickerRow).join(',');
     /** The append snippet, bound to whatever this build named the options array. */
     const injectInto = (options: string) =>
       missing.length
@@ -523,6 +533,89 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         /\(([\w$]+)==="opus"\|\|\1==="sonnet"\)[^;{}]*\?\[\1,([\w$]+)\]:\[\2\];for\(let ([\w$]+) of [\w$]+\)[\w$]+\(([\w$]+),\3,[\w$]+\);/,
         (m, _selected, _requested, _item, options) => m + injectInto(options!),
         { required: false, noopIsSkip: true }
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH 11 — the /model picker's served-catalog path.
+  // PATCH 5 above patches the LEGACY option builder. Claude Code only reaches
+  // that builder when no model catalog is served: the picker's entry point is
+  //
+  //     function Ij(e,n){let r=Cj(e,n),s=r??Rj(e),g=a.ANTHROPIC_CUSTOM_MODEL_OPTION;…}
+  //
+  // where `Cj` builds the whole list from the catalog the account is served and
+  // `Rj` — PATCH 5's builder, and the only path that reaches its choke point —
+  // is the `??` fallback. On an account that receives a catalog, `Cj` returns a
+  // non-null array, `Rj` is never called, and every row PATCH 5 injected sits in
+  // dead code: the aliases resolve, the Agent tool accepts them, `--model` works,
+  // and they are missing from /model alone. That is measured, not inferred — on
+  // Claude Code 2.1.282 with nine aliases patched OK, /model listed the served
+  // catalog's fourteen rows and none of the nine.
+  //
+  // So inject at the entry point, where both builders' results converge, and
+  // leave PATCH 5 in place for the builds and accounts that still take the
+  // legacy path (it dedupes by value, so a row reaching the array twice is not a
+  // second row). One side effect: the legacy builder's branch for Bedrock, Vertex,
+  // Foundry and Mantle never reached PATCH 5's choke point, so those pickers now
+  // list the aliases too.
+  // That adds no routing — clodex does not serve those providers — and the same
+  // names typed by hand were already accepted there.
+  //
+  // Anchor: the two-argument function whose FIRST statement binds one builder's
+  // result and then `?? `s it with the other's — `let r=C(e,n),s=r??R(e)` — with
+  // every identifier wildcarded and the repeats tied by back-reference, since
+  // that is the shape the minifier renames freely. `ANTHROPIC_CUSTOM_MODEL_OPTION`
+  // in a bounded lookahead is the discriminator: the env var by which Claude Code
+  // itself appends a non-catalog row to this very array, so it names the model
+  // picker and not any other two-builder merge. Measured against all fourteen
+  // published bundles on this machine (2.1.260 … 2.1.282) the pair matches
+  // exactly once. 2.1.270 and 2.1.272 bind a third declarator between the `??`
+  // and the env read, which is why the lookahead is bounded at 400 characters
+  // rather than requiring the env read to follow immediately.
+  //
+  // The rows are appended as one more DECLARATOR in the same `let` — a statement
+  // spliced in would land in the middle of the declaration list and not parse —
+  // and every measured build continues the list with a comma at exactly this
+  // point. The `(?=[,;])` right after the fallback call is what makes that safe
+  // to assume: a declarator can be appended before a `,` or a `;`, but a build
+  // that chains onto the fallback (`opts(e).slice()`, `opts(e)?.filter(…)`) would
+  // have the declarator split the chain, so the chained call would run on the
+  // `forEach` result instead of the array. Such a build stops matching and this
+  // site reports `anchor not found` rather than emitting code that throws or
+  // silently drops the chained call.
+  //
+  // `required:false`, like PATCH 5: a picker that lost its anchor costs the user
+  // the /model rows, not a working binary. The marker makes a re-patch idempotent
+  // — unlike PATCH 5 this site cannot use "is this value already present?",
+  // because PATCH 5 has put those very values in the source by the time it runs.
+  //
+  // For the same reason the anchor is counted against the ORIGINAL source first.
+  // PATCH 5 has spliced the user's model display names into the buffer by now, and
+  // a name that spells this anchor would otherwise be a candidate — on a build
+  // with no matching entry point (2.1.252 and older) the ONLY one, and the rows
+  // would be spliced into that name's string literal, breaking the bundle's syntax.
+  // ---------------------------------------------------------------------------
+  {
+    const catalogSite = 'PATCH 11: catalog picker options';
+    const catalogMarker = '/*ccpatch:picker*/';
+    const catalogAnchor = /function [\w$]+\(([\w$]+),([\w$]+)\)\{let ([\w$]+)=[\w$]+\(\1,\2\),([\w$]+)=\3\?\?[\w$]+\(\1\)(?=[,;])(?=[\s\S]{0,400}ANTHROPIC_CUSTOM_MODEL_OPTION)/;
+    const entryPoints = source.match(new RegExp(catalogAnchor.source, 'g'))?.length ?? 0;
+    const rows = ALIASES.map(pickerRow).join(',');
+    if (ALIASES.length === 0) {
+      log('SKIP', catalogSite, 'no aliases configured');
+    } else if (entryPoints !== 1 && !js.includes(catalogMarker)) {
+      log('FAIL', catalogSite, entryPoints === 0
+        ? 'anchor not found'
+        : 'anchor matched ' + entryPoints + ' times (expected 1)');
+    } else {
+      applyOnce(
+        catalogSite,
+        catalogAnchor,
+        (m, _first, _second, _catalog, options) =>
+          m + ',_ccpick=' + catalogMarker + '[' + rows + '].forEach(function(_o){if(!'
+          + options! + '.some(function(_i){return _i.value===_o.value}))' + options! + '.push(_o)})',
+        { marker: catalogMarker, required: false },
       );
     }
   }
