@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { parseDsmlToolCalls } from '../src/proxy-shared.js';
+import {
+  parseDsmlToolCalls,
+  rememberToolReasoning,
+  getToolReasoning,
+  resetToolReasoningRegistryForTests,
+} from '../src/proxy-shared.js';
 
 describe('parseDsmlToolCalls', () => {
   it('parses a single invoke with a string parameter (clean fullwidth-pipe spec form)', () => {
@@ -89,5 +94,42 @@ describe('parseDsmlToolCalls', () => {
       + '<｜DSML｜parameter name="cmd" string="true">ls';
 
     expect(parseDsmlToolCalls(text)).toBeNull();
+  });
+});
+
+describe('toolReasoningRegistry', () => {
+  it('stores and retrieves reasoning by raw and suffixed tool call ID', () => {
+    resetToolReasoningRegistryForTests();
+
+    rememberToolReasoning('call_abc123', 'thinking step 1');
+    expect(getToolReasoning('call_abc123')).toBe('thinking step 1');
+    expect(getToolReasoning('call_abc123__ts__dGVzdA')).toBe('thinking step 1');
+
+    rememberToolReasoning('call_def456__ts__c2lnbmF0dXJl', 'thinking step 2');
+    expect(getToolReasoning('call_def456')).toBe('thinking step 2');
+    expect(getToolReasoning('call_def456__ts__c2lnbmF0dXJl')).toBe('thinking step 2');
+
+    expect(getToolReasoning('unknown')).toBeUndefined();
+    expect(getToolReasoning('')).toBeUndefined();
+  });
+
+  it('evicts oldest entries when registry exceeds MAX_STORED_TOOL_REASONING', () => {
+    resetToolReasoningRegistryForTests();
+
+    for (let i = 0; i < 1005; i++) {
+      rememberToolReasoning(`call_${i}`, `reasoning_${i}`);
+    }
+
+    expect(getToolReasoning('call_0')).toBeUndefined();
+    expect(getToolReasoning('call_1004')).toBe('reasoning_1004');
+  });
+
+  it('clears all entries with resetToolReasoningRegistryForTests', () => {
+    resetToolReasoningRegistryForTests();
+    rememberToolReasoning('call_test', 'thinking');
+    expect(getToolReasoning('call_test')).toBe('thinking');
+
+    resetToolReasoningRegistryForTests();
+    expect(getToolReasoning('call_test')).toBeUndefined();
   });
 });
