@@ -556,7 +556,11 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // So inject at the entry point, where both builders' results converge, and
   // leave PATCH 5 in place for the builds and accounts that still take the
   // legacy path (it dedupes by value, so a row reaching the array twice is not a
-  // second row).
+  // second row). One side effect: the legacy builder's branch for Bedrock, Vertex,
+  // Foundry and Mantle never reached PATCH 5's choke point, so those pickers now
+  // list the aliases too.
+  // That adds no routing — clodex does not serve those providers — and the same
+  // names typed by hand were already accepted there.
   //
   // Anchor: the two-argument function whose FIRST statement binds one builder's
   // result and then `?? `s it with the other's — `let r=C(e,n),s=r??R(e)` — with
@@ -573,24 +577,41 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   // The rows are appended as one more DECLARATOR in the same `let` — a statement
   // spliced in would land in the middle of the declaration list and not parse —
   // and every measured build continues the list with a comma at exactly this
-  // point. A build that ends the statement there stops matching and this site
-  // reports `anchor not found` rather than emitting a syntax error.
+  // point. The `(?=[,;])` right after the fallback call is what makes that safe
+  // to assume: a declarator can be appended before a `,` or a `;`, but a build
+  // that chains onto the fallback (`opts(e).slice()`, `opts(e)?.filter(…)`) would
+  // have the declarator split the chain, so the chained call would run on the
+  // `forEach` result instead of the array. Such a build stops matching and this
+  // site reports `anchor not found` rather than emitting code that throws or
+  // silently drops the chained call.
   //
   // `required:false`, like PATCH 5: a picker that lost its anchor costs the user
   // the /model rows, not a working binary. The marker makes a re-patch idempotent
   // — unlike PATCH 5 this site cannot use "is this value already present?",
   // because PATCH 5 has put those very values in the source by the time it runs.
+  //
+  // For the same reason the anchor is counted against the ORIGINAL source first.
+  // PATCH 5 has spliced the user's model display names into the buffer by now, and
+  // a name that spells this anchor would otherwise be a candidate — on a build
+  // with no matching entry point (2.1.252 and older) the ONLY one, and the rows
+  // would be spliced into that name's string literal, breaking the bundle's syntax.
   // ---------------------------------------------------------------------------
   {
     const catalogSite = 'PATCH 11: catalog picker options';
     const catalogMarker = '/*ccpatch:picker*/';
+    const catalogAnchor = /function [\w$]+\(([\w$]+),([\w$]+)\)\{let ([\w$]+)=[\w$]+\(\1,\2\),([\w$]+)=\3\?\?[\w$]+\(\1\)(?=[,;])(?=[\s\S]{0,400}ANTHROPIC_CUSTOM_MODEL_OPTION)/;
+    const entryPoints = source.match(new RegExp(catalogAnchor.source, 'g'))?.length ?? 0;
     const rows = ALIASES.map(pickerRow).join(',');
     if (ALIASES.length === 0) {
       log('SKIP', catalogSite, 'no aliases configured');
+    } else if (entryPoints !== 1 && !js.includes(catalogMarker)) {
+      log('FAIL', catalogSite, entryPoints === 0
+        ? 'anchor not found'
+        : 'anchor matched ' + entryPoints + ' times (expected 1)');
     } else {
       applyOnce(
         catalogSite,
-        /function [\w$]+\(([\w$]+),([\w$]+)\)\{let ([\w$]+)=[\w$]+\(\1,\2\),([\w$]+)=\3\?\?[\w$]+\(\1\)(?=[\s\S]{0,400}ANTHROPIC_CUSTOM_MODEL_OPTION)/,
+        catalogAnchor,
         (m, _first, _second, _catalog, options) =>
           m + ',_ccpick=' + catalogMarker + '[' + rows + '].forEach(function(_o){if(!'
           + options! + '.some(function(_i){return _i.value===_o.value}))' + options! + '.push(_o)})',

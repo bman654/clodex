@@ -12,7 +12,7 @@
 (externalized in `tsup.config.ts`; it brings `node-lief` for native repacking and `ink`/`react` for
 its picker, which is why `patcher.ts` loads it via lazy `import()`). **Never `npx`, never the
 network.** Flow: `tryDetectInstallation({ path })` → `readClaudeBundle` → `applyClodexPatches(source,
-config)` (in-process pure function applying built-in PATCH 1–10 sites) → optional
+config)` (in-process pure function applying built-in PATCH 1–11 sites) → optional
 `applyLocalPatches` transaction with built-in postcondition verification → `writeContent` (repacks
 the native binary, here only to resize its Bun section) → `applyBundleWritePlan` (publishes the
 pristine blob with every patched module's source appended over that section). Both
@@ -400,9 +400,14 @@ relocates the Bun section and strands its old copy; that is independent of the r
   still REACH the passthrough, and in all 27 bundles the builder is immediately preceded by
   `}function ` — a 0-byte window the body run will not cross. Watch that window, not the literal
   count.
-  Count the discriminator against the **original source**, not the partly-patched buffer: PATCH 4
-  and PATCH 5 splice user-supplied model display text into the bundle, so counting afterwards lets
-  a model label that happens to contain the signal refuse a patch that would otherwise succeed.
+  Count the discriminator against the **original source**, not the partly-patched buffer: PATCH 4,
+  PATCH 5 and PATCH 11 splice user-supplied model display text into the bundle, so counting afterwards
+  lets a model label that happens to contain the signal refuse a patch that would otherwise succeed.
+  PATCH 11 runs after PATCH 5 has spliced display names, so it requires exactly one match in the
+  original source before it applies. A name spelling its anchor can then at most make it refuse
+  (`anchor matched 2 times`), never bind: on a build with no matching picker entry point (2.1.252
+  and older) that name would otherwise be the ONLY match, the rows would land inside its string
+  literal, and the bundle's syntax would break — which nothing downstream checks.
 - **The same lesson again, on the value the head ends at.** Claude Code 2.1.260 left every other anchor
   landmark in the child-env builder intact and rewrote how it asks whether it is running remote: in
   every measured pre-2.1.260 builder that was a call wrapping a `process.env` read whose result fed a ternary
@@ -453,8 +458,9 @@ relocates the Bun section and strands its old copy; that is independent of the r
   catch the loud ones.
 - **The alias IS the model identity in the binary.** For any favorite with an alias, the short name
   (`sol`) — never the canonical `clodex:<provider>:<model>` id — is what lands in the Agent-tool zod
-  enum (PATCH 1), the known-alias validator list (PATCH 3), the `/model` picker value (PATCH 5), and
-  the context-window map (PATCH 7). Subagent/skill/agent `model:` frontmatter is validated against
+  enum (PATCH 1), the known-alias validator list (PATCH 3), the `/model` picker value (PATCH 5 in the
+  legacy builder, PATCH 11 at the entry point the served-catalog builder returns through), and the
+  context-window map (PATCH 7). Subagent/skill/agent `model:` frontmatter is validated against
   that same enum, so injecting canonical ids made `model: sol` fail with InputValidationError.
   Favorites with no alias fall back to their canonical id as the identity (enum + validator +
   context map only; no resolver case, no picker entry).

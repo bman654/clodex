@@ -52,11 +52,9 @@ function version(file: string): string {
 /** PATCH 11's anchor, read out of the production source so it cannot drift from it. */
 function liveAnchor(): string {
   const src = readFileSync(join(import.meta.dirname, '..', '..', 'src', 'patch-transforms.ts'), 'utf8');
-  const at = src.indexOf('applyOnce(\n        catalogSite,');
-  expect(at, 'PATCH 11 applyOnce present').toBeGreaterThan(-1);
-  const anchor = src.slice(at).match(/\n\s*(\/(?:[^\n]|\\\/)+?\/),\n/);
+  const anchor = src.match(/\n\s*const catalogAnchor = \/(.+)\/;\n/);
   expect(anchor, 'extracted the PATCH 11 anchor literal').toBeTruthy();
-  return anchor![1]!.slice(1, -1);
+  return anchor![1]!;
 }
 
 /** The enclosing `function NAME(...){...}` containing a byte offset. */
@@ -82,7 +80,10 @@ function functionTexts(src: string, name: string): string[] {
   const texts: string[] = [];
   const needle = `function ${name}(`;
   for (let at = src.indexOf(needle); at >= 0; at = src.indexOf(needle, at + 1)) {
-    texts.push(enclosingFunction(src, at + 9).text);
+    // A same-named function in another module can hold braces inside strings, which this naive
+    // scan cannot balance (2.1.257 darwin-x64, 2.1.281, 2.1.282 win32-arm64). Skip it rather than
+    // abort the bundle: the function this harness is after scans cleanly on every build.
+    try { texts.push(enclosingFunction(src, at + 9).text); } catch (e) { if ((e as Error).message !== 'unbalanced') throw e; }
   }
   return texts;
 }
@@ -91,9 +92,9 @@ function functionTexts(src: string, name: string): string[] {
  * The patched entry point, rebuilt as a standalone declaration.
  *
  * Found by PATCH 11's own marker rather than by re-running the anchor: the injected rows sit
- * between the `??` and the custom-model env read, which is inside the anchor's bounded lookahead,
- * so the anchor deliberately does NOT match its own output. (Re-patching is guarded by the marker,
- * which `applyOnce` checks before the regex.)
+ * between the `??` and the custom-model env read, so whether the anchor still matches its own
+ * output depends on how far the rows push that read past the bounded lookahead. (Re-patching is
+ * guarded by the marker, which `applyOnce` checks before the regex.)
  */
 function patchedEntryPoint(patched: string): {
   name: string; catalogFn: string; legacyFn: string; declaration: string;
