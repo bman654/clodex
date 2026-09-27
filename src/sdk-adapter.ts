@@ -10,8 +10,6 @@ import {
   silenceSdkWarnings,
   type FullStreamPart,
   grabRoundTripSignature,
-  rememberToolReasoning,
-  getToolReasoning,
 } from './proxy-shared.js';
 import {
   deepMergeProviderOptions,
@@ -418,14 +416,12 @@ export function translateMessages(
       if (userParts.length) out.push({ role: 'user', content: userParts } as unknown as ModelMessage);
     } else if (msg.role === 'assistant') {
       const parts: Array<Record<string, unknown>> = [];
-      let hasThinking = false;
       for (const b of blocks) {
         if (b.type === 'text') {
           // The OpenAI Responses API currently accepts breakpoints on input
           // content, not prior assistant output_text items.
           parts.push({ type: 'text', text: b.text ?? '' });
         } else if (b.type === 'thinking') {
-          hasThinking = true;
           const restored = restoreOpenAiThinking(b.thinking ?? '', b.signature, npm);
           if (restored) parts.push(...restored);
           else {
@@ -439,21 +435,6 @@ export function translateMessages(
           };
           if (thoughtSignature && isGoogle) part.providerOptions = { google: { thoughtSignature } };
           parts.push(part);
-        }
-      }
-      if (!hasThinking) {
-        for (const b of blocks) {
-          if (b.type === 'tool_use' && b.id) {
-            const preserved = getToolReasoning(b.id);
-            if (preserved) {
-              const part = thinkingToSdkPart({ type: 'thinking', thinking: preserved }, npm);
-              if (part) {
-                parts.unshift(part);
-                hasThinking = true;
-                break;
-              }
-            }
-          }
         }
       }
       if (parts.length) out.push({ role: 'assistant', content: parts } as unknown as ModelMessage);
@@ -706,8 +687,8 @@ export function translateRequest(
   // GPT-5.6+ public-API implicit mode also
   // honors the explicit breakpoints copied from Claude Code's cache_control
   // blocks, while retaining an automatic latest-message breakpoint as fallback.
+  const claudeSessionId = extractClaudeSessionId(body, options?.claudeSessionId);
   if (npm === '@ai-sdk/openai') {
-    const claudeSessionId = extractClaudeSessionId(body, options?.claudeSessionId);
     const serviceTier = options?.openAiOAuth ? oauthServiceTier() : undefined;
     providerOptions = deepMergeProviderOptions(providerOptions, {
       openai: {
@@ -734,12 +715,17 @@ export function translateRequest(
     maxOutputTokens: options?.openAiOAuth ? undefined : body.max_tokens,
     temperature: body.temperature,
     providerOptions,
-    ...(isOpenRouterRoute(npm, options?.reasoningMetadata, body.model)
+    // OpenRouter derives its own conversation key when none is sent, and routes a
+    // session's requests to one provider when one is. The value needs to be stable
+    // and unique, not recognizable, so the session UUID goes over hashed through
+    // the same key the OpenAI route's prompt_cache_key uses; the system/tools hash
+    // stays the fallback for clients that send no session identity.
+    ...(isOpenRouterRoute(npm, options?.reasoningMetadata)
       ? {
           headers: {
-            'x-session-id':
-              extractClaudeSessionId(body, options?.claudeSessionId)
-              ?? openAiPromptCacheKey(baseSystem, upstreamTools),
+            'x-session-id': claudeSessionId
+              ? claudeSessionPromptCacheKey(claudeSessionId)
+              : openAiPromptCacheKey(baseSystem, upstreamTools),
           },
         }
       : {}),
@@ -941,7 +927,6 @@ export async function writeAnthropicStream(
   const flushedTools = new Set<string>();
   let openToolId: string | null = null;
   let finishReason = 'end_turn';
-  let turnReasoning = '';
   let usage: AnthropicUsage = {
     input_tokens: observer?.initialInputTokens ?? 0,
     output_tokens: 0,
@@ -1029,16 +1014,13 @@ export async function writeAnthropicStream(
           openBlock('thinking', { type: 'thinking', thinking: '', signature: '' });
         }
         break;
-      case 'reasoning-delta': {
+      case 'reasoning-delta':
         if (openType !== 'thinking') openBlock('thinking', { type: 'thinking', thinking: '', signature: '' });
-        const thinkingDelta = openAiThinking ? openAiThinking.append(part) : part.text ?? '';
-        turnReasoning += thinkingDelta;
         emit('content_block_delta', {
           type: 'content_block_delta', index: blockIndex,
-          delta: { type: 'thinking_delta', thinking: thinkingDelta },
+          delta: { type: 'thinking_delta', thinking: openAiThinking ? openAiThinking.append(part) : part.text ?? '' },
         });
         break;
-      }
       case 'reasoning-end': {
         if (openAiThinking) openAiThinking.end(part);
         else {
@@ -1062,9 +1044,6 @@ export async function writeAnthropicStream(
 
       case 'tool-input-start': {
         const sig = grabRoundTripSignature(part);
-        if (part.id && turnReasoning) {
-          rememberToolReasoning(part.id, turnReasoning);
-        }
         openBlock('tool', {
           type: 'tool_use', id: encodeToolUseId(part.id ?? '', sig), name: part.toolName, input: {},
         });
@@ -1082,9 +1061,6 @@ export async function writeAnthropicStream(
       case 'tool-call': {
         finishReason = 'tool_use';
         const id = part.toolCallId ?? '';
-        if (id && turnReasoning) {
-          rememberToolReasoning(id, turnReasoning);
-        }
         if (idToBlock.has(id)) {
           // Streamed input: emit the sanitized complete input as one delta,
           // falling back to the buffered raw JSON if the SDK gave no parsed input.
@@ -1113,9 +1089,6 @@ export async function writeAnthropicStream(
         } else if (openType !== 'tool') {
           // Non-streamed tool call (no input-start/delta arrived): emit a full block.
           const sig = grabRoundTripSignature(part);
-          if (id && turnReasoning) {
-            rememberToolReasoning(id, turnReasoning);
-          }
           openBlock('tool', {
             type: 'tool_use', id: encodeToolUseId(id, sig), name: part.toolName, input: {},
           });
@@ -1257,13 +1230,11 @@ export async function generateAnthropicResponse(
   let finishReason: string;
   let usage: SdkUsage | undefined;
   let warnings: unknown;
-  let generatedReasoning: string | undefined;
   const { idleTimeoutMs, totalTimeoutMs, maxRetries } = upstreamRequestBudget({
     idleTimeoutMs: options?.forceStream ? options.idleTimeoutMs : undefined,
   });
   const attempts = trackUpstreamAttempts(model);
 
-  const streamedReasoning: string[] = [];
   if (options?.forceStream) {
     // Some upstreams (e.g. ChatGPT's Codex backend) reject non-streaming requests
     // outright. Request a real stream from the SDK and collect it into one
@@ -1309,7 +1280,6 @@ export async function generateAnthropicResponse(
             : new Error(typeof part.error === 'string' ? part.error : 'Upstream stream failed');
         }
         if (part.type === 'text-delta') streamedText.push(part.text ?? '');
-        else if (part.type === 'reasoning-delta') streamedReasoning.push(part.text ?? '');
         else if (part.type === 'tool-call') {
           streamedToolCalls.push({
             toolCallId: part.toolCallId ?? '',
@@ -1353,13 +1323,6 @@ export async function generateAnthropicResponse(
         abortSignal: generateAbort.signal,
       } as Parameters<typeof generateText>[0]);
       ({ text, toolCalls, finishReason, usage, warnings } = r);
-      if (typeof (r as { reasoningText?: unknown }).reasoningText === 'string') {
-        generatedReasoning = (r as { reasoningText: string }).reasoningText;
-      } else if (Array.isArray((r as { reasoning?: unknown }).reasoning)) {
-        generatedReasoning = (r as { reasoning: Array<{ text?: string }> }).reasoning
-          .map(item => item.text ?? '')
-          .join('');
-      }
     } catch (error) {
       if (generateAbort.signal.aborted) throw streamAbortError(generateAbort.signal);
       throw error;
@@ -1367,13 +1330,6 @@ export async function generateAnthropicResponse(
       stopForwardingAbort();
       clearTimeout(totalTimer);
       if (!generateAbort.signal.aborted) generateAbort.abort();
-    }
-  }
-
-  const reasoningText = streamedReasoning.join('') || generatedReasoning;
-  if (reasoningText && toolCalls?.length) {
-    for (const tc of toolCalls) {
-      if (tc.toolCallId) rememberToolReasoning(tc.toolCallId, reasoningText);
     }
   }
 

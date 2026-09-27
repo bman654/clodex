@@ -467,17 +467,20 @@ function hasSupportedParameter(metadata: ReasoningMetadata | undefined, param: s
   return (metadata?.supportedParameters ?? []).some(p => p === param);
 }
 
-export function isOpenRouterRoute(
-  npm: string,
-  metadata?: ReasoningMetadata,
-  modelId?: string,
-): boolean {
+/**
+ * Whether a route is OpenRouter's. Recognition is endpoint-derived on purpose: a
+ * custom provider id comes from the display name the user typed and a gateway can
+ * list `openrouter/*` model ids, so neither is evidence of the upstream. This
+ * predicate decides reasoning capabilities and effort mapping, where a false
+ * positive silently changes what a provider is asked to do.
+ *
+ * Exported for the request-level session header, the one consumer outside this
+ * module; it reuses this answer rather than growing a second OpenRouter test.
+ */
+export function isOpenRouterRoute(npm: string, metadata?: ReasoningMetadata): boolean {
   return npm === '@openrouter/ai-sdk-provider'
     || metadata?.providerId === 'openrouter'
-    || metadata?.providerId === 'custom-openrouter'
-    || metadata?.apiBaseUrl?.includes('openrouter.ai') === true
-    || (typeof modelId === 'string' && modelId.startsWith('openrouter/'))
-    || (typeof metadata?.upstreamModelId === 'string' && metadata.upstreamModelId.startsWith('openrouter/'));
+    || metadata?.apiBaseUrl?.includes('openrouter.ai') === true;
 }
 
 function openRouterReasoningCapabilities(metadata?: ReasoningMetadata): ReasoningCapabilities {

@@ -17,8 +17,7 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   responses in testing.
 - Cache reads and GPT-5.6 cache writes map to Anthropic
   `cache_read_input_tokens`/`cache_creation_input_tokens`.
-- On tool turns where Claude Code omits thinking blocks from assistant history, `src/sdk-adapter.ts` restores captured reasoning from `toolReasoningRegistry` as `{ type: 'reasoning', text }` parts. SDK serializers (such as `@ai-sdk/openai-compatible` for DeepSeek) emit `reasoning_content` on the wire, preserving provider prefix cache hits across tool turns. The registry is bounded to 1,000 entries (~500 tool turns, registering raw and stripped IDs); eviction is oldest-first (FIFO), dropping earliest conversation turns when the cap is reached.
-- On OpenRouter routes (`custom-openrouter` provider or `openrouter/*` model IDs), requests attach an `x-session-id` header carrying Claude Code's session UUID (with a stable system+tools prompt cache key fallback). This enforces backend instance affinity across turns so node-level prompt caches remain hot.
+- On OpenRouter routes, requests attach an `x-session-id` header: Claude Code's session UUID put through `claudeSessionPromptCacheKey` (the same opaque key the OpenAI route sends as `prompt_cache_key`), or the system+tools prompt cache key when the client sends no session identity. Recognition is `isOpenRouterRoute`'s, which is endpoint-derived — the OpenRouter SDK package, the built-in `openrouter` provider id, or a base URL on the OpenRouter host. A custom endpoint's provider id comes from the display name the user typed and a private gateway can list `openrouter/*` model ids, so neither is evidence of the upstream, and the predicate also decides reasoning capabilities and effort, where a false positive silently changes what a provider is asked to do. The value gives OpenRouter a session key to keep a conversation on one upstream provider, subject to its own eligibility rules and idle expiry; it is not backend-node pinning, and no cache-hit improvement has been measured for it.
 - Consecutive OpenAI Responses reasoning summaries/items stream into **one Anthropic thinking
   block** until text, a tool, or successful completion closes it. A thinking-only WebSocket drop
   leaves that block open, so an earlier summary cannot disable Claude Code's mid-stream retry.
@@ -147,3 +146,16 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   API (GPT-5.4+, GPT-5.5, `*-codex`, o-series); `provider.chat(id)` otherwise. Originator string is
   `clodex`.
 
+## Where a cache question actually gets answered
+
+Claude Code owns the tool and history loop. clodex answers one request at a time: the SDK adapter handles one translated call, a passthrough route a different path, so a cache question is about the bytes of consecutive requests, not about a session object here.
+
+`src/provider-factory.ts` turns the id the client sent into route metadata: which SDK provider and protocol to use, and which reasoning options apply. `isOpenRouterRoute` is shared, and it is a disjunction of three clauses: the OpenRouter SDK package, a provider id of `openrouter`, or a base URL containing `openrouter.ai`. One match is enough; being endpoint-derived, it does not broaden from a display name.
+
+The streaming and the non-streaming response paths must each preserve the content and usage they support. That is an invariant to check, not a claim that it holds on every path today.
+
+`toAnthropicUsage` reports the fresh remainder in `input_tokens` and cache reads and cache writes as separate fields, so a caller must not sum rows from repeated usage stages.
+
+An affinity header is a hint. It is not backend pinning and not cache proof: a cache read says nothing about which prefix matched, on which node, or whether the bytes were identical between two turns.
+
+A fixture pins the boundary it selects. Whether a real client and a real provider build a stable history is a separate question, and only a loop through both answers it.
