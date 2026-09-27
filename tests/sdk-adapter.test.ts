@@ -1389,6 +1389,7 @@ describe('generateAnthropicResponse', () => {
     process.env['CLODEX_UPSTREAM_MAX_RETRIES'] = '4';
     const generateText = vi.fn(async () => ({
       text: 'done',
+      content: [{ type: 'text', text: 'done' }],
       toolCalls: [],
       finishReason: 'stop',
       usage: { inputTokens: 1, outputTokens: 1 },
@@ -1456,6 +1457,7 @@ describe('generateAnthropicResponse', () => {
     vi.resetModules();
     const generateText = vi.fn(async () => ({
       text: 'done',
+      content: [{ type: 'text', text: 'done' }],
       toolCalls: [],
       finishReason: 'stop',
       usage: {
@@ -1496,6 +1498,7 @@ describe('generateAnthropicResponse', () => {
     vi.resetModules();
     const generateText = vi.fn(async () => ({
       text: 'done',
+      content: [{ type: 'text', text: 'done' }],
       toolCalls: [],
       finishReason: 'stop',
       usage: undefined,
@@ -1557,6 +1560,13 @@ describe('generateAnthropicResponse', () => {
     vi.resetModules();
     const generateText = vi.fn(async () => ({
       text: '',
+      content: [{
+        type: 'tool-call',
+        toolCallId: 'call_1',
+        toolName: 'Read',
+        input: { path: 'a' },
+        providerMetadata: { google: { thoughtSignature: 'SIG' } },
+      }],
       toolCalls: [{
         toolCallId: 'call_1',
         toolName: 'Read',

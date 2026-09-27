@@ -34,7 +34,7 @@ import {
   type ResponsesWebSocketDiagnosticEvent,
   type ResponsesWebSocketFetchOptions,
 } from '../src/oauth/responses-websocket.js';
-import { streamAnthropicResponse, translateRequest } from '../src/sdk-adapter.js';
+import { generateAnthropicResponse, streamAnthropicResponse, translateRequest } from '../src/sdk-adapter.js';
 import type { UpgradeAdmission } from '../src/oauth/ws-upgrade-pacer.js';
 
 const WS_URL = 'wss://chatgpt.com/backend-api/codex/responses';
@@ -269,6 +269,49 @@ describe('OpenAI thinking round-trip through the WebSocket chain', () => {
     completeResponse(second.socket, {
       responseId: 'resp_2', reasoning: [{ itemId: 'rs_3', encrypted: 'enc_three', summaries: ['done'] }], text: 'ok',
     });
+    await expect(second.finished).resolves.toBeUndefined();
+  });
+
+  it('continues the chain exactly after a turn returned without streaming', async () => {
+    // Claude Code asks for a non-streaming reply once its mid-stream retries are
+    // spent. That reply must carry the reasoning; without it the next request
+    // omits the reasoning and the chain continues only by forgiving the gap.
+    const client = createClient({ accountId: 'acct-non-stream' });
+    const params = translateRequest(
+      { model: MODEL, system: SYSTEM, messages: [{ role: 'user', content: [{ type: 'text', text: 'go' }] }] } as never,
+      '@ai-sdk/openai',
+      { openAiOAuth: true },
+    );
+    const reply = generateAnthropicResponse(client.provider.responses(MODEL), params, MODEL, { forceStream: true });
+    await vi.waitFor(() => {
+      if (fakeSockets.length === 1 && fakeSockets[0]!.listenerCount('open') > 0 && sentFrames.length === 0) {
+        fakeSockets[0]!.emit('open');
+      }
+      expect(sentFrames.length).toBe(1);
+    });
+    completeResponse(sentFrames[0]!.socket, {
+      responseId: 'resp_1',
+      reasoning: [
+        { itemId: 'rs_1', encrypted: 'enc_one', summaries: THREE },
+        { itemId: 'rs_2', encrypted: 'enc_two', summaries: TWO },
+      ],
+      text: 'answer',
+    });
+    const assistant = { role: 'assistant', content: (await reply).content as Record<string, any>[] };
+    expect(assistant.content.map(block => block.type)).toEqual(['thinking', 'text']);
+
+    const second = await startTurn(client.provider, [
+      { role: 'user', content: [{ type: 'text', text: 'go' }] },
+      assistant,
+      { role: 'user', content: [{ type: 'text', text: 'next' }] },
+    ]);
+    expect(client.headDecisions.at(-1)).toMatchObject({
+      decision: 'continuation', continuationMatchMode: 'exact',
+    });
+    expect(second.payload.previous_response_id).toBe('resp_1');
+    expect(second.payload.input).toEqual([userItem('next')]);
+
+    completeResponse(second.socket, { responseId: 'resp_2', reasoning: [], text: 'ok' });
     await expect(second.finished).resolves.toBeUndefined();
   });
 
