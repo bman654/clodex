@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.18.3](https://github.com/bman654/clodex/compare/v2.18.2...v2.18.3) (2026-09-27)
+
+
+### Bug Fixes
+
+* **reasoning:** keep a turn's reasoning when Claude Code recovers from a dropped stream ([#295](https://github.com/bman654/clodex/issues/295)) ([a179ba0](https://github.com/bman654/clodex/commit/a179ba0502d0ff50892bd6c0787e887f35670178))
+
 ## [2.18.2](https://github.com/bman654/clodex/compare/v2.18.1...v2.18.2) (2026-09-26)
 
 
