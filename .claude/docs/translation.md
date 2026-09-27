@@ -33,9 +33,9 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   text. Older clodex builds cannot decode these new signatures and would forward the envelope as
   provider ciphertext, which can cause upstream errors.
   Resume such transcripts with an envelope-aware build rather than downgrading the bridge. This does not
-  change non-streaming responses' existing omission of reasoning, or the transport's prohibition
-  on replaying already-emitted model output. The guarantee covers SDK-visible summary text,
-  grouping and encrypted content, not output-only fields the SDK omits (such as `status`).
+  change the transport's prohibition on replaying already-emitted model output. The guarantee
+  covers SDK-visible summary text, grouping and encrypted content, not output-only fields the SDK
+  omits (such as `status`).
 
   **On `@ai-sdk/openai`, a thinking block whose signature is not a clodex envelope is dropped
   whole** — text and signature. Claude Code (2.1.281; not 2.1.276), under a server-side flag, keeps
@@ -50,6 +50,16 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   text and tool calls are unaffected, and a live WebSocket chain still continues (its
   `omitted_reasoning` match). `@ai-sdk/openai-compatible` reads no `openai` part options, so a
   foreign block's text still goes up as `reasoning_content` there and its signature never did.
+- **A non-streaming response carries the same thinking blocks the stream would have.** Claude
+  Code asks for one once its mid-stream retries are spent (see `claude-code-internals.md`), and it
+  keeps whatever that response holds. A turn returned without thinking lost its reasoning from
+  every later request in the session: the encrypted reasoning item on OpenAI routes, and the
+  `reasoning_content` DeepSeek's thinking mode requires back on every request that carries tools.
+  `src/non-stream-content.ts` builds the content in arrival order with `writeAnthropicStream`'s
+  thinking-block rules, and `tests/non-stream-reasoning.test.ts` holds both to the same blocks and
+  the same replayed upstream request. Two differences are deliberate: an empty text block is
+  dropped, and reasoning without an OpenAI item id leads a `generateText` result, because
+  `@ai-sdk/openai-compatible` lists it after the text although the model reasoned first.
 - **A tool schema's regexes are dropped when they hit a known Python incompatibility**, on every
   route but Anthropic-format ones (`src/tool-schema-sanitize.ts`). OpenAI rejects the same
   constructs python-jsonschema does — its 400 reads `'<pattern>' is not a 'regex'`, that library's

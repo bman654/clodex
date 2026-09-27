@@ -69,7 +69,8 @@ export class NonStreamContent {
 
   private openThinking(openAi?: OpenAiThinkingBlock): Extract<OpenBlock, { type: 'thinking' }> {
     this.close();
-    const open = { type: 'thinking' as const, block: { type: 'thinking', thinking: '', signature: '' }, openAi };
+    const block = { type: 'thinking', thinking: '', signature: '' };
+    const open = { type: 'thinking' as const, block, openAi };
     this.open = open;
     return open;
   }
@@ -111,7 +112,8 @@ export function addGeneratedContent(
   parts: FullStreamPart[],
   addToolCall: (part: FullStreamPart) => void,
 ): void {
-  const unplaced = (part: FullStreamPart) => part.type === 'reasoning' && !openAiReasoningItemId(part);
+  const unplaced = (part: FullStreamPart) =>
+    part.type === 'reasoning' && !openAiReasoningItemId(part);
   const ordered = [...parts.filter(unplaced), ...parts.filter(part => !unplaced(part))];
   ordered.forEach((part, index) => {
     if (part.type === 'reasoning') {
