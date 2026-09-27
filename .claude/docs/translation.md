@@ -58,8 +58,9 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   `src/non-stream-content.ts` builds the content in arrival order with `writeAnthropicStream`'s
   thinking-block rules, and `tests/non-stream-reasoning.test.ts` holds both to the same blocks and
   the same replayed upstream request. Two differences are deliberate: an empty text block is
-  dropped, and reasoning without an OpenAI item id leads a `generateText` result, because
-  `@ai-sdk/openai-compatible` lists it after the text although the model reasoned first.
+  dropped, and in a `generateText` result, reasoning without an OpenAI item id that follows the
+  text moves to the front, because `@ai-sdk/openai-compatible` appends it after the text although
+  the model reasoned first.
 - **A tool schema's regexes are dropped when they hit a known Python incompatibility**, on every
   route but Anthropic-format ones (`src/tool-schema-sanitize.ts`). OpenAI rejects the same
   constructs python-jsonschema does — its 400 reads `'<pattern>' is not a 'regex'`, that library's

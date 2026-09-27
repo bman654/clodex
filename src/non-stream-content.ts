@@ -100,27 +100,30 @@ export class NonStreamContent {
 /**
  * Feed a `generateText` result's content through the same rules as a stream.
  *
- * `@ai-sdk/openai-compatible` lists a non-streamed response's text before its
- * reasoning, although the model reasoned first and the same turn streamed
- * delivers the reasoning first. Reasoning without an OpenAI item id carries no
- * position of its own, so it leads, as it would have streamed. OpenAI reasoning
- * keeps its place: the Responses API needs each reasoning item replayed ahead of
- * the output it produced.
+ * `@ai-sdk/openai-compatible` appends a non-streamed response's reasoning after
+ * its text, although the model reasoned first and the stream delivers it first.
+ * Reasoning without an OpenAI item id that follows text therefore moves to the
+ * front, as it would have streamed. Reasoning the extract-reasoning middleware
+ * lifts out of the text already sits just ahead of that text, and OpenAI
+ * reasoning keeps its place: the Responses API needs each reasoning item
+ * replayed ahead of the output it produced.
  */
 export function addGeneratedContent(
   content: NonStreamContent,
   parts: FullStreamPart[],
   addToolCall: (part: FullStreamPart) => void,
 ): void {
-  const unplaced = (part: FullStreamPart) =>
-    part.type === 'reasoning' && !openAiReasoningItemId(part);
-  const ordered = [...parts.filter(unplaced), ...parts.filter(part => !unplaced(part))];
+  const firstText = parts.findIndex(part => part.type === 'text');
+  const late = parts.map((part, index) => firstText >= 0 && index > firstText
+    && part.type === 'reasoning' && !openAiReasoningItemId(part));
+  const ordered = [...parts.filter((_, i) => late[i]), ...parts.filter((_, i) => !late[i])];
   ordered.forEach((part, index) => {
     if (part.type === 'reasoning') {
       const id = `reasoning-${index}`;
-      content.add({ type: 'reasoning-start', id, providerMetadata: part.providerMetadata });
-      content.add({ type: 'reasoning-delta', id, text: part.text, providerMetadata: part.providerMetadata });
-      content.add({ type: 'reasoning-end', id, providerMetadata: part.providerMetadata });
+      const { text, providerMetadata } = part;
+      content.add({ type: 'reasoning-start', id, providerMetadata });
+      content.add({ type: 'reasoning-delta', id, text, providerMetadata });
+      content.add({ type: 'reasoning-end', id, providerMetadata });
     } else if (part.type === 'text') {
       content.add({ type: 'text-start' });
       content.add({ type: 'text-delta', text: part.text });

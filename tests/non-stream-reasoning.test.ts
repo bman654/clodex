@@ -1,6 +1,6 @@
 import { createOpenAI } from '@ai-sdk/openai';
 import { createOpenAICompatible } from '@ai-sdk/openai-compatible';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   generateAnthropicResponse,
   streamAnthropicResponse,
@@ -8,6 +8,7 @@ import {
   writeAnthropicStream,
 } from '../src/sdk-adapter.js';
 import { NonStreamContent } from '../src/non-stream-content.js';
+import { createLanguageModel } from '../src/provider-factory.js';
 import type { FullStreamPart } from '../src/proxy-shared.js';
 
 // A turn Claude Code receives without streaming must carry the same reasoning
@@ -17,10 +18,12 @@ import type { FullStreamPart } from '../src/proxy-shared.js';
 // request in the session. DeepSeek's thinking mode requires that reasoning back
 // on every request that carries tools.
 //
-// Every test drives the production path end to end; only `fetch` is replaced.
-// The streamed leg is the reference: the non-streaming response must rebuild
-// the same Anthropic content, and replaying it must send the same reasoning
-// upstream.
+// The route tests drive the production path end to end with only `fetch`
+// replaced. The streamed leg is the reference: the non-streaming response must
+// rebuild the same Anthropic content, and replaying it must send the same
+// reasoning upstream. The last block holds the two builders to the same block
+// rules over hand-built part sequences, including shapes (such as round-trip
+// signatures) that no installed provider currently produces.
 
 type Block = Record<string, any>;
 
@@ -266,6 +269,24 @@ describe.each([
     }]);
   });
 
+  it('keeps a reasoning item whose summary is empty, with its encrypted content', async () => {
+    // The Responses API can return reasoning with no summary at all; the item
+    // still has to go back so the model keeps its own chain of thought.
+    const items: OpenAiItem[] = [
+      { reasoning: { id: 'rs_empty', blob: 'blob-empty', summaries: [] } },
+      { call: { id: 'fc_1', callId: 'call_1', args: '{"file_path":"/tmp/a"}' } },
+    ];
+    const nonStreamed = await openAiNonStreamed(items, oauth);
+    expect(nonStreamed.map(b => b.type)).toEqual(['thinking', 'tool_use']);
+    expect(nonStreamed[0].thinking).toBe('');
+
+    const input = await openAiReplay(nonStreamed, oauth);
+    expect(input.filter(item => item?.type === 'reasoning')).toEqual([{
+      type: 'reasoning', id: 'rs_empty', encrypted_content: 'blob-empty', summary: [],
+    }]);
+    expect(input).toEqual(await openAiReplay(await openAiStreamed(items, oauth), oauth));
+  });
+
   it('keeps each reasoning item ahead of the call it produced when reasoning and calls interleave', async () => {
     const nonStreamed = await openAiNonStreamed(OPENAI_INTERLEAVED, oauth);
     expect(nonStreamed.map(b => b.type)).toEqual(['thinking', 'tool_use', 'thinking', 'tool_use']);
@@ -401,6 +422,34 @@ describe('non-streaming OpenAI-compatible response', () => {
       content: 'Let me look.',
       tool_calls: [{ id: 'call_00_abc', function: { name: 'Read' } }],
     });
+  });
+
+  it('keeps native reasoning ahead of reasoning extracted from <think> tags', async () => {
+    // A model id naming a reasoning model gets the SDK's extract-reasoning
+    // middleware from the provider factory. Its non-streamed result lists the
+    // extracted reasoning first and the native reasoning after the text; the
+    // stream delivers the native reasoning first.
+    const turn = { ...COMPAT_TURN, reasoning: 'native first', text: '<think>inline second</think>answer' };
+    vi.stubGlobal('fetch', async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      return body.stream ? sse(compatStreamChunks(turn), true) : json(compatJson(turn));
+    });
+    try {
+      const model = await createLanguageModel({
+        npm: '@ai-sdk/openai-compatible', modelId: 'custom-thinking', providerId: 'custom-r1',
+        baseURL: 'https://compat.invalid/v1', apiKey: 'test',
+      });
+      const nonStreamed = (await generateAnthropicResponse(model, compatParams(), 'custom-thinking'))
+        .content as Block[];
+      let raw = '';
+      await streamAnthropicResponse(model, compatParams(), 'custom-thinking', c => { raw += c; });
+      const streamed = blocksFromSse(raw).filter(b => b.type !== 'text' || b.text !== '');
+
+      expect(nonStreamed.map(b => b.thinking ?? b.type)).toEqual(['native first', 'inline second', 'text', 'tool_use']);
+      expect(nonStreamed).toEqual(streamed);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('adds no thinking block when the model did not reason', async () => {
