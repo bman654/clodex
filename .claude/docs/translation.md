@@ -50,17 +50,21 @@ hand-rolled per-provider translation. Preserved hard-won behavior:
   text and tool calls are unaffected, and a live WebSocket chain still continues (its
   `omitted_reasoning` match). `@ai-sdk/openai-compatible` reads no `openai` part options, so a
   foreign block's text still goes up as `reasoning_content` there and its signature never did.
-- **A non-streaming response carries the same thinking blocks the stream would have.** Claude
-  Code asks for one once its mid-stream retries are spent (see `claude-code-internals.md`), and it
+- **A non-streaming response carries the turn's reasoning, as the stream does.** Claude Code
+  asks for one once its mid-stream retries are spent (see `claude-code-internals.md`), and it
   keeps whatever that response holds. A turn returned without thinking lost its reasoning from
   every later request in the session: the encrypted reasoning item on OpenAI routes, and the
   `reasoning_content` DeepSeek's thinking mode requires back on every request that carries tools.
   `src/non-stream-content.ts` builds the content in arrival order with `writeAnthropicStream`'s
-  thinking-block rules, and `tests/non-stream-reasoning.test.ts` holds both to the same blocks and
-  the same replayed upstream request. Two differences are deliberate: an empty text block is
-  dropped, and in a `generateText` result, reasoning without an OpenAI item id that follows the
-  text moves to the front, because `@ai-sdk/openai-compatible` appends it after the text although
-  the model reasoned first.
+  thinking-block rules, and `tests/non-stream-reasoning.test.ts` holds the two to the same blocks
+  and the same replayed upstream request for the shapes it covers. Two differences are
+  deliberate: an empty text block is dropped, and in a `generateText` result, reasoning without an
+  OpenAI item id that follows the text moves to the front, because `@ai-sdk/openai-compatible`
+  appends it after the text although the model reasoned first. Parity is not complete: the SDK's
+  `<think>` extraction middleware (installed for compatible model ids that name a reasoning model)
+  splits text differently when generating and streaming — text before the tag, several sections,
+  an unclosed tag — and a Responses message with several `output_text` parts becomes several text
+  blocks. The reasoning itself is kept in each case.
 - **A tool schema's regexes are dropped when they hit a known Python incompatibility**, on every
   route but Anthropic-format ones (`src/tool-schema-sanitize.ts`). OpenAI rejects the same
   constructs python-jsonschema does — its 400 reads `'<pattern>' is not a 'regex'`, that library's
