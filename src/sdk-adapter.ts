@@ -29,6 +29,7 @@ import { emitParentNotice } from './parent-notice.js';
 import { CLAUDE_CODE_COMPACT_PROMPT_MARKERS } from './claude-code-compact-prompt.js';
 import { CLAUDE_CODE_BILLING_HEADER_PREFIX } from './oauth/claude-identity.js';
 import { OpenAiThinkingBlock, openAiReasoningItemId, restoreOpenAiThinking } from './openai-thinking.js';
+import { NonStreamContent, addGeneratedContent } from './non-stream-content.js';
 
 export { silenceSdkWarnings };
 
@@ -1210,8 +1211,14 @@ export async function generateAnthropicResponse(
     idleTimeoutMs?: number;
   },
 ): Promise<Record<string, unknown>> {
-  let text: string;
-  let toolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }>;
+  const requiredProps = toolRequiredProps(params.tools);
+  const content = new NonStreamContent();
+  const addToolCall = (tc: FullStreamPart) => content.push({
+    type: 'tool_use',
+    id: encodeToolUseId(tc.toolCallId ?? '', grabRoundTripSignature(tc)),
+    name: tc.toolName,
+    input: representableToolInput(sanitizeToolInput(tc.input ?? {}, requiredProps.get(tc.toolName ?? ''))),
+  });
   let finishReason: string;
   let usage: SdkUsage | undefined;
   let warnings: unknown;
@@ -1239,8 +1246,6 @@ export async function generateAnthropicResponse(
     );
     // See the streaming path above: Relay owns these timers and explicitly
     // settles its controller when the stream has been fully reduced.
-    const streamedText: string[] = [];
-    const streamedToolCalls: Array<{ toolCallId: string; toolName: string; input: unknown }> = [];
     let streamedFinishReason = 'stop';
     let streamedUsage: SdkUsage | undefined;
     try {
@@ -1264,17 +1269,11 @@ export async function generateAnthropicResponse(
             ? part.error
             : new Error(typeof part.error === 'string' ? part.error : 'Upstream stream failed');
         }
-        if (part.type === 'text-delta') streamedText.push(part.text ?? '');
-        else if (part.type === 'tool-call') {
-          streamedToolCalls.push({
-            toolCallId: part.toolCallId ?? '',
-            toolName: part.toolName ?? '',
-            input: part.input,
-          });
-        } else if (part.type === 'finish') {
+        if (part.type === 'tool-call') addToolCall(part);
+        else if (part.type === 'finish') {
           streamedFinishReason = part.finishReason ?? streamedFinishReason;
           streamedUsage = part.totalUsage;
-        }
+        } else content.add(part);
       }
       if (abortSignal.aborted) throw streamAbortError(abortSignal);
     } finally {
@@ -1285,8 +1284,6 @@ export async function generateAnthropicResponse(
       // result is fully reduced so Node can release AI SDK's listener graph.
       if (!forceAbort.signal.aborted) forceAbort.abort();
     }
-    text = streamedText.join('');
-    toolCalls = streamedToolCalls;
     finishReason = streamedFinishReason;
     usage = streamedUsage;
   } else {
@@ -1307,7 +1304,8 @@ export async function generateAnthropicResponse(
         maxRetries,
         abortSignal: generateAbort.signal,
       } as Parameters<typeof generateText>[0]);
-      ({ text, toolCalls, finishReason, usage, warnings } = r);
+      ({ finishReason, usage, warnings } = r);
+      addGeneratedContent(content, r.content as FullStreamPart[], addToolCall);
     } catch (error) {
       if (generateAbort.signal.aborted) throw streamAbortError(generateAbort.signal);
       throw error;
@@ -1320,18 +1318,9 @@ export async function generateAnthropicResponse(
 
   reportUnsupportedServiceTier(params, warnings);
   reportPromptTokens({ onPromptTokens: options?.onPromptTokens }, usage);
-  const requiredProps = toolRequiredProps(params.tools);
   return {
     id: translatedMessageId(), type: 'message', role: 'assistant', model: modelId,
-    content: [
-      ...(text ? [{ type: 'text', text }] : []),
-      ...toolCalls.map(tc => ({
-        type: 'tool_use',
-        id: encodeToolUseId(tc.toolCallId, grabRoundTripSignature(tc as FullStreamPart)),
-        name: tc.toolName,
-        input: representableToolInput(sanitizeToolInput(tc.input ?? {}, requiredProps.get(tc.toolName))),
-      })),
-    ],
+    content: content.content(),
     stop_reason: finishReason === 'tool-calls' ? 'tool_use' : 'end_turn',
     usage: toAnthropicUsage(usage),
   };
