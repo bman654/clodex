@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.18.4](https://github.com/bman654/clodex/compare/v2.18.3...v2.18.4) (2026-09-28)
+
+
+### Bug Fixes
+
+* **models:** keep each OpenRouter conversation on one provider to help reuse its prompt cache ([#294](https://github.com/bman654/clodex/issues/294)) ([c678fac](https://github.com/bman654/clodex/commit/c678faccbf6bf68eb3b7455d8871afc03de92cfc))
+
 ## [2.18.3](https://github.com/bman654/clodex/compare/v2.18.2...v2.18.3) (2026-09-27)
 
 
