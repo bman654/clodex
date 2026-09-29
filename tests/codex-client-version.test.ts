@@ -35,6 +35,10 @@ describe('Codex client version precedence', () => {
 });
 
 describe('offline seeded Codex version contract', () => {
+  it('advertises at least the client version verified with GPT-6.1 Sol', () => {
+    expect(compareCodexClientVersions(CODEX_RESPONSES_LITE_VERSION, '0.159.0')).toBeGreaterThanOrEqual(0);
+  });
+
   it('retains the minimums measured in the live catalog on 2026-09-24', () => {
     const models = buildOpenAiOAuthModels();
     const measured = {

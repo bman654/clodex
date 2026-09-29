@@ -215,10 +215,11 @@ describe('legacy OAuth cache overlay', () => {
       maxOutputTokens: 128_000,
       reasoning: true,
       pricingBoundary: 272_000,
+      useResponsesLite: true,
+      preferWebSockets: true,
+      minimalClientVersion: '0.159.0',
     });
     expect(sol?.maxContextWindow).toBeUndefined();
-    expect(sol?.useResponsesLite).toBeUndefined();
-    expect(sol?.preferWebSockets).toBeUndefined();
   });
 
   // The builder reads `lookupKnownContextWindow`, which reports `undefined` rather than
@@ -304,6 +305,23 @@ function providerWithRows(models: CachedModel[]): RegistryProvider {
 }
 
 describe('Responses-Lite fields missing from an older cache', () => {
+  it('backfills the verified Sol 6.1 transport on the actual launch model', () => {
+    const provider = providerWithRows([bareRow('gpt-6.1-sol')]);
+    expect(projectProviderCachedModels(provider)[0]?.minimalClientVersion).toBe('0.159.0');
+    const registry = {
+      schemaVersion: 4,
+      providers: [provider],
+    } as unknown as ProviderRegistry;
+    const [local] = materializeRegistry(registry, () => 'oauth-token');
+    const sol = local?.models.find(model => model.id === 'gpt-6.1-sol');
+    expect(sol).toMatchObject({
+      contextWindow: 272_000,
+      useResponsesLite: true,
+      preferWebSockets: true,
+    });
+    expect(sol?.maxContextWindow).toBeUndefined();
+  });
+
   it.each(RESPONSES_LITE_IDS)('backfills the flags and standard window for %s', id => {
     const model = projectProviderCachedModels(providerWithRows([bareRow(id)]))[0];
     expect(model?.useResponsesLite).toBe(true);
@@ -354,7 +372,7 @@ describe('Responses-Lite fields missing from an older cache', () => {
 
   // The catalog does report these fields, so whatever it sent is a provider answer.
   // `false` must survive: a truthiness fallback would silently turn it back on.
-  it.each(['gpt-6-sol', 'gpt-5.6-sol', 'gpt-5.6-terra'])(
+  it.each(['gpt-6.1-sol', 'gpt-6-sol', 'gpt-5.6-sol', 'gpt-5.6-terra'])(
     'keeps explicit false flags and an explicit window for %s', id => {
       const row = bareRow(id, {
         useResponsesLite: false,

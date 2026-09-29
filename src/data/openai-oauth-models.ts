@@ -59,8 +59,8 @@ export const CHATGPT_CODEX_UNSUPPORTED_MODELS = new Set<string>([
 // A model with no ceiling here has none above its default window.
 // Minimum client versions and transport flags checked against the live catalog on 2026-09-24.
 const OPENAI_OAUTH_MODEL_SEEDS: OAuthModelSeed[] = [
-  // Codex availability, ceiling and transport flags for 6.1 are unverified.
-  { id: 'gpt-6.1-sol',          name: 'GPT-6.1 Sol',       contextWindow: 272_000, maxOutputTokens: 128_000, reasoning: true },
+  // Sol's transport is verified with 0.159.0; its maximum Codex input window remains unconfirmed.
+  { id: 'gpt-6.1-sol',          name: 'GPT-6.1 Sol',       contextWindow: 272_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.159.0' },
   // GPT-6 family. The window, ceiling and Responses-Lite flags are what the live
   // Codex catalog returned (Astra on 2026-09-04, Sol and Luna on 2026-09-22) and are
   // deliberately NOT the published API numbers: the model cards list a 1,050,000
