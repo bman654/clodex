@@ -35,7 +35,7 @@ vi.mock('../src/registry/pricing.js', async importOriginal => ({
 
 const openai = getTemplateById('openai')!;
 const realFetch = globalThis.fetch;
-const ids = ['gpt-6-sol', 'gpt-6-astra', 'gpt-6-luna', 'gpt-5.6', 'gpt-5.6-sol', 'gpt-4.1'];
+const ids = ['gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-astra', 'gpt-6-luna', 'gpt-5.6', 'gpt-5.6-sol', 'gpt-4.1'];
 let home: string;
 let server: ServerHandle | undefined;
 let inputTokens: number;
@@ -144,6 +144,9 @@ describe('OpenAI API-key pricing boundaries', () => {
   it('persists the metadata through providers add and refresh-models', async () => {
     expect(await addProviderFromTemplate(openai, 'synthetic-api-key')).toMatchObject({ added: true });
     const added = loadRegistry().providers[0]!;
+    expect(added.modelsCache!.models.find(model => model.id === 'gpt-6.1-sol')).toMatchObject({
+      pricingBoundary: 272_000, contextWindow: 1_050_000,
+    });
     expect(added.modelsCache!.models.find(model => model.id === 'gpt-6-sol')).toMatchObject({
       pricingBoundary: 272_000, contextWindow: 1_050_000,
     });
@@ -262,6 +265,7 @@ describe('OpenAI API-key pricing boundaries', () => {
         expect(notices).toEqual([]);
         inputTokens = 272_001;
         await request('gpt-6-sol');
+        await request('gpt-6.1-sol');
         await request('gpt-5.6-sol');
         await request('gpt-4.1');
         await request('gpt-6-sol'); // existing once-per-model latch
@@ -269,9 +273,10 @@ describe('OpenAI API-key pricing boundaries', () => {
           expect(notices).toEqual([]);
           return;
         }
-        expect(notices).toHaveLength(2);
+        expect(notices).toHaveLength(3);
         expect(notices[0]).toContain('gpt-6-sol request counted 272,001 input tokens');
-        expect(notices[1]).toContain('gpt-5.6-sol request counted 272,001 input tokens');
+        expect(notices[1]).toContain('gpt-6.1-sol request counted 272,001 input tokens');
+        expect(notices[2]).toContain('gpt-5.6-sol request counted 272,001 input tokens');
         expect(notices.every(message => message.includes('272,000-token pricing boundary'))).toBe(true);
         expect(notices.every(message => message.includes('Choose a smaller context stop'))).toBe(true);
       } finally {

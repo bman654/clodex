@@ -199,12 +199,26 @@ describe('legacy OAuth cache overlay', () => {
     expect(windows.get('o3')).toBe(200_000);
     expect(windows.get('o1-mini')).toBe(128_000);
     expect(windows.get('gpt-6-astra')).toBe(272_000);
+    expect(windows.get('gpt-6.1-sol')).toBe(272_000);
     expect(windows.get('gpt-6-sol')).toBe(272_000);
     expect(windows.get('gpt-6-luna')).toBe(272_000);
     // Not declared, but a heuristic rule claims it.
     expect(windows.get('o3-mini')).toBe(1_000_000);
     // Nothing here may be the invented default standing in for a miss.
     expect([...windows.values()].every(w => typeof w === 'number' && w > 0)).toBe(true);
+  });
+
+  it('includes GPT-6.1 Sol with its published output limit and higher-rate boundary', () => {
+    const sol = buildOpenAiOAuthModels().find(model => model.id === 'gpt-6.1-sol');
+    expect(sol).toMatchObject({
+      name: 'GPT-6.1 Sol',
+      maxOutputTokens: 128_000,
+      reasoning: true,
+      pricingBoundary: 272_000,
+    });
+    expect(sol?.maxContextWindow).toBeUndefined();
+    expect(sol?.useResponsesLite).toBeUndefined();
+    expect(sol?.preferWebSockets).toBeUndefined();
   });
 
   // The builder reads `lookupKnownContextWindow`, which reports `undefined` rather than

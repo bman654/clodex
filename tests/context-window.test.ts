@@ -45,6 +45,7 @@ describe('contextWindowFromHeuristics', () => {
     ['deepseek-chat', 64_000],
     ['gpt-6-astra', 1_050_000],
     ['gpt-6-sol', 1_050_000],
+    ['gpt-6.1-sol', 1_050_000],
     ['gpt-6-luna', 1_050_000],
     ['gpt-5.4', 1_000_000],
     ['gpt-4o-mini', 128_000],

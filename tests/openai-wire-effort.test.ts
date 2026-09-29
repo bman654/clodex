@@ -51,7 +51,7 @@ async function emittedRequestBody(modelId: string, effort: string): Promise<Reco
 }
 
 describe('OpenAI reasoning effort on the wire', () => {
-  it.each(['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-daybreak-blue-latest'])(
+  it.each(['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-daybreak-blue-latest'])(
     'puts the chosen effort in the %s request body',
     async modelId => {
       const body = await emittedRequestBody(modelId, 'high');
@@ -66,8 +66,8 @@ describe('OpenAI reasoning effort on the wire', () => {
     expect(body.reasoning).toMatchObject({ effort: 'none' });
   });
 
-  it('never sends the none effort for gpt-6-astra', async () => {
-    const body = await emittedRequestBody('gpt-6-astra', 'none');
+  it.each(['gpt-6-astra', 'gpt-6.1-sol'])('never sends the none effort for %s', async modelId => {
+    const body = await emittedRequestBody(modelId, 'none');
     expect((body.reasoning as { effort?: string } | undefined)?.effort).not.toBe('none');
   });
 
