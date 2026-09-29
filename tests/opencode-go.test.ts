@@ -8,12 +8,14 @@ import {
 } from '../src/data/opencode-go-models.js';
 import { TEST_TIMEOUT_MS } from '../src/constants.js';
 import { buildHttpProxyRoutes } from '../src/http-proxy/routes.js';
+import { reportPricingBoundaryCrossing, resetPricingBoundaryWarnings } from '../src/pricing-boundary.js';
 import { getTemplateById, verifyOpenCodeGoCredential } from '../src/provider-templates.js';
 import { createLanguageModel, effortProviderOptions, getPatchReasoningCapabilities } from '../src/provider-factory.js';
 import { transformOpenAiCompatibleRequestBody } from '../src/model-runtime-compatibility.js';
 import { projectNativeEffort } from '../src/patch-transforms.js';
 import { applyTemplateModelMetadata } from '../src/registry/fetch-template-models.js';
 import {
+  cachedModelToLocal,
   materializeRegistry,
   projectProviderCachedModels,
 } from '../src/registry/materialize.js';
@@ -102,6 +104,7 @@ describe('OpenCode Go catalog', () => {
     });
     expect(byId.get('gpt-6-luna')).toMatchObject({
       contextWindow: 1_050_000,
+      pricingBoundary: 272_000,
       modalities: ['text', 'image'],
       compatibility: { reasoningEffortMap: {
         none: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
@@ -478,6 +481,36 @@ describe('qwen3.6-plus reasoning toggle', () => {
 });
 
 describe('OpenCode Go Responses-only models', () => {
+  it('warns when a Go Luna request exceeds the published pricing boundary', () => {
+    const provider = {
+      id: 'opencode-go', templateId: 'opencode-go', name: 'OpenCode Go', enabled: true,
+      authRef: 'keyring:provider:opencode-go', authType: 'api',
+      api: { npm: '@ai-sdk/openai-compatible', url: OPENCODE_GO_COMPLETIONS_BASE_URL },
+      modelsCache: { fetchedAt: '2026-09-29T00:00:00.000Z', models: [liveModel('gpt-6-luna')] },
+      addedAt: '2026-09-29T00:00:00.000Z',
+    } as Parameters<typeof projectProviderCachedModels>[0];
+    const projected = projectProviderCachedModels(provider)[0]!;
+    const local = cachedModelToLocal(projected, provider)!;
+    expect(local.pricingBoundary).toBe(272_000);
+    expect(projected.pricingBoundaryNote).toContain('OpenCode Go');
+
+    const messages: string[] = [];
+    const emit = (message: string) => messages.push(message);
+    resetPricingBoundaryWarnings();
+    try {
+      const observation = {
+        modelKey: 'opencode-go:gpt-6-luna', modelLabel: 'GPT-6 Luna',
+        pricingBoundary: local.pricingBoundary,
+      };
+      expect(reportPricingBoundaryCrossing({ ...observation, inputTokens: 272_000 }, emit)).toBe(false);
+      expect(reportPricingBoundaryCrossing({ ...observation, inputTokens: 300_000 }, emit)).toBe(true);
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toContain('272,000-token pricing boundary');
+    } finally {
+      resetPricingBoundaryWarnings();
+    }
+  });
+
   it('sends GPT-6 Luna to Go Responses with the chosen effort', async () => {
     const luna = buildOpenCodeGoModels().find(model => model.id === 'gpt-6-luna')!;
     const requests: Array<{ url: string; body: Record<string, unknown> }> = [];

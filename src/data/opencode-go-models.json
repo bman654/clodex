@@ -161,6 +161,8 @@
     "id": "gpt-6-luna",
     "name": "GPT-6 Luna",
     "contextWindow": 1050000,
+    "pricingBoundary": 272000,
+    "pricingBoundaryNote": "Above it, OpenCode Go lists $0.20 input and $0.75 output per million tokens.",
     "cost": {
       "input": 0.1,
       "output": 0.5,

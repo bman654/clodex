@@ -11,7 +11,7 @@ import { resolve } from 'node:path';
 //
 //   Feed-controlled: name, contextWindow, cost, modalities, reasoning.
 //   Local-only:      apiUrl, npm, modelFormat, the whole compatibility block,
-//                    and which ids exist at all (TRANSPORTS below).
+//                    pricing boundaries, and which ids exist at all (TRANSPORTS below).
 //
 // `toClodexModel` hardcodes every routing constant locally and filters ids
 // against TRANSPORTS, so a hostile or simply wrong feed cannot produce a bad
@@ -345,6 +345,12 @@ function toClodexModel(id, devModel) {
     id,
     name: devModel.name ?? id,
     contextWindow: devModel.limit?.context,
+    // OpenCode Go publishes a higher rate above 272K for GPT-6 Luna; models.dev
+    // supplies only the lower rate. Keep this warning tied to Go's own pricing.
+    ...(id === 'gpt-6-luna' ? {
+      pricingBoundary: 272_000,
+      pricingBoundaryNote: 'Above it, OpenCode Go lists $0.20 input and $0.75 output per million tokens.',
+    } : {}),
     cost,
     modelFormat: anthropic ? 'anthropic' : 'openai',
     npm: anthropic
