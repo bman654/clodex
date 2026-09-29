@@ -35,7 +35,7 @@ describe('opencode-go catalog invariants', () => {
       } else {
         expect(model.modelFormat, model.id).toBe('openai');
         // Chat Completions entries use openai-compatible; Responses-only entries
-        // (Muse Spark) use @ai-sdk/openai. Both share the /v1 base.
+         // (Muse Spark and GPT-6 Luna) use @ai-sdk/openai. Both share the /v1 base.
         expect(['@ai-sdk/openai-compatible', '@ai-sdk/openai'], model.id).toContain(model.npm);
         expect(model.apiUrl, model.id).toBe('https://opencode.ai/zen/go/v1');
       }
@@ -82,7 +82,7 @@ describe('opencode-go catalog invariants', () => {
 
   it('keeps prototype names unmapped while regenerating every reviewed model', () => {
     const mappedIds = [
-      'deepseek-v4-flash', 'deepseek-v4.1-flash', 'deepseek-v4-pro', 'glm-5.1', 'glm-5.2', 'gpt-5.6-luna',
+      'deepseek-v4-flash', 'deepseek-v4.1-flash', 'deepseek-v4-pro', 'glm-5.2', 'gpt-5.6-luna', 'gpt-6-luna',
       'hy3', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k3', 'mimo-v2.5', 'mimo-v2.5-pro',
       'minimax-m2.7', 'minimax-m3', 'muse-spark-1.2-contributor', 'muse-spark-1.3-contributor', 'qwen3.6-plus', 'qwen3.7-max', 'qwen3.7-plus',
       'qwen3.8-max',
@@ -93,6 +93,7 @@ describe('opencode-go catalog invariants', () => {
       'deepseek-v4-pro': ['high', 'max'],
       'glm-5.2': ['high', 'max'],
       'gpt-5.6-luna': ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+      'gpt-6-luna': ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
       hy3: ['none', 'low', 'high'],
       'kimi-k3': ['max'],
     };

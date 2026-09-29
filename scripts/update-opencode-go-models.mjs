@@ -41,9 +41,12 @@ const TRANSPORTS = Object.assign(Object.create(null), {
   // Measured 2026-09-11: V4.1 Flash answers on /v1/messages (thinking block + text).
   'deepseek-v4.1-flash': 'anthropic-messages',
   'deepseek-v4-pro': 'openai-completions',
-  'glm-5.1': 'openai-completions',
   'glm-5.2': 'openai-completions',
   'gpt-5.6-luna': 'openai-completions',
+  // Measured 2026-09-29: GPT-6 Luna answers 200 on /v1/responses with
+  // reasoning effort and 400 ModelProtocolUnsupported on /v1/chat/completions
+  // and /v1/messages; OpenCode's Go docs list it on /v1/responses.
+  'gpt-6-luna': 'openai-responses',
   'hy3': 'openai-completions',
   'kimi-k2.6': 'openai-completions',
   'kimi-k2.7-code': 'openai-completions',
@@ -96,15 +99,6 @@ const PATCHES = Object.assign(Object.create(null), {
     requiresReasoningContentOnAssistantMessages: true,
     thinkingFormat: 'deepseek',
   },
-  'glm-5.1': {
-    // Z.ai: reasoning_effort is "Only supported by GLM-5.2". 5.1 thinks by
-    // default and is controlled by the binary `thinking` field, so it reasons
-    // but has no effort control to advertise.
-    supportsReasoningEffort: false,
-    supportsStore: false,
-    supportsDeveloperRole: false,
-    maxTokensField: 'max_tokens',
-  },
   'glm-5.2': {
     // Z.ai's own API documents the full ladder ("max, xhigh, high, medium,
     // low, minimal, none"), but that describes Z.ai's endpoint, not OpenCode's
@@ -126,6 +120,11 @@ const PATCHES = Object.assign(Object.create(null), {
     supportsStore: false,
     supportsDeveloperRole: false,
     maxTokensField: 'max_tokens',
+  },
+  'gpt-6-luna': {
+    // OpenCode Go serves GPT-6 Luna exclusively over the Responses API (/v1/responses).
+    // models.dev publishes effort=none/low/medium/high/xhigh/max.
+    reasoningEffortMap: { none: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
   'hy3': {
     reasoningEffortMap: { off: 'none', minimal: null, low: 'low', medium: null, high: 'high', xhigh: null, max: null },

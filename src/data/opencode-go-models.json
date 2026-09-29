@@ -90,31 +90,6 @@
     "family": "deepseek"
   },
   {
-    "id": "glm-5.1",
-    "name": "GLM-5.1",
-    "contextWindow": 202752,
-    "cost": {
-      "input": 1.4,
-      "output": 4.4,
-      "cache_read": 0.26
-    },
-    "modelFormat": "openai",
-    "npm": "@ai-sdk/openai-compatible",
-    "apiUrl": "https://opencode.ai/zen/go/v1",
-    "reasoning": true,
-    "modalities": [
-      "text"
-    ],
-    "compatibility": {
-      "supportsReasoningEffort": false,
-      "supportsStore": false,
-      "supportsDeveloperRole": false,
-      "maxTokensField": "max_tokens"
-    },
-    "upstreamModelId": "glm-5.1",
-    "family": "glm"
-  },
-  {
     "id": "glm-5.2",
     "name": "GLM-5.2",
     "contextWindow": 1000000,
@@ -180,6 +155,37 @@
       "maxTokensField": "max_tokens"
     },
     "upstreamModelId": "gpt-5.6-luna",
+    "family": "gpt"
+  },
+  {
+    "id": "gpt-6-luna",
+    "name": "GPT-6 Luna",
+    "contextWindow": 1050000,
+    "cost": {
+      "input": 0.1,
+      "output": 0.5,
+      "cache_read": 0.01,
+      "cache_write": 0.125
+    },
+    "modelFormat": "openai",
+    "npm": "@ai-sdk/openai",
+    "apiUrl": "https://opencode.ai/zen/go/v1",
+    "reasoning": true,
+    "modalities": [
+      "text",
+      "image"
+    ],
+    "compatibility": {
+      "reasoningEffortMap": {
+        "none": "none",
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+        "max": "max"
+      }
+    },
+    "upstreamModelId": "gpt-6-luna",
     "family": "gpt"
   },
   {
@@ -366,7 +372,8 @@
     "cost": {
       "input": 0.3,
       "output": 1.2,
-      "cache_read": 0.06
+      "cache_read": 0.06,
+      "cache_write": 0.375
     },
     "modelFormat": "openai",
     "npm": "@ai-sdk/openai-compatible",

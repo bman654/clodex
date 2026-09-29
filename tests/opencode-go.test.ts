@@ -9,7 +9,7 @@ import {
 import { TEST_TIMEOUT_MS } from '../src/constants.js';
 import { buildHttpProxyRoutes } from '../src/http-proxy/routes.js';
 import { getTemplateById, verifyOpenCodeGoCredential } from '../src/provider-templates.js';
-import { effortProviderOptions, getPatchReasoningCapabilities } from '../src/provider-factory.js';
+import { createLanguageModel, effortProviderOptions, getPatchReasoningCapabilities } from '../src/provider-factory.js';
 import { transformOpenAiCompatibleRequestBody } from '../src/model-runtime-compatibility.js';
 import { projectNativeEffort } from '../src/patch-transforms.js';
 import { applyTemplateModelMetadata } from '../src/registry/fetch-template-models.js';
@@ -33,7 +33,7 @@ function liveModel(id: string): CachedModel {
 
 describe('OpenCode Go catalog', () => {
   /**
-   * The exact literals below — the total, the 4/13 format split, and
+   * The exact literals below — the total, the format split, and
    * gpt-5.6-luna's precise cost — are deliberate tripwires, not incidental
    * assertions. The catalog is generated, so a regeneration that silently
    * adds, drops, or reprices a model should FAIL here and be re-read by a
@@ -54,7 +54,7 @@ describe('OpenCode Go catalog', () => {
     expect(models.filter(model => model.modelFormat === 'anthropic')).toHaveLength(5);
     expect(models.filter(model => model.modelFormat === 'openai')).toHaveLength(15);
     expect(models.filter(model => model.npm === '@ai-sdk/openai').map(model => model.id).sort())
-      .toEqual(['muse-spark-1.2-contributor', 'muse-spark-1.3-contributor']);
+      .toEqual(['gpt-6-luna', 'muse-spark-1.2-contributor', 'muse-spark-1.3-contributor']);
     // clodex sends graded effort only for recognised OpenAI/Codex families, so
     // advertising a control here would promise one that never reaches the wire.
     for (const id of ['muse-spark-1.2-contributor', 'muse-spark-1.3-contributor']) {
@@ -99,6 +99,14 @@ describe('OpenCode Go catalog', () => {
       output: 1.2,
       cache_read: 0.02,
       cache_write: 0.25,
+    });
+    expect(byId.get('gpt-6-luna')).toMatchObject({
+      contextWindow: 1_050_000,
+      modalities: ['text', 'image'],
+      compatibility: { reasoningEffortMap: {
+        none: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
+      } },
+      cost: { input: 0.1, output: 0.5, cache_read: 0.01, cache_write: 0.125 },
     });
     expect(byId.get('deepseek-v4.1-flash')).toMatchObject({
       modelFormat: 'anthropic',
@@ -470,6 +478,43 @@ describe('qwen3.6-plus reasoning toggle', () => {
 });
 
 describe('OpenCode Go Responses-only models', () => {
+  it('sends GPT-6 Luna to Go Responses with the chosen effort', async () => {
+    const luna = buildOpenCodeGoModels().find(model => model.id === 'gpt-6-luna')!;
+    const requests: Array<{ url: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit) => {
+      requests.push({ url: String(url), body: JSON.parse(String(init.body)) as Record<string, unknown> });
+      return new Response(JSON.stringify({
+        id: 'resp_luna', model: 'gpt-6-luna', output: [],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }));
+    try {
+      const model = await createLanguageModel({
+        npm: luna.npm!, modelId: luna.upstreamModelId!, apiKey: 'test-key',
+        baseURL: luna.apiUrl, providerId: 'opencode-go', authType: 'api',
+      });
+      for (const level of ['high', 'none']) {
+        await model.doGenerate({
+          prompt: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+          providerOptions: effortProviderOptions(luna.npm!, level, luna.id, {
+            providerId: 'opencode-go', reasoning: luna.reasoning, compatibility: luna.compatibility,
+          }) as never,
+        } as never);
+      }
+      expect(requests.map(request => request.url)).toEqual([
+        'https://opencode.ai/zen/go/v1/responses',
+        'https://opencode.ai/zen/go/v1/responses',
+      ]);
+      expect(requests.map(request => request.body.model)).toEqual(['gpt-6-luna', 'gpt-6-luna']);
+      expect(requests.map(request => request.body.reasoning)).toEqual([
+        expect.objectContaining({ effort: 'high' }),
+        expect.objectContaining({ effort: 'none' }),
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('pins a catalog model on the Responses package to the Go /v1 base, but not the provider record', async () => {
     const { openCodeGoPinnedApiUrl, openCodeGoPinnedModelApiUrl } = await import('../src/registry/resolve-template.js');
     expect(openCodeGoPinnedModelApiUrl('@ai-sdk/openai')).toBe(OPENCODE_GO_COMPLETIONS_BASE_URL);

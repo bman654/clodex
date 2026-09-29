@@ -654,8 +654,8 @@ describe('createLanguageModel', () => {
     vi.doUnmock('@ai-sdk/openai');
   });
 
-  // OpenCode Go serves Muse Spark only on /v1/responses. An API-key Responses
-  // route that dropped its base URL would default to api.openai.com and send
+  // OpenCode Go serves Muse Spark and GPT-6 Luna only on /v1/responses.
+  // An API-key route that dropped its base URL would default to api.openai.com and send
   // the Go key there, so the destination is asserted, not assumed.
   it('passes the configured base URL on an API-key Responses route', async () => {
     vi.resetModules();

@@ -7,7 +7,7 @@ export const OPENCODE_GO_PROVIDER_NAME = 'OpenCode Go';
 export const OPENCODE_GO_COMPLETIONS_BASE_URL = 'https://opencode.ai/zen/go/v1';
 export const OPENCODE_GO_ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go';
 export const OPENCODE_GO_SOURCE = 'https://models.dev/api.json';
-export const OPENCODE_GO_SOURCE_FETCHED_AT = '2026-09-13T16:46:07.450Z';
+export const OPENCODE_GO_SOURCE_FETCHED_AT = '2026-09-29T17:56:16.249Z';
 
 type OpenCodeGoModel = Pick<CachedModel, 'id' | 'name'>
   & Partial<Omit<CachedModel, 'id' | 'name'>>;
@@ -19,9 +19,8 @@ type OpenCodeGoModel = Pick<CachedModel, 'id' | 'name'>
  * catalog (models.dev); per-model wire transport and compatibility behavior
  * are clodex's live-validated knowledge in the updater script. The upstream
  * catalog mixes Anthropic Messages, Chat Completions, and Responses
- * transports. Clodex intentionally publishes only the first two;
- * Responses-only entries (currently Grok and mainline GPT) never enter the
- * provider allowlist.
+ * transports. Clodex publishes only models with a verified transport;
+ * unmapped models never enter the provider allowlist.
  */
 export function buildOpenCodeGoModels(): OpenCodeGoModel[] {
   return structuredClone(models) as unknown as OpenCodeGoModel[];

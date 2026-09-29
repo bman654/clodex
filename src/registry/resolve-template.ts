@@ -85,7 +85,7 @@ export function openCodeGoPinnedApiUrl(npm: string): string | null {
 
 /**
  * The destination for one CATALOG MODEL's package. Wider than the provider
- * record's pin above: Responses-only Go models (Muse Spark) carry
+ * record's pin above: Responses-only Go models (Muse Spark and GPT-6 Luna) carry
  * `@ai-sdk/openai` and share the /v1 base, while the provider record itself —
  * what discovery and refresh key on — still may not name that package.
  */
