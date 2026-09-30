@@ -201,13 +201,15 @@ async function fetchJsonWithAuth(
  * Projection hides a marked row only when it uses Responses-Lite (other requests omit
  * the version) and only while the bundled version is at or below the mark.
  *
- * Fails safe: an unusable or empty answer marks nothing, leaving the rows exactly as
- * discovered, and never fails the refresh.
+ * An unusable or empty answer is no new evidence, so it keeps this account's previous
+ * markers on the rows still discovered rather than re-offering a model last seen
+ * withheld; it never fails the refresh. A usable answer replaces every marker.
  */
 async function markModelsWithheldAtRequestVersion(
   models: CachedModel[],
   accessToken: string,
   timeoutMs: number,
+  previous: readonly CachedModel[],
 ): Promise<CachedModel[]> {
   const pinned = await fetchJsonWithAuth(
     `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_RESPONSES_LITE_VERSION}`,
@@ -215,10 +217,27 @@ async function markModelsWithheldAtRequestVersion(
     timeoutMs,
   );
   const offered = new Set(parseOpenAiModelEntries(pinned.body).map(entry => entry.id));
-  if (offered.size === 0) return models;
+  if (offered.size === 0) return carryWithheldMarkers(models, previous);
   return models.map(model => (offered.has(model.id)
     ? model
     : { ...model, withheldAtClientVersion: CODEX_RESPONSES_LITE_VERSION }));
+}
+
+/**
+ * Re-apply the last pinned answer's markers when this refresh could not get a new one.
+ * Verbatim: a marker at or below a newer pin already hides nothing, and only the same
+ * account's cache is passed in.
+ */
+function carryWithheldMarkers(models: CachedModel[], previous: readonly CachedModel[]): CachedModel[] {
+  const withheld = new Map(previous.flatMap(model => {
+    const version = readCodexClientVersion(model.withheldAtClientVersion);
+    return version ? [[model.id, version] as const] : [];
+  }));
+  if (withheld.size === 0) return models;
+  return models.map(model => {
+    const version = withheld.get(model.id);
+    return version ? { ...model, withheldAtClientVersion: version } : model;
+  });
 }
 
 /**
@@ -229,7 +248,8 @@ async function markModelsWithheldAtRequestVersion(
  *    including their minimum client versions. It is fetched with Claude Code's
  *    version number, far above any Codex client version, so the answer is
  *    effectively unfiltered; a second fetch at the version clodex sends marks
- *    the models withheld from it. Projection hides incompatible models.
+ *    the models withheld from it (or, when unusable, keeps the previous marks).
+ *    Projection hides incompatible models.
  *
  * 2. chatgpt.com/backend-api/models — all ChatGPT models, filtered by the
  *    confirmed-bad set. Used when the Codex endpoint doesn't exist or returns nothing.
@@ -238,6 +258,8 @@ async function markModelsWithheldAtRequestVersion(
  */
 export async function refreshOpenAiOAuthModels(
   accessToken: string,
+  /** This account's cached rows; supplies markers when the pinned fetch is unusable. */
+  previous: readonly CachedModel[] = [],
 ): Promise<{
   models: CachedModel[];
   source: 'live' | 'seed';
@@ -261,7 +283,7 @@ export async function refreshOpenAiOAuthModels(
   if (codexEntries.length > 0) {
     const models = toModels(codexEntries, true);
     return {
-      models: await markModelsWithheldAtRequestVersion(models, accessToken, TIMEOUT_MS),
+      models: await markModelsWithheldAtRequestVersion(models, accessToken, TIMEOUT_MS, previous),
       source: 'live',
     };
   }
@@ -275,7 +297,11 @@ export async function refreshOpenAiOAuthModels(
   const chatGptEntries = parseOpenAiModelEntries(chatGptResult.body)
     .filter(({ id }) => !CHATGPT_CODEX_UNSUPPORTED_MODELS.has(id));
   if (chatGptEntries.length > 0) {
-    return { models: toModels(chatGptEntries, false), source: 'live' };
+    // This list says nothing about Codex version gating; keep the last pinned answer's markers.
+    return {
+      models: carryWithheldMarkers(toModels(chatGptEntries, false), previous),
+      source: 'live',
+    };
   }
 
   // Tier 3: Static seed — reuse already-built map instead of calling the builder again.

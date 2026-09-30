@@ -74,7 +74,10 @@ async function refreshOAuthProvider(
   credentialRejected?: boolean;
 }> {
   const tpl = provider.templateId ?? provider.id;
-  if (tpl === 'openai' || tpl === 'openai-oauth') return refreshOpenAiOAuthModels(accessToken);
+  if (tpl === 'openai' || tpl === 'openai-oauth') {
+    // `provider` is the refresh's cacheProvider: its cache belongs to the account being refreshed.
+    return refreshOpenAiOAuthModels(accessToken, provider.modelsCache?.models);
+  }
   throw new Error(`refreshOAuthProvider: unsupported template "${tpl}"`);
 }
 

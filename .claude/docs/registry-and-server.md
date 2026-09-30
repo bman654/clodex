@@ -16,15 +16,17 @@ catalog fetch lives in `openai-oauth-catalog.ts`.
 Materialization (`materialize.ts`) turns registry providers into `LocalProvider`s with per-model
 `npm`/`baseUrl`/`upstreamModelId`. For ChatGPT OAuth, projection fills absent minimums from seeds
 and hides Responses-Lite models whose `minimalClientVersion` exceeds the bundled request version.
-The published minimum can understate the real gate (#298), so discovery fetches the Codex catalog
-a second time at the bundled request version and records `withheldAtClientVersion` on every row that
+The published minimum can understate the real gate (#298), so discovery fetches the Codex catalog a
+second time at the bundled request version and records `withheldAtClientVersion` on every row that
 answer omits; projection also hides Responses-Lite rows whose recorded version the bundled one does
-not exceed. Only the Codex tier is compared, and a failed, malformed or empty second answer records
-nothing. Refresh warns about hidden models; their cache entries remain intact so a later version
-increase can restore availability without a refresh. The check uses the cached `useResponsesLite`
-flag, which discovery resolves from the live catalog with seed fallback. Explicit `false` overrides
-a seed. Non-Lite models are not restricted because their requests omit the version header. Missing
-or malformed versions are not evidence of incompatibility.
+not exceed. Only the Codex tier is compared. A failed, malformed or empty second answer, and the
+general-catalog fallback, keep the marks this account's previous cache held for the rows still
+discovered, so a transient failure does not re-offer a model last seen withheld. Refresh warns about
+hidden models; their cache entries remain intact so a later version increase can restore
+availability without a refresh. The check uses the cached `useResponsesLite` flag, which discovery
+resolves from the live catalog with seed fallback. Explicit `false` overrides a seed. Non-Lite
+models are not restricted because their requests omit the version header. Missing or malformed
+versions are not evidence of incompatibility.
 
 A custom OpenAI-compatible server is not a template. `providers add` → *Custom OpenAI-compatible
 server* (`src/providers-custom-add.ts`) calls `addCustomEndpointProvider`

@@ -8,6 +8,7 @@ import { buildDesiredPatchConfig } from '../src/patcher.js';
 import { refreshProviderModels, refreshProviderModelsWithCredential } from '../src/registry/refresh-models.js';
 import { loadRegistryStrict, saveRegistry } from '../src/registry/io.js';
 import { withRegistryWriteLockSync } from '../src/registry/lock.js';
+import { setActiveOAuthAccount } from '../src/registry/crud.js';
 import { applySelectedOAuthAccount, materializeRegistry, projectProviderCachedModels } from '../src/registry/materialize.js';
 import type { CachedModel, RegistryProvider } from '../src/registry/types.js';
 
@@ -32,6 +33,7 @@ vi.mock('../src/registry/pricing.js', async importOriginal => ({
 }));
 
 const CODEX_MODELS = 'https://chatgpt.com/backend-api/codex/models';
+const GENERAL_MODELS = 'https://chatgpt.com/backend-api/models';
 
 /**
  * A catalog row plus the client version the fake backend actually gates it on.
@@ -53,18 +55,32 @@ const GPT_55: Row = { slug: 'gpt-5.5', gate: '0.124.0', minimal_client_version: 
 
 type Reply = (init?: RequestInit) => Promise<Response>;
 
-/**
- * Answer the Codex catalog per `client_version`, like the live endpoint, and only for
- * the expected bearer token. `pinnedReply` replaces the answer at any other version.
- */
-function serveCatalog(rows: Row[], { token = 'fake-token', pinnedReply }: { token?: string; pinnedReply?: Reply } = {}) {
+interface CatalogOptions {
+  /** Bearer tokens the fake accepts; any other request is answered 401. */
+  tokens?: string[];
+  /** Replaces the answer at Claude Code's version (discovery's own fetch). */
+  firstReply?: Reply;
+  /** Replaces the answer at any other version (the version clodex sends). */
+  pinnedReply?: Reply;
+  /** Answers the general ChatGPT catalog (the tier-2 fallback), which otherwise fails. */
+  generalReply?: Reply;
+}
+
+/** Answer the Codex catalog per `client_version`, like the live endpoint. */
+function serveCatalog(rows: Row[], { tokens = ['fake-token'], firstReply, pinnedReply, generalReply }: CatalogOptions = {}) {
   vi.mocked(fetch).mockImplementation(async (input, init) => {
     const url = new URL(String(input));
-    if (`${url.origin}${url.pathname}` !== CODEX_MODELS) throw new Error(`unexpected fetch ${url.href}`);
-    if (new Headers(init?.headers).get('authorization') !== `Bearer ${token}`) {
+    const endpoint = `${url.origin}${url.pathname}`;
+    if (endpoint !== CODEX_MODELS && !(endpoint === GENERAL_MODELS && generalReply)) {
+      throw new Error(`unexpected fetch ${url.href}`);
+    }
+    const auth = new Headers(init?.headers).get('authorization');
+    if (!tokens.some(token => auth === `Bearer ${token}`)) {
       return new Response('{"detail":"Unauthorized"}', { status: 401 });
     }
+    if (endpoint === GENERAL_MODELS) return generalReply!(init);
     const version = url.searchParams.get('client_version') ?? '';
+    if (version === CLAUDE_VERSION && firstReply) return firstReply(init);
     if (version !== CLAUDE_VERSION && pinnedReply) return pinnedReply(init);
     return Response.json({
       models: rows
@@ -82,6 +98,20 @@ function requestedVersions(): string[] {
     .filter(url => `${url.origin}${url.pathname}` === CODEX_MODELS)
     .map(url => url.searchParams.get('client_version') ?? '');
 }
+
+/** Second answers that carry no evidence about which models the version clodex sends is offered. */
+const UNUSABLE_ANSWERS: Array<[string, Reply]> = [
+  ['a network failure', () => Promise.reject(new TypeError('fetch failed'))],
+  ['HTTP 500', async () => new Response('upstream error', { status: 500 })],
+  ['HTTP 503', async () => new Response('upstream unavailable', { status: 503 })],
+  ['HTTP 429', async () => new Response('rate limited', { status: 429 })],
+  ['HTTP 403', async () => new Response('forbidden', { status: 403 })],
+  ['malformed JSON', async () => new Response('{"models": [', { status: 200 })],
+  ['an empty catalog', async () => Response.json({ models: [] })],
+  ['a catalog of null entries', async () => Response.json({ models: [null] })],
+  ['a data-shaped catalog of null entries', async () => Response.json({ data: [null] })],
+  ['a body that is not a catalog', async () => Response.json({ detail: 'unavailable' })],
+];
 
 let home: string;
 let provider: RegistryProvider;
@@ -183,16 +213,7 @@ describe('refresh at the request version -> persisted marker -> selectable OAuth
     expect(offeredIds()).toEqual(['gpt-5.5', 'gpt-5.4', 'gpt-6-astra', 'gpt-6-sol']);
   });
 
-  it.each<[string, Reply]>([
-    ['a network failure', () => Promise.reject(new TypeError('fetch failed'))],
-    ['HTTP 500', async () => new Response('upstream error', { status: 500 })],
-    ['HTTP 403', async () => new Response('forbidden', { status: 403 })],
-    ['malformed JSON', async () => new Response('{"models": [', { status: 200 })],
-    ['an empty catalog', async () => Response.json({ models: [] })],
-    ['a catalog of null entries', async () => Response.json({ models: [null] })],
-    ['a data-shaped catalog of null entries', async () => Response.json({ data: [null] })],
-    ['a body that is not a catalog', async () => Response.json({ detail: 'unavailable' })],
-  ])('marks nothing and keeps the refresh when the second fetch returns %s', async (_label, reply) => {
+  it.each(UNUSABLE_ANSWERS)('marks nothing and keeps the refresh when the second fetch returns %s', async (_label, reply) => {
     pin.override = '0.156.0';
     persistProvider();
     serveCatalog([SOL_61, SOL_6, GPT_55], { pinnedReply: reply });
@@ -345,7 +366,7 @@ describe('refresh at the request version -> persisted marker -> selectable OAuth
     persistProvider();
     serveCatalog([SOL_6]);
     await refresh();
-    serveCatalog([SOL_61, SOL_6], { token: 'work-token' });
+    serveCatalog([SOL_61, SOL_6], { tokens: ['work-token'] });
     const result = await refreshProviderModelsWithCredential(provider.id, async () => 'work-token', 'work');
     expect(result.reason).toContain('gpt-6.1-sol (requires a version newer than 0.156.0)');
     expect(reloaded().authAccounts?.work?.modelsCache?.models[0]?.withheldAtClientVersion).toBe('0.156.0');
@@ -407,5 +428,154 @@ describe('refresh at the request version -> persisted marker -> selectable OAuth
       persistProvider();
       expect(offeredIds(), `${pinned} vs ${marker}`).toEqual(offered ? ['next-model'] : []);
     }
+  });
+});
+
+describe('across refreshes: the marker is carried, replaced or cleared', () => {
+  const failed: Reply = async () => new Response('upstream unavailable', { status: 503 });
+  async function refreshHidden() {
+    pin.override = '0.156.0';
+    persistProvider();
+    serveCatalog([SOL_61, SOL_6, GPT_55]);
+    expect((await refresh()).reason).toContain('gpt-6.1-sol (requires a version newer than 0.156.0)');
+    expect(saved('gpt-6.1-sol')?.withheldAtClientVersion).toBe('0.156.0');
+    expect(offeredIds()).toEqual(['gpt-6-sol', 'gpt-5.5']);
+  }
+
+  it.each(UNUSABLE_ANSWERS)('keeps an earlier marker, and its warning, when a later second fetch returns %s', async (_label, reply) => {
+    await refreshHidden();
+    serveCatalog([SOL_61, SOL_6, GPT_55], { pinnedReply: reply });
+    const again = await refresh();
+    expect(again).toMatchObject({ ok: true, modelCount: 3 });
+    expect(again.skipped).toBeUndefined();
+    expect(again.reason).toContain('gpt-6.1-sol (requires a version newer than 0.156.0)');
+    expect(saved('gpt-6.1-sol')?.withheldAtClientVersion).toBe('0.156.0');
+    expect(saved('gpt-6-sol')?.withheldAtClientVersion).toBeUndefined();
+    expect(offeredIds()).toEqual(['gpt-6-sol', 'gpt-5.5']);
+  });
+
+  it('keeps an earlier marker when a later second fetch times out', async () => {
+    await refreshHidden();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    serveCatalog([SOL_61, SOL_6, GPT_55], { pinnedReply: init => new Promise<never>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(init.signal!.reason), { once: true });
+    }) });
+    const pending = refresh();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect((await pending).reason).toContain('gpt-6.1-sol (requires a version newer than 0.156.0)');
+    expect(saved('gpt-6.1-sol')?.withheldAtClientVersion).toBe('0.156.0');
+    expect(offeredIds()).toEqual(['gpt-6-sol', 'gpt-5.5']);
+  });
+
+  it('clears the marker when the next second answer lists the model', async () => {
+    await refreshHidden();
+    serveCatalog([{ ...SOL_61, gate: '0.156.0' }, SOL_6, GPT_55]);
+    expect((await refresh()).reason).toBeUndefined();
+    expect(saved('gpt-6.1-sol')?.withheldAtClientVersion).toBeUndefined();
+    expect(offeredIds()).toEqual(['gpt-6.1-sol', 'gpt-6-sol', 'gpt-5.5']);
+  });
+
+  it('clears a carried marker once a later second answer lists the model', async () => {
+    await refreshHidden();
+    serveCatalog([SOL_61, SOL_6, GPT_55], { pinnedReply: failed });
+    await refresh();
+    expect(saved('gpt-6.1-sol')?.withheldAtClientVersion).toBe('0.156.0');
+    serveCatalog([{ ...SOL_61, gate: '0.156.0' }, SOL_6, GPT_55]);
+    await refresh();
+    expect(saved('gpt-6.1-sol')?.withheldAtClientVersion).toBeUndefined();
+    expect(offeredIds()).toEqual(['gpt-6.1-sol', 'gpt-6-sol', 'gpt-5.5']);
+  });
+
+  it('advances the marker when a newer release is still withheld', async () => {
+    await refreshHidden();
+    pin.override = '0.158.0';
+    expect(offeredIds()).toEqual(['gpt-6.1-sol', 'gpt-6-sol', 'gpt-5.5']);
+    serveCatalog([SOL_61, SOL_6, GPT_55]);
+    expect((await refresh()).reason).toContain('gpt-6.1-sol (requires a version newer than 0.158.0)');
+    expect(saved('gpt-6.1-sol')?.withheldAtClientVersion).toBe('0.158.0');
+    expect(offeredIds()).toEqual(['gpt-6-sol', 'gpt-5.5']);
+  });
+
+  it('carries a marker below a newer release without hiding anything', async () => {
+    await refreshHidden();
+    pin.override = '0.159.0';
+    serveCatalog([SOL_61, SOL_6, GPT_55], { pinnedReply: failed });
+    expect((await refresh()).reason).toBeUndefined();
+    expect(saved('gpt-6.1-sol')?.withheldAtClientVersion).toBe('0.156.0');
+    expect(offeredIds()).toEqual(['gpt-6.1-sol', 'gpt-6-sol', 'gpt-5.5']);
+  });
+
+  it('keeps an earlier marker through the general-catalog fallback', async () => {
+    // gpt-6-sol's published and seeded minimum (0.155.0) is below the pin, so only the marker hides it.
+    pin.override = '0.156.0';
+    persistProvider();
+    serveCatalog([{ ...SOL_6, gate: '0.157.0' }, GPT_55]);
+    await refresh();
+    expect(saved('gpt-6-sol')?.withheldAtClientVersion).toBe('0.156.0');
+    serveCatalog([], {
+      firstReply: async () => new Response('stalled', { status: 504 }),
+      generalReply: async () => Response.json({ models: [
+        { slug: 'gpt-6-sol', title: 'GPT-6 Sol' }, { slug: 'gpt-5.5', title: 'GPT-5.5' },
+      ] }),
+    });
+    const fallback = await refresh();
+    expect(fallback).toMatchObject({ ok: true, modelCount: 2 });
+    expect(fallback.reason).toContain('gpt-6-sol (requires a version newer than 0.156.0)');
+    expect(saved('gpt-6-sol')).toMatchObject({ minimalClientVersion: '0.155.0', withheldAtClientVersion: '0.156.0' });
+    expect(offeredIds()).toEqual(['gpt-5.5']);
+  });
+
+  describe('only from the account being refreshed', () => {
+    const tokens = ['fake-token', 'work-token'];
+    const byAccount = async (item: RegistryProvider) => (item.authRef === 'keyring:work' ? 'work-token' : 'fake-token');
+    const refreshWork = () => refreshProviderModelsWithCredential(provider.id, byAccount, 'work');
+    const defaultSol = () => reloaded().modelsCache?.models.find(model => model.id === 'gpt-6.1-sol');
+    const workSol = () => reloaded().authAccounts?.work?.modelsCache?.models.find(model => model.id === 'gpt-6.1-sol');
+    beforeEach(() => {
+      pin.override = '0.156.0';
+      provider.authAccounts = { work: { authRef: 'keyring:work', addedAt: provider.addedAt } };
+      persistProvider();
+    });
+
+    it('does not carry the default account marker into a slot with no cache of its own', async () => {
+      serveCatalog([SOL_61, SOL_6], { tokens });
+      await refresh();
+      expect(defaultSol()?.withheldAtClientVersion).toBe('0.156.0');
+      serveCatalog([SOL_61, SOL_6], { tokens, pinnedReply: failed });
+      expect((await refreshWork()).ok).toBe(true);
+      expect(workSol()).toBeDefined();
+      expect(workSol()?.withheldAtClientVersion).toBeUndefined();
+      expect(defaultSol()?.withheldAtClientVersion).toBe('0.156.0');
+    });
+
+    it('does not carry a slot marker into the default account', async () => {
+      serveCatalog([SOL_61, SOL_6], { tokens });
+      await refreshWork();
+      expect(workSol()?.withheldAtClientVersion).toBe('0.156.0');
+      expect(reloaded().modelsCache).toBeUndefined();
+      serveCatalog([SOL_61, SOL_6], { tokens, pinnedReply: failed });
+      expect((await refresh()).ok).toBe(true);
+      expect(defaultSol()?.withheldAtClientVersion).toBeUndefined();
+    });
+
+    it("keeps a slot's own marker when its later second fetch fails", async () => {
+      serveCatalog([SOL_61, SOL_6], { tokens });
+      await refreshWork();
+      serveCatalog([SOL_61, SOL_6], { tokens, pinnedReply: failed });
+      expect((await refreshWork()).reason).toContain('gpt-6.1-sol (requires a version newer than 0.156.0)');
+      expect(workSol()?.withheldAtClientVersion).toBe('0.156.0');
+    });
+
+    it('drops the previous account marker after switching to a slot with no cache', async () => {
+      serveCatalog([SOL_61, SOL_6], { tokens });
+      await refresh();
+      expect(defaultSol()?.withheldAtClientVersion).toBe('0.156.0');
+      expect((await setActiveOAuthAccount(provider.id, 'work')).updated).toBe(true);
+      expect(reloaded().modelsCache).toBeUndefined();
+      serveCatalog([SOL_61, SOL_6], { tokens, pinnedReply: failed });
+      expect((await refreshProviderModelsWithCredential(provider.id, byAccount, null)).ok).toBe(true);
+      expect(defaultSol()?.withheldAtClientVersion).toBeUndefined();
+      expect(workSol()?.withheldAtClientVersion).toBeUndefined();
+    });
   });
 });
