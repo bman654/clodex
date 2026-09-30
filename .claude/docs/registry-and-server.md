@@ -11,7 +11,8 @@ device codes). Interactive entry points that don't take flags — the providers 
 add-account actions, the provider detail menu, `providers add`'s OAuth path, and the first-run
 wizard — ask instead through `promptOAuthMethod` (`providers-command.ts`), a device-code/browser
 picker whose Enter default is device code; the chosen method is forwarded to
-`authenticateProvider`. `refresh-models.ts` fetches the model list (3-tier fetch for OAuth).
+`authenticateProvider`. `refresh-models.ts` fetches the model list; the 3-tier ChatGPT OAuth
+catalog fetch lives in `openai-oauth-catalog.ts`.
 Materialization (`materialize.ts`) turns registry providers into `LocalProvider`s with per-model
 `npm`/`baseUrl`/`upstreamModelId`. For ChatGPT OAuth, projection fills absent minimums from seeds
 and hides Responses-Lite models whose `minimalClientVersion` exceeds the bundled request version.
@@ -30,7 +31,7 @@ but no command offers it. The server chooses the model ids, names and error text
 fetchers (`fetchTemplateModels`, `fetchAnthropicModels`) skip a model whose trimmed id or name
 contains a control character, so neither an add nor `refresh-models` stores one, and the flow prints
 the server's error text with control characters replaced by spaces (`server-text.ts`). The ChatGPT
-OAuth catalog parser (`parseOpenAiModelEntries` in `refresh-models.ts`) has no such check; its host
+OAuth catalog parser (`parseOpenAiModelEntries` in `openai-oauth-catalog.ts`) has no such check; its host
 is fixed. Custom providers are read by the same materialization and refresh code as template
 providers (`materialize.ts`, `model-source.ts`, `refresh-models.ts`).
 
