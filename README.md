@@ -316,12 +316,13 @@ model the catalog does not offer to clodex's version even though its published m
 lower. Those models stay cached but are hidden from clodex's selectable catalog to avoid
 version rejections. Update clodex to a release supporting the required version to make them
 available again. Saved favorites and aliases are preserved but unavailable while their models
-are hidden: a patched model picker can still list them, and choosing one returns clodex's
-"model route … is unavailable" error instead of reaching OpenAI. Older caches without this
-metadata need a refresh for newly discovered models. Known built-in models use their seeded
-minimums when absent from the cache and their seeded flags when discovery omits them. Models
-not using Responses-Lite do not send this version header and are not hidden by this check. This
-check does not establish your account's model entitlement.
+are hidden: a patched model picker can still list them, and choosing one gets an error from
+clodex instead of reaching OpenAI ("model route … is unavailable" in the default proxy mode,
+"Unknown model" in endpoint mode). Older caches without this metadata need a refresh for newly
+discovered models. Known built-in models use their seeded minimums when absent from the cache
+and their seeded flags when discovery omits them. Models not using Responses-Lite do not send
+this version header and are not hidden by this check. This check does not establish your
+account's model entitlement.
 
 Providers supported: `openai` (API key, platform.openai.com), `openai-oauth` (ChatGPT/Codex plan), and `opencode-go` (OpenCode Go API key). OpenCode Go exposes its Anthropic Messages, Chat Completions, and Responses models; entries whose transport has not been verified against the live endpoint are left out. See [OpenCode Go provider](docs/opencode-go.md).
 
