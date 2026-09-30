@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.18.7](https://github.com/bman654/clodex/compare/v2.18.6...v2.18.7) (2026-09-30)
+
+
+### Bug Fixes
+
+* **providers:** allow self-hosted model servers reached over Tailscale or HTTPS on your LAN ([#305](https://github.com/bman654/clodex/issues/305)) ([9de5845](https://github.com/bman654/clodex/commit/9de5845cace41496e22a32bb4989c3598538fb3d))
+* **providers:** let servers added without an API key refresh their model list ([#306](https://github.com/bman654/clodex/issues/306)) ([c320aef](https://github.com/bman654/clodex/commit/c320aef015b702ada971c55f448e7aa57e329d2b))
+
 ## [2.18.6](https://github.com/bman654/clodex/compare/v2.18.5...v2.18.6) (2026-09-30)
 
 
