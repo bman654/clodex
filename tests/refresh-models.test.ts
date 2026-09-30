@@ -189,6 +189,76 @@ describe('refreshProviderModels', () => {
     expect(saveRegistry).not.toHaveBeenCalled();
   });
 
+  // `providers add` saves a custom server added without a key as anonymous. Refresh
+  // resolves no credential for it, and must list the models without one rather than
+  // mistake the missing key for a placeholder.
+  const keylessRegistry = (overrides: { authType?: 'none' | 'api'; authRef?: string; cached?: boolean } = {}): ProviderRegistry => ({
+    schemaVersion: 1,
+    providers: [{
+      id: 'custom-local-gemma',
+      templateId: 'custom-openai',
+      name: 'Local Gemma',
+      enabled: true,
+      authRef: overrides.authRef ?? 'none:anonymous',
+      authType: overrides.authType ?? 'none',
+      api: { npm: '@ai-sdk/openai-compatible', url: 'https://192.0.2.10/v1' },
+      addedAt: '2026-09-30T00:00:00.000Z',
+      ...(overrides.cached === false ? {} : {
+        modelsCache: {
+          fetchedAt: '2026-09-30T00:00:00.000Z',
+          models: [{ id: 'gemma-old', name: 'Gemma old', upstreamModelId: 'gemma-old', modelFormat: 'openai' as const }],
+        },
+      }),
+    }],
+  });
+  const liveKeylessModels = {
+    baseUrl: 'https://192.0.2.10/v1',
+    models: [
+      { id: 'gemma-old', name: 'Gemma old', upstreamModelId: 'gemma-old', modelFormat: 'openai' as const },
+      { id: 'gemma-new', name: 'Gemma new', upstreamModelId: 'gemma-new', modelFormat: 'openai' as const },
+    ],
+  };
+
+  it.each([
+    ['with', true],
+    ['without', false],
+  ])('refreshes a keyless custom server %s cached models, sending no key', async (_label, cached) => {
+    const registry = keylessRegistry({ cached });
+    vi.mocked(loadRegistryStrict).mockReturnValue(registry);
+    vi.mocked(fetchTemplateModels).mockResolvedValue(liveKeylessModels);
+    const resolveKey = vi.fn(async () => 'must-not-be-used');
+
+    const result = await refreshProviderModelsWithCredential('custom-local-gemma', resolveKey, null);
+
+    expect(result).toMatchObject({ ok: true, modelCount: 2 });
+    expect(resolveKey).not.toHaveBeenCalled();
+    expect(fetchTemplateModels).toHaveBeenCalledWith(expect.anything(), '', 'https://192.0.2.10/v1');
+    expect(saveRegistry).toHaveBeenCalledOnce();
+    const saved = vi.mocked(saveRegistry).mock.calls[0]![0].providers[0]!;
+    expect(saved.modelsCache?.models.map(model => model.id)).toEqual(['gemma-old', 'gemma-new']);
+    expect(saved).toMatchObject({ authType: 'none', authRef: 'none:anonymous' });
+  });
+
+  it('refreshes a keyless custom server during refresh-all', async () => {
+    vi.mocked(loadRegistryStrict).mockReturnValue(keylessRegistry());
+    vi.mocked(fetchTemplateModels).mockResolvedValue(liveKeylessModels);
+
+    const result = await refreshAllProviderModels(vi.fn(async () => null));
+
+    expect(result.refreshed).toMatchObject([{ id: 'custom-local-gemma', ok: true, modelCount: 2 }]);
+  });
+
+  it('still refuses a keyed custom server whose key is missing', async () => {
+    const registry = keylessRegistry({ authType: 'api', authRef: 'keyring:provider:custom-local-gemma' });
+    vi.mocked(loadRegistryStrict).mockReturnValue(registry);
+
+    const result = await refreshProviderModelsWithCredential('custom-local-gemma', vi.fn(async () => null), null);
+
+    expect(result).toMatchObject({ ok: false, reason: expect.stringContaining('placeholder API key') });
+    expect(fetchTemplateModels).not.toHaveBeenCalled();
+    expect(saveRegistry).not.toHaveBeenCalled();
+  });
+
   it('does not apply discovery results after credentials change', async () => {
     const initialRegistry: ProviderRegistry = {
       schemaVersion: 1,

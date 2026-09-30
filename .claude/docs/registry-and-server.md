@@ -33,8 +33,9 @@ A custom OpenAI-compatible server is not a template. `providers add` → *Custom
 server* (`src/providers-custom-add.ts`) calls `addCustomEndpointProvider`
 (`src/registry/custom-endpoint.ts`), which runs the base-URL checks in `url-security.ts`, lists the
 server's models, stores the key, and saves a `templateId: 'custom-openai'` provider — with
-`authRef: 'none:anonymous'` when the key is empty. The same function accepts `kind: 'anthropic'`,
-but no command offers it. The server chooses the model ids, names and error text. Both list
+`authRef: 'none:anonymous'` when the key is empty; `refresh-models` treats such a provider as
+key-optional and lists its models without sending one. The same function accepts
+`kind: 'anthropic'`, but no command offers it. The server chooses the model ids, names and error text. Both list
 fetchers (`fetchTemplateModels`, `fetchAnthropicModels`) skip a model whose trimmed id or name
 contains a control character, so neither an add nor `refresh-models` stores one, and the flow prints
 the server's error text with control characters replaced by spaces (`server-text.ts`). The ChatGPT

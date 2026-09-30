@@ -40,7 +40,7 @@ import { applyOAuthSeedContextMetadata } from '../data/openai-oauth-models.js';
 import { refreshOpenAiOAuthModels } from './openai-oauth-catalog.js';
 import { isChatGptOAuthProvider } from './provider-kind.js';
 import { classifyFreeStatus, isFreeStatus } from '../free-models.js';
-import { isLegacyAnonymousCustomEndpoint } from './materialize.js';
+import { isAnonymousProvider, isLegacyAnonymousCustomEndpoint } from './materialize.js';
 import { OPENCODE_GO_PROVIDER_NAME } from '../data/opencode-go-models.js';
 
 export interface RefreshProviderResult {
@@ -419,7 +419,8 @@ export async function refreshProviderModels(
       }
     } else {
       const template = resolveProviderTemplate(provider);
-      const keyOptional = template?.apiKeyOptional === true;
+      // A provider saved without a key (a local server with no auth) has none to resolve.
+      const keyOptional = template?.apiKeyOptional === true || isAnonymousProvider(provider);
       const effectiveKey = keyOptional && isLikelyPlaceholderKey(apiKey) ? '' : apiKey;
       if (!keyOptional && isLikelyPlaceholderKey(effectiveKey)) {
         if (cachedModelCount(cacheProvider) > 0) {
