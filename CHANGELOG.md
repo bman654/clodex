@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.18.6](https://github.com/bman654/clodex/compare/v2.18.5...v2.18.6) (2026-09-30)
+
+
+### Bug Fixes
+
+* **models:** hide ChatGPT-plan models clodex's version cannot use yet, so requests don't fail ([#303](https://github.com/bman654/clodex/issues/303)) ([76e69da](https://github.com/bman654/clodex/commit/76e69da81c1f49c031349e1e1adc212f93983fdc))
+
 ## [2.18.5](https://github.com/bman654/clodex/compare/v2.18.4...v2.18.5) (2026-09-30)
 
 
