@@ -38,9 +38,9 @@ export async function runCustomEndpointAddFlow(
 
   let allowInsecureLocal = false;
   if (/^http:\/\//i.test(String(baseUrl).trim())) {
-    p.log.warn('HTTP is not encrypted. Only use it for a trusted local or LAN server.');
+    p.log.warn('HTTP is not encrypted. Only use it for a trusted server on this machine, your LAN or Tailscale.');
     const allow = await p.confirm({
-      message: 'Allow insecure HTTP for this local/LAN server?',
+      message: 'Allow insecure HTTP for this local, LAN or Tailscale server?',
       initialValue: true,
     });
     if (p.isCancel(allow)) {

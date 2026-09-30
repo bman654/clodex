@@ -1,10 +1,21 @@
-// src/registry/url-security.ts — SSRF guard for custom provider URLs
+// src/registry/url-security.ts — base URL checks for custom providers
+//
+// No network-facing clodex route supplies or stores this URL: it is typed into
+// `providers add`, or read back from the local providers.json by a refresh. Whoever
+// controls either can already reach any address this machine can, so refusing
+// private networks would protect nothing and strand self-hosted servers.
+//
+// What is checked, against the addresses the host resolves to when the provider is
+// added or refreshed: plain HTTP only after the user approves it and only to a
+// non-public network, so an approved server is not one across the internet; and
+// never a link-local or listed cloud metadata address. Later requests are not
+// re-checked, and an outbound proxy still sees plain HTTP it carries.
 
 import { lookup } from 'node:dns/promises';
 import ipaddr from 'ipaddr.js';
 
 export interface UrlSecurityOptions {
-  /** Allow http:// endpoints for user-approved local/LAN servers (Ollama, LM Studio, vLLM). */
+  /** Allow http:// endpoints for user-approved servers on a non-public network (Ollama, LM Studio, vLLM). */
   allowInsecureLocal?: boolean;
 }
 
@@ -20,24 +31,21 @@ const BLOCKED_HOSTNAMES = new Set([
   'metadata.google.internal',
   '169.254.170.2',
   'fd00:ec2::254',
+  '100.100.100.200', // Alibaba Cloud ECS
+  'fd20:ce::254', // Google Cloud IPv6
 ]);
 
-function isBlockedIp(ipStr: string, allowInsecureLocal: boolean): boolean {
+// Where approved plain HTTP may go: this machine, the LAN, and private overlays.
+// Tailscale hands out carrier-grade-NAT IPv4 (100.64.0.0/10) and unique-local
+// IPv6 (fd7a:115c:a1e0::/48) addresses.
+const NON_PUBLIC_RANGES = new Set(['loopback', 'private', 'uniqueLocal', 'carrierGradeNat']);
+
+// Cloud metadata services answer in link-local space, and a few at the listed
+// carrier-grade-NAT and unique-local addresses.
+function isBlockedIp(ipStr: string): boolean {
   try {
     const ip = ipaddr.process(ipStr);
-    const range = ip.range();
-
-    if (allowInsecureLocal && (range === 'loopback' || range === 'private')) {
-      return false;
-    }
-
-    if (range === 'loopback') return true;
-    if (range === 'private') return true;
-    if (range === 'linkLocal') return true;
-    if (range === 'uniqueLocal') return true;
-    if (range === 'carrierGradeNat') return true;
-    
-    return false;
+    return ip.range() === 'linkLocal' || BLOCKED_HOSTNAMES.has(ip.toString());
   } catch {
     return true; // If we can't parse it, block it to be safe
   }
@@ -82,10 +90,10 @@ export async function validateCustomEndpointUrl(
     return {
       ok: false,
       error: 'Only HTTPS URLs are allowed.',
-      hint: 'For local or LAN servers (Ollama, LM Studio, vLLM), allow insecure HTTP when prompted.',
+      hint: 'For a server on this machine, your LAN or Tailscale (Ollama, LM Studio, vLLM), allow insecure HTTP when prompted.',
     };
   } else if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    return { ok: false, error: 'URL must use https:// or user-approved http:// for local/LAN servers.' };
+    return { ok: false, error: 'URL must use https:// or user-approved http:// for local, LAN or Tailscale servers.' };
   }
   
   // URL parses IPv6 hosts with brackets (e.g., "[::1]"). Strip them for DNS/IP checks.
@@ -96,7 +104,7 @@ export async function validateCustomEndpointUrl(
     return {
       ok: false,
       error: 'This URL points to a blocked internal/metadata host.',
-      hint: 'Use a public API endpoint for your provider.',
+      hint: "Use your model server's own loopback, LAN, Tailscale or public address.",
     };
   }
 
@@ -116,11 +124,11 @@ export async function validateCustomEndpointUrl(
       continue;
     }
 
-    if (isBlockedIp(addr, allowLocal)) {
+    if (isBlockedIp(addr)) {
       return {
         ok: false,
-        error: 'URL resolves to a private or restricted network address.',
-        hint: 'Use a public HTTPS endpoint, or explicitly allow insecure HTTP for a trusted local/LAN server.',
+        error: 'URL resolves to a restricted link-local or cloud metadata address.',
+        hint: "Link-local addresses are not supported. Use the server's loopback, LAN, Tailscale or public address.",
       };
     }
   }
@@ -128,8 +136,7 @@ export async function validateCustomEndpointUrl(
   if (parsed.protocol === 'http:') {
     const allResolvedAddressesAreLocal = addresses.every(addr => {
       try {
-        const range = ipaddr.process(addr).range();
-        return range === 'loopback' || range === 'private' || range === 'uniqueLocal';
+        return NON_PUBLIC_RANGES.has(ipaddr.process(addr).range());
       } catch {
         return false;
       }
@@ -137,8 +144,8 @@ export async function validateCustomEndpointUrl(
     if (!allowLocal || !allResolvedAddressesAreLocal) {
       return {
         ok: false,
-        error: 'HTTP is only allowed for local loopback or private-network addresses.',
-        hint: 'Use https://, or allow insecure HTTP for a trusted local/LAN server.',
+        error: 'HTTP is only allowed for addresses on this machine, your LAN or a private network such as Tailscale.',
+        hint: 'Use https:// for a server on the public internet.',
       };
     }
   }

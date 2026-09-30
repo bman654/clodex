@@ -31,7 +31,7 @@ incompatibility.
 
 A custom OpenAI-compatible server is not a template. `providers add` → *Custom OpenAI-compatible
 server* (`src/providers-custom-add.ts`) calls `addCustomEndpointProvider`
-(`src/registry/custom-endpoint.ts`), which runs the SSRF guard in `url-security.ts`, lists the
+(`src/registry/custom-endpoint.ts`), which runs the base-URL checks in `url-security.ts`, lists the
 server's models, stores the key, and saves a `templateId: 'custom-openai'` provider — with
 `authRef: 'none:anonymous'` when the key is empty. The same function accepts `kind: 'anthropic'`,
 but no command offers it. The server chooses the model ids, names and error text. Both list
@@ -41,6 +41,17 @@ the server's error text with control characters replaced by spaces (`server-text
 OAuth catalog parser (`parseOpenAiModelEntries` in `openai-oauth-catalog.ts`) has no such check; its host
 is fixed. Custom providers are read by the same materialization and refresh code as template
 providers (`materialize.ts`, `model-source.ts`, `refresh-models.ts`).
+
+The base-URL checks are not an SSRF boundary. No network-facing clodex route supplies or stores
+the URL: it is typed into `providers add`, or read back from the local `providers.json` by a
+refresh, and launches use the stored URL without re-checking it. When a provider is added or
+refreshed the checks require every address its host resolves to be non-public — loopback, private,
+unique-local or carrier-grade-NAT, the last two being where Tailscale addresses live — before
+user-approved plain HTTP is accepted, accept `https://` on those networks too, and refuse
+link-local addresses and the listed cloud-metadata addresses. They say nothing about later hops: an
+`HTTP_PROXY` without a matching `NO_PROXY` still carries a private `http://` request through the
+proxy. `refresh-models` re-checks a custom provider's stored URL and treats its `http://` as
+approved when the provider was added.
 
 Provider templates can declare reusable controls for non-default behavior:
 

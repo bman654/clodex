@@ -140,8 +140,11 @@ async function refreshApiListProvider(
   let safeBaseUrl = baseUrl;
   const templateDefault = catalogTemplate?.defaultBaseUrl?.trim();
   if (configuredUrl && configuredUrl !== templateDefault) {
+    // A custom server's http:// URL was approved when the provider was added;
+    // the check still confines it to a non-public network.
+    const customEndpoint = provider.templateId === 'custom-openai' || provider.templateId === 'custom-anthropic';
     const urlCheck = await validateCustomEndpointUrl(baseUrl, {
-      allowInsecureLocal: catalogTemplate?.apiKeyOptional === true,
+      allowInsecureLocal: catalogTemplate?.apiKeyOptional === true || customEndpoint,
     });
     if (!urlCheck.ok || !urlCheck.normalizedUrl) {
       return { models: [], error: `${urlCheck.error ?? 'Invalid API base URL.'} ${urlCheck.hint ?? ''}`.trim() };

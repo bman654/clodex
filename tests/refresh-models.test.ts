@@ -722,6 +722,89 @@ describe('refreshProviderModels', () => {
     expect(saveRegistry).not.toHaveBeenCalled();
   });
 
+  // A custom server's http:// URL is approved once, when the provider is added.
+  // Refresh honours that approval but keeps plain HTTP off the public internet,
+  // and the allowance is not extended to built-in providers.
+  const httpRegistry = (templateId: string, url: string): ProviderRegistry => ({
+    schemaVersion: 1,
+    providers: [{
+      id: 'http-server',
+      templateId,
+      name: 'HTTP server',
+      enabled: true,
+      authRef: 'keyring:provider:http-server',
+      authType: 'api',
+      api: { npm: '@ai-sdk/openai-compatible', url },
+      addedAt: '2026-09-30T00:00:00.000Z',
+    }],
+  });
+
+  it.each([
+    ['a LAN', 'http://192.168.68.5:1234/v1'],
+    ['a Tailscale', 'http://100.71.180.77:8080/v1'],
+  ])('refreshes a custom server on %s address over approved http', async (_label, url) => {
+    const registry = httpRegistry('custom-openai', url);
+    vi.mocked(fetchTemplateModels).mockResolvedValue({
+      baseUrl: url,
+      models: [{ id: 'gemma', name: 'Gemma', upstreamModelId: 'gemma', modelFormat: 'openai' }],
+    });
+    vi.mocked(loadRegistryStrict).mockReturnValue(registry);
+
+    const result = await refreshProviderModels('http-server', 'sk-local-key', registry);
+
+    expect(result).toMatchObject({ ok: true, modelCount: 1 });
+    expect(fetchTemplateModels).toHaveBeenCalledWith(expect.anything(), 'sk-local-key', url);
+  });
+
+  it('refreshes a custom Anthropic-format server over approved http', async () => {
+    const url = 'http://100.71.180.77:8080/v1';
+    const registry: ProviderRegistry = {
+      schemaVersion: 1,
+      providers: [{
+        id: 'custom-local-anthropic',
+        templateId: 'custom-anthropic',
+        name: 'Local Anthropic',
+        enabled: true,
+        authRef: 'keyring:provider:custom-local-anthropic',
+        authType: 'api',
+        api: { npm: '@ai-sdk/anthropic', url },
+        addedAt: '2026-09-30T00:00:00.000Z',
+      }],
+    };
+    vi.mocked(fetchAnthropicModels).mockResolvedValue({
+      baseUrl: url,
+      models: [{ id: 'local-claude', name: 'Local', upstreamModelId: 'local-claude', modelFormat: 'anthropic' }],
+    });
+    vi.mocked(loadRegistryStrict).mockReturnValue(registry);
+
+    const result = await refreshProviderModels('custom-local-anthropic', 'sk-local-key', registry);
+
+    expect(result).toMatchObject({ ok: true, modelCount: 1 });
+    expect(fetchAnthropicModels).toHaveBeenCalledWith(url, 'sk-local-key');
+  });
+
+  it('refuses a custom server whose stored http URL is public', async () => {
+    const registry = httpRegistry('custom-openai', 'http://1.1.1.1/v1');
+
+    const result = await refreshProviderModels('http-server', 'sk-local-key', registry);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/HTTP is only allowed/);
+    expect(fetchTemplateModels).not.toHaveBeenCalled();
+    expect(saveRegistry).not.toHaveBeenCalled();
+  });
+
+  it('does not extend the http allowance to a built-in provider', async () => {
+    const registry = httpRegistry('openai', 'http://192.168.68.5:1234/v1');
+
+    const result = await refreshProviderModels('http-server', 'sk-real-key', registry);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toMatch(/Only HTTPS/);
+    expect(fetchTemplateModels).not.toHaveBeenCalled();
+    expect(saveRegistry).not.toHaveBeenCalled();
+  });
+
   it('does not report an imported snapshot as a model-count change on first live refresh', async () => {
     const registry: ProviderRegistry = {
       schemaVersion: 1,
@@ -774,7 +857,7 @@ describe('refreshProviderModels', () => {
   // names the keyring slot holding the user's real OpenCode credential, which
   // is exactly what makes a redirected destination an exfiltration channel.
   //
-  // The forged addresses are RFC 5737 TEST-NET literals so the SSRF guard
+  // The forged addresses are RFC 5737 TEST-NET literals so the URL check
   // resolves them without DNS: before the pin they sail through it, which is
   // the point.
   const OPENCODE_EXFIL_URL = 'https://192.0.2.1/v1';
