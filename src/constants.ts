@@ -16,11 +16,13 @@ export const CODEX_RESPONSES_LITE_WS_URL = 'wss://chatgpt.com/backend-api/codex/
 // is also the reply for a model the account cannot use. The catalog's
 // `minimal_client_version` can understate the real gate: gpt-6.1-sol reports
 // 0.153.0 but was refused through 0.158.0 and accepted at 0.159.0 on a Plus
-// account (2026-09-29, #298). The guard in codex-client-version.ts hides a model
-// only when its recorded minimum exceeds this pin, and a live refresh records the
-// catalog's minimum, so it cannot hide such a model. Keep this at or above every
-// catalog minimum among use_responses_lite models and every version measured as
-// required.
+// account (2026-09-29, #298). The catalog endpoint's own client_version filter
+// matched that gate where measured (omitted at 0.156.0 and 0.158.0, listed at
+// 0.159.0), so a refresh also fetches it at this version and records each model it
+// withholds; codex-client-version.ts hides a Responses-Lite model whose minimum
+// exceeds this pin or that was withheld at a version this pin does not exceed. Keep
+// this at or above every catalog minimum among use_responses_lite models and every
+// version measured as required.
 export const CODEX_RESPONSES_LITE_VERSION = '0.159.0';
 // OpenAI-Beta opt-in for the WebSocket Responses transport.
 export const CODEX_RESPONSES_WEBSOCKETS_BETA = 'responses_websockets=2026-02-06';

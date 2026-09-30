@@ -1,6 +1,7 @@
 // src/registry/openai-oauth-catalog.ts — ChatGPT/Codex-plan OAuth model catalog discovery
 
 import { readCodexClientVersion } from '../codex-client-version.js';
+import { CODEX_RESPONSES_LITE_VERSION } from '../constants.js';
 import type { CachedModel } from './types.js';
 import {
   buildOpenAiOAuthModels,
@@ -54,6 +55,11 @@ function readCapabilityFlags(m: Record<string, unknown>): Pick<OpenAiModelEntry,
   };
 }
 
+/** A `null` entry names no model; reading a field off it would fail the whole refresh. */
+function objectEntries(list: unknown[]): Array<Record<string, unknown>> {
+  return list.filter((m): m is Record<string, unknown> => m !== null && typeof m === 'object');
+}
+
 /** Parse model entries from OpenAI-standard or ChatGPT-internal response shapes. */
 function parseOpenAiModelEntries(body: unknown): OpenAiModelEntry[] {
   if (!body || typeof body !== 'object') return [];
@@ -61,7 +67,7 @@ function parseOpenAiModelEntries(body: unknown): OpenAiModelEntry[] {
 
   // ChatGPT backend format: { models: [{ slug, title }] }
   if (Array.isArray(b.models)) {
-    return (b.models as Array<Record<string, unknown>>)
+    return objectEntries(b.models)
       .map(m => ({
         id: (m.slug as string) ?? '',
         name: (m.title as string) ?? (m.name as string) ?? (m.slug as string) ?? '',
@@ -72,7 +78,7 @@ function parseOpenAiModelEntries(body: unknown): OpenAiModelEntry[] {
   }
   // Standard OpenAI format: { data: [{ id, name }] }
   if (Array.isArray(b.data)) {
-    return (b.data as Array<Record<string, unknown>>)
+    return objectEntries(b.data)
       .map(m => ({
         id: (m.id as string) ?? '',
         name: (m.name as string) ?? (m.id as string) ?? '',
@@ -187,11 +193,43 @@ async function fetchJsonWithAuth(
 }
 
 /**
+ * The Codex catalog filters on `client_version`, and its published
+ * `minimal_client_version` can understate that filter: gpt-6.1-sol reported 0.153.0
+ * but was omitted at 0.156.0 and 0.158.0, where its requests were also refused, and
+ * listed and accepted at 0.159.0 (#298). Ask again at the version clodex sends and
+ * mark each row that answer omits with that version.
+ * Projection hides a marked row only when it uses Responses-Lite (other requests omit
+ * the version) and only while the bundled version is at or below the mark.
+ *
+ * Fails safe: an unusable or empty answer marks nothing, leaving the rows exactly as
+ * discovered, and never fails the refresh.
+ */
+async function markModelsWithheldAtRequestVersion(
+  models: CachedModel[],
+  accessToken: string,
+  timeoutMs: number,
+): Promise<CachedModel[]> {
+  const pinned = await fetchJsonWithAuth(
+    `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_RESPONSES_LITE_VERSION}`,
+    accessToken,
+    timeoutMs,
+  );
+  const offered = new Set(parseOpenAiModelEntries(pinned.body).map(entry => entry.id));
+  if (offered.size === 0) return models;
+  return models.map(model => (offered.has(model.id)
+    ? model
+    : { ...model, withheldAtClientVersion: CODEX_RESPONSES_LITE_VERSION }));
+}
+
+/**
  * Fetch OpenAI OAuth (ChatGPT) models using a 3-tier strategy:
  *
  * 1. chatgpt.com/backend-api/codex/models — Codex-specific endpoint.
  *    If it exists, it returns ONLY models the Codex API actually supports,
- *    including their minimum client versions. Projection hides incompatible models.
+ *    including their minimum client versions. It is fetched with Claude Code's
+ *    version number, far above any Codex client version, so the answer is
+ *    effectively unfiltered; a second fetch at the version clodex sends marks
+ *    the models withheld from it. Projection hides incompatible models.
  *
  * 2. chatgpt.com/backend-api/models — all ChatGPT models, filtered by the
  *    confirmed-bad set. Used when the Codex endpoint doesn't exist or returns nothing.
@@ -221,7 +259,11 @@ export async function refreshOpenAiOAuthModels(
   );
   const codexEntries = parseOpenAiModelEntries(codexResult.body);
   if (codexEntries.length > 0) {
-    return { models: toModels(codexEntries, true), source: 'live' };
+    const models = toModels(codexEntries, true);
+    return {
+      models: await markModelsWithheldAtRequestVersion(models, accessToken, TIMEOUT_MS),
+      source: 'live',
+    };
   }
 
   // Tier 2: General ChatGPT model list, filtered by known Codex restrictions.

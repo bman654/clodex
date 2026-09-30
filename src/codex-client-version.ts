@@ -43,24 +43,60 @@ export function compareCodexClientVersions(a: string, b: string): number | undef
   return 0;
 }
 
+/** Why a Responses-Lite model cannot use the bundled request version. */
+type CodexClientRequirement =
+  /** The catalog's published minimum exceeds the request version. */
+  | { kind: 'minimum'; version: string }
+  /** The catalog omitted the model at this version, which the request version does not exceed. */
+  | { kind: 'withheld'; version: string };
+
+function atLeast(version: string, floor: string): boolean {
+  const order = compareCodexClientVersions(version, floor);
+  return order === 0 || order === 1;
+}
+
 /** Check only Responses-Lite models: other requests do not send the pinned version.
- * The minimum itself is the persisted marker; no stale "blocked" flag to clear.
+ * The recorded versions themselves are the persisted markers; no stale "blocked" flag to
+ * clear. A withheld marker applies only while the pin is at or below it, so a release
+ * with a newer pin offers the model again without a refresh. When both apply, report
+ * the stronger bound.
  */
-export function requiresNewerCodexClient(
-  model: Pick<CachedModel, 'minimalClientVersion' | 'useResponsesLite'>,
-): boolean {
-  if (!model.useResponsesLite) return false;
+function codexClientRequirement(
+  model: Pick<CachedModel, 'minimalClientVersion' | 'withheldAtClientVersion' | 'useResponsesLite'>,
+): CodexClientRequirement | undefined {
+  if (!model.useResponsesLite) return undefined;
   const minimum = readCodexClientVersion(model.minimalClientVersion);
-  return minimum !== undefined
-    && compareCodexClientVersions(minimum, CODEX_RESPONSES_LITE_VERSION) === 1;
+  const withheldAt = readCodexClientVersion(model.withheldAtClientVersion);
+  const blockingMinimum = minimum !== undefined
+    && compareCodexClientVersions(minimum, CODEX_RESPONSES_LITE_VERSION) === 1 ? minimum : undefined;
+  const blockingWithheld = withheldAt !== undefined && atLeast(withheldAt, CODEX_RESPONSES_LITE_VERSION)
+    ? withheldAt : undefined;
+  if (blockingMinimum !== undefined
+    && (blockingWithheld === undefined || compareCodexClientVersions(blockingMinimum, blockingWithheld) === 1)) {
+    return { kind: 'minimum', version: blockingMinimum };
+  }
+  return blockingWithheld === undefined ? undefined : { kind: 'withheld', version: blockingWithheld };
+}
+
+export function requiresNewerCodexClient(
+  model: Pick<CachedModel, 'minimalClientVersion' | 'withheldAtClientVersion' | 'useResponsesLite'>,
+): boolean {
+  return codexClientRequirement(model) !== undefined;
 }
 
 export function codexClientVersionWarning(models: CachedModel[]): string | undefined {
-  const unavailable = models.filter(requiresNewerCodexClient);
+  const unavailable = models.flatMap(model => {
+    const requirement = codexClientRequirement(model);
+    return requirement ? [{ id: model.id, requirement }] : [];
+  });
   if (unavailable.length === 0) return undefined;
-  const details = unavailable.map(model =>
-    `${printableServerText(model.id)} (requires ${model.minimalClientVersion})`).join(', ');
+  const details = unavailable.map(({ id, requirement }) => `${printableServerText(id)} (requires ${
+    requirement.kind === 'minimum' ? requirement.version : `a version newer than ${requirement.version}`
+  })`).join(', ');
+  const reason = unavailable.every(({ requirement }) => requirement.kind === 'minimum')
+    ? 'their catalog minimum exceeds this version'
+    : 'the ChatGPT catalog does not offer them to this version';
   return `Hidden ChatGPT-plan models: ${details}. clodex sends Codex client version `
-    + `${CODEX_RESPONSES_LITE_VERSION} for Responses-Lite; their catalog minimum exceeds this version. `
+    + `${CODEX_RESPONSES_LITE_VERSION} for Responses-Lite; ${reason}. `
     + 'Update clodex to a release supporting their required version to use them.';
 }

@@ -3,6 +3,7 @@ import { refreshProviderModels } from '../src/registry/refresh-models.js';
 import * as io from '../src/registry/io.js';
 import * as pricing from '../src/registry/pricing.js';
 import type { CachedModel, ProviderRegistry } from '../src/registry/types.js';
+import { CODEX_RESPONSES_LITE_VERSION } from '../src/constants.js';
 
 vi.mock('../src/registry/io.js', () => ({
   loadRegistry: vi.fn(),
@@ -219,8 +220,11 @@ describe('registry/refresh-models', () => {
 
       const result = await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
 
-      expect(global.fetch).toHaveBeenCalledTimes(1);
-      expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining('https://chatgpt.com/backend-api/codex/models?client_version='), expect.anything());
+      // The second call re-asks the catalog at the version clodex sends; this mock
+      // leaves it unanswered, which must not affect the refresh.
+      expect(global.fetch).toHaveBeenCalledTimes(2);
+      expect(global.fetch).toHaveBeenNthCalledWith(1, expect.stringContaining('https://chatgpt.com/backend-api/codex/models?client_version='), expect.anything());
+      expect(global.fetch).toHaveBeenNthCalledWith(2, `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_RESPONSES_LITE_VERSION}`, expect.anything());
       
       expect(result.ok).toBe(true);
       expect(result.modelCount).toBe(1);

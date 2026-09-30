@@ -311,9 +311,10 @@ Two things worth knowing about the numbers:
 | `refresh-models [id]` | Update cached model lists |
 
 For ChatGPT-plan models using Responses-Lite (the catalog's `use_responses_lite` flag),
-refresh warns when the catalog requires a newer Codex client version than clodex sends.
-Those models stay cached but are hidden from clodex's selectable catalog to avoid version
-rejections. Update clodex to a release supporting the required version to make them
+refresh warns when the catalog requires a newer Codex client version than clodex sends,
+including a model the catalog does not offer to clodex's version even though its published
+minimum is lower. Those models stay cached but are hidden from clodex's selectable catalog to
+avoid version rejections. Update clodex to a release supporting the required version to make them
 available again. Saved favorites and aliases are preserved but unavailable while their
 models are hidden. Older caches without this metadata need a refresh for newly discovered
 models. Known built-in models use their seeded minimums when absent from the cache and
