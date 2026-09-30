@@ -222,8 +222,9 @@ async function markModelsWithheldAtRequestVersion(
 /**
  * The ids in the answer at the version clodex sends, or undefined when it proves nothing.
  * Strict on purpose: a model is hidden for being ABSENT from this list, so an empty
- * answer, or one with any row lacking a non-blank string id, cannot show that the rows
- * it fails to name are withheld. Reads the same two shapes as `parseOpenAiModelEntries`.
+ * answer, or one with any row lacking a non-blank string id free of surrounding
+ * whitespace, cannot show that the rows it fails to name are withheld. Reads the same
+ * two shapes as `parseOpenAiModelEntries`.
  */
 function readOfferedIds(body: unknown): Set<string> | undefined {
   if (!body || typeof body !== 'object') return undefined;
@@ -237,7 +238,7 @@ function readOfferedIds(body: unknown): Set<string> | undefined {
     const id = row !== null && typeof row === 'object'
       ? (row as Record<string, unknown>)[shape.key]
       : undefined;
-    if (typeof id !== 'string' || id.trim() === '') return undefined;
+    if (typeof id !== 'string' || id === '' || id !== id.trim()) return undefined;
     ids.add(id);
   }
   return ids;

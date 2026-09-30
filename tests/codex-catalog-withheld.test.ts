@@ -119,6 +119,8 @@ const UNUSABLE_ANSWERS: Array<[string, Reply]> = [
   ['a valid id and a null row', async () => Response.json({ models: [{ slug: 'gpt-6-sol' }, null] })],
   ['a valid id and a whitespace-only id', async () => Response.json({ models: [{ slug: 'gpt-6-sol' }, { slug: ' ' }] })],
   ['a valid id and an empty-string id', async () => Response.json({ models: [{ slug: 'gpt-6-sol' }, { slug: '' }] })],
+  ['valid ids and an id with trailing whitespace', async () => Response.json({ models: [{ slug: 'gpt-6-sol' }, { slug: 'gpt-6.1-sol ' }, { slug: 'gpt-5.5' }] })],
+  ['a data-shaped id with leading whitespace', async () => Response.json({ data: [{ id: ' gpt-6.1-sol' }] })],
   ['a data-shaped valid id and a numeric id', async () => Response.json({ data: [{ id: 'gpt-6-sol' }, { id: 5 }] })],
   ['a body that is not a catalog', async () => Response.json({ detail: 'unavailable' })],
 ];
