@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { materializeRegistry, projectProviderCachedModels } from '../src/registry/materialize.js';
 import { buildOpenAiOAuthModels } from '../src/data/openai-oauth-models.js';
+import { resetContextStops, setSessionContextStops } from '../src/context-modes.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from '../src/registry/types.js';
 
 /**
@@ -218,8 +219,9 @@ describe('legacy OAuth cache overlay', () => {
       useResponsesLite: true,
       preferWebSockets: true,
       minimalClientVersion: '0.159.0',
+      contextWindow: 272_000,
+      maxContextWindow: 872_000,
     });
-    expect(sol?.maxContextWindow).toBeUndefined();
   });
 
   // The builder reads `lookupKnownContextWindow`, which reports `undefined` rather than
@@ -319,7 +321,21 @@ describe('Responses-Lite fields missing from an older cache', () => {
       useResponsesLite: true,
       preferWebSockets: true,
     });
-    expect(sol?.maxContextWindow).toBeUndefined();
+  });
+
+  it('lets the max stop reach the seeded Sol 6.1 ceiling on the launch model', () => {
+    const registry = {
+      schemaVersion: 4,
+      providers: [providerWithRows([bareRow('gpt-6.1-sol')])],
+    } as unknown as ProviderRegistry;
+    setSessionContextStops({ 'openai-oauth:gpt-6.1-sol': 'max' });
+    try {
+      const [local] = materializeRegistry(registry, () => 'oauth-token');
+      const sol = local?.models.find(model => model.id === 'gpt-6.1-sol');
+      expect(sol).toMatchObject({ contextWindow: 872_000, contextStop: 'max' });
+    } finally {
+      resetContextStops();
+    }
   });
 
   it.each(RESPONSES_LITE_IDS)('backfills the flags and standard window for %s', id => {

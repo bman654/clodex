@@ -35,7 +35,7 @@ const ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go';
 // model on models.dev surfaces in the updater's "unmapped" report and is added
 // once its transport is verified against the live endpoint. Responses-only
 // models ride 'openai-responses' (the @ai-sdk/openai Responses path) only once
-// verified; grok and mainline gpt are still absent.
+// verified; grok and GPT ids other than the two Lunas are still unmapped.
 const TRANSPORTS = Object.assign(Object.create(null), {
   'deepseek-v4-flash': 'openai-completions',
   // Measured 2026-09-11: V4.1 Flash answers on /v1/messages (thinking block + text).
@@ -77,6 +77,18 @@ const TRANSPORTS = Object.assign(Object.create(null), {
 // entries are validated against, never as their source: `assertEffortLadders`
 // below fails this updater if a map would send an effort value the feed does
 // not publish, and reports the safe direction rather than failing on it.
+// Higher-rate pricing boundaries, curated from OpenCode Go's own pricing page.
+// models.dev also publishes context tiers (`cost.tiers`), but the updater does
+// not read them: like the rest of this block they stay local-only, and the
+// feed has disagreed with Go's page (it lists a 512K minimax-m3 tier Go does
+// not). Checked against Go's pricing page on 2026-09-29.
+const PRICING_BOUNDARIES = Object.assign(Object.create(null), {
+  'gpt-6-luna': {
+    pricingBoundary: 272_000,
+    pricingBoundaryNote: 'Above it, OpenCode Go lists $0.20 input and $0.75 output per million tokens.',
+  },
+});
+
 const PATCHES = Object.assign(Object.create(null), {
   // Muse Spark rides the @ai-sdk/openai Responses path, where effort is only
   // sent for OpenAI/Codex model families (effortProviderOptions). The model
@@ -123,7 +135,9 @@ const PATCHES = Object.assign(Object.create(null), {
   },
   'gpt-6-luna': {
     // OpenCode Go serves GPT-6 Luna exclusively over the Responses API (/v1/responses).
-    // models.dev publishes effort=none/low/medium/high/xhigh/max.
+    // models.dev publishes effort=none/low/medium/high/xhigh/max. On @ai-sdk/openai
+    // the gpt-6 family rule, not these values, decides the effort on the wire; the
+    // map lists the menu levels and is what assertEffortLadders checks against the feed.
     reasoningEffortMap: { none: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max' },
   },
   'hy3': {
@@ -345,12 +359,7 @@ function toClodexModel(id, devModel) {
     id,
     name: devModel.name ?? id,
     contextWindow: devModel.limit?.context,
-    // OpenCode Go publishes a higher rate above 272K for GPT-6 Luna; models.dev
-    // supplies only the lower rate. Keep this warning tied to Go's own pricing.
-    ...(id === 'gpt-6-luna' ? {
-      pricingBoundary: 272_000,
-      pricingBoundaryNote: 'Above it, OpenCode Go lists $0.20 input and $0.75 output per million tokens.',
-    } : {}),
+    ...(PRICING_BOUNDARIES[id] ?? {}),
     cost,
     modelFormat: anthropic ? 'anthropic' : 'openai',
     npm: anthropic

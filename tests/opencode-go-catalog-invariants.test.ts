@@ -35,7 +35,7 @@ describe('opencode-go catalog invariants', () => {
       } else {
         expect(model.modelFormat, model.id).toBe('openai');
         // Chat Completions entries use openai-compatible; Responses-only entries
-         // (Muse Spark and GPT-6 Luna) use @ai-sdk/openai. Both share the /v1 base.
+        // (Muse Spark and GPT-6 Luna) use @ai-sdk/openai. Both share the /v1 base.
         expect(['@ai-sdk/openai-compatible', '@ai-sdk/openai'], model.id).toContain(model.npm);
         expect(model.apiUrl, model.id).toBe('https://opencode.ai/zen/go/v1');
       }
@@ -148,6 +148,16 @@ describe('opencode-go catalog invariants', () => {
         readFileSync(join(workspace, 'src', 'data', 'opencode-go-models.json'), 'utf8'),
       ) as Array<{ id: string }>;
       expect(regenerated.map(model => model.id).sort()).toEqual([...mappedIds].sort());
+      // Pricing boundaries and effort maps are local-only: the fixture feed carries
+      // neither a price tier nor a Go-specific map, so both must come from the script.
+      const withBoundary = (regenerated as Array<{ id: string; pricingBoundary?: number }>)
+        .filter(model => model.pricingBoundary !== undefined);
+      expect(withBoundary).toEqual([expect.objectContaining({ id: 'gpt-6-luna', pricingBoundary: 272_000 })]);
+      const luna = (regenerated as Array<{ id: string; compatibility?: { reasoningEffortMap?: unknown } }>)
+        .find(model => model.id === 'gpt-6-luna');
+      expect(luna?.compatibility?.reasoningEffortMap).toEqual({
+        none: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
+      });
       for (const hostileName of hostileNames) {
         expect(regenerated.some(model => model.id === hostileName)).toBe(false);
       }
