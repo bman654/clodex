@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.18.5](https://github.com/bman654/clodex/compare/v2.18.4...v2.18.5) (2026-09-30)
+
+
+### Bug Fixes
+
+* **models:** add GPT-6 Luna on OpenCode Go and stop GPT-6.1 Sol failing on ChatGPT plans ([#300](https://github.com/bman654/clodex/issues/300)) ([0674978](https://github.com/bman654/clodex/commit/0674978a11509bea88badf85670acdc7c7b80836))
+
 ## [2.18.4](https://github.com/bman654/clodex/compare/v2.18.3...v2.18.4) (2026-09-28)
 
 
