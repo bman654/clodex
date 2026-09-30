@@ -55,7 +55,11 @@ function readCapabilityFlags(m: Record<string, unknown>): Pick<OpenAiModelEntry,
   };
 }
 
-/** A `null` entry names no model; reading a field off it would fail the whole refresh. */
+/**
+ * A `null` entry names no model; reading a field off it would fail the whole refresh.
+ * Entries whose id is not a string are dropped below, so an answer holding no valid id
+ * counts as empty rather than as a list that withholds every model.
+ */
 function objectEntries(list: unknown[]): Array<Record<string, unknown>> {
   return list.filter((m): m is Record<string, unknown> => m !== null && typeof m === 'object');
 }
@@ -69,7 +73,7 @@ function parseOpenAiModelEntries(body: unknown): OpenAiModelEntry[] {
   if (Array.isArray(b.models)) {
     return objectEntries(b.models)
       .map(m => ({
-        id: (m.slug as string) ?? '',
+        id: typeof m.slug === 'string' ? m.slug : '',
         name: (m.title as string) ?? (m.name as string) ?? (m.slug as string) ?? '',
         ...readContextFields(m),
         ...readCapabilityFlags(m),
@@ -80,7 +84,7 @@ function parseOpenAiModelEntries(body: unknown): OpenAiModelEntry[] {
   if (Array.isArray(b.data)) {
     return objectEntries(b.data)
       .map(m => ({
-        id: (m.id as string) ?? '',
+        id: typeof m.id === 'string' ? m.id : '',
         name: (m.name as string) ?? (m.id as string) ?? '',
         ...readContextFields(m),
         ...readCapabilityFlags(m),

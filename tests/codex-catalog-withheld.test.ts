@@ -110,6 +110,8 @@ const UNUSABLE_ANSWERS: Array<[string, Reply]> = [
   ['an empty catalog', async () => Response.json({ models: [] })],
   ['a catalog of null entries', async () => Response.json({ models: [null] })],
   ['a data-shaped catalog of null entries', async () => Response.json({ data: [null] })],
+  ['entries with no string id', async () => Response.json({ models: [null, 5, {}, [], { slug: ['gpt-5.5'] }, { slug: 7 }] })],
+  ['data entries with no string id', async () => Response.json({ data: [{ id: 5 }, { id: ['gpt-5.5'] }, { name: 'x' }] })],
   ['a body that is not a catalog', async () => Response.json({ detail: 'unavailable' })],
 ];
 
@@ -396,14 +398,14 @@ describe('refresh at the request version -> persisted marker -> selectable OAuth
     expect(offeredIds()).toEqual(['gpt-6-sol', 'gpt-5.5']);
   });
 
-  it('skips null entries in either catalog answer instead of failing the refresh', async () => {
+  it('skips null entries and non-string ids in either catalog answer instead of failing the refresh', async () => {
     pin.override = '0.156.0';
     persistProvider();
     vi.mocked(fetch).mockImplementation(async input => {
       const version = new URL(String(input)).searchParams.get('client_version');
       return Response.json({ models: version === CLAUDE_VERSION
-        ? [null, { slug: 'gpt-6.1-sol', minimal_client_version: '0.153.0', use_responses_lite: true }, { slug: 'gpt-6-sol' }]
-        : [null, { slug: 'gpt-6-sol' }] });
+        ? [null, { slug: ['x'] }, { slug: 'gpt-6.1-sol', minimal_client_version: '0.153.0', use_responses_lite: true }, { slug: 'gpt-6-sol' }]
+        : [null, { slug: ['gpt-6.1-sol'] }, { slug: 'gpt-6-sol' }] });
     });
     const result = await refresh();
     expect(result).toMatchObject({ ok: true, modelCount: 2 });
