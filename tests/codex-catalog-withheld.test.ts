@@ -112,6 +112,14 @@ const UNUSABLE_ANSWERS: Array<[string, Reply]> = [
   ['a data-shaped catalog of null entries', async () => Response.json({ data: [null] })],
   ['entries with no string id', async () => Response.json({ models: [null, 5, {}, [], { slug: ['gpt-5.5'] }, { slug: 7 }] })],
   ['data entries with no string id', async () => Response.json({ data: [{ id: 5 }, { id: ['gpt-5.5'] }, { name: 'x' }] })],
+  ['an empty-string id', async () => Response.json({ models: [{ slug: '' }] })],
+  ['a whitespace-only id', async () => Response.json({ models: [{ slug: '  ' }] })],
+  // Partially malformed: a valid id alongside a row that names nothing usable.
+  ['a valid id and a non-string id', async () => Response.json({ models: [{ slug: 'gpt-6-sol' }, { slug: ['gpt-6.1-sol'] }] })],
+  ['a valid id and a null row', async () => Response.json({ models: [{ slug: 'gpt-6-sol' }, null] })],
+  ['a valid id and a whitespace-only id', async () => Response.json({ models: [{ slug: 'gpt-6-sol' }, { slug: ' ' }] })],
+  ['a valid id and an empty-string id', async () => Response.json({ models: [{ slug: 'gpt-6-sol' }, { slug: '' }] })],
+  ['a data-shaped valid id and a numeric id', async () => Response.json({ data: [{ id: 'gpt-6-sol' }, { id: 5 }] })],
   ['a body that is not a catalog', async () => Response.json({ detail: 'unavailable' })],
 ];
 
@@ -398,19 +406,17 @@ describe('refresh at the request version -> persisted marker -> selectable OAuth
     expect(offeredIds()).toEqual(['gpt-6-sol', 'gpt-5.5']);
   });
 
-  it('skips null entries and non-string ids in either catalog answer instead of failing the refresh', async () => {
+  it('fails the refresh and keeps the cache when discovery returns a null row, as before', async () => {
     pin.override = '0.156.0';
     persistProvider();
-    vi.mocked(fetch).mockImplementation(async input => {
-      const version = new URL(String(input)).searchParams.get('client_version');
-      return Response.json({ models: version === CLAUDE_VERSION
-        ? [null, { slug: ['x'] }, { slug: 'gpt-6.1-sol', minimal_client_version: '0.153.0', use_responses_lite: true }, { slug: 'gpt-6-sol' }]
-        : [null, { slug: ['gpt-6.1-sol'] }, { slug: 'gpt-6-sol' }] });
-    });
+    serveCatalog([SOL_61, SOL_6, GPT_55]);
+    await refresh();
+    const before = reloaded().modelsCache;
+    serveCatalog([], { firstReply: async () => Response.json({ models: [null, { slug: 'gpt-6-sol' }] }) });
     const result = await refresh();
-    expect(result).toMatchObject({ ok: true, modelCount: 2 });
-    expect(result.reason).toContain('gpt-6.1-sol (requires a version newer than 0.156.0)');
-    expect(offeredIds()).toEqual(['gpt-6-sol']);
+    expect(result.ok).toBe(false);
+    expect(reloaded().modelsCache).toEqual(before);
+    expect(offeredIds()).toEqual(['gpt-6-sol', 'gpt-5.5']);
   });
 
   it('compares the marker with the version clodex sends by precedence, not as text', () => {
@@ -579,5 +585,56 @@ describe('across refreshes: the marker is carried, replaced or cleared', () => {
       expect(defaultSol()?.withheldAtClientVersion).toBeUndefined();
       expect(workSol()?.withheldAtClientVersion).toBeUndefined();
     });
+  });
+});
+
+// A fresh reviewer's repro: a partially malformed second answer must hide nothing new, and a
+// partially malformed discovery answer must not replace a known-good cache.
+describe('partial or malformed catalog answers', () => {
+  const BETA: Row = { slug: 'new-lite-beta', gate: '0.100.0', minimal_client_version: '0.100.0', use_responses_lite: true };
+  const second = (models: unknown[]): CatalogOptions => ({ pinnedReply: async () => Response.json({ models }) });
+
+  it('does not hide a model when the second answer mixes a valid slug with a non-string one', async () => {
+    persistProvider();
+    serveCatalog([BETA, SOL_6], second([{ slug: 'gpt-6-sol' }, { slug: ['new-lite-beta'] }]));
+    expect((await refresh()).ok).toBe(true);
+    expect(saved('new-lite-beta')?.withheldAtClientVersion).toBeUndefined();
+    expect(offeredIds()).toEqual(['new-lite-beta', 'gpt-6-sol']);
+  });
+
+  it('does not hide anything when the only id in the second answer is whitespace', async () => {
+    persistProvider();
+    serveCatalog([BETA, SOL_6], second([{ slug: '  ' }]));
+    expect((await refresh()).ok).toBe(true);
+    expect(offeredIds()).toEqual(['new-lite-beta', 'gpt-6-sol']);
+  });
+
+  it('treats duplicate valid ids as one offer, not as a malformed answer', async () => {
+    persistProvider();
+    serveCatalog([BETA, SOL_6], second([{ slug: 'gpt-6-sol' }, { slug: 'gpt-6-sol' }]));
+    expect((await refresh()).ok).toBe(true);
+    expect(saved('new-lite-beta')?.withheldAtClientVersion).toBe(CODEX_RESPONSES_LITE_VERSION);
+    expect(offeredIds()).toEqual(['gpt-6-sol']);
+  });
+
+  it('does not replace a known-good cache from a partially malformed discovery answer', async () => {
+    persistProvider();
+    serveCatalog([BETA, SOL_6]);
+    expect((await refresh()).ok).toBe(true);
+    expect(offeredIds()).toEqual(['new-lite-beta', 'gpt-6-sol']);
+    serveCatalog([BETA, SOL_6], { firstReply: async () => Response.json({ models: [null, { slug: 'gpt-6-sol' }] }) });
+    await refresh();
+    expect(offeredIds()).toEqual(['new-lite-beta', 'gpt-6-sol']);
+  });
+
+  it('does not carry a marker for a model that discovery no longer lists', async () => {
+    persistProvider();
+    serveCatalog([BETA, SOL_6], second([{ slug: 'gpt-6-sol' }]));
+    expect((await refresh()).ok).toBe(true);
+    expect(saved('new-lite-beta')?.withheldAtClientVersion).toBe(CODEX_RESPONSES_LITE_VERSION);
+    serveCatalog([SOL_6], { pinnedReply: async () => new Response('unavailable', { status: 503 }) });
+    expect((await refresh()).ok).toBe(true);
+    expect(reloaded().modelsCache!.models.map(model => model.id)).toEqual(['gpt-6-sol']);
+    expect(offeredIds()).toEqual(['gpt-6-sol']);
   });
 });

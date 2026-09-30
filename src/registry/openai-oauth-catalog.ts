@@ -55,15 +55,6 @@ function readCapabilityFlags(m: Record<string, unknown>): Pick<OpenAiModelEntry,
   };
 }
 
-/**
- * A `null` entry names no model; reading a field off it would fail the whole refresh.
- * Entries whose id is not a string are dropped below, so an answer holding no valid id
- * counts as empty rather than as a list that withholds every model.
- */
-function objectEntries(list: unknown[]): Array<Record<string, unknown>> {
-  return list.filter((m): m is Record<string, unknown> => m !== null && typeof m === 'object');
-}
-
 /** Parse model entries from OpenAI-standard or ChatGPT-internal response shapes. */
 function parseOpenAiModelEntries(body: unknown): OpenAiModelEntry[] {
   if (!body || typeof body !== 'object') return [];
@@ -71,9 +62,9 @@ function parseOpenAiModelEntries(body: unknown): OpenAiModelEntry[] {
 
   // ChatGPT backend format: { models: [{ slug, title }] }
   if (Array.isArray(b.models)) {
-    return objectEntries(b.models)
+    return (b.models as Array<Record<string, unknown>>)
       .map(m => ({
-        id: typeof m.slug === 'string' ? m.slug : '',
+        id: (m.slug as string) ?? '',
         name: (m.title as string) ?? (m.name as string) ?? (m.slug as string) ?? '',
         ...readContextFields(m),
         ...readCapabilityFlags(m),
@@ -82,9 +73,9 @@ function parseOpenAiModelEntries(body: unknown): OpenAiModelEntry[] {
   }
   // Standard OpenAI format: { data: [{ id, name }] }
   if (Array.isArray(b.data)) {
-    return objectEntries(b.data)
+    return (b.data as Array<Record<string, unknown>>)
       .map(m => ({
-        id: typeof m.id === 'string' ? m.id : '',
+        id: (m.id as string) ?? '',
         name: (m.name as string) ?? (m.id as string) ?? '',
         ...readContextFields(m),
         ...readCapabilityFlags(m),
@@ -205,9 +196,10 @@ async function fetchJsonWithAuth(
  * Projection hides a marked row only when it uses Responses-Lite (other requests omit
  * the version) and only while the bundled version is at or below the mark.
  *
- * An unusable or empty answer is no new evidence, so it keeps this account's previous
- * markers on the rows still discovered rather than re-offering a model last seen
- * withheld; it never fails the refresh. A usable answer replaces every marker.
+ * An unusable answer (see `readOfferedIds`) is no new evidence, so it keeps this
+ * account's previous markers on the rows still discovered rather than re-offering a
+ * model last seen withheld; it never fails the refresh. A usable answer replaces every
+ * marker.
  */
 async function markModelsWithheldAtRequestVersion(
   models: CachedModel[],
@@ -220,11 +212,35 @@ async function markModelsWithheldAtRequestVersion(
     accessToken,
     timeoutMs,
   );
-  const offered = new Set(parseOpenAiModelEntries(pinned.body).map(entry => entry.id));
-  if (offered.size === 0) return carryWithheldMarkers(models, previous);
+  const offered = readOfferedIds(pinned.body);
+  if (!offered) return carryWithheldMarkers(models, previous);
   return models.map(model => (offered.has(model.id)
     ? model
     : { ...model, withheldAtClientVersion: CODEX_RESPONSES_LITE_VERSION }));
+}
+
+/**
+ * The ids in the answer at the version clodex sends, or undefined when it proves nothing.
+ * Strict on purpose: a model is hidden for being ABSENT from this list, so an empty
+ * answer, or one with any row lacking a non-blank string id, cannot show that the rows
+ * it fails to name are withheld. Reads the same two shapes as `parseOpenAiModelEntries`.
+ */
+function readOfferedIds(body: unknown): Set<string> | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const record = body as Record<string, unknown>;
+  const shape = Array.isArray(record.models) ? { rows: record.models as unknown[], key: 'slug' }
+    : Array.isArray(record.data) ? { rows: record.data as unknown[], key: 'id' }
+      : undefined;
+  if (!shape || shape.rows.length === 0) return undefined;
+  const ids = new Set<string>();
+  for (const row of shape.rows) {
+    const id = row !== null && typeof row === 'object'
+      ? (row as Record<string, unknown>)[shape.key]
+      : undefined;
+    if (typeof id !== 'string' || id.trim() === '') return undefined;
+    ids.add(id);
+  }
+  return ids;
 }
 
 /**
