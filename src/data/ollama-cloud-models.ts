@@ -9,18 +9,13 @@ type OllamaCloudModel = Pick<CachedModel, 'id' | 'name'>
 
 const OPENAI_COMPATIBLE = '@ai-sdk/openai-compatible';
 
-// TODO(verify): none of these ids exist in src/data/models-dev-cache.json (its
-// `ollama-cloud` entry predates them), so the context windows below are
-// conservative values taken from the closest same-family models there
-// (kimi-k2.6 262144, glm-5.1 202752) — except deepseek-v4.1-flash, which is
-// deliberately set well below its v4-flash sibling's 1048576. Replace with
-// the published limits once confirmed. A too-small window only compacts
-// early; a too-large one breaks auto-compaction.
+// Context windows: `model_info.*.context_length` from ollama.com `/api/show`
+// for each id (measured 2026-10-01: all four report 1048576).
 const CATALOG: OllamaCloudModel[] = [
-  { id: 'kimi-k3', name: 'Kimi K3', contextWindow: 262144, family: 'kimi' },
-  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 202752, family: 'glm' },
-  { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 202752, family: 'glm' },
-  { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', contextWindow: 262144, family: 'deepseek' },
+  { id: 'kimi-k3', name: 'Kimi K3', contextWindow: 1048576, family: 'kimi' },
+  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1048576, family: 'glm' },
+  { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 1048576, family: 'glm' },
+  { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', contextWindow: 1048576, family: 'deepseek' },
 ].map(model => ({
   ...model,
   upstreamModelId: model.id,

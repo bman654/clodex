@@ -22,5 +22,5 @@ Whether `/v1/models` requires authentication is unverified, so the pasted key is
 
 ## Known gaps
 
-- Context windows for the four models are conservative placeholders (marked `TODO(verify)` in the catalog) until confirmed against Ollama's published limits.
+- Context windows come from `model_info.*.context_length` in `https://ollama.com/api/show` (1,048,576 for all four as of 2026-10-01).
 - Reasoning-effort mapping is unverified, so no effort is sent (`supportsReasoningEffort: false`).
