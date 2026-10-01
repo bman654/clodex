@@ -43,6 +43,7 @@ clodex claude                  # 5. launch Claude Code on an OpenAI model
 | OpenAI (ChatGPT / Codex plan) | OAuth | Fully supported by the clodex maintainer |
 | OpenCode Go | API key | Community-supported — maintained by its contributor |
 | Custom OpenAI-compatible server (OpenRouter, vLLM, …) | API key, or none | Community-supported — maintained by its contributor |
+| Ollama Cloud | API key | Community-supported — Chat Completions models only; see [docs](docs/ollama-cloud.md) |
 
 **Community-supported** means the maintainer holds no account for that service,
 so it cannot be exercised against the live API here or debugged when the vendor
@@ -304,7 +305,7 @@ Two things worth knowing about the numbers:
 | Subcommand | Effect |
 | --- | --- |
 | *(none)* | Provider hub wizard |
-| `add` | Add OpenAI or OpenCode Go with an API key, add a custom OpenAI-compatible server by base URL, or sign in with ChatGPT |
+| `add` | Add OpenAI, OpenCode Go or Ollama Cloud with an API key, add a custom OpenAI-compatible server by base URL, or sign in with ChatGPT |
 | `auth openai` | Sign in with ChatGPT/Codex-plan OAuth (device code; `--browser` for workspaces that disable device codes) |
 | `list` | Show configured providers |
 | `remove <id>` | Remove a provider by id |
@@ -331,6 +332,8 @@ A **custom OpenAI-compatible server** is any OpenAI-style API, given by its base
 ### `clodex install-vscode-launcher`
 
 Windows only. Builds `%USERPROFILE%\.clodex\bin\clodex-claude.exe`, the executable the Claude Code VS Code extension can use as its `claudeCode.claudeProcessWrapper`, so chats in the editor launch Claude Code through `clodex-claude` (on Windows npm installs that wrapper as three script shims — extensionless, `.cmd`, `.ps1` — and no executable the extension can spawn). It compiles a short C# source shipped in the package with the compiler already inside the .NET Framework — nothing is downloaded — and prints the setting to paste; it never edits VS Code or Claude settings. The paths to `node.exe` and the clodex install are compiled in, so re-run it after switching Node versions or moving clodex. Like `clodex patch`, it warns when an installed Claude Code extension is a different version from the Claude Code clodex last patched (on any platform). Setup guide: [docs/windows-setup.md](docs/windows-setup.md).
+
+`ollama-cloud` (Ollama Cloud API key) exposes a curated set of Chat Completions models; see [Ollama Cloud provider](docs/ollama-cloud.md).
 
 ### Root
 

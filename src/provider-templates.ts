@@ -9,6 +9,12 @@ import {
   OPENCODE_GO_PROVIDER_NAME,
   openCodeGoSessionHeaders,
 } from './data/opencode-go-models.js';
+import {
+  buildOllamaCloudModels,
+  OLLAMA_CLOUD_COMPLETIONS_BASE_URL,
+  OLLAMA_CLOUD_PROVIDER_ID,
+  OLLAMA_CLOUD_PROVIDER_NAME,
+} from './data/ollama-cloud-models.js';
 
 export type ProviderAuthType = 'api' | 'oauth' | 'none';
 export type ProviderModelSource = 'api-list' | 'static-seed' | 'manual-only';
@@ -128,6 +134,53 @@ export async function verifyOpenCodeGoCredential(apiKey: string): Promise<string
   return null;
 }
 
+/**
+ * Ollama Cloud: it is unknown whether `/v1/models` requires authentication, so
+ * the models fetch cannot be trusted to validate a pasted key. Probe the
+ * authenticated chat-completions endpoint instead. The destination is the
+ * template's own literal, never an argument (a live credential is sent).
+ *
+ * The body names a catalog model but carries no messages: a valid key gets a
+ * request-validation error, a bad key a 401. Only a definite 401/403 rejects;
+ * a 403 that reads as a plan/model entitlement problem, timeouts, network
+ * errors and every other status are inconclusive and pass.
+ */
+export async function verifyOllamaCloudCredential(apiKey: string): Promise<string | null> {
+  const model = buildOllamaCloudModels()[0];
+  if (!model) return null;
+  try {
+    const response = await fetch(`${OLLAMA_CLOUD_COMPLETIONS_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ model: model.upstreamModelId ?? model.id }),
+      signal: AbortSignal.timeout(TEST_TIMEOUT_MS),
+    });
+    if (response.status === 401 || response.status === 403) {
+      let entitlement = false;
+      if (response.status === 403) {
+        const text = await response.text().catch(() => '');
+        entitlement = /\b(?:subscription|plan|upgrade|quota|model|access)\b/i.test(text)
+          && !/\bapi[ _-]?key\b/i.test(text);
+      } else {
+        await response.body?.cancel?.().catch(() => undefined);
+      }
+      if (!entitlement) {
+        return 'Ollama Cloud rejected this API key (authentication failed). Check the key and try again.';
+      }
+    } else {
+      try {
+        await response.body?.cancel?.();
+      } catch { /* only auth rejections matter to the probe */ }
+    }
+  } catch {
+    // Unreachable probe is inconclusive; the models fetch surfaces network errors.
+  }
+  return null;
+}
+
 /** Built-in providers available through `clodex providers add` or OAuth authentication. */
 export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
   {
@@ -138,6 +191,22 @@ export const PROVIDER_TEMPLATES: ProviderTemplate[] = [
     defaultBaseUrl: 'https://api.openai.com/v1',
     signupUrl: 'https://platform.openai.com/api-keys',
     modelSource: 'api-list',
+    supported: true,
+  },
+  {
+    id: OLLAMA_CLOUD_PROVIDER_ID,
+    name: OLLAMA_CLOUD_PROVIDER_NAME,
+    authType: 'api',
+    npm: '@ai-sdk/openai-compatible',
+    defaultBaseUrl: OLLAMA_CLOUD_COMPLETIONS_BASE_URL,
+    modelsPath: '/models',
+    signupUrl: 'https://ollama.com',
+    modelSource: 'api-list',
+    verifyCredential: verifyOllamaCloudCredential,
+    // Getter for the same reason as opencode-go: no eager catalog clone at import.
+    get staticModels() { return buildOllamaCloudModels(); },
+    staticModelPolicy: 'allowlist',
+    preserveModelPricing: true,
     supported: true,
   },
   {
