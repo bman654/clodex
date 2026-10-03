@@ -76,11 +76,12 @@ function configuredAliases(config: PatchScriptModelConfig): Array<{
   const aliases = new Map<string, { id: string; display?: string }>();
   for (const [id, entry] of Object.entries(config)) {
     if (entry.alias === undefined) continue;
-    const alias = String(entry.alias).trim().toLowerCase();
-    aliases.set(alias, {
-      id,
-      ...(entry.display === undefined ? {} : { display: String(entry.display) }),
-    });
+    for (const name of [entry.alias, ...(entry.moreAliases ?? [])]) {
+      aliases.set(String(name).trim().toLowerCase(), {
+        id,
+        ...(entry.display === undefined ? {} : { display: String(entry.display) }),
+      });
+    }
   }
   return [...aliases].map(([alias, entry]) => ({ alias, ...entry }));
 }

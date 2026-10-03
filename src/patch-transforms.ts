@@ -99,6 +99,8 @@ export const PATCH_TRANSFORMS_VERSION = 14;
 
 export interface PatchScriptModelEntry {
   alias?: string;
+  /** Further saved aliases of the same model; each resolves exactly like `alias`. */
+  moreAliases?: string[];
   context?: number;
   /** Human label for the /model picker, e.g. `GPT-5.6 Sol (OpenAI (ChatGPT))`. */
   display?: string;
@@ -213,11 +215,13 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
 
   for (const [id, value] of Object.entries(MODEL_CONFIG)) {
     const spec: PatchScriptModelEntry = value && typeof value === 'object' ? value : { alias: value as unknown as string };
-    if (spec.alias !== undefined) {
-      const rawAlias = String(spec.alias).trim();
-      const a = rawAlias.toLowerCase();
+    const aliasNames = spec.alias === undefined
+      ? []
+      : [String(spec.alias), ...(spec.moreAliases ?? []).map(String)];
+    for (const name of aliasNames) {
+      const a = name.trim().toLowerCase();
       if (!/^[a-z0-9][a-z0-9._-]*(\[1m\])?$/.test(a)) {
-        fail('clodex patch: alias "' + spec.alias + '" is not a safe lowercase alias');
+        fail('clodex patch: alias "' + name + '" is not a safe lowercase alias');
       }
       if (isReservedModelAlias(a)) {
         fail('clodex patch: reserved alias "' + a + '" cannot be reassigned');
@@ -225,12 +229,11 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       ALIAS_TO_ID[a] = String(id);
       IDENTITIES.push(a);
       if (spec.display) DISPLAY_BY_IDENTITY[a] = String(spec.display);
-    } else {
+      registerCapabilityKeys(name);
+    }
+    if (aliasNames.length === 0) {
       IDENTITIES.push(String(id));
       if (spec.display) DISPLAY_BY_IDENTITY[String(id)] = String(spec.display);
-    }
-    if (spec.alias !== undefined) {
-      registerCapabilityKeys(String(spec.alias));
     }
     registerCapabilityKeys(String(id));
 
@@ -242,12 +245,12 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       // A [1m] suffix hard-codes 1M upstream (and sends the context-1m beta header
       // + raises the media cap). An explicit context on a [1m] model would win via
       // PATCH 7 while those side effects silently stayed on — so reject it.
-      if (/\[1m\]/i.test(String(spec.alias ?? '')) || /\[1m\]/i.test(id)) {
+      if (aliasNames.some(name => /\[1m\]/i.test(name)) || /\[1m\]/i.test(id)) {
         fail(
           'clodex patch: "' + id + '" sets context but keeps the [1m] suffix — drop the suffix from both the id and the alias'
         );
       }
-      if (spec.alias !== undefined) CONTEXT_BY_KEY[String(spec.alias).trim().toLowerCase()] = n;
+      for (const name of aliasNames) CONTEXT_BY_KEY[name.trim().toLowerCase()] = n;
       CONTEXT_BY_KEY[String(id).trim().toLowerCase()] = n;
     }
 
@@ -258,8 +261,8 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
           `clodex patch: effort for "${id}" must include low, medium, and high with a native default`,
         );
       }
-      if (spec.alias !== undefined) {
-        for (const key of capabilityKeys(String(spec.alias))) {
+      for (const name of aliasNames) {
+        for (const key of capabilityKeys(name)) {
           EFFORT_BY_KEY[key] = effort;
         }
       }

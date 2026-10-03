@@ -211,23 +211,27 @@ export function buildPatchModelConfig(
       alias: source,
       reason: 'target-not-favorite',
     })));
-  const aliasByFavorite = new Map(
-    normalizedAliases.aliases
-      .filter(alias => favoriteTargets.has(`${alias.providerId}:${alias.modelId}`))
-      .map(alias => [
-        `${alias.providerId}:${alias.modelId}`,
-        alias.name,
-      ]),
-  );
+  // Several saved aliases can name one model (a follow-latest name and a pin that
+  // currently agree). Each must be patched: a Map keyed by target kept only the last,
+  // so the others got no context window and Claude Code fell back to its 200K default.
+  const aliasesByFavorite = new Map<string, string[]>();
+  for (const alias of normalizedAliases.aliases) {
+    const key = `${alias.providerId}:${alias.modelId}`;
+    if (!favoriteTargets.has(key)) continue;
+    const names = aliasesByFavorite.get(key) ?? [];
+    names.push(alias.name);
+    aliasesByFavorite.set(key, names);
+  }
 
   for (const favorite of favorites) {
     const id = stripOneMContextSuffix(httpProxyModelId(favorite.providerId, favorite.modelId));
     if (config[id]) continue;
     const meta = modelMetaFor(favorite.providerId, favorite.modelId);
     const context = meta?.contextWindow;
-    const alias = aliasByFavorite.get(`${favorite.providerId}:${favorite.modelId}`);
+    const [alias, ...moreAliases] = aliasesByFavorite.get(`${favorite.providerId}:${favorite.modelId}`) ?? [];
     const entry: PatchScriptModelConfig[string] = {};
     if (alias) entry.alias = alias;
+    if (moreAliases.length > 0) entry.moreAliases = moreAliases;
     // An absent window and an explicit 200_000 must keep producing the SAME entry: both
     // omit `context`, so `computePatchConfigHash` cannot tell them apart. That equality is
     // what lets a model stop persisting the invented default without marking every patched
@@ -282,6 +286,8 @@ export function computePatchConfigHash(
       entry.display ?? null,
       entry.effort?.levels ?? null,
       entry.effort?.defaultLevel ?? null,
+      // Appended only when present, so a config with one alias per model keeps its hash.
+      ...(entry.moreAliases ? [entry.moreAliases] : []),
     ];
   });
   const payload: unknown[] = [transformsVersion, canonical];
@@ -1206,7 +1212,8 @@ export async function applyPatch(
   writePatchManifest(manifest);
 
   const modelCount = Object.keys(desired.config).length;
-  const aliasCount = Object.values(desired.config).filter(entry => entry.alias).length;
+  const aliasCount = Object.values(desired.config)
+    .reduce((n, entry) => n + (entry.alias ? 1 : 0) + (entry.moreAliases?.length ?? 0), 0);
   const windowCount = Object.values(desired.config).filter(entry => entry.context).length;
   return {
     ok: true,

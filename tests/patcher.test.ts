@@ -680,7 +680,7 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
       version: 14,
-      digest: '1ddec6f36b84fce97388f75a7aae913f894fe7a86e30713df5a9c8d5ccc899ea',
+      digest: '25ad534634f2c7ca0b25022299bfd8bbb0372810ebe591743661c4b02f4db1fd',
     });
   });
 });
@@ -3783,5 +3783,40 @@ describe('patch script identity naming', () => {
       'clodex:openai-oauth:gpt-5.6-sol[1m]',
       'medium',
     )).toBe('medium');
+  });
+});
+
+describe('several saved aliases naming one model', () => {
+  const aliases = [
+    { name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-6.1-sol' },
+    { name: 'sol61', providerId: 'openai-oauth', modelId: 'gpt-6.1-sol' },
+  ];
+  const favorites = [{ providerId: 'openai-oauth', modelId: 'gpt-6.1-sol' }];
+  const meta = () => ({ contextWindow: 872_000 });
+
+  it('keeps every alias, the first saved one as the primary', () => {
+    const { config } = buildPatchModelConfig(favorites, aliases, meta);
+    expect(config['clodex:openai-oauth:gpt-6.1-sol']).toEqual({
+      alias: 'sol',
+      moreAliases: ['sol61'],
+      context: 872_000,
+    });
+  });
+
+  it('gives each alias the context window and resolution, not only the last one', () => {
+    const { config } = buildPatchModelConfig(favorites, aliases, meta);
+    const out = applyClodexPatches(CLAUDE_FIXTURE, config).content;
+    expect(out).toContain('"sol":872000');
+    expect(out).toContain('"sol61":872000');
+    expect(out).toContain('case"sol":return "sol";');
+    expect(out).toContain('case"sol61":return "sol61";');
+  });
+
+  it('leaves the config hash of a one-alias-per-model config unchanged', () => {
+    const single = { 'clodex:openai-oauth:gpt-6.1-sol': { alias: 'sol', context: 872_000 } };
+    const withEmpty = { 'clodex:openai-oauth:gpt-6.1-sol': { alias: 'sol', context: 872_000, moreAliases: undefined } };
+    expect(computePatchConfigHash(withEmpty)).toBe(computePatchConfigHash(single));
+    const multi = buildPatchModelConfig(favorites, aliases, meta).config;
+    expect(computePatchConfigHash(multi)).not.toBe(computePatchConfigHash(single));
   });
 });
