@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.18.8](https://github.com/bman654/clodex/compare/v2.18.7...v2.18.8) (2026-10-05)
+
+
+### Bug Fixes
+
+* **models:** stop extra aliases of a model falling back to a 200K context window ([#309](https://github.com/bman654/clodex/issues/309)) ([7ad8ae6](https://github.com/bman654/clodex/commit/7ad8ae652795c612b6d8d8cef60b2c654339f467))
+* **opencode-go:** make DeepSeek V4.1 Flash answer again via the endpoint OpenCode documents ([#310](https://github.com/bman654/clodex/issues/310)) ([14eee0d](https://github.com/bman654/clodex/commit/14eee0dc561b09bf86e3575d97bd021e5d3e94bb))
+
 ## [2.18.7](https://github.com/bman654/clodex/compare/v2.18.6...v2.18.7) (2026-09-30)
 
 
