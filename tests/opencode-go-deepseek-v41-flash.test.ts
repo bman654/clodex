@@ -1,10 +1,18 @@
+import { mkdtempSync, rmSync } from 'node:fs';
 import http from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { savePreferences } from '../src/config.js';
+import { loadHttpProxyRoutes } from '../src/http-proxy/index.js';
 import { buildHttpProxyRoutes } from '../src/http-proxy/routes.js';
 import { localProvidersToServerModels } from '../src/provider-catalog.js';
 import { startProxyCatalog } from '../src/proxy.js';
+import { loadRegistry, saveRegistry } from '../src/registry/io.js';
+import { withRegistryWriteLockSync } from '../src/registry/lock.js';
 import { materializeRegistry } from '../src/registry/materialize.js';
 import type { CachedModel, ProviderRegistry } from '../src/registry/types.js';
+import { loadServerModels } from '../src/server/index.js';
 import { createGatewayModelCatalog } from '../src/server/models.js';
 import { startServer } from '../src/server/router.js';
 
@@ -82,7 +90,13 @@ function existingInstallRegistry(): ProviderRegistry {
       api: { npm: '@ai-sdk/openai-compatible', url: 'https://opencode.ai/zen/go/v1' },
       modelsCache: {
         fetchedAt: '2026-09-20T00:00:00.000Z',
-        models: [structuredClone(LEGACY_V41_FLASH_ROW), structuredClone(LEGACY_QWEN_ROW)],
+        models: [
+          structuredClone(LEGACY_V41_FLASH_ROW),
+          structuredClone(LEGACY_QWEN_ROW),
+          // V4 Flash's catalog entry is unchanged by #308, so the bare row is
+          // enough: the projection supplies the rest, as it always has.
+          discovered('deepseek-v4-flash'),
+        ],
       },
       addedAt: '2026-09-20T00:00:00.000Z',
     }],
@@ -275,8 +289,89 @@ function expectGoChatCompletionsWire(captured: CapturedRequest[]): void {
   });
 }
 
+const GO_KEY_ENV = 'CLODEX_TEST_I308_GO_KEY';
+const homes: string[] = [];
+
+/**
+ * Write the existing-install registry where clodex's own loaders read it, with
+ * V4.1 Flash and V4 Flash as favorites, so a test can start from the same
+ * loaders `clodex claude` (proxy) and `clodex server` (endpoint) use.
+ */
+function persistExistingInstall(): void {
+  const home = mkdtempSync(join(tmpdir(), 'clodex-i308-'));
+  homes.push(home);
+  vi.stubEnv('CLODEX_HOME', home);
+  vi.stubEnv(GO_KEY_ENV, GO_KEY);
+  // A process-scoped key override would block the provider; make sure none leaks in.
+  vi.stubEnv('CLODEX_KEY_OPENCODE_GO', undefined);
+  const registry = existingInstallRegistry();
+  registry.providers[0]!.authRef = `env:${GO_KEY_ENV}`;
+  withRegistryWriteLockSync(() => saveRegistry(registry));
+  savePreferences({
+    favoriteModels: [
+      { providerId: 'opencode-go', modelId: 'deepseek-v4.1-flash' },
+      { providerId: 'opencode-go', modelId: 'deepseek-v4-flash' },
+    ],
+  });
+}
+
+type Send = (modelId: string, body: Record<string, unknown>) => Promise<{ status: number; body: string }>;
+
+/** Start the gateway a bridge mode really starts, from the persisted install. */
+async function openGateway(mode: 'proxy' | 'endpoint'): Promise<{ send: Send; close: () => Promise<void> }> {
+  if (mode === 'proxy') {
+    const { routes } = await loadHttpProxyRoutes();
+    const handle = await startProxyCatalog(routes, routes[0]!.aliasId, false);
+    return {
+      send: (modelId, body) => post(handle.port, '/v1/messages', {
+        ...body,
+        model: routes.find(route => route.realModelId === modelId)!.aliasId,
+      }, { authorization: `Bearer ${handle.token}`, 'x-claude-code-session-id': SESSION_ID }),
+      close: async () => handle.close(),
+    };
+  }
+  // loadServerModels, not a hand-built catalog: it is what gives each model
+  // `clodex server`'s default effort for requests that name none.
+  const server = await startServer({
+    host: '127.0.0.1',
+    port: 0,
+    apiKey: 'unused-server-key',
+    serverPassword: null,
+    catalog: createGatewayModelCatalog(await loadServerModels()),
+  });
+  return {
+    send: (modelId, body) => post(server.port, '/anthropic/v1/messages', {
+      ...body,
+      model: `clodex:opencode-go:${modelId}`,
+    }, { 'x-claude-code-session-id': SESSION_ID }),
+    close: () => server.close(),
+  };
+}
+
+/**
+ * The reasoning fields every Claude Code effort level must produce, per bridge
+ * mode, written out rather than derived: `high` and `max` pass through with
+ * DeepSeek's thinking switch, and every other level sends neither field.
+ * A request with no effort differs by mode — the proxy sends nothing, while
+ * `clodex server` applies the model's default level, which for this ladder is
+ * high.
+ */
+const EFFORT_MATRIX: Array<{ effort?: string; proxy?: 'high' | 'max'; endpoint?: 'high' | 'max' }> = [
+  { effort: 'low' },
+  { effort: 'medium' },
+  { effort: 'high', proxy: 'high', endpoint: 'high' },
+  { effort: 'xhigh' },
+  { effort: 'max', proxy: 'max', endpoint: 'max' },
+  { effort: 'none' },
+  { effort: 'minimal' },
+  { effort: 'off' },
+  { endpoint: 'high' },
+];
+
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
+  while (homes.length) rmSync(homes.pop()!, { recursive: true, force: true });
 });
 
 describe('DeepSeek V4.1 Flash on an existing OpenCode Go install', () => {
@@ -430,4 +525,68 @@ describe('DeepSeek V4.1 Flash on an existing OpenCode Go install', () => {
     expect(captured[0]!.body).not.toHaveProperty('reasoning_effort');
     expect(captured[0]!.body).not.toHaveProperty('thinking');
   });
+});
+
+describe('DeepSeek V4.1 Flash reasoning effort, from a persisted install', () => {
+  for (const mode of ['proxy', 'endpoint'] as const) {
+    it(`${mode} mode sends each effort level exactly as V4 Flash does`, async () => {
+      persistExistingInstall();
+      const captured = stubUpstream([]);
+      const gateway = await openGateway(mode);
+      try {
+        for (const { effort } of EFFORT_MATRIX) {
+          for (const modelId of ['deepseek-v4.1-flash', 'deepseek-v4-flash']) {
+            const res = await gateway.send(modelId, {
+              max_tokens: 1234,
+              stream: false,
+              system: 'You are terse.',
+              tools: [READ_TOOL],
+              messages: [{ role: 'user', content: 'hi' }],
+              ...(effort ? { output_config: { effort } } : {}),
+            });
+            expect(res.status, `${modelId} effort=${effort}: ${res.body}`).toBe(200);
+          }
+        }
+      } finally {
+        await gateway.close();
+      }
+      // Loading routed from the old cache without rewriting it: no refresh happened.
+      expect(loadRegistry().providers[0]!.modelsCache!.models[0]).toMatchObject({
+        id: 'deepseek-v4.1-flash', npm: '@ai-sdk/anthropic',
+      });
+
+      expect(captured).toHaveLength(EFFORT_MATRIX.length * 2);
+      EFFORT_MATRIX.forEach((row, index) => {
+        const label = `effort=${row.effort ?? '(none sent)'}`;
+        const v41 = captured[index * 2]!;
+        const v4 = captured[index * 2 + 1]!;
+        expect(v41.url, label).toBe(GO_COMPLETIONS_URL);
+        expect(v41.headers.get('authorization'), label).toBe(`Bearer ${GO_KEY}`);
+        expect(v41.headers.get('x-api-key'), label).toBeNull();
+        expect(v41.headers.get('x-opencode-session'), label).toBe(SESSION_ID);
+        expect(v41.body.model, label).toBe('deepseek-v4.1-flash');
+        expect(v41.body.max_tokens, label).toBe(1234);
+        expect(v41.body, label).not.toHaveProperty('max_completion_tokens');
+        expect(v41.body, label).not.toHaveProperty('store');
+
+        const expected = row[mode];
+        if (expected) {
+          expect(v41.body.reasoning_effort, label).toBe(expected);
+          expect(v41.body.thinking, label).toEqual({ type: 'enabled' });
+        } else {
+          expect(v41.body, label).not.toHaveProperty('reasoning_effort');
+          expect(v41.body, label).not.toHaveProperty('thinking');
+        }
+
+        // Differential: V4.1 Flash must reach Go exactly as V4 Flash does, bar
+        // its id, so no V4.1-only divergence can hide behind a shared change.
+        expect(v4.body.model, label).toBe('deepseek-v4-flash');
+        expect(v41.url, label).toBe(v4.url);
+        expect(Object.fromEntries(v41.headers), label).toEqual(Object.fromEntries(v4.headers));
+        const { model: _v41Model, ...v41Rest } = v41.body;
+        const { model: _v4Model, ...v4Rest } = v4.body;
+        expect(v41Rest, label).toEqual(v4Rest);
+      });
+    });
+  }
 });
