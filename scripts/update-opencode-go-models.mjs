@@ -36,10 +36,17 @@ const ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go';
 // once its transport is verified against the live endpoint. Responses-only
 // models ride 'openai-responses' (the @ai-sdk/openai Responses path) only once
 // verified; grok and GPT ids other than the two Lunas are still unmapped.
+// One entry (deepseek-v4.1-flash) is taken from OpenCode's per-model Go
+// endpoint table rather than a live probe; its comment says so.
 const TRANSPORTS = Object.assign(Object.create(null), {
   'deepseek-v4-flash': 'openai-completions',
-  // Measured 2026-09-11: V4.1 Flash answers on /v1/messages (thinking block + text).
-  'deepseek-v4.1-flash': 'anthropic-messages',
+  // OpenCode's Go docs (go.mdx endpoint table) list V4.1 Flash on
+  // /v1/chat/completions with @ai-sdk/openai-compatible, like every Go
+  // DeepSeek, and models.dev gives it no Anthropic SDK override. Not probed
+  // live. Do not move it back to 'anthropic-messages' on the strength of a
+  // probe that answers there: one did, and that route was later reported
+  // failing every request with 422 "Endpoint is unavailable" (#308).
+  'deepseek-v4.1-flash': 'openai-completions',
   'deepseek-v4-pro': 'openai-completions',
   'glm-5.2': 'openai-completions',
   'gpt-5.6-luna': 'openai-completions',
@@ -96,6 +103,19 @@ const PATCHES = Object.assign(Object.create(null), {
   'muse-spark-1.2-contributor': { supportsReasoningEffort: false },
   'muse-spark-1.3-contributor': { supportsReasoningEffort: false },
   'deepseek-v4-flash': {
+    reasoningEffortMap: { minimal: null, low: null, medium: null, high: 'high', max: 'max' },
+    supportsStore: false,
+    supportsDeveloperRole: false,
+    maxTokensField: 'max_tokens',
+    requiresReasoningContentOnAssistantMessages: true,
+    thinkingFormat: 'deepseek',
+  },
+  'deepseek-v4.1-flash': {
+    // The same block as deepseek-v4-flash. models.dev publishes the same
+    // reasoning_content interleaving and the same low/high/max ladder for both,
+    // and DeepSeek's thinking mode needs reasoning_content back on every
+    // assistant turn of a request that carries tools. `low` stays unsent, as on
+    // V4 Flash, until it is validated against the gateway for both models.
     reasoningEffortMap: { minimal: null, low: null, medium: null, high: 'high', max: 'max' },
     supportsStore: false,
     supportsDeveloperRole: false,

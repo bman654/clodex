@@ -15,7 +15,7 @@ Choose **OpenCode Go API key**, paste an API key from OpenCode, then use `clodex
 The provider uses one credential with three upstream wire protocols:
 
 - Anthropic Messages models are passed through to `https://opencode.ai/zen/go/v1/messages`.
-- OpenAI Chat Completions models are translated through the OpenAI-compatible SDK at `https://opencode.ai/zen/go/v1/chat/completions`.
+- OpenAI Chat Completions models are translated through the OpenAI-compatible SDK at `https://opencode.ai/zen/go/v1/chat/completions`. Every DeepSeek model rides this endpoint, DeepSeek V4.1 Flash included: OpenCode's Go docs list it here, and clodex's earlier Messages route for it was reported failing every request with `422 Endpoint is unavailable` (#308).
 - OpenAI Responses models are translated through the OpenAI SDK at `https://opencode.ai/zen/go/v1/responses`. Go serves GPT-6 Luna and the Muse Spark contributor models on this endpoint only; GPT-6 Luna returns `ModelProtocolUnsupported` on Chat Completions and Messages.
 
 The selective proxy diverts only explicit `clodex:opencode-go:...` model ids or saved aliases. Ordinary Claude model traffic remains on Claude Code's native Anthropic connection.
@@ -24,7 +24,7 @@ The Messages and Chat Completions endpoints require an `x-opencode-session` head
 
 ## Supported transport scope
 
-A model reaches the catalog only once its transport has been verified against the live endpoint; any id the updater cannot map is reported and left out. Grok and GPT models other than GPT-5.6 Luna and GPT-6 Luna are still absent on that basis. Responses-API models are no longer excluded as a class — a catalog entry says so by carrying the `@ai-sdk/openai` package, which is what routes it to `/v1/responses`. The provider record itself still names `@ai-sdk/openai-compatible`, and model discovery and refresh continue to refuse any other package for it.
+A model reaches the catalog only once its transport has been verified — against the live endpoint, or, for DeepSeek V4.1 Flash, against OpenCode's own per-model Go endpoint table (no live probe was available for #308); any id the updater cannot map is reported and left out. Grok and GPT models other than GPT-5.6 Luna and GPT-6 Luna are still absent on that basis. Responses-API models are no longer excluded as a class — a catalog entry says so by carrying the `@ai-sdk/openai` package, which is what routes it to `/v1/responses`. The provider record itself still names `@ai-sdk/openai-compatible`, and model discovery and refresh continue to refuse any other package for it.
 
 Live `/models` results are treated as availability data. Clodex layers its committed catalog over those results to supply the correct protocol, endpoint, context window, modalities, pricing, and compatibility behavior per model. Models absent from the committed allowlist are hidden even when the live endpoint advertises them.
 
@@ -36,6 +36,6 @@ The committed catalog is generated directly from OpenCode's own catalog service 
 pnpm update:opencode-go
 ```
 
-The updater takes per-model metadata (name, context window, base cost, modalities) from models.dev and merges it with the transport map and compatibility patches maintained in `scripts/update-opencode-go-models.mjs` — models.dev does not publish wire transports, and per-model routing is live-validated clodex knowledge. Higher-rate pricing boundaries, such as GPT-6 Luna's at 272,000 tokens, are curated from OpenCode Go's own pricing table; models.dev publishes the same tier, but the updater does not read pricing tiers from the feed. Only transport-mapped ids enter the catalog; new models on models.dev are reported as unmapped so their transport can be verified against the live endpoint before they ship. The script records the fetch time in `OPENCODE_GO_SOURCE_FETCHED_AT`.
+The updater takes per-model metadata (name, context window, base cost, modalities) from models.dev and merges it with the transport map and compatibility patches maintained in `scripts/update-opencode-go-models.mjs` — models.dev publishes no per-model endpoint (for some models only an SDK-package override), so per-model routing is clodex knowledge, validated against the live endpoint or OpenCode's Go endpoint table. Where the two disagree, prefer the table: DeepSeek V4.1 Flash answered a live probe on Messages, which its docs never listed, and that route was later reported failing every request (#308). Higher-rate pricing boundaries, such as GPT-6 Luna's at 272,000 tokens, are curated from OpenCode Go's own pricing table; models.dev publishes the same tier, but the updater does not read pricing tiers from the feed. Only transport-mapped ids enter the catalog; new models on models.dev are reported as unmapped so their transport can be verified against the live endpoint before they ship. The script records the fetch time in `OPENCODE_GO_SOURCE_FETCHED_AT`.
 
 Review catalog, pricing, endpoint, and compatibility changes before committing generated output. In particular, a model changing between Anthropic Messages, Chat Completions, and Responses is a routing change rather than a cosmetic catalog refresh.

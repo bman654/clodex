@@ -74,17 +74,27 @@
       "output": 0.6,
       "cache_read": 0.003
     },
-    "modelFormat": "anthropic",
-    "npm": "@ai-sdk/anthropic",
-    "apiUrl": "https://opencode.ai/zen/go",
+    "modelFormat": "openai",
+    "npm": "@ai-sdk/openai-compatible",
+    "apiUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
     "modalities": [
       "text",
       "image"
     ],
     "compatibility": {
-      "supportsCountTokens": false,
-      "supportsReasoningEffort": false
+      "reasoningEffortMap": {
+        "minimal": null,
+        "low": null,
+        "medium": null,
+        "high": "high",
+        "max": "max"
+      },
+      "supportsStore": false,
+      "supportsDeveloperRole": false,
+      "maxTokensField": "max_tokens",
+      "requiresReasoningContentOnAssistantMessages": true,
+      "thinkingFormat": "deepseek"
     },
     "upstreamModelId": "deepseek-v4.1-flash",
     "family": "deepseek"

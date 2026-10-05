@@ -90,6 +90,8 @@ describe('opencode-go catalog invariants', () => {
     const hostileNames = ['constructor', 'toString', '__proto__', 'hasOwnProperty'];
     const effortValues = {
       'deepseek-v4-flash': ['high', 'max'],
+      // The ladder the live feed publishes; the local map sends only high/max of it.
+      'deepseek-v4.1-flash': ['low', 'high', 'max'],
       'deepseek-v4-pro': ['high', 'max'],
       'glm-5.2': ['high', 'max'],
       'gpt-5.6-luna': ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
@@ -158,6 +160,25 @@ describe('opencode-go catalog invariants', () => {
       expect(luna?.compatibility?.reasoningEffortMap).toEqual({
         none: 'none', low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh', max: 'max',
       });
+      // Routing is local-only too: the fixture feed names no endpoint, so V4.1
+      // Flash reaching Chat Completions with DeepSeek's wire quirks is the
+      // script's own transport map and patch at work (#308).
+      const v41 = (regenerated as Array<Record<string, unknown>>)
+        .find(model => model.id === 'deepseek-v4.1-flash');
+      expect(v41).toMatchObject({
+        modelFormat: 'openai',
+        npm: '@ai-sdk/openai-compatible',
+        apiUrl: 'https://opencode.ai/zen/go/v1',
+        compatibility: {
+          reasoningEffortMap: { minimal: null, low: null, medium: null, high: 'high', max: 'max' },
+          requiresReasoningContentOnAssistantMessages: true,
+          thinkingFormat: 'deepseek',
+          maxTokensField: 'max_tokens',
+          supportsStore: false,
+          supportsDeveloperRole: false,
+        },
+      });
+      expect(v41?.compatibility).not.toHaveProperty('supportsCountTokens');
       for (const hostileName of hostileNames) {
         expect(regenerated.some(model => model.id === hostileName)).toBe(false);
       }

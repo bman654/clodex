@@ -53,8 +53,8 @@ describe('OpenCode Go catalog', () => {
     expect(new Set(ids).size).toBe(models.length);
     expect(ids).not.toContain('grok-4.5');
     expect(new Set(models.map(model => model.modelFormat))).toEqual(new Set(['anthropic', 'openai']));
-    expect(models.filter(model => model.modelFormat === 'anthropic')).toHaveLength(5);
-    expect(models.filter(model => model.modelFormat === 'openai')).toHaveLength(15);
+    expect(models.filter(model => model.modelFormat === 'anthropic')).toHaveLength(4);
+    expect(models.filter(model => model.modelFormat === 'openai')).toHaveLength(16);
     expect(models.filter(model => model.npm === '@ai-sdk/openai').map(model => model.id).sort())
       .toEqual(['gpt-6-luna', 'muse-spark-1.2-contributor', 'muse-spark-1.3-contributor']);
     // clodex sends graded effort only for recognised OpenAI/Codex families, so
@@ -111,13 +111,21 @@ describe('OpenCode Go catalog', () => {
       } },
       cost: { input: 0.1, output: 0.5, cache_read: 0.01, cache_write: 0.125 },
     });
-    expect(byId.get('deepseek-v4.1-flash')).toMatchObject({
-      modelFormat: 'anthropic',
-      npm: '@ai-sdk/anthropic',
-      apiUrl: OPENCODE_GO_ANTHROPIC_BASE_URL,
-      contextWindow: 1_000_000,
+    // OpenCode's Go docs list V4.1 Flash on Chat Completions, and its Messages
+    // route was reported failing every request with 422 (#308). Apart from its
+    // name and image input, it is V4 Flash's entry.
+    expect(byId.get('deepseek-v4.1-flash')).toEqual({
+      ...byId.get('deepseek-v4-flash'),
+      id: 'deepseek-v4.1-flash',
+      name: 'DeepSeek V4.1 Flash',
+      upstreamModelId: 'deepseek-v4.1-flash',
       modalities: ['text', 'image'],
-      compatibility: { supportsReasoningEffort: false, supportsCountTokens: false },
+    });
+    expect(byId.get('deepseek-v4.1-flash')).toMatchObject({
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai-compatible',
+      apiUrl: OPENCODE_GO_COMPLETIONS_BASE_URL,
+      contextWindow: 1_000_000,
     });
   });
 
