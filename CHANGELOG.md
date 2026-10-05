@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.18.9](https://github.com/bman654/clodex/compare/v2.18.8...v2.18.9) (2026-10-05)
+
+
+### Bug Fixes
+
+* **proxy:** let Python 3.13+ tools connect to Anthropic through the clodex proxy ([#312](https://github.com/bman654/clodex/issues/312)) ([27808ba](https://github.com/bman654/clodex/commit/27808bac70faacea674949fb3101243ba6f69ac3))
+
 ## [2.18.8](https://github.com/bman654/clodex/compare/v2.18.7...v2.18.8) (2026-10-05)
 
 
