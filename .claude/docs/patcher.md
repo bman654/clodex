@@ -358,11 +358,13 @@ relocates the Bun section and strands its old copy; that is independent of the r
     still making it impossible to consume the enclosing function's closing brace, which would need
     an *unmatched closing* one;
   * the tail is `return <copy>}` where `<copy>` is **back-referenced** from the merged copy the
-    builder declares (`let <copy>={...process.env,...}`), so it survives a rename of that copy and
+    builder declares — through 2.1.289 the first declarator after the passthrough
+    (`let <copy>={...process.env,...}`), from 2.1.290 a later declarator of that same statement
+    (see the 2.1.290 entry below) — so it survives a rename of that copy and
     steps over a nested return of some *other* variable. It is rename-resistant, not
     refactor-proof. It does NOT prove the match stopped on
     the function's own brace — the walk below does that.
-  Identity is carried by the passthrough early-out — `)return process.env;let <copy>={` —
+  Identity is carried by the passthrough early-out — `)return process.env;let <first>={` —
   counted across the WHOLE bundle before the anchor runs, the same discipline PATCH 5 uses. Over
   29 real bundles (2.1.208 through all eight 2.1.239 builds) it occurs exactly once and exactly one
   head candidate precedes it; on the 21 pre-2.1.239 bundles the widened anchor's matched span is
@@ -446,6 +448,27 @@ relocates the Bun section and strands its old copy; that is independent of the r
   `.claude/harnesses/cc260-patch10-execute-real-builder` extracts the patched builder from each of
   the eight bundles, checks that their first-occurrence identifier-token skeletons are identical,
   and executes each one; copy it when a release moves the builder again.
+- **And again at the other end.** Claude Code 2.1.290 kept the head, the passthrough and every
+  other landmark of the child-env builder, and reordered the statement right after the passthrough.
+  Through 2.1.289 that statement declared the merged copy FIRST and the builder returned it
+  (`let E={...process.env,...s,...r,...d},…return E}`); 2.1.290 lays the settings env for children
+  (`settingsEnvForChildren`, which replaced `settingsColorEnv`) over a base copy *before* the
+  passthrough and then declares an overlay first and the copy second
+  (`let Z={...r,...m},E={...i};…return E}`). The tail back-referenced the first declarator, looked
+  for `return Z}`, found none, and `clodex patch` refused all eight published builds. The
+  back-reference may now skip earlier declarators of that same statement, over the same run the
+  head uses (`[^;{}]` or one balanced `{...}` group), and the skip is **lazy** so the first
+  declarator is tried first: over 67 measured pre-2.1.290 bundle files (2.1.208 through 2.1.289)
+  the whole `applyClodexPatches` output is byte-identical to version 14's. **Widen the count with
+  the tail.** The whole-bundle passthrough count uses the same declarator run, so every site the
+  tail could bind is counted; a review constructed a silent wrong bind (a decoy whose first
+  declarator is a call, plus a builder whose own tail broke) against a count left narrow. Narrow and
+  widened, the count is exactly one in all 75 measured bundle files. Within the builder the brace
+  walk still requires the match to end on the builder's own closing brace whichever declarator the
+  tail ties to. The skip is lazy and never retried, so a first declarator that is itself returned
+  from a nested block refuses loudly even when a later one would bind — no measured build does
+  that. `.claude/harnesses/cc290-patch10-execute-real-builder` executes the patched builder from all
+  eight 2.1.290 bundles on both sides of the new settings-env branch.
 - **Calibrate a patch-anchor weakness by corpus reachability and by which direction it fails, not
   by whether an attack can be constructed** — one always can, against every site we ship.
   PATCH 5's surviving hole needs upstream to make two coordinated changes at once (respell its own

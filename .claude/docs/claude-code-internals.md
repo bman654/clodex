@@ -227,7 +227,7 @@ The models-list fetch validates only `{id, display_name, description}`. The serv
 lookup is unreachable anyway: it is gated on the Anthropic base URL being `api.anthropic.com`, and
 `src/env.ts` points the child at `127.0.0.1`.
 
-## The shared child-environment builder (verified 2.1.221, re-verified 2.1.239 and 2.1.260)
+## The shared child-environment builder (verified 2.1.221, re-verified 2.1.239, 2.1.260 and 2.1.290)
 
 The shared child-env builder — `pH()` in 2.1.221, with 14 call sites there and 16 in every 2.1.239
 build. The split that matters for bridge isolation:
@@ -242,18 +242,24 @@ builds of 2.1.239, which moved the agent-proxy env behind a registry lookup
 (`{settingsColorEnv:n}=e`), added a second computed deny list, and **deleted** the GitHub-Actions
 `INPUT_${…}` scrub from the tail entirely, and `Ai()`/`wi()`/`Es()`/`Rs()`/`Ti()` across the builds
 of 2.1.260, which stopped asking `process.env` whether it is running remote and reads the flag off
-the typed env accessor instead (`i=a.CLAUDE_CODE_REMOTE===!0`). That is why PATCH 10's anchor
+the typed env accessor instead (`i=a.CLAUDE_CODE_REMOTE===!0`), and `us()` (darwin-arm64) in
+2.1.290, which replaced the settings-colour env with the full settings env for children
+(`{settingsEnvForChildren:s}=e`), laid it over a base copy before the passthrough
+(`i=process.env;if(c){i={...process.env};for(…)i[Crt(i,p)]=A}`), and declared an overlay ahead of
+the returned copy (`let Z={...r,...m},E={...i};…return E}`). That is why PATCH 10's anchor
 identifies the function by landmarks inside its body that survive all of that — the agent-proxy env
 it folds in (`getAgentProxyEnv`, spelled inline by every measured builder from 2.1.246 on, with the
 `CLAUDE_CODE_REMOTE` ternary the measured 2.1.238 builder uses still accepted as the alternative),
-the passthrough early-out `)return process.env;let <copy>={` (counted across the
-whole bundle), the back-referenced `return <copy>}` tail, and the required-literal, nested-function
+the passthrough early-out `)return process.env;let <first>={` (counted across the
+whole bundle), the `return <copy>}` tail back-referenced to a declarator of that statement, and the
+required-literal, nested-function
 and brace-balance checks — rather than by counting bindings or by naming a statement upstream is
 free to delete.
 
 **Two paths overlay the child env AFTER PATCH 10's restore, and neither is inside the builder.**
-The merge is `{...<restored>,...<settingsColour>,...<agentProxy>,...<remote>}`, so the agent-proxy
-helper wins over the reverted values. Its active branch returns Claude Code's own proxy and is
+The merge is `{...<restored>,...<settingsColour>,...<agentProxy>,...<remote>}` (from 2.1.290:
+settings env for children laid over a copy of `<restored>`, then `{...<agentProxy>,...<remote>}`
+assigned over that), so the agent-proxy helper wins over the reverted values. Its active branch returns Claude Code's own proxy and is
 meant to be authoritative. Its **disabled fallback** is the one to know about: gated on ambient
 `HTTPS_PROXY && SSL_CERT_FILE`, it copies the live ambient proxy variables forward — and under
 clodex the ambient `HTTPS_PROXY` *is* the injection, so the bridge URL reaches the child. Verified
@@ -279,6 +285,12 @@ built with `pH()` env.
 **Settings-sourced env is applied AFTER any wrapper snapshot.** `S7()`/`mht()` do
 `Object.assign(process.env, phr(<settings>.env, scope))` per scope, and the recorder keeps only
 `NO_COLOR`/`FORCE_COLOR` — so settings-level proxy or CA values get no second chance inside `pH()`.
+**2.1.290 changed the recorder** (`se()`, darwin-arm64): a key is held in `settingsEnvForChildren`
+— and NOT assigned to `process.env` — when it is `NO_COLOR`/`FORCE_COLOR` or a gate `W(key, value)`
+says so; every other key is still assigned to `process.env`. The gate itself was not enumerated.
+Either way the builder lays `settingsEnvForChildren` over a copy of the RESTORED env, so a held
+settings-level proxy still beats PATCH 10's revert — measured by executing the patched builder from
+all eight 2.1.290 bundles (`.claude/harnesses/cc290-patch10-execute-real-builder`).
 
 **The `utn()` allowlist branch is not a leak path.** Several Bash spawns use
 `utn() ? {...KIs(), ...Qdt()} : pH()`, and `KIs()` copies only

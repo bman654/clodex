@@ -94,8 +94,19 @@ import {
  * injects is unreachable and /model shows no clodex model at all. Existing
  * installs have to repatch to receive the new site, which is exactly what the
  * bump is for.
+ *
+ * 15 — PATCH 10 stopped recognising Claude Code 2.1.290 on all eight published
+ * builds. Its tail was tied by back-reference to the FIRST variable declared after
+ * the passthrough early-out, which through 2.1.289 was always the merged copy the
+ * builder returns. 2.1.290 lays the settings env for children over a base copy
+ * before the early-out and then declares an overlay first and the returned copy
+ * second (`let Z={...r,...m},E={...i};…return E}`), so the tail looked for
+ * `return Z}` and found none. The tail may now bind any declarator of that same
+ * statement, the first preferred. Like 12, this bump rescues nobody by itself: on
+ * every measured pre-2.1.290 bundle the output is byte-identical to version 14's,
+ * and a 2.1.290 install was never patched. It is bumped because the anchor changed.
  */
-export const PATCH_TRANSFORMS_VERSION = 14;
+export const PATCH_TRANSFORMS_VERSION = 15;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -905,17 +916,37 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   //
   //   * tail — through 2.1.238 the builder ended by scrubbing GitHub Actions
   //     inputs (``delete p[`INPUT_${f}`]``); 2.1.239 dropped that entirely. The
-  //     tail is now tied to the merged copy by BACK-REFERENCE: the same variable
-  //     the builder declares for `{...process.env,...}` is the one it returns at
-  //     the end. That survives a RENAME of the merged copy in a way a named
-  //     statement does not — but it is not refactor-proof, and it does NOT prove
-  //     we stopped at the function's own closing brace. It can stop short at a
-  //     nested `return <copy>}`, and if the builder's own final return is ever
+  //     tail is now tied to the merged copy by BACK-REFERENCE: a variable the
+  //     builder declares in the `let` statement right after the passthrough is the
+  //     one it returns at the end. That survives a RENAME of the merged copy in a
+  //     way a named statement does not — but it is not refactor-proof, and it does
+  //     NOT prove we stopped at the function's own closing brace. It can stop short
+  //     at a nested `return <copy>}`, and if the builder's own final return is ever
   //     minified to the comma form it runs long into a neighbour. The brace walk
   //     below is what rules out both.
   //
+  //     Through 2.1.289 the copy was always the FIRST declarator of that statement
+  //     (`let E={...process.env,...s,...r,...d},…`). 2.1.290 lays the settings env
+  //     for children over a base copy before the passthrough, then declares an
+  //     overlay first and the copy second — `let Z={...r,...m},E={...i};…return E}`
+  //     — so a tail pinned to the first declarator looked for `return Z}`, found
+  //     none, and PATCH 10 refused all eight builds. So the back-reference may now
+  //     skip earlier declarators of the same statement, over the same run the head
+  //     uses (`[^;{}]` or one balanced `{...}` group, so it cannot leave the
+  //     statement or stop inside a `{...}` initializer). The skip is LAZY: the first
+  //     declarator is tried first, which is why every measured pre-2.1.290 bundle
+  //     (67 files, 2.1.208 through 2.1.289) patches byte-identically to before.
+  //     The whole-bundle passthrough count below was widened by the SAME run, so
+  //     every site the tail could bind is counted (exactly one in each of the 75
+  //     measured bundle files, narrow or widened). Within the builder, whichever
+  //     declarator the tail ties to, the brace walk still requires the match to end
+  //     on the builder's own closing brace. The skip is tried lazily and never
+  //     retried: a FIRST declarator that is itself returned from a nested block
+  //     ends the match early and refuses loudly, even if a later one would bind.
+  //
   // Identity is carried by the passthrough early-out — `)return process.env;let
-  // <copy>={` — which reads as nothing but the shared child-env builder ("nothing
+  // <first>={` (the count also admits earlier declarators, the run the tail skips) —
+  // which reads as nothing but the shared child-env builder ("nothing
   // to change, so hand the parent's own env straight through, otherwise start a
   // copy"). It is counted across the WHOLE bundle before the anchor runs, so a
   // second candidate fails loud instead of being silently preferred. It occurs
@@ -936,9 +967,10 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     const contractVar = q(NETWORK_ENV_CONTRACT_VAR);
     const networkVars = JSON.stringify(CHILD_NETWORK_ENV_VARS);
     // What the REWRITE depends on: `{...process.env` is the merged copy every
-    // `process.env` read is redirected away from. Nothing else is: the builder's
-    // remote-mode check used to read `process.env.CLAUDE_CODE_REMOTE` and so was
-    // rewritten with everything else, but 2.1.260 reads that flag off the typed
+    // `process.env` read is redirected away from (from 2.1.290 it is the base copy
+    // the settings env is laid over, and the returned copy spreads that). Nothing
+    // else is: the builder's remote-mode check used to read
+    // `process.env.CLAUDE_CODE_REMOTE` and so was rewritten with everything else, but 2.1.260 reads that flag off the typed
     // env accessor instead and the rewrite no longer touches it. That is a change
     // in nothing that matters here — `CLAUDE_CODE_REMOTE` is not one of the
     // network variables clodex reverts, so which object it is read from cannot
@@ -1078,14 +1110,18 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     // applyOnce reports SKIP for that case and must still be allowed to.
     const passthroughSites = source.includes(marker)
       ? 1
-      : (source.match(/\)return process\.env;let [\w$]+=\{/g) ?? []).length;
+      // The SAME declarator run the anchor's tail may skip, so every passthrough the
+      // tail could bind is counted. A count narrower than the anchor would let a
+      // second site the count never sees take the match while the real builder fails
+      // to — a silent wrong bind a review constructed against 2.1.290.
+      : (source.match(/\)return process\.env;let (?:(?:[^;{}]|\{[^;{}]*\})*?,)??[\w$]+=\{/g) ?? []).length;
     if (passthroughSites !== 1) {
       log('FAIL', patchName, 'child env passthrough appears ' + passthroughSites + ' times (expected 1)');
       fail('clodex patch: required patch failed: ' + patchName);
     }
     applyOnce(
       patchName,
-      /(function [\w$]+\(\)\{)(let[ {[](?:[^;{}]|\{[^;{}]*\})*?(?:\{[^;{}]*)?(?:getAgentProxyEnv|[\w$]+\(process\.env\.CLAUDE_CODE_REMOTE\)\?)(?:(?!\}\s*function )[\s\S])*?\)return process\.env;let ([\w$]+)=\{(?:(?!\}\s*function )[\s\S])*?return \3)(\})/,
+      /(function [\w$]+\(\)\{)(let[ {[](?:[^;{}]|\{[^;{}]*\})*?(?:\{[^;{}]*)?(?:getAgentProxyEnv|[\w$]+\(process\.env\.CLAUDE_CODE_REMOTE\)\?)(?:(?!\}\s*function )[\s\S])*?\)return process\.env;let (?:(?:[^;{}]|\{[^;{}]*\})*?,)??([\w$]+)=\{(?:(?!\}\s*function )[\s\S])*?return \3)(\})/,
       (match, head, body, _copyVar, tail) => {
         // The tail is found lazily, so it can stop in the wrong place in EITHER
         // direction, and both are silent without this check:
