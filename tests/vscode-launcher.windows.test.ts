@@ -13,6 +13,7 @@ import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, write
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { BOUNDED_NODE_CHILD } from './helpers/bounded-child.js';
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const cliPath = join(projectRoot, 'dist', 'cli.js');
@@ -81,7 +82,9 @@ describe.skipIf(process.platform !== 'win32')('clodex-claude.exe built by clodex
     const run = spawnSync(process.execPath, [cliPath, 'install-vscode-launcher'], {
       encoding: 'utf8',
       env: launcherEnv(),
+      ...BOUNDED_NODE_CHILD,
     });
+    expect(run.error, run.stderr).toBeUndefined();
     return { code: run.status, stdout: run.stdout, stderr: run.stderr };
   }
 
@@ -210,7 +213,9 @@ describe.skipIf(process.platform !== 'win32')('clodex-claude.exe built by clodex
     const build = spawnSync(process.execPath, [join(pkg, 'dist', 'cli.js'), 'install-vscode-launcher'], {
       encoding: 'utf8',
       env: launcherEnv({ CLODEX_HOME: staleHome }),
+      ...BOUNDED_NODE_CHILD,
     });
+    expect(build.error, build.stderr).toBeUndefined();
     expect(build.stderr).toBe('');
     expect(build.status).toBe(0);
     rmSync(join(pkg, 'dist', 'claude-wrapper.js'));

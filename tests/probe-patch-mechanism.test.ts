@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { buildFakeNativeClaude } from './bun-blob-fixture.js';
 import { CLAUDE_FIXTURE } from './fixtures/claude-bundle.js';
+import { BOUNDED_NODE_CHILD } from './helpers/bounded-child.js';
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -69,8 +70,10 @@ registerHooks({
           ...process.env,
           TWEAKCC_CONFIG_DIR: join(dir, 'tweakcc-config'),
         },
+        ...BOUNDED_NODE_CHILD,
       });
 
+      expect(result.error, result.stderr).toBeUndefined();
       expect(result.status).toBe(1);
       expect(result.stderr).not.toMatch(/\n\s+at /);
       const report: unknown = JSON.parse(result.stdout);

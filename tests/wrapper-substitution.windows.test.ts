@@ -48,6 +48,7 @@ import { readPatchManifest } from '../src/patch-manifest.js';
 import { runPatchCommand } from '../src/patcher.js';
 import { CSC_ARGS, findCsc, runCsc } from '../src/vscode-launcher.js';
 import { finalizeWrapperTarget, prepareWrapperTarget } from '../src/wrapper-target.js';
+import { BOUNDED_NODE_CHILD } from './helpers/bounded-child.js';
 
 const hoisted = vi.hoisted(() => ({ sentinel: '\n#__CLAUDE_BUNDLE__\n' }));
 
@@ -367,7 +368,9 @@ describe.skipIf(!onWindows)('clodex-claude.exe runs the clodex-patched install f
     const install = spawnSync(process.execPath, [cliPath, 'install-vscode-launcher'], {
       encoding: 'utf8',
       env: { ...process.env, CLODEX_HOME: home },
+      ...BOUNDED_NODE_CHILD,
     });
+    expect(install.error, install.stderr).toBeUndefined();
     expect(install.status, install.stderr).toBe(0);
     launcherExe = join(home, 'bin', 'clodex-claude.exe');
     expect(existsSync(launcherExe)).toBe(true);
