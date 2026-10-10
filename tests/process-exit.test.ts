@@ -20,6 +20,7 @@ import { CHILD_NETWORK_ENV_VARS } from '../src/network-env.js';
 import { describeActiveResources } from '../src/process-exit.js';
 import { MODELS_DEV_API_URL } from '../src/registry/models-dev.js';
 import { PRICING_API_URL } from '../src/registry/pricing.js';
+import { tryAcquireRegistryLock } from '../src/registry/lock.js';
 import { BOUNDED_NODE_CHILD } from './helpers/bounded-child.js';
 
 const PROBE_SOURCE = fileURLToPath(new URL('./helpers/exit-probe.ts', import.meta.url));
@@ -57,17 +58,22 @@ function hermeticEnv(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return env;
 }
 
-function runProbe(mode: string, extraArgs: string[] = []): Promise<ProbeRun> {
+function runProbe(
+  mode: string,
+  extraArgs: string[] = [],
+  options: { clodexHome?: string; onStderr?: (soFar: string) => void } = {},
+): Promise<ProbeRun> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [PROBE, mode, ...extraArgs], {
       stdio: ['ignore', 'ignore', 'pipe'],
-      env: hermeticEnv({ CLODEX_HOME: home, CLODEX_TRACE: '' }),
+      env: hermeticEnv({ CLODEX_HOME: options.clodexHome ?? home, CLODEX_TRACE: '' }),
     });
     live.add(child);
     let stderr = '';
     child.stderr!.setEncoding('utf8');
     child.stderr!.on('data', (chunk: string) => {
       stderr += chunk;
+      options.onStderr?.(stderr);
     });
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
@@ -248,6 +254,59 @@ describe('the background pricing enrichment', () => {
     } finally {
       await new Promise<void>(resolve => upstream.server.close(() => resolve()));
     }
+  }, 25_000);
+});
+
+/**
+ * The enrichment's fetch has finished and it is waiting for the provider-registry lock, which
+ * another clodex process holds (the test process takes the real lock lease here).
+ */
+describe('the background pricing enrichment waiting on a held registry lock', () => {
+  async function runWithLockHeld(release: 'never' | 'soon-after-exit') {
+    const scratch = mkdtempSync(join(tmpdir(), 'clodex-exit-lock-'));
+    const server = createHttpServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ models: [] }));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}/pricing`;
+    const lease = tryAcquireRegistryLock(join(scratch, 'providers.json.lock'));
+    expect(lease).not.toBeNull();
+    let releaseTimer: NodeJS.Timeout | undefined;
+    try {
+      return await runProbe('pricing-lock-contended', [url], {
+        clodexHome: scratch,
+        onStderr: soFar => {
+          if (release === 'soon-after-exit' && !releaseTimer && soFar.includes('EXIT-REQUESTED')) {
+            releaseTimer = setTimeout(() => lease!.release(), 200);
+          }
+        },
+      });
+    } finally {
+      clearTimeout(releaseTimer);
+      lease!.release();
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+
+  it('stops waiting for the lock when the exit is requested', async () => {
+    const run = await runWithLockHeld('never');
+    expect(run.stderr).toContain('FETCH-ANSWERED');
+    // The lock is still held when the probe ends: only an abandoned wait lets it drain.
+    expect(run.stderr).not.toContain('event loop still busy');
+    expect(run.stderr).toContain('EXITED via=drain code=0');
+    expect(run.stderr).not.toContain('ENRICHMENT-FINISHED');
+  }, 25_000);
+
+  it('does not update the registry once the lock comes free after the exit', async () => {
+    const run = await runWithLockHeld('soon-after-exit');
+    expect(run.stderr).toContain('FETCH-ANSWERED');
+    expect(run.stderr).not.toContain('ENRICHMENT-FINISHED');
+    expect(run.stderr).not.toContain('event loop still busy');
+    expect(run.stderr).toContain('EXITED via=drain code=0');
   }, 25_000);
 });
 

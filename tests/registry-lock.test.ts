@@ -320,6 +320,39 @@ describe('provider registry lock', () => {
     lease?.release();
   });
 
+  it('abandons the wait for a held lock as soon as its signal aborts', async () => {
+    const lockPath = temporaryLockPath();
+    const holder = tryAcquireRegistryLock(lockPath);
+    expect(holder).not.toBeNull();
+    const controller = new AbortController();
+    const operation = vi.fn();
+    try {
+      // A retry interval far beyond the test timeout: only an abortable wait can end this.
+      const waiting = withRegistryWriteLock(operation, {
+        lockPath, waitMs: 120_000, retryMs: 60_000, signal: controller.signal,
+      });
+      setTimeout(() => controller.abort(new Error('exiting')), 20);
+      await expect(waiting).rejects.toThrow('exiting');
+      expect(operation).not.toHaveBeenCalled();
+    } finally {
+      holder?.release();
+    }
+  });
+
+  it('does not take a free lock once its signal has aborted', async () => {
+    const lockPath = temporaryLockPath();
+    const controller = new AbortController();
+    controller.abort(new Error('exiting'));
+    const operation = vi.fn();
+
+    await expect(withRegistryWriteLock(operation, { lockPath, signal: controller.signal }))
+      .rejects.toThrow('exiting');
+    expect(operation).not.toHaveBeenCalled();
+    const lease = tryAcquireRegistryLock(lockPath);
+    expect(lease).toMatchObject({ active: true });
+    lease?.release();
+  });
+
   it('serializes independent asynchronous callers', async () => {
     const lockPath = temporaryLockPath();
     const events: string[] = [];

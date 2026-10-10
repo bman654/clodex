@@ -50,7 +50,9 @@ function redirectFetch(from: string, onStart: () => void): void {
   globalThis.fetch = ((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
     if (String(input) !== from) return realFetch(input, init);
     onStart();
-    return realFetch(upstreamUrl, init);
+    const response = realFetch(upstreamUrl, init);
+    void response.then(() => say('FETCH-ANSWERED'), () => {});
+    return response;
   }) as typeof fetch;
 }
 
@@ -133,6 +135,22 @@ async function run(): Promise<void> {
       await new Promise(resolve => setTimeout(resolve, 200));
       clearInterval(command);
       requestExit(0, { graceMs: 10_000, trace: true });
+      return;
+    }
+    case 'pricing-lock-contended': {
+      // The pricing fetch completes; the registry lock it then needs is held by the test process.
+      await installOutboundDispatcher();
+      const answered = new Promise<void>(resolve => redirectFetch(PRICING_API_URL, () => {
+        say('FETCH-STARTED');
+        resolve();
+      }));
+      enrichPricingAsync(updated => say(`ENRICHMENT-FINISHED updated=${updated}`));
+      const command = holdLoop();
+      await answered;
+      // Long enough for the answer to arrive and the enrichment to start retrying the lock.
+      await new Promise(resolve => setTimeout(resolve, 300));
+      clearInterval(command);
+      requestExit(0, { graceMs: 5_000, trace: true });
       return;
     }
     case 'unowned-fetch-connecting': {
