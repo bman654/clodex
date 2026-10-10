@@ -61,6 +61,21 @@ async function buildProbe(): Promise<void> {
 }
 
 const live = new Set<ChildProcess>();
+/** Children spawned as their own process group, whose descendants must die with them. */
+const groupLeaders = new WeakSet<ChildProcess>();
+
+/** SIGKILL a child, and its whole process group when it leads one. */
+function kill(child: ChildProcess): void {
+  if (groupLeaders.has(child) && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+      return;
+    } catch {
+      // Group already gone; fall through to the child itself.
+    }
+  }
+  child.kill('SIGKILL');
+}
 
 function track(child: ChildProcess): ChildProcess {
   live.add(child);
@@ -72,7 +87,7 @@ function track(child: ChildProcess): ChildProcess {
 function awaitExit(child: ChildProcess): Promise<number> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
-      child.kill('SIGKILL');
+      kill(child);
       reject(new Error('probe timed out'));
     }, PROBE_TIMEOUT_MS);
     timer.unref();
@@ -128,10 +143,13 @@ describe('parent notices while Claude Code owns the terminal', () => {
     const quoted = [process.execPath, PROBE, dir, '--epipe']
       .map(part => `"${part}"`).join(' ');
     const script = `{ ${quoted}; echo "$?" >&3; } 3>"${statusPath}" 2>&1 | head -n 1`;
+    // Its own process group: on timeout the nested Node probe must die too, not just the shell.
     const child = track(spawn('/bin/sh', ['-c', script], {
       stdio: ['ignore', 'ignore', 'ignore'],
       env: { ...process.env, CLODEX_HOME: join(dir, 'home') },
+      detached: true,
     }));
+    groupLeaders.add(child);
     await awaitExit(child);
     return readFileSync(statusPath, 'utf8').trim();
   }
@@ -151,7 +169,7 @@ describe('parent notices while Claude Code owns the terminal', () => {
   afterAll(() => {
     // Kill anything still alive BEFORE removing the scratch tree: the fake claude
     // polls for a release file inside it, so deleting first would strand it.
-    for (const child of live) child.kill('SIGKILL');
+    for (const child of live) kill(child);
     live.clear();
     rmSync(root, { recursive: true, force: true });
     rmSync(PROBE, { force: true });
@@ -165,6 +183,13 @@ describe('parent notices while Claude Code owns the terminal', () => {
     // a real TUI, it paints into a half-drawn frame or onto the prompt.
     expect(plain.output.indexOf(NOTICE_TEXT)).toBeGreaterThan(plain.output.indexOf(CHILD_LAST));
     expect(plain.output).toContain('probe-done exit=0');
+  });
+
+  it('removes its signal forwarders once the child has exited', () => {
+    // A forwarder left installed would swallow a Ctrl-C aimed at clodex while it winds down
+    // after Claude Code exits. The signalled run consumed its SIGINT forwarder; SIGTERM's stayed.
+    expect(plain.output).toContain('probe-signal-listeners-added sigint=0 sigterm=0');
+    expect(signalled.output).toContain('probe-signal-listeners-added sigint=0 sigterm=0');
   });
 
   it('never lets an ordinary parent write reach the terminal at all', () => {

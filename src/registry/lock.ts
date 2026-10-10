@@ -41,6 +41,14 @@ interface RegistryLockOptions {
   isAlive?: (pid: number) => boolean;
 }
 
+interface RegistryWriteLockOptions extends RegistryLockOptions {
+  /**
+   * Abandons the wait for the lock: once aborted, the returned promise rejects with the signal's
+   * reason instead of acquiring. It never interrupts an operation that already holds the lock.
+   */
+  signal?: AbortSignal;
+}
+
 interface RegistryLockContext {
   leases: ReadonlyMap<string, RegistryLockLease>;
 }
@@ -308,8 +316,19 @@ export function tryAcquireRegistryLock(
   return null;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function sleepSync(ms: number): void {
@@ -340,7 +359,7 @@ function lockTimeoutError(
 
 export async function withRegistryWriteLock<T>(
   operation: () => Promise<T> | T,
-  options: RegistryLockOptions = {},
+  options: RegistryWriteLockOptions = {},
 ): Promise<T> {
   const lockPath = options.lockPath ?? getRegistryLockPath();
   const inheritedLeases = registryLockContext.getStore()?.leases;
@@ -353,6 +372,7 @@ export async function withRegistryWriteLock<T>(
   let lease: RegistryLockLease | null = null;
 
   while (!lease) {
+    options.signal?.throwIfAborted();
     lease = tryAcquireRegistryLock(lockPath, {
       now,
       isAlive: options.isAlive,
@@ -360,7 +380,7 @@ export async function withRegistryWriteLock<T>(
     if (lease) break;
     if (now() >= deadline)
       throw lockTimeoutError(lockPath, waitMs, options.isAlive ?? isPidAlive);
-    await sleep(retryMs);
+    await sleep(retryMs, options.signal);
   }
 
   const leases = new Map(inheritedLeases);

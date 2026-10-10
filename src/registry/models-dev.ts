@@ -11,10 +11,13 @@ import {
 import { dirname, join } from 'node:path';
 import bundledCache from '../data/models-dev-cache.json';
 import { getAppHome } from '../paths.js';
+import { cancelOnExit } from '../process-exit.js';
 import { normalizeModelIdCandidates } from './pricing.js';
 
 export const MODELS_DEV_API_URL = 'https://models.dev/api.json';
 const FETCH_TIMEOUT_MS = 15_000;
+/** Longer than a help, version, or listing command takes end to end (about 250 ms measured). */
+export const MODELS_DEV_REFRESH_DELAY_MS = 500;
 const FILE_MODE = 0o600;
 
 export interface ModelsDevModalities {
@@ -174,9 +177,12 @@ export function loadModelsDevCache(): ModelsDevCacheFile {
   return rememberModelsDevCache('bundled', loadBundledModelsDevCache());
 }
 
-export async function fetchModelsDevCache(): Promise<ModelsDevCacheFile | null> {
+export async function fetchModelsDevCache(signal?: AbortSignal): Promise<ModelsDevCacheFile | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const onCallerAbort = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener('abort', onCallerAbort, { once: true });
   try {
     const response = await fetch(MODELS_DEV_API_URL, {
       signal: controller.signal,
@@ -192,6 +198,7 @@ export async function fetchModelsDevCache(): Promise<ModelsDevCacheFile | null> 
     return null;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onCallerAbort);
   }
 }
 
@@ -199,12 +206,31 @@ export function resolveModelsDevSlug(providerId: string): string {
   return REGISTRY_TO_MODELS_DEV[providerId] ?? providerId;
 }
 
-/** Fetch latest models.dev catalog in the background; falls back to bundled snapshot offline. */
+/**
+ * Fetch latest models.dev catalog in the background; falls back to bundled snapshot offline.
+ *
+ * Nothing awaits this, so it must never keep the process alive: a requested exit cancels it,
+ * whether it is still waiting to start or already downloading. It waits MODELS_DEV_REFRESH_DELAY_MS
+ * before starting so that quick commands never touch the network at all. Once issued, a DNS lookup
+ * cannot be cancelled and would hold the exit until it resolved, and a command that finishes this
+ * quickly could never have completed the multi-megabyte download anyway.
+ */
 export function refreshModelsDevCacheAsync(onComplete?: (updated: boolean) => void): void {
-  void (async () => {
-    const updated = (await fetchModelsDevCache()) !== null;
-    onComplete?.(updated);
-  })();
+  const controller = new AbortController();
+  const start = setTimeout(() => {
+    void (async () => {
+      try {
+        const updated = (await fetchModelsDevCache(controller.signal)) !== null;
+        onComplete?.(updated);
+      } finally {
+        unregister();
+      }
+    })();
+  }, MODELS_DEV_REFRESH_DELAY_MS);
+  const unregister = cancelOnExit(() => {
+    clearTimeout(start);
+    controller.abort();
+  });
 }
 
 export function findModelsDevModel(

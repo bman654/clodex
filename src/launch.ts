@@ -125,21 +125,30 @@ export function launchClaude(
       shell: isWindows,
     });
 
-    const forward = (signal: NodeJS.Signals): void => {
-      child.kill(signal);
+    const forwardSigint = (): void => {
+      child.kill('SIGINT');
+    };
+    const forwardSigterm = (): void => {
+      child.kill('SIGTERM');
     };
 
-    process.once('SIGINT', () => forward('SIGINT'));
-    process.once('SIGTERM', () => forward('SIGTERM'));
+    process.once('SIGINT', forwardSigint);
+    process.once('SIGTERM', forwardSigterm);
+    // Once claude is gone there is nothing to forward to: a Ctrl-C while clodex winds down must
+    // terminate it rather than be swallowed by a stale forwarder.
+    const stopForwarding = (): void => {
+      process.off('SIGINT', forwardSigint);
+      process.off('SIGTERM', forwardSigterm);
+    };
 
-    child.on('exit', (code) => {
+    // Both ways the child can end go through here, so neither can skip the cleanup.
+    const finish = (code: number): void => {
+      stopForwarding();
       restore();
-      resolve(code ?? 0);
-    });
+      resolve(code);
+    };
 
-    child.on('error', (err) => {
-      restore();
-      resolve(1);
-    });
+    child.on('exit', (code) => finish(code ?? 0));
+    child.on('error', () => finish(1));
   });
 }

@@ -20,6 +20,7 @@ import {
 import { dirname, join } from 'node:path';
 import bundledPricing from '../data/pricing-cache.json';
 import { getAppHome } from '../paths.js';
+import { cancelOnExit } from '../process-exit.js';
 import { getTemplateById } from '../provider-templates.js';
 import { isRetainedOpenCodeGoProvider, retainedOpenCodeGoTemplate } from './resolve-template.js';
 import type { CachedModel, RegistryModelsCache, RegistryProvider } from './types.js';
@@ -144,9 +145,12 @@ export function loadPricingCache(): PricingCacheFile {
   return readPricingFile(getUserPricingCachePath()) ?? loadBundledPricingCache();
 }
 
-export async function fetchPricingCache(): Promise<PricingCacheFile | null> {
+export async function fetchPricingCache(signal?: AbortSignal): Promise<PricingCacheFile | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const onCallerAbort = () => controller.abort();
+  if (signal?.aborted) controller.abort();
+  else signal?.addEventListener('abort', onCallerAbort, { once: true });
   try {
     const response = await fetch(PRICING_API_URL, {
       signal: controller.signal,
@@ -161,6 +165,7 @@ export async function fetchPricingCache(): Promise<PricingCacheFile | null> {
     return null;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onCallerAbort);
   }
 }
 
@@ -300,19 +305,32 @@ export function applyCachedPricing(): boolean {
   });
 }
 
-/** Fetch latest pricing in the background; updates registry when complete. */
+/**
+ * Fetch latest pricing in the background; updates registry when complete. Nothing awaits this,
+ * so a requested exit abandons it, as process.exit() used to: the fetch, the wait for the registry
+ * lock (another clodex process may hold it), and the registry update.
+ */
 export function enrichPricingAsync(onComplete?: (updated: boolean) => void): void {
+  const controller = new AbortController();
+  const { signal } = controller;
+  const unregister = cancelOnExit(() => controller.abort());
   void (async () => {
-    const fetched = await fetchPricingCache();
+    const fetched = await fetchPricingCache(signal);
+    if (signal.aborted) return;
     const cache = fetched ?? loadPricingCache();
     const changed = await withRegistryWriteLock(() => {
+      // The wait above already stops on abort; this keeps an update from starting under a lease
+      // granted after the exit was requested, should acquiring ever yield before the operation.
+      if (signal.aborted) return undefined;
       const registry = loadRegistryStrict();
       const updated = applyPricingToRegistryProviders(registry, cache);
       if (updated) saveRegistry(registry);
       return updated;
-    });
-    onComplete?.(changed);
-  })().catch(() => onComplete?.(false));
+    }, { signal });
+    if (changed !== undefined) onComplete?.(changed);
+  })().catch(() => {
+    if (!signal.aborted) onComplete?.(false);
+  }).finally(unregister);
 }
 
 export function pricingPlatformForProvider(templateId: string, providerId: string): string | undefined {
