@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULT_PASSTHROUGH_OUTAGE_HOLD_MS,
   DEFAULT_PASSTHROUGH_RETRIES,
+  MAX_PASSTHROUGH_OUTAGE_HOLD_MS,
   MAX_UPSTREAM_MAX_RETRIES,
+  PASSTHROUGH_OUTAGE_HOLD_ENV,
   UPSTREAM_IDLE_TIMEOUT_ENV,
   UPSTREAM_MAX_RETRIES_ENV,
   UPSTREAM_TOTAL_TIMEOUT_ENV,
+  outageRetryDelayMs,
+  passthroughOutageHoldMs,
   passthroughUpstreamRetries,
   upstreamRequestBudget,
 } from '../src/upstream-retry.js';
@@ -743,5 +748,57 @@ describe('upstream request budget adapter wiring', () => {
       restoreEnv();
       vi.resetModules();
     }
+  });
+});
+
+describe('passthroughOutageHoldMs', () => {
+  it('holds for 120 s when nothing is configured', () => {
+    // Inside the 180 s Claude Code gives a query's first request, so a held
+    // 502 arrives before the client gives up on its own.
+    expect(passthroughOutageHoldMs({})).toBe(DEFAULT_PASSTHROUGH_OUTAGE_HOLD_MS);
+    expect(DEFAULT_PASSTHROUGH_OUTAGE_HOLD_MS).toBe(120_000);
+    expect(passthroughOutageHoldMs({ [PASSTHROUGH_OUTAGE_HOLD_ENV]: '  ' })).toBe(120_000);
+  });
+
+  it('turns the hold off with 0', () => {
+    expect(passthroughOutageHoldMs({ [PASSTHROUGH_OUTAGE_HOLD_ENV]: '0' })).toBe(0);
+  });
+
+  it('accepts any whole number of milliseconds up to the ceiling', () => {
+    const warn = vi.fn();
+    expect(passthroughOutageHoldMs({ [PASSTHROUGH_OUTAGE_HOLD_ENV]: '3000' }, warn)).toBe(3_000);
+    expect(passthroughOutageHoldMs({ [PASSTHROUGH_OUTAGE_HOLD_ENV]: ' 570000 ' }, warn)).toBe(570_000);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it.each(['soon', '1.5', '-1'])('ignores and reports invalid value %s', raw => {
+    const warn = vi.fn();
+
+    expect(passthroughOutageHoldMs({ [PASSTHROUGH_OUTAGE_HOLD_ENV]: raw }, warn))
+      .toBe(DEFAULT_PASSTHROUGH_OUTAGE_HOLD_MS);
+    expect(warn).toHaveBeenCalledWith(
+      `ignoring ${PASSTHROUGH_OUTAGE_HOLD_ENV}=${raw} `
+      + '(expected a non-negative integer number of milliseconds)',
+    );
+  });
+
+  it('clamps a hold to stay inside the escalated header wait, and says so', () => {
+    const warn = vi.fn();
+
+    expect(passthroughOutageHoldMs({ [PASSTHROUGH_OUTAGE_HOLD_ENV]: '600000' }, warn))
+      .toBe(MAX_PASSTHROUGH_OUTAGE_HOLD_MS);
+    expect(MAX_PASSTHROUGH_OUTAGE_HOLD_MS).toBe(570_000);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]![0]).toContain(
+      `clamping ${PASSTHROUGH_OUTAGE_HOLD_ENV}=600000 to 570000ms`,
+    );
+    expect(warn.mock.calls[0]![0]).toContain('29 s inside the 599 s');
+  });
+});
+
+describe('outageRetryDelayMs', () => {
+  it('backs off 1, 2, 4, 8 s, then retries every 15 s', () => {
+    expect([1, 2, 3, 4, 5, 6, 7, 20].map(outageRetryDelayMs))
+      .toEqual([1_000, 2_000, 4_000, 8_000, 15_000, 15_000, 15_000, 15_000]);
   });
 });

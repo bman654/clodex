@@ -14,7 +14,11 @@ import { normalizeRouteLookupId } from '../context-model-id.js';
 import { listenTcpServer } from '../listener-ready.js';
 import { routeUnavailableMessage } from '../route-unavailable.js';
 import { emitParentNotice } from '../parent-notice.js';
-import { passthroughUpstreamRetries } from '../upstream-retry.js';
+import {
+  outageRetryDelayMs,
+  passthroughOutageHoldMs,
+  passthroughUpstreamRetries,
+} from '../upstream-retry.js';
 import {
   OUTBOUND_PROXY_HOP_HEADER,
   isOwnOutboundProxyHop,
@@ -52,6 +56,30 @@ const MAX_USAGE_SSE_BLOCK_BYTES = 64 * 1024;
 const RETRYABLE_PASSTHROUGH_CODE = 'ECONNRESET';
 
 /**
+ * Failures that mean the request never reached Anthropic: name resolution
+ * failed, the connect was refused or had no route, or the connection died
+ * before TLS completed (the request bytes are only written after the
+ * handshake). During a network outage these are what every request meets, and
+ * holding them for a while is safe because nothing can have been served. The
+ * two codes that can also occur AFTER bytes went out (ECONNRESET, ETIMEDOUT)
+ * are covered by the same rule: the hold only applies while the attempt's TLS
+ * handshake has not completed.
+ */
+const OUTAGE_HOLD_CODES = new Set([
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EAI_FAIL',
+  'ECONNREFUSED',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'ENETDOWN',
+  'EHOSTDOWN',
+  'EADDRNOTAVAIL',
+  'ECONNRESET',
+  'ETIMEDOUT',
+]);
+
+/**
  * The passthrough's own connection pool. `timeout` must not be dropped: it is
  * what evicts an IDLE pooled socket, and https.globalAgent -- which this
  * replaces -- carries one. Without it dead sockets accumulate in the pool and
@@ -67,6 +95,14 @@ export function upstreamUnreachableDetail(err: Error): string {
   return err.message || (err as NodeJS.ErrnoException).code || err.name || 'connection failed';
 }
 
+/**
+ * The outage hold relies on this agent never queueing a request: it treats an
+ * attempt as unsent unless its socket was reused or finished TLS, and Node
+ * reports `reusedSocket: false` for a queued request that is later handed an
+ * already-used socket. Both `maxSockets` and `maxTotalSockets` stay at their
+ * unbounded defaults so that queueing cannot happen; bounding either would let
+ * a hold retry a request that had already been sent.
+ */
 export function createPassthroughAgent(): https.Agent {
   return new https.Agent({
     keepAlive: true,
@@ -202,6 +238,8 @@ export interface HttpProxyOptions {
   anthropicOrigin?: string;
   /** Test hook for a local self-signed Anthropic origin. */
   anthropicRejectUnauthorized?: boolean;
+  /** Test hook; production resolves the Anthropic origin with the system resolver. */
+  anthropicLookup?: net.LookupFunction;
   /** Test hook for observing relay-route isolation without calling an AI provider. */
   adapterHandle?: ProxyHandle;
   /** Test hook for exercising adapter request transport failures. */
@@ -324,10 +362,24 @@ function forwardRawAnthropicRequest(
     progressIntervalMs: number;
   },
   isLocalShutdown: () => boolean = () => false,
+  passthrough: {
+    /** Hold through an outage; only messages generation asks for this. */
+    holdOutages?: boolean;
+    lookup?: net.LookupFunction;
+  } = {},
 ): Promise<void> {
   return new Promise(resolve => {
     const startedAt = Date.now();
     const retryBudget = passthroughUpstreamRetries();
+    const outageHoldMs = passthrough.holdOutages ? passthroughOutageHoldMs() : 0;
+    // The hold is a deadline measured from the request's arrival, so an attempt
+    // that takes long to fail cannot stretch it past what the client will wait.
+    const holdDeadline = startedAt + outageHoldMs;
+    let lastHoldError: Error | undefined;
+    let outageRetries = 0;
+    let reuseRetries = 0;
+    let holdTimer: NodeJS.Timeout | undefined;
+    let attemptDeadlineTimer: NodeJS.Timeout | undefined;
     let lastActivityAt = startedAt;
     let headersReceived = false;
     let firstByteAt: number | undefined;
@@ -401,7 +453,7 @@ function forwardRawAnthropicRequest(
     // is replayed into the same stream (pinned by the after-headers test, which
     // resets the raw TCP socket to produce exactly that arrival).
     const isRetryableUpstreamFailure = (err: Error, request: http.ClientRequest): boolean =>
-      attempt <= retryBudget
+      reuseRetries < retryBudget
       && !headersReceived
       && !failed
       && !clientDisconnected
@@ -409,7 +461,77 @@ function forwardRawAnthropicRequest(
       && request.reusedSocket === true
       && (err as NodeJS.ErrnoException).code === RETRYABLE_PASSTHROUGH_CODE;
 
-    const sendAttempt = (): void => {
+    // Hold a request that never reached the upstream (see OUTAGE_HOLD_CODES),
+    // retrying with backoff until the hold deadline. Only a FRESH socket whose
+    // TLS handshake never completed qualifies: a reused socket is the case
+    // above, and a completed handshake means the body may have gone out.
+    const isOutageHoldFailure = (
+      err: Error,
+      request: http.ClientRequest,
+      tlsEstablished: boolean,
+    ): boolean =>
+      outageHoldMs > 0
+      && !headersReceived
+      && !failed
+      && !clientDisconnected
+      && !isLocalShutdown()
+      && request.reusedSocket !== true
+      && !tlsEstablished
+      && OUTAGE_HOLD_CODES.has((err as NodeJS.ErrnoException).code ?? '');
+
+    const clearAttemptDeadline = (): void => {
+      if (attemptDeadlineTimer) clearTimeout(attemptDeadlineTimer);
+      attemptDeadlineTimer = undefined;
+    };
+
+    const answer502 = (
+      detail: string,
+      failure: { errorType: string; reusedSocket: boolean; outageHold?: boolean },
+    ): void => {
+      failed = true;
+      stopProgress();
+      clearAttemptDeadline();
+      const now = Date.now();
+      writeLifecycle('response_failed', {
+        statusCode: 502,
+        phase: responsePhase(),
+        durationMs: now - startedAt,
+        idleMs: now - lastActivityAt,
+        bytes,
+        chunks,
+        errorType: failure.errorType,
+        terminationSource: isLocalShutdown() ? 'local_shutdown' : 'upstream_failure',
+        attempt,
+        reusedSocket: failure.reusedSocket,
+        ...(failure.outageHold ? { outageHold: true } : {}),
+      });
+      onErrorResponse?.(502, `Anthropic upstream unreachable: ${detail}`);
+      if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
+      res.end(`Anthropic upstream unreachable: ${detail}`);
+      done();
+    };
+
+    const holdExpiredDetail = (pendingHandshake: boolean): string => {
+      const parts = [`outage hold of ${outageHoldMs} ms expired`];
+      if (pendingHandshake) parts[0] += ' before the TLS handshake completed';
+      if (lastHoldError) parts.push(`last upstream error: ${upstreamUnreachableDetail(lastHoldError)}`);
+      return parts.join('; ');
+    };
+
+    // A replay of a reset reused connection that starts after the deadline is
+    // cut by the deadline alone, with no connect failure behind it, so its 502
+    // names the reset rather than reporting an outage. Only the replay is timed:
+    // the reset itself may have come just before the deadline.
+    const lateReplayDetail = (): string => {
+      const parts = [
+        `reused connection was reset and the outage hold of ${outageHoldMs} ms had expired `
+        + 'before the request could be resent, so it was not resent on a new connection',
+      ];
+      if (lastHoldError) parts.push(`last upstream error: ${upstreamUnreachableDetail(lastHoldError)}`);
+      return parts.join('; ');
+    };
+
+    const sendAttempt = (replayOfReset = false): void => {
       attempt += 1;
       const request = https.request({
         protocol: 'https:',
@@ -421,7 +543,9 @@ function forwardRawAnthropicRequest(
         servername: net.isIP(origin.hostname) ? undefined : origin.hostname,
         rejectUnauthorized,
         agent,
+        ...(passthrough.lookup ? { lookup: passthrough.lookup } : {}),
       }, upstreamRes => {
+        clearAttemptDeadline();
         headersReceived = true;
         statusCode = upstreamRes.statusCode ?? 502;
         lastActivityAt = Date.now();
@@ -470,12 +594,109 @@ function forwardRawAnthropicRequest(
         });
       });
       upstream = request;
+      let tlsEstablished = false;
+      // While the hold is on, every attempt on a fresh socket that has not
+      // completed TLS is bounded by the arrival deadline: nothing has been sent,
+      // so ending it there is safe, and it also ends a connect or handshake that
+      // never answers at all. An attempt started before the deadline carries a
+      // timer to it, cleared the moment TLS completes, so it can never cut a
+      // request that went out. One started at or after the deadline (a
+      // pooled-socket replay late in a slow request) is decided when its socket
+      // arrives: a reused socket goes ahead, a fresh one is answered with the
+      // 502 at once. The reset that led to that replay came before any response,
+      // so nothing was served, and Claude Code resends a 502 itself.
+      const cutPendingAttempt = (lateReplay: boolean): void => {
+        if (tlsEstablished || headersReceived || failed || clientDisconnected) return;
+        answer502(lateReplay ? lateReplayDetail() : holdExpiredDetail(true), {
+          errorType: 'outage_hold_expired',
+          reusedSocket: false,
+          outageHold: true,
+        });
+        request.destroy();
+      };
+      const attemptRemaining = holdDeadline - Date.now();
+      const startedAfterDeadline = outageHoldMs > 0 && attemptRemaining <= 0;
+      if (outageHoldMs > 0 && attemptRemaining > 0) {
+        attemptDeadlineTimer = setTimeout(() => {
+          attemptDeadlineTimer = undefined;
+          cutPendingAttempt(false);
+        }, attemptRemaining);
+      }
+      request.once('socket', socket => {
+        if (request.reusedSocket) {
+          clearAttemptDeadline();
+          return;
+        }
+        if (startedAfterDeadline) {
+          cutPendingAttempt(replayOfReset);
+          return;
+        }
+        socket.once('secureConnect', () => {
+          tlsEstablished = true;
+          clearAttemptDeadline();
+        });
+      });
       request.once('error', err => {
+        clearAttemptDeadline();
         if (clientDisconnected) {
           done();
           return;
         }
+        if (isOutageHoldFailure(err, request, tlsEstablished)) {
+          lastHoldError = err;
+          const now = Date.now();
+          const remaining = holdDeadline - now;
+          if (remaining <= 0) {
+            answer502(holdExpiredDetail(false), {
+              errorType: errorType(err),
+              reusedSocket: false,
+              outageHold: true,
+            });
+            return;
+          }
+          outageRetries += 1;
+          const backoff = outageRetryDelayMs(outageRetries);
+          const holdDelay = Math.min(backoff, remaining);
+          // A wait cut to the deadline ends the hold when it fires. Do not
+          // re-read the clock: Node's timer clock and Date.now() round
+          // differently, so the callback can run a millisecond short of the
+          // deadline and a recheck would start one more, unnecessary, attempt.
+          const waitReachesDeadline = backoff >= remaining;
+          writeLifecycle('response_retried', {
+            phase: responsePhase(),
+            durationMs: now - startedAt,
+            idleMs: now - lastActivityAt,
+            errorType: errorType(err),
+            terminationSource: 'upstream_failure',
+            attempt,
+            reusedSocket: false,
+            outageHold: true,
+            holdElapsedMs: now - startedAt,
+            retryDelayMs: holdDelay,
+          });
+          lastActivityAt = now;
+          holdTimer = setTimeout(() => {
+            holdTimer = undefined;
+            if (clientDisconnected || failed || isLocalShutdown()) {
+              if (isLocalShutdown()) res.destroy();
+              done();
+              return;
+            }
+            if (waitReachesDeadline || Date.now() >= holdDeadline) {
+              answer502(holdExpiredDetail(false), {
+                errorType: errorType(err),
+                reusedSocket: false,
+                outageHold: true,
+              });
+              return;
+            }
+            lastActivityAt = Date.now();
+            sendAttempt();
+          }, holdDelay);
+          return;
+        }
         if (isRetryableUpstreamFailure(err, request)) {
+          reuseRetries += 1;
           const retriedAt = Date.now();
           writeLifecycle('response_retried', {
             phase: responsePhase(),
@@ -487,33 +708,17 @@ function forwardRawAnthropicRequest(
             reusedSocket: true,
           });
           lastActivityAt = retriedAt;
-          sendAttempt();
+          sendAttempt(true);
           return;
         }
         if (failed) {
           done();
           return;
         }
-        failed = true;
-        stopProgress();
-        const now = Date.now();
-        writeLifecycle('response_failed', {
-          statusCode: 502,
-          phase: responsePhase(),
-          durationMs: now - startedAt,
-          idleMs: now - lastActivityAt,
-          bytes,
-          chunks,
+        answer502(upstreamUnreachableDetail(err), {
           errorType: errorType(err),
-          terminationSource: isLocalShutdown() ? 'local_shutdown' : 'upstream_failure',
-          attempt,
           reusedSocket: request.reusedSocket === true,
         });
-        const detail = upstreamUnreachableDetail(err);
-        onErrorResponse?.(502, `Anthropic upstream unreachable: ${detail}`);
-        if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain' });
-        res.end(`Anthropic upstream unreachable: ${detail}`);
-        done();
       });
       request.end(rawBody);
     };
@@ -535,6 +740,11 @@ function forwardRawAnthropicRequest(
       stopProgress();
       if (res.writableFinished || failed) return;
       clientDisconnected = true;
+      if (holdTimer) {
+        clearTimeout(holdTimer);
+        holdTimer = undefined;
+      }
+      clearAttemptDeadline();
       const now = Date.now();
       writeLifecycle('response_client_disconnected', {
         statusCode,
@@ -1158,6 +1368,13 @@ export async function startHttpProxy(options: HttpProxyOptions): Promise<HttpPro
             }
           : undefined,
         () => shuttingDown,
+        // Only messages generation is held. count_tokens, OAuth, bootstrap and
+        // telemetry calls carry no lifecycle log and short client timeouts of
+        // their own, so holding them would only slow startup without a trace.
+        {
+          holdOutages: messagesEndpoint === 'messages',
+          lookup: options.anthropicLookup,
+        },
       );
       return;
     }

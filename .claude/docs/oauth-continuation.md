@@ -587,8 +587,13 @@ fallback rung. An upstream value above clodex's 60s client-facing cap remains in
 not promoted into repeated in-process waits. A deadline during retry
 backoff preserves the provider failure that prompted the retry, while a deadline during a silent
 active provider call remains a timeout. Proxy mode's raw HTTP MITM path shares the retry setting but
-retains its independent ceiling of five and one-retry default; other direct raw relays add no
-transport-failure replay, although an OAuth 401 refresh can still start a new authenticated call.
+retains its independent ceiling of five and one-retry default; there the setting governs only the
+pooled-socket replay. A second, independently controlled outage hold also runs on that path
+(`CLODEX_PASSTHROUGH_OUTAGE_HOLD_MS`, default 120 s, messages generation only): it retries attempts
+on a fresh socket that failed before TLS completed, up to a deadline counted from the request's
+arrival, and `CLODEX_UPSTREAM_MAX_RETRIES=0` / `CLAUDE_CODE_MAX_RETRIES=0` do not turn it off.
+Other direct raw relays add no transport-failure replay, although an OAuth 401 refresh can still
+start a new authenticated call.
 **This policy can recover only while no model output has been exposed downstream**; replay after
 partial output could duplicate content or tool calls.
 

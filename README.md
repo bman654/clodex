@@ -457,8 +457,76 @@ clodex --version    # version
   `CLODEX_UPSTREAM_MAX_RETRIES` value takes precedence on the HTTP MITM path;
   otherwise, Claude Code's own `CLAUDE_CODE_MAX_RETRIES=0` disables that replay
   so telling the client never to resend a request is not quietly undone one
-  layer down.
+  layer down. On that path the retry setting controls only this pooled-connection
+  replay. A separate outage hold, with its own setting, also runs there; see
+  the next entry.
   Recovered requests appear in the inference log as `response_retried`.
+- **Outage hold (proxy mode):** when a Claude Code request cannot reach
+  `api.anthropic.com` at all, clodex keeps retrying it for a while instead of
+  answering 502 at once, so a laptop waking from sleep, a Wi-Fi switch or a VPN
+  reconnect does not end the turn. A failure qualifies when the name does not
+  resolve, the connection is refused or has no route, or the connection is
+  reset or times out before its TLS handshake completes. clodex sends the
+  request only after the handshake, so none of these attempts sent anything
+  and retrying cannot submit the request twice. A failure after the handshake,
+  a certificate error, and a reset on a reused connection are not held. Retries
+  wait 1, 2, 4 and 8 seconds, then 15 seconds between attempts. The hold is a
+  deadline counted from when the request arrived: at the deadline clodex drops
+  any attempt that has not finished its handshake and answers 502, with a
+  message saying the outage hold expired and, if there was one, naming the last
+  upstream error.
+  If a reused connection is reset after the deadline and clodex replays the
+  request, the replay gets a 502 at once unless it can go out on another
+  reused connection.
+  `CLODEX_PASSTHROUGH_OUTAGE_HOLD_MS` sets the deadline in milliseconds. The
+  default is `120000` (2 minutes) and `0` turns the hold off. Values above
+  `570000` clamp to it with a one-time warning; malformed values are reported
+  once and ignored. Only messages generation (`/v1/messages`, including
+  `/v1/messages?beta=true`) is held. `count_tokens`, OAuth, startup and
+  telemetry calls still get their 502 at once. Each held retry appears in the
+  inference log as `response_retried` with `outageHold: true`.
+  Claude Code resends a 502 itself, so at its default of 10 retries a turn can
+  last through roughly 25 minutes of outage at the default hold. That figure is a
+  projection from Claude Code's retry schedule, not a measurement. Claude Code
+  can also give up sooner than the hold. It waits 180 seconds plus 1 second per
+  32 KiB of request body for a query's first response headers. After one
+  request gets no response, later requests in the query get `API_TIMEOUT_MS`
+  minus 1 second (599 seconds at its default), and a second request with no
+  response ends the turn even with retries left. At Claude Code's defaults the
+  default hold answers inside the first window, so a request still waiting for
+  its connection gets its 502 before either limit. A hold above about
+  180 seconds means the query's first held request is cut off by Claude Code
+  instead, and the hold must then stay below the longer window; the `570000`
+  ceiling does that at Claude Code's default `API_TIMEOUT_MS`. If you lower
+  `API_TIMEOUT_MS` in Claude Code's environment so that `API_TIMEOUT_MS` minus
+  1 second is shorter than the hold, every turn whose outage outlasts both
+  windows ends on that second no-response after about min(180 s plus the body
+  allowance, `API_TIMEOUT_MS` − 1 s) + (`API_TIMEOUT_MS` − 1 s); keep the hold
+  below `API_TIMEOUT_MS` − 1 s, or set it to `0`. For
+  `0 < API_TIMEOUT_MS < 11000`, Claude Code skips both of those waits for
+  response headers, but its own request timeout still applies: if that is
+  shorter than the hold, it aborts each held request before clodex can return
+  its 502.
+  The cost is a longer wait when the outage does not end: with the hold off,
+  Claude Code gives up on a persistent fast-failing outage after about 3
+  minutes, and at the default hold after about 25 (both projections).
+  The hold has its own switch. `CLODEX_UPSTREAM_MAX_RETRIES=0` and
+  `CLAUDE_CODE_MAX_RETRIES=0` do not turn it off, because a held request was
+  never sent. If you want outages to fail fast, for example in a headless
+  `claude -p` or CI run that would otherwise wait through each hold unless its
+  caller sets a limit, also set `CLODEX_PASSTHROUGH_OUTAGE_HOLD_MS=0`. The
+  server process reads the variable: with a standalone `clodex server`, set it
+  when starting the server, because setting it on `clodex-claude` changes
+  nothing. When clodex itself uses `HTTPS_PROXY`, the hold covers an
+  unreachable proxy and a tunnel that fails before its TLS handshake completes.
+  When the proxy is up but Anthropic is not, the proxy usually answers clodex's
+  `CONNECT` with an error status, and that error response comes back at once,
+  as it does with the hold off. If the proxy closes the connection before
+  replying, clodex answers 502 at once; if it resets the connection instead,
+  the request is held as for an unreachable proxy. A replay after the deadline
+  that needs a new tunnel waits for the proxy's `CONNECT` reply and is not cut
+  while it waits, so a proxy that never replies leaves that request with no
+  response, and an error reply to it gets clodex's 502 instead of the proxy's.
 - **Connection pacing (ChatGPT/Codex plans):** when many agents run at once,
   clodex spaces out the new connections it opens to OpenAI, which should make a
   burst of parallel work less likely to trip OpenAI's own rate limit. (In the

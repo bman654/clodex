@@ -288,6 +288,12 @@ export interface InferenceResponseLifecycleLogEntry {
   attempt?: number;
   /** Whether the failed attempt went out on a pooled keep-alive socket. */
   reusedSocket?: boolean;
+  /** Set on a retry made because the upstream could not be reached at all (outage hold). */
+  outageHold?: boolean;
+  /** Milliseconds of the outage hold used, counted from the request's arrival. */
+  holdElapsedMs?: number;
+  /** Delay before the next attempt. */
+  retryDelayMs?: number;
 }
 
 export type ProxyLifecycleEvent =
@@ -494,6 +500,9 @@ export function writeInferenceResponseLifecycleLog(
     ...(entry.terminationSource ? { terminationSource: entry.terminationSource } : {}),
     ...(attempt !== undefined ? { attempt } : {}),
     ...(entry.reusedSocket !== undefined ? { reusedSocket: entry.reusedSocket } : {}),
+    ...(entry.outageHold !== undefined ? { outageHold: entry.outageHold } : {}),
+    ...(entry.holdElapsedMs !== undefined ? { holdElapsedMs: entry.holdElapsedMs } : {}),
+    ...(entry.retryDelayMs !== undefined ? { retryDelayMs: entry.retryDelayMs } : {}),
   }));
 }
 

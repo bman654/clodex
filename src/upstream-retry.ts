@@ -244,3 +244,63 @@ export function passthroughUpstreamRetries(
   }
   return DEFAULT_PASSTHROUGH_RETRIES;
 }
+
+export const PASSTHROUGH_OUTAGE_HOLD_ENV = 'CLODEX_PASSTHROUGH_OUTAGE_HOLD_MS';
+/**
+ * How long the raw Anthropic MITM path keeps retrying a messages request that
+ * could not reach the upstream at all (DNS failure, refused or unreachable
+ * connect, a reset or timeout before TLS completed) before answering 502. The
+ * budget is a deadline from the request's arrival: an attempt still short of
+ * TLS when it passes is cut off, so slow-failing connects cannot stretch it.
+ * Claude Code resends a 502 itself, up to its own retry count, so each of its
+ * attempts covers this much outage instead of failing in milliseconds.
+ *
+ * What bounds a held request on the client is Claude Code's wait for response
+ * headers, not CLAUDE_STREAM_IDLE_TIMEOUT_MS (that watchdog is armed only once
+ * headers arrive). The first request of a query gets 180 s plus 1 s per 32 KiB
+ * of body. After a request gets no response, later requests in that query get
+ * API_TIMEOUT_MS - 1 s (599 s at defaults), and a second no-response ends the
+ * query with retries unused.
+ *
+ * At Claude Code's defaults the 120 s default hold answers inside that first
+ * window, so a held request never trips either limit and Claude Code's own
+ * retry loop keeps running. Above about 180 s the query's first held request is
+ * cut by the client instead, and the hold must then stay below the escalated
+ * window; the 570 s ceiling keeps it there at Claude Code's default
+ * API_TIMEOUT_MS. `0` turns the hold off.
+ */
+export const DEFAULT_PASSTHROUGH_OUTAGE_HOLD_MS = 120_000;
+export const MAX_PASSTHROUGH_OUTAGE_HOLD_MS = 570_000;
+
+export function passthroughOutageHoldMs(
+  env: NodeJS.ProcessEnv = process.env,
+  warn: Warn = defaultWarn,
+): number {
+  const raw = env[PASSTHROUGH_OUTAGE_HOLD_ENV]?.trim();
+  if (raw === undefined || raw === '') return DEFAULT_PASSTHROUGH_OUTAGE_HOLD_MS;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    reportOnce(
+      `${PASSTHROUGH_OUTAGE_HOLD_ENV}=${raw}`,
+      `ignoring ${PASSTHROUGH_OUTAGE_HOLD_ENV}=${raw} (expected a non-negative integer number of milliseconds)`,
+      warn,
+    );
+    return DEFAULT_PASSTHROUGH_OUTAGE_HOLD_MS;
+  }
+  if (value > MAX_PASSTHROUGH_OUTAGE_HOLD_MS) {
+    reportOnce(
+      `${PASSTHROUGH_OUTAGE_HOLD_ENV}=${raw}`,
+      `clamping ${PASSTHROUGH_OUTAGE_HOLD_ENV}=${raw} to ${MAX_PASSTHROUGH_OUTAGE_HOLD_MS}ms `
+      + '(the ceiling keeps the hold 29 s inside the 599 s Claude Code waits for response '
+      + 'headers after a request has gone unanswered, at its default API_TIMEOUT_MS)',
+      warn,
+    );
+    return MAX_PASSTHROUGH_OUTAGE_HOLD_MS;
+  }
+  return value;
+}
+
+/** Backoff between outage retries: 1 s, 2 s, 4 s, 8 s, then every 15 s. */
+export function outageRetryDelayMs(retry: number): number {
+  return Math.min(15_000, 1_000 * 2 ** Math.max(0, retry - 1));
+}
