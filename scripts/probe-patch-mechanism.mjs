@@ -590,4 +590,8 @@ try {
   else console.log(`${info.verdict.toUpperCase()} ${label} — ${checks.length} checks in ${Math.round(info.durationMs / 1000)}s`);
 }
 
-process.exit(exitCode);
+// Not process.exit(). On Node 24 it can hang forever: it joins V8's background threads before
+// tearing down the isolate, so a background compile that is waiting for the main thread to collect
+// garbage is never woken (nodejs/node#64274). That stalled CI's test job for six hours. Exiting
+// once the event loop drains tears the isolate down first, which releases that thread.
+process.exitCode = exitCode;

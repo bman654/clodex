@@ -37,6 +37,7 @@ import {
   runInstallVscodeLauncherCommand,
 } from '../src/vscode-launcher.js';
 import { installVscodeLauncherHelpText, main, parseArgs, rootHelpText } from '../src/cli.js';
+import { BOUNDED_NODE_CHILD } from './helpers/bounded-child.js';
 
 vi.mock('../src/first-run.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/first-run.js')>();
@@ -546,8 +547,10 @@ describe('packaged default paths', () => {
     const run = spawnSync(process.execPath, ['--import', preload, join(pkgRoot, 'dist', 'cli.js'), 'install-vscode-launcher'], {
       encoding: 'utf8',
       env: { ...process.env, WINDIR: windir, CLODEX_HOME: home, TEMP: temp, TMP: temp },
+      ...BOUNDED_NODE_CHILD,
     });
 
+    expect(run.error, run.stderr).toBeUndefined();
     expect(run.stderr).toBe('');
     expect(run.status).toBe(0);
     expect(readFileSync(join(home, 'bin', 'clodex-claude.exe'), 'utf8')).toBe('MZ packaged');
