@@ -150,7 +150,13 @@ let dispatcherInstalled = false;
  * `Agent.destroy()` cannot reach a socket it has not been handed yet. A peer that stalls the
  * handshake would therefore hold a requested exit until the fallback fires. process.exit() used
  * to cut these off; this does the same. Established connections are left to their owners, which
- * abort or unref them. Two cases are not seen, and a stall there still ends through the exit
+ * abort or unref them.
+ *
+ * Each socket is destroyed WITH an error. undici settles a connection attempt only on connect or
+ * error, so a bare destroy() (which emits only 'close') would strand the request it was opened for:
+ * an un-aborted fetch would then never settle, and its own ref'd timeout would hold the exit
+ * instead. A no-op listener keeps the error from becoming an uncaught exception on a socket whose
+ * owner never listened for one. Two cases are not seen, and a stall there still ends through the exit
  * fallback: TLS sockets on Node 22, which does not report them on this channel, and the TLS
  * handshake inside an HTTP(S)_PROXY tunnel, whose socket is tracked only until the TCP connection
  * to the proxy is made.
@@ -168,7 +174,10 @@ function abandonPendingConnectionsOnExit(): void {
   diagnosticsChannel.subscribe('net.client.socket', track);
   cancelOnExit(() => {
     diagnosticsChannel.unsubscribe('net.client.socket', track);
-    for (const socket of pending) socket.destroy();
+    for (const socket of pending) {
+      socket.on('error', () => {});
+      socket.destroy(Object.assign(new Error('clodex is exiting'), { code: 'ECONNABORTED' }));
+    }
     pending.clear();
   });
 }

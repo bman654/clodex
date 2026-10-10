@@ -13,6 +13,7 @@
 import { cancelOnExit, exitAfterDrain } from '../../src/process-exit.js';
 import { installOutboundDispatcher } from '../../src/outbound-proxy.js';
 import { MODELS_DEV_API_URL, refreshModelsDevCacheAsync } from '../../src/registry/models-dev.js';
+import { enrichPricingAsync, fetchPricingCache, PRICING_API_URL } from '../../src/registry/pricing.js';
 
 const mode = process.argv[2] ?? '';
 const upstreamUrl = process.argv[3] ?? '';
@@ -43,11 +44,11 @@ function holdLoop(): NodeJS.Timeout {
   return setInterval(() => {}, 60_000);
 }
 
-/** Point the models.dev refresh at the test's server, recording that the fetch really started. */
-function redirectModelsDevFetch(onStart: () => void): void {
+/** Point one public metadata URL at the test's server, recording that the fetch really started. */
+function redirectFetch(from: string, onStart: () => void): void {
   const realFetch = globalThis.fetch;
   globalThis.fetch = ((input: Parameters<typeof fetch>[0], init?: RequestInit) => {
-    if (String(input) !== MODELS_DEV_API_URL) return realFetch(input, init);
+    if (String(input) !== from) return realFetch(input, init);
     onStart();
     return realFetch(upstreamUrl, init);
   }) as typeof fetch;
@@ -94,7 +95,7 @@ async function run(): Promise<void> {
     case 'models-dev-quick': {
       // A command like `models --list`: some real work, finished well before the refresh's start
       // delay. Without the delay its download would already be under way here.
-      redirectModelsDevFetch(() => say('FETCH-STARTED'));
+      redirectFetch(MODELS_DEV_API_URL, () => say('FETCH-STARTED'));
       refreshModelsDevCacheAsync();
       await new Promise(resolve => setTimeout(resolve, 100));
       requestExit(0, { graceMs: 30_000 });
@@ -104,7 +105,7 @@ async function run(): Promise<void> {
       // A command still running when the refresh starts, ending while the download is in flight.
       // The CLI's own fetch dispatcher, as main() installs it, owns the connection.
       await installOutboundDispatcher();
-      const started = new Promise<void>(resolve => redirectModelsDevFetch(() => {
+      const started = new Promise<void>(resolve => redirectFetch(MODELS_DEV_API_URL, () => {
         say('FETCH-STARTED');
         resolve();
       }));
@@ -113,6 +114,38 @@ async function run(): Promise<void> {
       await started;
       // Give the connection time to reach the test's server, which never answers (over https, it
       // never completes the TLS handshake either).
+      await new Promise(resolve => setTimeout(resolve, 200));
+      clearInterval(command);
+      requestExit(0, { graceMs: 10_000, trace: true });
+      return;
+    }
+    case 'pricing-in-flight': {
+      // Pricing enrichment whose request is established and unanswered when the exit is requested.
+      await installOutboundDispatcher();
+      const started = new Promise<void>(resolve => redirectFetch(PRICING_API_URL, () => {
+        say('FETCH-STARTED');
+        resolve();
+      }));
+      // Reports only if the enrichment carried on to its registry update after the exit.
+      enrichPricingAsync(updated => say(`ENRICHMENT-FINISHED updated=${updated}`));
+      const command = holdLoop();
+      await started;
+      await new Promise(resolve => setTimeout(resolve, 200));
+      clearInterval(command);
+      requestExit(0, { graceMs: 10_000, trace: true });
+      return;
+    }
+    case 'unowned-fetch-connecting': {
+      // A fetch nobody aborts, with its own ref'd timeout (fetchPricingCache called without a
+      // signal), still opening its connection when the exit is requested.
+      await installOutboundDispatcher();
+      const started = new Promise<void>(resolve => redirectFetch(PRICING_API_URL, () => {
+        say('FETCH-STARTED');
+        resolve();
+      }));
+      void fetchPricingCache().then(result => say(`FETCH-SETTLED ${result === null ? 'null' : 'data'}`));
+      const command = holdLoop();
+      await started;
       await new Promise(resolve => setTimeout(resolve, 200));
       clearInterval(command);
       requestExit(0, { graceMs: 10_000, trace: true });

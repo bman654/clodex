@@ -8,14 +8,18 @@
 // tests/helpers/exit-probe.ts in a plain Node process, bundled with tsup as
 // tests/parent-notice-launch.test.ts does, and asserts on how it reported its own end.
 import { type ChildProcess, spawn, spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { build } from 'tsup';
+import { createServer as createHttpServer } from 'node:http';
+import { CHILD_NETWORK_ENV_VARS } from '../src/network-env.js';
 import { describeActiveResources } from '../src/process-exit.js';
+import { MODELS_DEV_API_URL } from '../src/registry/models-dev.js';
+import { PRICING_API_URL } from '../src/registry/pricing.js';
 import { BOUNDED_NODE_CHILD } from './helpers/bounded-child.js';
 
 const PROBE_SOURCE = fileURLToPath(new URL('./helpers/exit-probe.ts', import.meta.url));
@@ -43,11 +47,21 @@ function afterRequestMs(run: ProbeRun): number {
 const live = new Set<ChildProcess>();
 let home: string;
 
+/**
+ * The child environment without the ambient proxy settings, so the CLI's dispatcher is the plain
+ * Agent these cases exercise and loopback fixtures are reached directly.
+ */
+function hermeticEnv(overrides: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env = { ...process.env, ...overrides };
+  for (const name of CHILD_NETWORK_ENV_VARS) delete env[name];
+  return env;
+}
+
 function runProbe(mode: string, extraArgs: string[] = []): Promise<ProbeRun> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [PROBE, mode, ...extraArgs], {
       stdio: ['ignore', 'ignore', 'pipe'],
-      env: { ...process.env, CLODEX_HOME: home, CLODEX_TRACE: '' },
+      env: hermeticEnv({ CLODEX_HOME: home, CLODEX_TRACE: '' }),
     });
     live.add(child);
     let stderr = '';
@@ -218,6 +232,125 @@ describe('the background models.dev refresh', () => {
   }, 25_000);
 });
 
+describe('the background pricing enrichment', () => {
+  // Started by provider add and refresh. The interactive provider hub keeps running after it starts,
+  // so its request can be established and waiting on a stalled server when the user leaves.
+  it('cannot hold the process open once its request is in flight', async () => {
+    const upstream = await startSilentServer();
+    try {
+      const run = await runProbe('pricing-in-flight', [upstream.url]);
+      expect(run.stderr).toContain('FETCH-STARTED');
+      expect(upstream.requests()).toBeGreaterThan(0);
+      // Abandoned outright, as process.exit() would: no registry update while the process exits.
+      expect(run.stderr).not.toContain('ENRICHMENT-FINISHED');
+      expect(run.stderr).not.toContain('event loop still busy');
+      expect(run.stderr).toContain('EXITED via=drain code=0');
+    } finally {
+      await new Promise<void>(resolve => upstream.server.close(() => resolve()));
+    }
+  }, 25_000);
+});
+
+describe('outbound connections still opening at exit', () => {
+  it('fail the fetch that opened them, so its own timeout cannot hold the exit', async () => {
+    const upstream = await startSilentServer();
+    try {
+      // https against a server that never completes TLS: the connection is still opening.
+      const run = await runProbe('unowned-fetch-connecting', [upstream.url.replace('http:', 'https:')]);
+      expect(run.stderr).toContain('FETCH-STARTED');
+      expect(upstream.requests()).toBeGreaterThan(0);
+      // A connection destroyed without an error strands the fetch: it never settles and its 15 s
+      // timer holds the loop until the 10 s fallback.
+      expect(run.stderr).toContain('FETCH-SETTLED null');
+      expect(run.stderr).not.toContain('event loop still busy');
+      expect(run.stderr).toContain('EXITED via=drain code=0');
+    } finally {
+      await new Promise<void>(resolve => upstream.server.close(() => resolve()));
+    }
+  }, 25_000);
+});
+
+/**
+ * `clodex providers refresh-models` on a loopback custom-openai provider: the real successful
+ * refresh path, which ends by starting the background pricing enrichment that nothing awaits.
+ * A preload points the two public metadata URLs (pricing, models.dev) at the same loopback server.
+ */
+describe('clodex providers refresh-models', () => {
+  async function refreshAgainstLoopback() {
+    const scratch = mkdtempSync(join(tmpdir(), 'clodex-exit-refresh-'));
+    const hits: string[] = [];
+    const server = createHttpServer((req, res) => {
+      hits.push(req.url ?? '');
+      if (req.url === '/v1/models') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ data: [{ id: 'loop-model', object: 'model' }] }));
+      } else if (req.url === '/pricing') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ models: [] }));
+      } else {
+        res.writeHead(404).end();
+      }
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    const url = `http://127.0.0.1:${typeof address === 'object' && address ? address.port : 0}`;
+    try {
+      const clodexHome = join(scratch, 'home');
+      mkdirSync(clodexHome);
+      writeFileSync(join(clodexHome, 'providers.json'), JSON.stringify({
+        schemaVersion: 1,
+        providers: [{
+          id: 'loop', templateId: 'custom-openai', name: 'Loop', enabled: true,
+          authRef: 'none:anonymous', authType: 'none',
+          api: { npm: '@ai-sdk/openai-compatible', url: `${url}/v1` },
+          addedAt: '2026-10-10T00:00:00.000Z',
+        }],
+      }));
+      const redirect = join(scratch, 'redirect-metadata.mjs');
+      writeFileSync(redirect, [
+        'const realFetch = globalThis.fetch;',
+        'const routes = {',
+        `  ${JSON.stringify(PRICING_API_URL)}: '/pricing',`,
+        `  ${JSON.stringify(MODELS_DEV_API_URL)}: '/models-dev',`,
+        '};',
+        'globalThis.fetch = (input, init) => {',
+        '  const path = routes[String(input)];',
+        `  return realFetch(path ? ${JSON.stringify(url)} + path : input, init);`,
+        '};',
+        '',
+      ].join('\n'));
+      const child = spawn(process.execPath, [
+        '--import', writeExitWitness(scratch), '--import', redirect,
+        BUILT_CLI, 'providers', 'refresh-models', 'loop',
+      ], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: hermeticEnv({ CLODEX_HOME: clodexHome, HOME: scratch, CLODEX_TRACE: '1' }),
+      });
+      live.add(child);
+      let output = '';
+      child.stdout!.on('data', chunk => { output += String(chunk); });
+      child.stderr!.on('data', chunk => { output += String(chunk); });
+      const killer = setTimeout(() => child.kill('SIGKILL'), PROBE_TIMEOUT_MS);
+      const status = await new Promise<number | null>(resolve => child.on('close', code => resolve(code)));
+      clearTimeout(killer);
+      live.delete(child);
+      return { status, output, hits };
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  }
+
+  it('drains naturally right after starting the pricing enrichment', async () => {
+    const run = await refreshAgainstLoopback();
+    expect(run.hits).toContain('/v1/models');
+    expect(run.output).not.toContain('event loop still busy');
+    expect(run.output).toContain('EXIT-WITNESS drained(0)');
+    expect(run.status).toBe(0);
+  }, 25_000);
+});
+
 describe('describeActiveResources', () => {
   it('groups resources by type with counts', () => {
     expect(describeActiveResources(['TCPSocketWrap', 'Timeout', 'TCPSocketWrap'])).toBe('TCPSocketWrap x2, Timeout');
@@ -260,15 +393,14 @@ describe('both bins end by draining the event loop', () => {
       const run = spawnSync(process.execPath, ['--import', witness, bin, ...args], {
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
+        env: hermeticEnv({
           CLODEX_HOME: join(scratch, 'home'),
           HOME: scratch,
           CLODEX_TRACE: '',
           CLODEX_CLAUDE_PATH: '',
           PATH: '/usr/bin:/bin',
           ...env,
-        },
+        }),
         ...BOUNDED_NODE_CHILD,
       });
       return { status: run.status, stderr: run.stderr, error: run.error, scratch };
@@ -322,6 +454,33 @@ describe('both bins end by draining the event loop', () => {
       'clodex-claude: could not find the claude binary (set CLODEX_CLAUDE_PATH)',
       'EXIT-WITNESS drained(127)',
     ]);
+  });
+
+  it.skipIf(process.platform === 'win32')('clodex-claude keeps its 127 when nobody is reading its stderr', async () => {
+    // `clodex-claude … 2>&1 | true`: the reader is gone before the diagnostic is written. The
+    // write fails with EPIPE asynchronously, after the exit was requested; process.exit() used to
+    // end the process first, and an unhandled stream error would now turn 127 into 1.
+    const scratch = mkdtempSync(join(tmpdir(), 'clodex-exit-epipe-'));
+    try {
+      const child = spawn(process.execPath, [BUILT_WRAPPER, '-p', 'hi'], {
+        stdio: ['ignore', 'ignore', 'pipe'],
+        env: hermeticEnv({
+          CLODEX_HOME: join(scratch, 'home'),
+          HOME: scratch,
+          CLODEX_CLAUDE_PATH: '',
+          PATH: '/usr/bin:/bin',
+        }),
+      });
+      live.add(child);
+      child.stderr!.destroy();
+      const killer = setTimeout(() => child.kill('SIGKILL'), PROBE_TIMEOUT_MS);
+      const status = await new Promise<number | null>(resolve => child.on('close', code => resolve(code)));
+      clearTimeout(killer);
+      live.delete(child);
+      expect(status).toBe(127);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 
   it.skipIf(process.platform === 'win32')('clodex-claude when a server is required and none is live', () => {

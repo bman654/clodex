@@ -141,16 +141,14 @@ export function launchClaude(
       process.off('SIGTERM', forwardSigterm);
     };
 
-    child.on('exit', (code) => {
+    // Both ways the child can end go through here, so neither can skip the cleanup.
+    const finish = (code: number): void => {
       stopForwarding();
       restore();
-      resolve(code ?? 0);
-    });
+      resolve(code);
+    };
 
-    child.on('error', (err) => {
-      stopForwarding();
-      restore();
-      resolve(1);
-    });
+    child.on('exit', (code) => finish(code ?? 0));
+    child.on('error', () => finish(1));
   });
 }

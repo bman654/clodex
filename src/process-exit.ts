@@ -15,8 +15,8 @@ import { writeSync } from 'node:fs';
 
 /**
  * How long a requested exit may wait for the event loop to drain before falling back to
- * process.exit(). Measured drains finish in under a millisecond and never took more than about
- * 60 ms, so this only matters when something unexpected holds the loop. One second keeps that case
+ * process.exit(). Most measured drains ended before a 1 ms poll could sample them, and none took
+ * more than about 60 ms, so this only matters when something unexpected holds the loop. One second keeps that case
  * short for someone at a terminal, while leaving room for the waits a drain can legitimately
  * include: an uncancellable in-flight DNS lookup or connection attempt, a pipe reader catching up on
  * buffered output (which process.exit() can cut short), and closing sockets finishing their
@@ -78,6 +78,12 @@ export function exitAfterDrain(code: number, options: ExitAfterDrainOptions = {}
   if (exitRequested) return;
   exitRequested = true;
   process.exitCode = code;
+  // process.exit() discarded a stdio failure that arrived after the exit: a reader that has gone
+  // away reports EPIPE asynchronously, and unhandled it would turn this exit code into 1.
+  // Errors from before the request are untouched.
+  const ignoreStdioError = () => {};
+  process.stdout.on('error', ignoreStdioError);
+  process.stderr.on('error', ignoreStdioError);
 
   const cancellers = [...exitCancellers];
   exitCancellers.clear();

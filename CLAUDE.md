@@ -192,9 +192,9 @@ These bite from outside the subsystem that owns them, so they live here rather t
 - **Never call `process.exit()` in `src/`; end through `exitAfterDrain()` (`src/process-exit.ts`).**
   On Node 24 `process.exit()` can hang forever (nodejs/node#64274), so both bins set the exit code
   and let the event loop drain, falling back to `process.exit()` after one second. That only works
-  if nothing holds the loop: background work that nothing awaits (the models.dev refresh, a
-  WebSocket's closing handshake, outbound connections still being opened) registers
-  `cancelOnExit()` so it is cut off as `process.exit()` used to cut it off. Run with `CLODEX_TRACE=1` to see what held the loop when the fallback fires.
+  if nothing holds the loop: background work that nothing awaits (the models.dev refresh, the
+  pricing enrichment, a WebSocket's closing handshake, outbound connections still being opened)
+  registers `cancelOnExit()` so it is cut off as `process.exit()` used to cut it off. Run with `CLODEX_TRACE=1` to see what held the loop when the fallback fires.
 - **Every AI SDK generation entry point must resolve its timeout and retry budget through
   `src/upstream-retry.ts`.** Anthropic- and OpenAI-format `streamText` consumers abort at idle and
   total deadlines; `generateText` consumers abort at total only. Cancellation remains cooperative
