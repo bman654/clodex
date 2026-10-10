@@ -50,6 +50,7 @@ import {
   wrapperSubstitutionEligible,
 } from './wrapper-env.js';
 import { finalizeWrapperTarget, prepareWrapperTarget } from './wrapper-target.js';
+import { exitAfterDrain } from './process-exit.js';
 
 const isWindows = process.platform === 'win32';
 const WRAPPER_SERVER_READY_TIMEOUT_MS = 500;
@@ -155,7 +156,8 @@ async function main(): Promise<void> {
 
   if (!checkOnly && !claudePath) {
     process.stderr.write('clodex-claude: could not find the claude binary (set CLODEX_CLAUDE_PATH)\n');
-    process.exit(127);
+    exitWrapper(127);
+    return;
   }
 
   // Selection policy (see orderWrapperServerCandidates): proxy-mode servers
@@ -171,10 +173,14 @@ async function main(): Promise<void> {
     WRAPPER_SERVER_READY_TIMEOUT_MS,
     { retryFailure: result => result === 'timeout' },
   );
-  if (checkOnly) process.exit(state ? 0 : 1);
+  if (checkOnly) {
+    exitWrapper(state ? 0 : 1);
+    return;
+  }
   if (!state && wrapperRequiresServer(process.env)) {
     process.stderr.write('clodex-claude: no live clodex server is available\n');
-    process.exit(1);
+    exitWrapper(1);
+    return;
   }
   if (state && process.env[OAUTH_ACCOUNT_ENV]?.trim()) {
     process.stderr.write(
@@ -230,15 +236,20 @@ async function main(): Promise<void> {
 
   child.on('error', err => {
     process.stderr.write(`clodex-claude: failed to launch ${claudePath}: ${err.message}\n`);
-    process.exit(127);
+    exitWrapper(127);
   });
   child.on('exit', (code, signal) => {
     if (signal) {
       const signum = osConstants.signals[signal as keyof typeof osConstants.signals];
-      process.exit(signum ? 128 + signum : 1);
+      exitWrapper(signum ? 128 + signum : 1);
+      return;
     }
-    process.exit(code ?? 0);
+    exitWrapper(code ?? 0);
   });
+}
+
+function exitWrapper(code: number): void {
+  exitAfterDrain(code, { label: 'clodex-claude' });
 }
 
 void main();

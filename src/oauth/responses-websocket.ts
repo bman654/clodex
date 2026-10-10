@@ -14,6 +14,7 @@ import type { FetchFunction } from '@ai-sdk/provider-utils';
 import type { RawData, WebSocket as WsWebSocket } from 'ws';
 import { CODEX_RESPONSES_WEBSOCKETS_BETA } from '../constants.js';
 import { outboundWsProxyAgent } from '../outbound-proxy.js';
+import { cancelOnExit } from '../process-exit.js';
 import { emitParentNotice } from '../parent-notice.js';
 import {
   anthropicErrorType,
@@ -1573,9 +1574,21 @@ function deleteEntry(entry: ConnectionEntry, closeSocket = true): void {
   entry.inFlight = false;
   entry.current = undefined;
   unregisterEntry(entry);
-  if (closeSocket) {
-    try { entry.socket.close(); } catch { /* ignore */ }
-  }
+  if (closeSocket) closeGracefully(entry.socket);
+}
+
+/** ws `readyState` while a closing handshake is in progress. */
+const WS_CLOSING = 2;
+
+/**
+ * Start a closing handshake that cannot hold up the process exiting. The handshake waits for the
+ * peer to answer behind ws's ref'd 30-second close timer; an exit requested meanwhile terminates
+ * the socket instead, as process.exit() used to.
+ */
+function closeGracefully(socket: WsWebSocket): void {
+  try { socket.close(); } catch { return; }
+  if (socket.readyState !== WS_CLOSING) return;
+  socket.once('close', cancelOnExit(() => socket.terminate()));
 }
 
 function failContext(

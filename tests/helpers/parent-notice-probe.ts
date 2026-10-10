@@ -76,9 +76,14 @@ function awaitLaunch(exit: Promise<number>, ms: number): Promise<number> {
   });
 }
 
+function signalListenerCounts(): { sigint: number; sigterm: number } {
+  return { sigint: process.listenerCount('SIGINT'), sigterm: process.listenerCount('SIGTERM') };
+}
+
 async function main(): Promise<void> {
   const extraArgs = withDebugFile ? ['--debug-file', debugFile] : [];
   if (withDebugFile) writeFileSync(debugFile, '');
+  const signalListenersBefore = signalListenerCounts();
   const exit = launchClaude({ ...process.env }, undefined, extraArgs);
 
   try {
@@ -108,6 +113,15 @@ async function main(): Promise<void> {
   const code = await awaitLaunch(exit, 20_000);
   // Belt and braces: whatever happened above, the child is now free to exit.
   try { writeFileSync(release, ''); } catch { /* scratch may be gone */ }
+
+  // Signal forwarders left behind would swallow a Ctrl-C while clodex winds down.
+  const signalListenersAfter = signalListenerCounts();
+  if (!isEpipe) {
+    process.stderr.write(
+      `probe-signal-listeners-added sigint=${signalListenersAfter.sigint - signalListenersBefore.sigint}`
+      + ` sigterm=${signalListenersAfter.sigterm - signalListenersBefore.sigterm}\n`,
+    );
+  }
 
   // After the child is gone the sink must be released, so this one goes straight
   // to the terminal rather than into a queue nobody will ever flush.

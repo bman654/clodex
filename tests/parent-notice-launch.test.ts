@@ -167,6 +167,13 @@ describe('parent notices while Claude Code owns the terminal', () => {
     expect(plain.output).toContain('probe-done exit=0');
   });
 
+  it('removes its signal forwarders once the child has exited', () => {
+    // A forwarder left installed would swallow a Ctrl-C aimed at clodex while it winds down
+    // after Claude Code exits. The signalled run consumed its SIGINT forwarder; SIGTERM's stayed.
+    expect(plain.output).toContain('probe-signal-listeners-added sigint=0 sigterm=0');
+    expect(signalled.output).toContain('probe-signal-listeners-added sigint=0 sigterm=0');
+  });
+
   it('never lets an ordinary parent write reach the terminal at all', () => {
     // The mute's original purpose: only opted-in notices are deferred-and-shown;
     // everything else stays swallowed exactly as before.

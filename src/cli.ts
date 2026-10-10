@@ -80,6 +80,7 @@ import {
 } from './http-proxy/index.js';
 import { runPatchCommand, runLaunchPatchCheck } from './patcher.js';
 import { installOutboundDispatcher } from './outbound-proxy.js';
+import { exitAfterDrain } from './process-exit.js';
 import { runInstallVscodeLauncherCommand } from './vscode-launcher.js';
 import { CHECKED_EDITORS_DESCRIPTION } from './editor-extension-version.js';
 const STARTER_CLAUDE_FLAGS = new Set(['--dry-run', '--trace', '--fast', '--endpoint', '--proxy', '--save-mode', '--help', '-h', '--version', '-v']);
@@ -1878,13 +1879,10 @@ function isCliEntryPoint(): boolean {
 }
 
 if (isCliEntryPoint()) {
-  main().then((exitCode) => {
-    process.exit(exitCode);
-  }).catch((err: unknown) => {
-    if (err === Symbol.for('clack:cancel')) {
-      process.exit(0);
-    }
-    console.error(pc.red('\nUnexpected error:'), err);
-    process.exit(1);
+  const exitOptions = { trace: Boolean(parseArgs(process.argv.slice(2)).trace) };
+  main().then((exitCode) => exitAfterDrain(exitCode, exitOptions), (err: unknown) => {
+    const cancelled = err === Symbol.for('clack:cancel');
+    if (!cancelled) console.error(pc.red('\nUnexpected error:'), err);
+    exitAfterDrain(cancelled ? 0 : 1, exitOptions);
   });
 }

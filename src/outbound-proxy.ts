@@ -25,9 +25,13 @@
 
 import type { Agent as HttpAgent } from 'node:http';
 import { randomUUID } from 'node:crypto';
+import diagnosticsChannel from 'node:diagnostics_channel';
+import { Socket } from 'node:net';
 import { networkInterfaces } from 'node:os';
+import { TLSSocket } from 'node:tls';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { emitParentNotice } from './parent-notice.js';
+import { cancelOnExit } from './process-exit.js';
 
 // Private to this process. Sent only to an outbound proxy (not to the origin)
 // and removed if a request returns to our listener, regardless of its value.
@@ -138,6 +142,37 @@ export function proxyUrlTargetsListener(
 
 let dispatcherInstalled = false;
 
+/**
+ * Destroy outbound connections still being opened when the process is asked to exit.
+ *
+ * Aborting a request does not abort the connection being opened for it: undici keeps dialling
+ * until the TCP connect and TLS handshake finish or its 10 s connect timeout fires, and
+ * `Agent.destroy()` cannot reach a socket it has not been handed yet. A peer that stalls the
+ * handshake would therefore hold a requested exit until the fallback fires. process.exit() used
+ * to cut these off; this does the same. Established connections are left to their owners, which
+ * abort or unref them. Two cases are not seen, and a stall there still ends through the exit
+ * fallback: TLS sockets on Node 22, which does not report them on this channel, and the TLS
+ * handshake inside an HTTP(S)_PROXY tunnel, whose socket is tracked only until the TCP connection
+ * to the proxy is made.
+ */
+function abandonPendingConnectionsOnExit(): void {
+  const pending = new Set<Socket>();
+  const track = (message: unknown): void => {
+    const socket = (message as { socket?: unknown }).socket;
+    if (!(socket instanceof Socket)) return;
+    pending.add(socket);
+    const settled = () => pending.delete(socket);
+    socket.once(socket instanceof TLSSocket ? 'secureConnect' : 'connect', settled);
+    socket.once('close', settled);
+  };
+  diagnosticsChannel.subscribe('net.client.socket', track);
+  cancelOnExit(() => {
+    diagnosticsChannel.unsubscribe('net.client.socket', track);
+    for (const socket of pending) socket.destroy();
+    pending.clear();
+  });
+}
+
 /** Reset the install-once latch (tests only). */
 export function resetOutboundDispatcherForTests(): void {
   dispatcherInstalled = false;
@@ -160,6 +195,7 @@ export async function installOutboundDispatcher(): Promise<boolean> {
       ? new EnvHttpProxyAgent({ allowH2: false })
       : new Agent({ allowH2: false });
     setGlobalDispatcher(dispatcher);
+    abandonPendingConnectionsOnExit();
     dispatcherInstalled = true;
     return true;
   } catch (err) {
