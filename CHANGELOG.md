@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.19.0](https://github.com/bman654/clodex/compare/v2.18.10...v2.19.0) (2026-10-10)
+
+
+### Features
+
+* **proxy:** keep Claude Code turns alive through network outages instead of failing ([#316](https://github.com/bman654/clodex/issues/316)) ([7f091fb](https://github.com/bman654/clodex/commit/7f091fb1ad74784eb08f85da0c46b1c3af3b8733))
+
+
+### Bug Fixes
+
+* **cli:** stop clodex occasionally hanging after a command finishes on Node 24 ([#319](https://github.com/bman654/clodex/issues/319)) ([34c4791](https://github.com/bman654/clodex/commit/34c47910e29e5c5d7994305186ae413ba7a5d609))
+
 ## [2.18.10](https://github.com/bman654/clodex/compare/v2.18.9...v2.18.10) (2026-10-06)
 
 
