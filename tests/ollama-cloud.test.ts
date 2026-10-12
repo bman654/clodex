@@ -12,7 +12,7 @@ import {
   listAddableTemplates,
   verifyOllamaCloudCredential,
 } from '../src/provider-templates.js';
-import { applyTemplateModelMetadata } from '../src/registry/fetch-template-models.js';
+import { applyTemplateModelMetadata, fetchTemplateModels } from '../src/registry/fetch-template-models.js';
 import { materializeRegistry } from '../src/registry/materialize.js';
 import { providerPreservesModelPricing } from '../src/registry/pricing.js';
 import type { CachedModel, ProviderRegistry } from '../src/registry/types.js';
@@ -123,6 +123,34 @@ describe('Ollama Cloud template and catalog', () => {
   });
 });
 
+describe('Ollama Cloud model discovery with the real template', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('lists models from ollama.com/v1/models and keeps only the allowlist', async () => {
+    // Answers like ollama.com (an OpenAI `{data: [...]}` list) at the real path only.
+    const fetchMock = vi.fn(async (url: string) => (url === 'https://ollama.com/v1/models'
+      ? new Response(JSON.stringify({
+        object: 'list',
+        data: [
+          { id: 'gpt-oss:120b', object: 'model', owned_by: 'ollama' },
+          { id: 'kimi-k3', object: 'model', owned_by: 'ollama' },
+          { id: 'deepseek-v4.1-flash', object: 'model', owned_by: 'ollama' },
+        ],
+      }), { status: 200 })
+      : new Response('404 page not found', { status: 404 })));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await fetchTemplateModels(getTemplateById('ollama-cloud')!, 'ollama-key');
+    expect(result.error).toBeUndefined();
+    expect(fetchMock.mock.calls.map(call => call[0])).toEqual(['https://ollama.com/v1/models']);
+    expect(result.models.map(m => [m.id, m.name])).toEqual([
+      ['kimi-k3', 'Kimi K3'],
+      ['deepseek-v4.1-flash', 'DeepSeek V4.1 Flash'],
+    ]);
+  });
+});
+
 describe('verifyOllamaCloudCredential', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -160,15 +188,28 @@ describe('verifyOllamaCloudCredential', () => {
     expect(await verifyOllamaCloudCredential('any-key')).toBeNull();
   });
 
-  it('is wired on the template, takes only the key, and bounds the probe', async () => {
+  it('is wired on the template and takes only the key', () => {
     expect(getTemplateById('ollama-cloud')?.verifyCredential).toBe(verifyOllamaCloudCredential);
     expect(verifyOllamaCloudCredential.length).toBe(1);
-    const fetchMock = vi.fn(async () => new Response('{}', { status: 400 }));
-    vi.stubGlobal('fetch', fetchMock);
-    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout');
-    await verifyOllamaCloudCredential('k');
-    expect(timeoutSpy).toHaveBeenCalledWith(TEST_TIMEOUT_MS);
-    timeoutSpy.mockRestore();
+  });
+
+  it('hands its timeout signal to fetch, so a stalled probe ends as inconclusive', async () => {
+    const deadline = new AbortController();
+    const timeoutSpy = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
+    // A fetch that never answers on its own: it settles only when the signal it was
+    // given aborts, as the real fetch does.
+    vi.stubGlobal('fetch', vi.fn((_url: string, init?: RequestInit) => new Promise<Response>((_, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+    })));
+    try {
+      const probe = verifyOllamaCloudCredential('k');
+      expect(timeoutSpy).toHaveBeenCalledWith(TEST_TIMEOUT_MS);
+      deadline.abort();
+      const hung = new Promise<'hung'>(resolve => setTimeout(() => resolve('hung'), 1000));
+      expect(await Promise.race([probe, hung])).toBeNull();
+    } finally {
+      timeoutSpy.mockRestore();
+    }
   });
 });
 
@@ -261,6 +302,35 @@ describe('verifyOllamaCloudCredential 403 classification', () => {
 
   // Synthetic body: no real Ollama Cloud 403 has been observed. It pins the predicate's
   // precedence — a body that names the key is a key rejection even beside entitlement words.
+  // One body per entitlement word, each containing no other word from the list, so
+  // dropping any single word from the predicate turns exactly one row red.
+  it.each([
+    ['subscription', '{"error":"a subscription is required"}'],
+    ['plan', '{"error":"not available on your plan"}'],
+    ['upgrade', '{"error":"please upgrade to continue"}'],
+    ['quota', '{"error":"weekly quota exceeded"}'],
+    ['model', '{"error":"this model is not enabled"}'],
+    ['access', '{"error":"no access to this resource"}'],
+  ])('treats a 403 naming only "%s" as inconclusive', async (_word, body) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 403 })));
+    expect(await verifyOllamaCloudCredential('good-key')).toBeNull();
+  });
+
+  it.each([
+    ['a bare Forbidden', '{"error":"Forbidden"}'],
+    ['an HTML block page', '<html><body><h1>403 Forbidden</h1></body></html>'],
+    ['an empty body', ''],
+  ])('rejects a 403 with %s', async (_label, body) => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(body, { status: 403 })));
+    expect(await verifyOllamaCloudCredential('bad-key')).not.toBeNull();
+  });
+
+  it('rejects a 401 even when its body reads like an entitlement problem', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response('{"error":"this model requires a subscription"}', { status: 401 })));
+    expect(await verifyOllamaCloudCredential('bad-key')).not.toBeNull();
+  });
+
   it('rejects a 403 that names the API key even when it also mentions access', async () => {
     vi.stubGlobal('fetch', vi.fn(async () =>
       new Response('{"error":"api key does not have access"}', { status: 403 })));
