@@ -125,7 +125,7 @@ Launch Claude Code bridged to configured model providers. Unrecognized flags (an
 | `--dry-run` | Run the wizard but print a launch preview instead of launching (never persists anything) |
 | `--trace` | Write debug logs to `~/.clodex/logs/` and show errors on exit |
 | `--fast` | Request Codex fast mode (`service_tier=priority`) for ChatGPT/Codex OAuth routes; equivalent to `CLODEX_SERVICE_TIER=fast` |
-| `--provider <id>` | Endpoint mode only: boot provider id of a configured provider (`openai`, `openai-oauth`, `opencode-go`, `ollama-cloud`, or `custom-<name>`); with `--model`, skips the wizard |
+| `--provider <id>` | Endpoint mode only: boot provider id of a configured provider (e.g. `openai`, `openai-oauth`, `opencode-go`, `ollama-cloud`, or `custom-<name>`); with `--model`, skips the wizard |
 | `--model <id>` | Endpoint mode only: boot model id; with `--provider`, skips the wizard |
 | `--context <model=stop>` | Use a different share of a model's context window for this launch only; never saved. Reaches Claude Code through the exported catalog, so a binary patched by `clodex patch` keeps its baked window until the stop is saved and the patch re-run |
 | `--help`, `--version` | Help / version |
