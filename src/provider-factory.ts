@@ -14,6 +14,7 @@ import {
   injectClaudeIdentity,
 } from './oauth/claude-identity.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
+import { OLLAMA_CLOUD_PROVIDER_ID } from './data/ollama-cloud-models.js';
 import {
   transformOpenAiCompatibleRequestBody,
   type ModelRuntimeCompatibility,
@@ -259,6 +260,10 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
       ...(spec.authType !== 'none' && apiKey.trim() ? { apiKey } : {}),
       ...(spec.authType === 'none' ? { fetch: fetchWithoutCredentialHeaders } : {}),
       ...(spec.headers ? { headers: spec.headers } : {}),
+      // ollama.com sends a streamed usage chunk only when the request carries
+      // stream_options.include_usage (observed 2026-10-13); without it every
+      // streamed turn reports output_tokens 0. Scoped to this provider only.
+      ...(spec.providerId === OLLAMA_CLOUD_PROVIDER_ID ? { includeUsage: true } : {}),
       ...(spec.compatibility
         ? {
             transformRequestBody: (body: Record<string, unknown>) =>

@@ -113,6 +113,8 @@ describe('Ollama Cloud template and catalog', () => {
     ]).routes;
     expect(routes).toHaveLength(1);
     expect(routes[0]).toMatchObject({
+      // createLanguageModel keys streamed usage (include_usage) on this provider id.
+      providerId: 'ollama-cloud',
       modelFormat: 'openai',
       npm: '@ai-sdk/openai-compatible',
       baseURL: OLLAMA_CLOUD_COMPLETIONS_BASE_URL,
