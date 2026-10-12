@@ -4,8 +4,8 @@
 
 ## Provider registry
 
-`src/registry/`. The shipped registry has three provider templates in `src/provider-templates.ts`:
-`openai` (API key), `openai-oauth`, and `opencode-go`. `provider-auth.ts` implements the OpenAI
+`src/registry/`. The shipped registry has four provider templates in `src/provider-templates.ts`:
+`openai` (API key), `openai-oauth`, `opencode-go`, and `ollama-cloud`. `provider-auth.ts` implements the OpenAI
 OAuth sign-in (device code by default; browser PKCE via `--browser` for workspaces that disable
 device codes). Interactive entry points that don't take flags — the providers hub's auth and
 add-account actions, the provider detail menu, `providers add`'s OAuth path, and the first-run

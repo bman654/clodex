@@ -135,9 +135,9 @@ export async function verifyOpenCodeGoCredential(apiKey: string): Promise<string
 }
 
 /**
- * Ollama Cloud: it is unknown whether `/v1/models` requires authentication, so
- * the models fetch cannot be trusted to validate a pasted key. Probe the
- * authenticated chat-completions endpoint instead. The destination is the
+ * Ollama Cloud: `/v1/models` answers 200 without a key (observed 2026-10-12, no
+ * Authorization header and a bogus one alike), so the models fetch cannot
+ * validate a pasted key. Probe the authenticated chat-completions endpoint instead. The destination is the
  * template's own literal, never an argument (a live credential is sent).
  *
  * The body names a catalog model but carries no messages: a valid key gets a

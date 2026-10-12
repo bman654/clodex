@@ -43,7 +43,7 @@ clodex claude                  # 5. launch Claude Code on an OpenAI model
 | OpenAI (ChatGPT / Codex plan) | OAuth | Fully supported by the clodex maintainer |
 | OpenCode Go | API key | Community-supported — maintained by its contributor |
 | Custom OpenAI-compatible server (OpenRouter, vLLM, …) | API key, or none | Community-supported — maintained by its contributor |
-| Ollama Cloud | API key | Community-supported — Chat Completions models only; see [docs](docs/ollama-cloud.md) |
+| Ollama Cloud | API key | Community-supported — maintained by its contributor |
 
 **Community-supported** means the maintainer holds no account for that service,
 so it cannot be exercised against the live API here or debugged when the vendor
@@ -327,13 +327,13 @@ account's model entitlement.
 
 Providers supported: `openai` (API key, platform.openai.com), `openai-oauth` (ChatGPT/Codex plan), and `opencode-go` (OpenCode Go API key). OpenCode Go exposes its Anthropic Messages, Chat Completions, and Responses models; only entries whose transport has been verified, live or against OpenCode's per-model endpoint table, are included. See [OpenCode Go provider](docs/opencode-go.md).
 
+`ollama-cloud` (Ollama Cloud API key) exposes a curated set of four Chat Completions models from `https://ollama.com/v1`; other models Ollama Cloud lists are hidden. See [Ollama Cloud provider](docs/ollama-cloud.md).
+
 A **custom OpenAI-compatible server** is any OpenAI-style API, given by its base URL (the part before `/chat/completions`), such as `https://openrouter.ai/api/v1`. `providers add` asks for a name, the base URL and an API key (leave it empty for a local server without auth), lists the server's models to check the connection, and saves the provider as `custom-<name>`. Its models then appear in `clodex models`; once saved as favorites they are addressed as `clodex:custom-<name>:<model>` and can be given a short alias with `clodex models --alias`. The base URL is checked before anything is saved and again when its models are refreshed: plain `http://` is accepted only after you confirm it, and only if every address the host resolves to is on this machine, your LAN or a private network such as Tailscale (loopback, private, unique-local IPv6 or carrier-grade-NAT `100.64.0.0/10` addresses); `https://` is accepted on any of those networks as well as the public internet; and a link-local (`169.254.0.0/16`, `fe80::/10`) or well-known cloud-metadata address is refused whether or not HTTP was approved. A server on another machine in your tailnet can be added by its `100.x` address, its MagicDNS name, or the HTTPS name `tailscale serve` gives it. A model's id and name are stored with surrounding whitespace trimmed, and a model whose trimmed id or name still contains a control character is skipped, whether the list is fetched by `providers add` or by `providers refresh-models`, and error text from the server is shown with control characters replaced by spaces. Only the OpenAI-compatible kind is offered in the menu.
 
 ### `clodex install-vscode-launcher`
 
 Windows only. Builds `%USERPROFILE%\.clodex\bin\clodex-claude.exe`, the executable the Claude Code VS Code extension can use as its `claudeCode.claudeProcessWrapper`, so chats in the editor launch Claude Code through `clodex-claude` (on Windows npm installs that wrapper as three script shims — extensionless, `.cmd`, `.ps1` — and no executable the extension can spawn). It compiles a short C# source shipped in the package with the compiler already inside the .NET Framework — nothing is downloaded — and prints the setting to paste; it never edits VS Code or Claude settings. The paths to `node.exe` and the clodex install are compiled in, so re-run it after switching Node versions or moving clodex. Like `clodex patch`, it warns when an installed Claude Code extension is a different version from the Claude Code clodex last patched (on any platform). Setup guide: [docs/windows-setup.md](docs/windows-setup.md).
-
-`ollama-cloud` (Ollama Cloud API key) exposes a curated set of Chat Completions models; see [Ollama Cloud provider](docs/ollama-cloud.md).
 
 ### Root
 
