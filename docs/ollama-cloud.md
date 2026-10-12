@@ -16,7 +16,7 @@ Streamed requests carry `stream_options: {"include_usage": true}`: ollama.com se
 
 ## Supported models
 
-Chat Completions only, from a committed allowlist (`src/data/ollama-cloud-models.ts`): `kimi-k3`, `glm-5.3`, `glm-5.3-flash`, `deepseek-v4.1-flash`. Live `/v1/models` results are availability data; models absent from the allowlist are hidden. Ollama publishes pay-as-you-go per-token rates (<https://ollama.com/pricing>), but clodex does not record them for this provider: no per-token cost is set and the global pricing cache is not applied.
+Chat Completions only, from a committed allowlist (`src/data/ollama-cloud-models.ts`): `kimi-k3`, `glm-5.3`, `glm-5.3-flash`, `deepseek-v4.1-flash`. Live `/v1/models` results are availability data; models absent from the allowlist are hidden. Ollama publishes pay-as-you-go per-token rates, but clodex does not record them for this provider: no per-token cost is set and the global pricing cache is not applied. See <https://ollama.com/pricing> for the current rates.
 
 ## Credential check
 
