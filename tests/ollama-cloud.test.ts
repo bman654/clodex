@@ -175,11 +175,13 @@ describe('verifyOllamaCloudCredential', () => {
 describe('Ollama Cloud per-model metadata', () => {
   // contextWindow is `model_info.<arch>.context_length` from ollama.com `/api/show`
   // (re-measured 2026-10-12: 1048576 for all four). Re-measure before changing it.
-  const EXPECTED: Record<string, { name: string; family: string }> = {
-    'kimi-k3': { name: 'Kimi K3', family: 'kimi' },
-    'glm-5.3': { name: 'GLM-5.3', family: 'glm' },
-    'glm-5.3-flash': { name: 'GLM-5.3 Flash', family: 'glm' },
-    'deepseek-v4.1-flash': { name: 'DeepSeek V4.1 Flash', family: 'deepseek' },
+  // modalities mirror `/api/show` `capabilities` (checked 2026-10-13): `vision` on every
+  // id except glm-5.3.
+  const EXPECTED: Record<string, { name: string; family: string; modalities: string[] }> = {
+    'kimi-k3': { name: 'Kimi K3', family: 'kimi', modalities: ['text', 'image'] },
+    'glm-5.3': { name: 'GLM-5.3', family: 'glm', modalities: ['text'] },
+    'glm-5.3-flash': { name: 'GLM-5.3 Flash', family: 'glm', modalities: ['text', 'image'] },
+    'deepseek-v4.1-flash': { name: 'DeepSeek V4.1 Flash', family: 'deepseek', modalities: ['text', 'image'] },
   };
 
   it('pins every curated field for each model', () => {
@@ -194,7 +196,6 @@ describe('Ollama Cloud per-model metadata', () => {
         modelFormat: 'openai',
         npm: '@ai-sdk/openai-compatible',
         apiUrl: 'https://ollama.com/v1',
-        modalities: ['text'],
         compatibility: {
           supportsStore: false,
           supportsDeveloperRole: false,
@@ -213,7 +214,7 @@ describe('Ollama Cloud per-model metadata', () => {
     expect(provider!.models.map(m => m.id)).toEqual(IDS);
     for (const model of provider!.models) {
       expect(model.contextWindow, model.id).toBe(1048576);
-      expect(model.modalities, model.id).toEqual(['text']);
+      expect(model.modalities, model.id).toEqual(EXPECTED[model.id]!.modalities);
 
       const body = transformOpenAiCompatibleRequestBody({
         model: model.id,

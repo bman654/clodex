@@ -11,20 +11,40 @@ const OPENAI_COMPATIBLE = '@ai-sdk/openai-compatible';
 
 // Context windows: `model_info.*.context_length` from ollama.com `/api/show`
 // for each id (measured 2026-10-01: all four report 1048576).
-const CATALOG: OllamaCloudModel[] = [
-  { id: 'kimi-k3', name: 'Kimi K3', contextWindow: 1048576, family: 'kimi' },
-  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1048576, family: 'glm' },
-  { id: 'glm-5.3-flash', name: 'GLM-5.3 Flash', contextWindow: 1048576, family: 'glm' },
-  { id: 'deepseek-v4.1-flash', name: 'DeepSeek V4.1 Flash', contextWindow: 1048576, family: 'deepseek' },
-].map(model => ({
+// Modalities: `/api/show` `capabilities` lists `vision` for every id except
+// glm-5.3 (checked 2026-10-13). Image input through clodex is untested.
+const CATALOG: OllamaCloudModel[] = ([
+  {
+    id: 'kimi-k3',
+    name: 'Kimi K3',
+    contextWindow: 1048576,
+    family: 'kimi',
+    modalities: ['text', 'image'],
+  },
+  { id: 'glm-5.3', name: 'GLM-5.3', contextWindow: 1048576, family: 'glm', modalities: ['text'] },
+  {
+    id: 'glm-5.3-flash',
+    name: 'GLM-5.3 Flash',
+    contextWindow: 1048576,
+    family: 'glm',
+    modalities: ['text', 'image'],
+  },
+  {
+    id: 'deepseek-v4.1-flash',
+    name: 'DeepSeek V4.1 Flash',
+    contextWindow: 1048576,
+    family: 'deepseek',
+    modalities: ['text', 'image'],
+  },
+] satisfies OllamaCloudModel[]).map(model => ({
   ...model,
   upstreamModelId: model.id,
   modelFormat: 'openai' as const,
   npm: OPENAI_COMPATIBLE,
   apiUrl: OLLAMA_CLOUD_COMPLETIONS_BASE_URL,
-  // Subscription pricing: no per-token cost is published, so none is set and
-  // the template's preserveModelPricing keeps the global pricing cache off it.
-  modalities: ['text'],
+  // Ollama publishes pay-as-you-go per-token rates (https://ollama.com/pricing),
+  // but clodex does not record them for this provider: no cost is set, and the
+  // template's preserveModelPricing keeps the global pricing cache off it.
   compatibility: {
     supportsStore: false,
     supportsDeveloperRole: false,
