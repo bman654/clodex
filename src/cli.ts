@@ -396,7 +396,7 @@ export function parseArgs(args: string[]): ParsedArgs {
 
 export function rootHelpText(): string {
   return `${pc.bold('clodex')} v${VERSION}
-Bridge Claude Code to OpenAI and OpenCode Go models.
+Bridge Claude Code to OpenAI, OpenCode Go, Ollama Cloud and custom OpenAI-compatible models.
 
 ${pc.bold('Usage:')}
   clodex claude [options] [claude-flags]

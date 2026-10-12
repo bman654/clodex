@@ -2,7 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/%40bman654%2Fclodex.svg)](https://www.npmjs.com/package/@bman654/clodex)
 
-**clodex** lets you use your ChatGPT/Codex plan, OpenAI API models, or OpenCode Go models with Claude Code as first-class model choices.
+**clodex** lets you use your ChatGPT/Codex plan, OpenAI API models, OpenCode Go or Ollama Cloud models, or models from a custom OpenAI-compatible server with Claude Code as first-class model choices.
 You can use them anywhere you use Anthropic models like Opus and Sonnet — as the main session model, and in subagents, workflows, and agent teams. Clodex integrates them directly into Claude Code, using Claude Code's system prompt.
 It works with your existing Claude Code plan as well as your Codex plans WITHOUT violating Anthropic's ToS.
 No messing with CMUX or child codex processes or any of that stuff.
@@ -125,7 +125,7 @@ Launch Claude Code bridged to configured model providers. Unrecognized flags (an
 | `--dry-run` | Run the wizard but print a launch preview instead of launching (never persists anything) |
 | `--trace` | Write debug logs to `~/.clodex/logs/` and show errors on exit |
 | `--fast` | Request Codex fast mode (`service_tier=priority`) for ChatGPT/Codex OAuth routes; equivalent to `CLODEX_SERVICE_TIER=fast` |
-| `--provider <id>` | Endpoint mode only: boot provider id (`openai`, `openai-oauth`, or `opencode-go`); with `--model`, skips the wizard |
+| `--provider <id>` | Endpoint mode only: boot provider id of a configured provider (`openai`, `openai-oauth`, `opencode-go`, `ollama-cloud`, or `custom-<name>`); with `--model`, skips the wizard |
 | `--model <id>` | Endpoint mode only: boot model id; with `--provider`, skips the wizard |
 | `--context <model=stop>` | Use a different share of a model's context window for this launch only; never saved. Reaches Claude Code through the exported catalog, so a binary patched by `clodex patch` keeps its baked window until the stop is saved and the patch re-run |
 | `--help`, `--version` | Help / version |
