@@ -5,6 +5,8 @@ import {
 } from '../src/data/ollama-cloud-models.js';
 import { TEST_TIMEOUT_MS } from '../src/constants.js';
 import { buildHttpProxyRoutes } from '../src/http-proxy/routes.js';
+import { transformOpenAiCompatibleRequestBody } from '../src/model-runtime-compatibility.js';
+import { effortProviderOptions } from '../src/provider-factory.js';
 import {
   getTemplateById,
   listAddableTemplates,
@@ -12,6 +14,7 @@ import {
 } from '../src/provider-templates.js';
 import { applyTemplateModelMetadata } from '../src/registry/fetch-template-models.js';
 import { materializeRegistry } from '../src/registry/materialize.js';
+import { providerPreservesModelPricing } from '../src/registry/pricing.js';
 import type { CachedModel, ProviderRegistry } from '../src/registry/types.js';
 
 const IDS = ['kimi-k3', 'glm-5.3', 'glm-5.3-flash', 'deepseek-v4.1-flash'];
@@ -25,6 +28,24 @@ function liveModel(id: string): CachedModel {
     brand: 'Ollama',
     modelFormat: 'openai',
     npm: '@ai-sdk/openai-compatible',
+  };
+}
+
+function ollamaRegistry(models: CachedModel[]): ProviderRegistry {
+  return {
+    schemaVersion: 1,
+    providers: [{
+      id: 'ollama-cloud',
+      templateId: 'ollama-cloud',
+      name: 'Ollama Cloud',
+      enabled: true,
+      authRef: 'keyring:provider:ollama-cloud',
+      authType: 'api',
+      preserveModelPricing: true,
+      api: { npm: '@ai-sdk/openai-compatible', url: OLLAMA_CLOUD_COMPLETIONS_BASE_URL },
+      modelsCache: { fetchedAt: '2026-10-01T00:00:00.000Z', models },
+      addedAt: '2026-10-01T00:00:00.000Z',
+    }],
   };
 }
 
@@ -86,22 +107,7 @@ describe('Ollama Cloud template and catalog', () => {
   it('materializes a Chat Completions route with the stored key', () => {
     const template = getTemplateById('ollama-cloud')!;
     const models = applyTemplateModelMetadata(template, IDS.map(liveModel));
-    const registry: ProviderRegistry = {
-      schemaVersion: 1,
-      providers: [{
-        id: 'ollama-cloud',
-        templateId: 'ollama-cloud',
-        name: 'Ollama Cloud',
-        enabled: true,
-        authRef: 'keyring:provider:ollama-cloud',
-        authType: 'api',
-        preserveModelPricing: true,
-        api: { npm: '@ai-sdk/openai-compatible', url: OLLAMA_CLOUD_COMPLETIONS_BASE_URL },
-        modelsCache: { fetchedAt: '2026-10-01T00:00:00.000Z', models },
-        addedAt: '2026-10-01T00:00:00.000Z',
-      }],
-    };
-    const providers = materializeRegistry(registry, () => 'ollama-key');
+    const providers = materializeRegistry(ollamaRegistry(models), () => 'ollama-key');
     const routes = buildHttpProxyRoutes(providers, [
       { providerId: 'ollama-cloud', modelId: 'kimi-k3' },
     ]).routes;
@@ -161,5 +167,90 @@ describe('verifyOllamaCloudCredential', () => {
     await verifyOllamaCloudCredential('k');
     expect(timeoutSpy).toHaveBeenCalledWith(TEST_TIMEOUT_MS);
     timeoutSpy.mockRestore();
+  });
+});
+
+describe('Ollama Cloud per-model metadata', () => {
+  // contextWindow is `model_info.<arch>.context_length` from ollama.com `/api/show`
+  // (re-measured 2026-10-12: 1048576 for all four). Re-measure before changing it.
+  const EXPECTED: Record<string, { name: string; family: string }> = {
+    'kimi-k3': { name: 'Kimi K3', family: 'kimi' },
+    'glm-5.3': { name: 'GLM-5.3', family: 'glm' },
+    'glm-5.3-flash': { name: 'GLM-5.3 Flash', family: 'glm' },
+    'deepseek-v4.1-flash': { name: 'DeepSeek V4.1 Flash', family: 'deepseek' },
+  };
+
+  it('pins every curated field for each model', () => {
+    const models = buildOllamaCloudModels();
+    expect(models.map(m => m.id)).toEqual(Object.keys(EXPECTED));
+    for (const model of models) {
+      expect(model, model.id).toEqual({
+        id: model.id,
+        ...EXPECTED[model.id],
+        contextWindow: 1048576,
+        upstreamModelId: model.id,
+        modelFormat: 'openai',
+        npm: '@ai-sdk/openai-compatible',
+        apiUrl: 'https://ollama.com/v1',
+        modalities: ['text'],
+        compatibility: {
+          supportsStore: false,
+          supportsDeveloperRole: false,
+          maxTokensField: 'max_tokens',
+          supportsReasoningEffort: false,
+        },
+      });
+    }
+  });
+
+  it('carries the curated window and wire quirks from discovery through materialization', () => {
+    const template = getTemplateById('ollama-cloud')!;
+    // Live discovery carries no window or compatibility; the overlay supplies them.
+    const discovered = applyTemplateModelMetadata(template, IDS.map(liveModel));
+    const [provider] = materializeRegistry(ollamaRegistry(discovered), () => 'ollama-key');
+    expect(provider!.models.map(m => m.id)).toEqual(IDS);
+    for (const model of provider!.models) {
+      expect(model.contextWindow, model.id).toBe(1048576);
+      expect(model.modalities, model.id).toEqual(['text']);
+
+      const body = transformOpenAiCompatibleRequestBody({
+        model: model.id,
+        store: true,
+        max_completion_tokens: 4096,
+        messages: [{ role: 'developer', content: 'rules' }, { role: 'user', content: 'hi' }],
+      }, model.compatibility!) as Record<string, unknown>;
+      expect(body, model.id).toEqual({
+        model: model.id,
+        max_tokens: 4096,
+        messages: [{ role: 'system', content: 'rules' }, { role: 'user', content: 'hi' }],
+      });
+
+      const effort = effortProviderOptions(model.npm!, 'high', model.id, {
+        providerId: 'ollama-cloud',
+        compatibility: model.compatibility,
+      } as never);
+      expect(effort, model.id).toBeUndefined();
+    }
+  });
+
+  it('keeps the shared pricing cache off a record whose persisted flag is absent', () => {
+    expect(providerPreservesModelPricing({ templateId: 'ollama-cloud' })).toBe(true);
+    // An explicit persisted choice still wins.
+    expect(providerPreservesModelPricing({ templateId: 'ollama-cloud', preserveModelPricing: false }))
+      .toBe(false);
+  });
+});
+
+describe('verifyOllamaCloudCredential 403 classification', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // Synthetic body: no real Ollama Cloud 403 has been observed. It pins the predicate's
+  // precedence — a body that names the key is a key rejection even beside entitlement words.
+  it('rejects a 403 that names the API key even when it also mentions access', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response('{"error":"api key does not have access"}', { status: 403 })));
+    expect(await verifyOllamaCloudCredential('bad-key')).not.toBeNull();
   });
 });
