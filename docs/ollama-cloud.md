@@ -10,7 +10,7 @@ clodex providers add
 
 Choose **Ollama Cloud API key** and paste a key from <https://ollama.com>. Then use `clodex models` to add models to favorites and `clodex patch` to make them selectable in Claude Code.
 
-Models are served through the OpenAI-compatible SDK at `https://ollama.com/v1/chat/completions` (Bearer key). `providers add` and its key check always use that address; as with the OpenAI API-key provider, later model refreshes and launches use the address stored in `providers.json`.
+Models are served through the OpenAI-compatible SDK at `https://ollama.com/v1/chat/completions` (Bearer key). Every catalog model carries that address, so `providers add`, its key check, and launched sessions always use it. A model-list refresh (`clodex providers refresh-models`) instead uses the provider's stored `api.url` in `providers.json`, which `providers add` sets to the same address.
 
 ## Supported models
 

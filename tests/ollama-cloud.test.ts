@@ -233,6 +233,16 @@ describe('Ollama Cloud per-model metadata', () => {
     }
   });
 
+  it('launches on ollama.com even when the stored provider URL differs', () => {
+    const template = getTemplateById('ollama-cloud')!;
+    const registry = ollamaRegistry(applyTemplateModelMetadata(template, IDS.map(liveModel)));
+    registry.providers[0]!.api.url = 'https://relay.example/v1';
+    const [provider] = materializeRegistry(registry, () => 'ollama-key');
+    for (const model of provider!.models) {
+      expect(model.completionsUrl, model.id).toBe('https://ollama.com/v1/chat/completions');
+    }
+  });
+
   it('keeps the shared pricing cache off a record whose persisted flag is absent', () => {
     expect(providerPreservesModelPricing({ templateId: 'ollama-cloud' })).toBe(true);
     // An explicit persisted choice still wins.
