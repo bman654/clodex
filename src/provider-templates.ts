@@ -140,10 +140,15 @@ export async function verifyOpenCodeGoCredential(apiKey: string): Promise<string
  * validate a pasted key. Probe the authenticated chat-completions endpoint instead. The destination is the
  * template's own literal, never an argument (a live credential is sent).
  *
- * The body names a catalog model but carries no messages: a valid key gets a
- * request-validation error, a bad key a 401. Only a definite 401/403 rejects;
- * a 403 that reads as a plan/model entitlement problem, timeouts, network
- * errors and every other status are inconclusive and pass.
+ * The body names a catalog model but carries no messages. Observed: a bad key
+ * gets 401 `Unauthorized` (2026-10-12); one valid key got 400
+ * `invalid_request_error` ("[] is too short - 'messages'", 2026-10-13). A valid
+ * key without access to the probe model has not been observed.
+ *
+ * A 401 always rejects. A 403 rejects unless its body has a whole-word
+ * subscription/plan/upgrade/quota/model/access and no api key/api_key/api-key/apikey
+ * (an entitlement problem, not a bad key). Timeouts, network errors and every
+ * other status are inconclusive and pass; model listing must still succeed.
  */
 export async function verifyOllamaCloudCredential(apiKey: string): Promise<string | null> {
   const model = buildOllamaCloudModels()[0];
