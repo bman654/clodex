@@ -25,6 +25,8 @@ import { loadRegistry } from '../registry/io.js';
 import type { ServerModelInfo, GatewayModelOptions } from './models.js';
 import {
   upstreamModelId,
+  gatewayAliasDaybreak,
+  gatewayAliasTarget,
   gatewayProviderId,
   gatewayProviderLabel,
   buildDedupedModelRows,
@@ -466,9 +468,16 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
   const targetUnavailableAliases = unavailableAliases.filter(({ alias }) => (
     !collidingAliasNames.has(alias.name)
   ));
+  const daybreakUnavailableAliases = normalizedAliases.accepted.flatMap(entry => {
+    if (collidingAliasNames.has(entry.alias.name)) return [];
+    const target = gatewayAliasTarget(models, entry.alias);
+    const daybreak = target ? gatewayAliasDaybreak(entry.alias, target) : undefined;
+    return daybreak?.kind === 'unavailable' ? [{ ...entry, reason: daybreak.reason }] : [];
+  });
   const inactiveAliasNames = new Set([
     ...targetUnavailableAliases.map(({ alias }) => alias.name),
     ...collidingAliasNames,
+    ...daybreakUnavailableAliases.map(({ alias }) => alias.name),
   ]);
   const modelAliases = normalizedAliases.aliases.filter(alias => !inactiveAliasNames.has(alias.name));
   const aliasWarnings = [
@@ -480,6 +489,9 @@ export async function runServerCommand(options: ServerCommandOptions = {}): Prom
     ))),
     ...collidingAliases.flatMap(({ sources }) => sources.map(source => (
       `${JSON.stringify(source.name)} — conflicts with a catalog model id`
+    ))),
+    ...daybreakUnavailableAliases.flatMap(({ sources, reason }) => sources.map(source => (
+      `${JSON.stringify(source.name)} — ${reason}`
     ))),
   ];
   if (aliasWarnings.length > 0) {

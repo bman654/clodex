@@ -2,6 +2,7 @@
 
 import type { FreeStatus } from './free-models.js';
 import type { ModelRuntimeCompatibility } from './model-runtime-compatibility.js';
+import type { CyberAccessProgram } from './daybreak.js';
 
 export type ModelFormat = 'anthropic' | 'openai' | 'unsupported';
 
@@ -48,6 +49,8 @@ export interface LocalProviderModel {
   useResponsesLite?: boolean;
   /** Backend capability: model must use the WebSocket Responses transport instead of HTTP. */
   preferWebSockets?: boolean;
+  /** Access programs the ChatGPT Codex catalog offers this account for the model. */
+  cyberAccessPrograms?: CyberAccessProgram[];
   /** OpenCode Zen free-tier models only. */
   isFree?: boolean;
   freeStatus?: FreeStatus;
@@ -77,6 +80,8 @@ export interface FavoriteModel {
 /** Short model name accepted by Claude HTTP-proxy mode for a saved favorite. */
 export interface ModelAlias extends FavoriteModel {
   name: string;
+  /** Send a Daybreak access program, chosen from the model's catalog entry. */
+  daybreak?: true;
 }
 
 export type BridgeMode = 'endpoint' | 'proxy';
@@ -152,6 +157,8 @@ export interface ParsedArgs {
   favoritesAlias?: string;
   /** Remove a saved short proxy-mode model alias. */
   favoritesUnalias?: string;
+  /** With `models --alias`: send a Daybreak access program through that alias. */
+  favoritesDaybreak?: boolean;
   /** Print resolved metadata for saved favorites as JSON. */
   favoritesJson?: boolean;
   /** Context stop assignments (`<model-ref>=standard|max|default|<tokens>`). */

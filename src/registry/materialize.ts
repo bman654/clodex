@@ -11,6 +11,7 @@ import {
 import { applyOAuthSeedContextMetadata, openAiPricingMetadata } from '../data/openai-oauth-models.js';
 import { isChatGptOAuthProvider } from './provider-kind.js';
 import { lookupKnownContextWindow } from '../context-window.js';
+import { cyberAccessProgramList } from '../daybreak.js';
 import type { LocalProvider, LocalProviderModel } from '../types.js';
 import { normalizeGoogleDisplayName, normalizeGoogleModelId } from './google-model-id.js';
 import { findModelsDevModel } from './models-dev.js';
@@ -165,6 +166,7 @@ export function cachedModelToLocal(
     interleavedReasoningField: cached.interleavedReasoningField ?? modelsDev?.interleaved?.field,
     useResponsesLite: cached.useResponsesLite,
     preferWebSockets: cached.preferWebSockets,
+    cyberAccessPrograms: cyberAccessProgramList(cached.cyberAccessPrograms),
     modalities: cached.modalities,
     compatibility: cached.compatibility,
   };

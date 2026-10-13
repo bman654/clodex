@@ -12,6 +12,7 @@ import {
   normalizeModelAliases,
 } from './model-aliases.js';
 import { isSdkMigratedNpm } from './provider-factory.js';
+import { resolveAliasDaybreak } from './daybreak.js';
 import { aliasModelId } from './proxy.js';
 import type { ProxyModelAlias, ProxyRoute } from './proxy.js';
 import type {
@@ -56,6 +57,7 @@ export function localModelToRoute(lp: LocalProvider, model: LocalProviderModel):
     useResponsesLite: model.useResponsesLite,
     preferWebSockets: model.preferWebSockets,
     compatibility: model.compatibility,
+    cyberAccessPrograms: model.cyberAccessPrograms,
   };
 }
 
@@ -79,12 +81,15 @@ export function resolveCatalogModelAliases(
     catalogRoutes.map(route => normalizeRouteLookupId(route.aliasId)),
   );
   return [
-    ...normalized.accepted.map(({ alias, source, sources }) => {
+    ...normalized.accepted.map(({ alias, source, sources }): ProxyModelAlias => {
       const route = resolveRoute(alias.providerId, alias.modelId);
       const collidesWithCatalog = catalogRouteIds.has(
         normalizeRouteLookupId(alias.name),
       );
       const sourceNames = [...new Set(sources.map(entry => entry.name))];
+      const daybreak = route
+        ? resolveAliasDaybreak(alias, { ...route, modelId: alias.modelId })
+        : { kind: 'off' as const };
       return {
         name: alias.name,
         ...(source.name === alias.name ? {} : { savedName: source.name }),
@@ -97,9 +102,13 @@ export function resolveCatalogModelAliases(
         ...(
           collidesWithCatalog
             ? { unavailableReason: 'conflicts with a catalog model id' }
-            : route
-              ? {}
-              : { unavailableReason: 'target unavailable' }
+            : !route
+              ? { unavailableReason: 'target unavailable' }
+              : daybreak.kind === 'unavailable'
+                ? { unavailableReason: daybreak.reason }
+                : daybreak.kind === 'on'
+                  ? { accessPrograms: daybreak.accessPrograms }
+                  : {}
         ),
       };
     }),

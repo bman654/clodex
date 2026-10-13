@@ -880,12 +880,15 @@ async function getOrInitLanguageModel(
   apiKey: string,
   webSocketDiagnosticsLogPath?: string,
 ): Promise<LanguageModel> {
+  // A Daybreak alias and its plain target share every other field, so without
+  // the program here whichever is asked for first decides what both send.
   const cacheKey = [
     model.providerId ?? model.sourceBackend,
     model.id,
     upstreamModelId(model),
     npm,
     baseURL ?? '',
+    model.accessPrograms?.cyber ?? '',
   ].join('\x1f');
   let cached = modelCache.get(cacheKey);
   if (!cached || cached.apiKey !== apiKey) {
@@ -901,6 +904,7 @@ async function getOrInitLanguageModel(
       useResponsesLite: model.useResponsesLite,
       preferWebSockets: model.preferWebSockets,
       compatibility: model.compatibility,
+      accessPrograms: model.accessPrograms,
       onWebSocketDiagnostic: webSocketDiagnosticsLogPath
         ? event => writeWebSocketDiagnosticLog(webSocketDiagnosticsLogPath, event)
         : undefined,

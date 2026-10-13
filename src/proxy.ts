@@ -13,6 +13,7 @@ import {
 } from './context-model-id.js';
 import { reportPricingBoundaryCrossing } from './pricing-boundary.js';
 import { routeUnavailableMessage } from './route-unavailable.js';
+import type { AccessPrograms, CyberAccessProgram } from './daybreak.js';
 import {
   getProxyDebugLogPath,
   INFERENCE_PROGRESS_INTERVAL_MS,
@@ -263,6 +264,10 @@ export interface ProxyRoute {
   compatibility?: ModelRuntimeCompatibility;
   /** Static headers sent on every upstream request (e.g. a plan/auth-tracking header a custom endpoint requires). */
   headers?: Record<string, string>;
+  /** Access programs the ChatGPT Codex catalog offers this account for the model. */
+  cyberAccessPrograms?: CyberAccessProgram[];
+  /** Responses `access_programs` to send; set only on the route copy of a Daybreak alias. */
+  accessPrograms?: AccessPrograms;
 }
 
 /**
@@ -291,6 +296,8 @@ export interface ProxyModelAlias {
   sourceNames?: string[];
   routeId?: string;
   unavailableReason?: string;
+  /** Daybreak program this alias sends; its route is copied so the target model stays plain. */
+  accessPrograms?: AccessPrograms;
 }
 
 function configuredAliasLookupNames(alias: ProxyModelAlias): string[] {
@@ -337,7 +344,9 @@ export async function startProxyCatalog(
     if (alias.routeId === undefined || alias.unavailableReason !== undefined) continue;
     const route = lookupRoute(byAlias, alias.routeId);
     const aliasId = normalizeRouteLookupId(alias.name);
-    if (route && !byAlias.has(aliasId)) byAlias.set(aliasId, route);
+    if (route && !byAlias.has(aliasId)) {
+      byAlias.set(aliasId, alias.accessPrograms ? { ...route, accessPrograms: alias.accessPrograms } : route);
+    }
   }
   const defaultRoute = lookupRoute(byAlias, defaultAliasId) ?? routes[0]!;
 
@@ -678,6 +687,7 @@ export async function startProxyCatalog(
             useResponsesLite: route.useResponsesLite,
             preferWebSockets: route.preferWebSockets,
             compatibility: route.compatibility,
+            accessPrograms: route.accessPrograms,
             onDebug: (msg: string) => plog(() => msg),
             onWebSocketDiagnostic: webSocketDiagnosticsLogPath
               ? event => writeWebSocketDiagnosticLog(webSocketDiagnosticsLogPath, event)

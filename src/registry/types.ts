@@ -2,6 +2,7 @@
 
 import type { FreeStatus } from '../free-models.js';
 import type { ModelRuntimeCompatibility } from '../model-runtime-compatibility.js';
+import type { CyberAccessProgram } from '../daybreak.js';
 
 export const REGISTRY_SCHEMA_VERSION = 1;
 
@@ -106,6 +107,13 @@ export interface CachedModel {
    * version, and can be stricter than the published minimum.
    */
   withheldAtClientVersion?: string;
+  /**
+   * Access programs the ChatGPT Codex catalog lets this account select for the
+   * model (`available_access_programs.cyber`). Absent when the catalog said
+   * nothing — a row from an older clodex or a fallback listing — which is not
+   * the same answer as an empty list.
+   */
+  cyberAccessPrograms?: CyberAccessProgram[];
   /** Supported input modalities preserved from curated provider metadata. */
   modalities?: ('text' | 'image')[];
   /** Provider-neutral per-model wire quirks. */

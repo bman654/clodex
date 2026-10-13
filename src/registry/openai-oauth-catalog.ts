@@ -12,6 +12,7 @@ import { deriveBrand } from '../models.js';
 import { lookupKnownContextWindow } from '../context-window.js';
 import { getInstalledClaudeVersion } from '../launch.js';
 import { modelPrefersResponsesApi } from '../provider-factory.js';
+import { readCyberAccessPrograms, type CyberAccessProgram } from '../daybreak.js';
 
 /** A parsed model entry, including backend-reported transport capability flags. */
 interface OpenAiModelEntry {
@@ -27,6 +28,7 @@ interface OpenAiModelEntry {
   useResponsesLite?: boolean;
   preferWebSockets?: boolean;
   minimalClientVersion?: string;
+  cyberAccessPrograms?: CyberAccessProgram[];
 }
 
 function positiveInteger(value: unknown): number | undefined {
@@ -46,12 +48,15 @@ function readContextFields(
 }
 
 /** Read the Responses-Lite / WebSocket capability flags off a raw model entry. */
-function readCapabilityFlags(m: Record<string, unknown>): Pick<OpenAiModelEntry, 'useResponsesLite' | 'preferWebSockets' | 'minimalClientVersion'> {
+function readCapabilityFlags(
+  m: Record<string, unknown>,
+): Pick<OpenAiModelEntry, 'useResponsesLite' | 'preferWebSockets' | 'minimalClientVersion' | 'cyberAccessPrograms'> {
   const bool = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined);
   return {
     useResponsesLite: bool(m['use_responses_lite']),
     preferWebSockets: bool(m['prefer_websockets']),
     minimalClientVersion: readCodexClientVersion(m['minimal_client_version']),
+    cyberAccessPrograms: readCyberAccessPrograms(m['available_access_programs']),
   };
 }
 
@@ -116,6 +121,8 @@ function buildDynamicOAuthModel(
       useResponsesLite: entry.useResponsesLite ?? seed.useResponsesLite,
       preferWebSockets: entry.preferWebSockets ?? seed.preferWebSockets,
       minimalClientVersion: entry.minimalClientVersion ?? seed.minimalClientVersion,
+      // Account-specific, so there is no seed value to fall back on.
+      cyberAccessPrograms: entry.cyberAccessPrograms,
     };
   }
   const { id } = entry;
@@ -152,6 +159,7 @@ function buildDynamicOAuthModel(
     useResponsesLite: entry.useResponsesLite,
     preferWebSockets: entry.preferWebSockets,
     minimalClientVersion: entry.minimalClientVersion,
+    cyberAccessPrograms: entry.cyberAccessPrograms,
   };
 }
 

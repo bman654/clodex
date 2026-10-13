@@ -26,13 +26,15 @@ export type ModelAliasRejectionReason =
   | 'reserved-name'
   | 'invalid-target'
   | 'conflicting-targets'
-  | 'target-not-favorite';
+  | 'target-not-favorite'
+  | 'invalid-daybreak';
 
 /** Unvalidated saved alias record retained exactly as read from configuration. */
 export interface StoredModelAlias {
   name: string;
   providerId?: unknown;
   modelId?: unknown;
+  daybreak?: unknown;
 }
 
 export interface NormalizedModelAliasSource {
@@ -96,6 +98,8 @@ export function describeModelAliasRejection(reason: ModelAliasRejectionReason): 
       return 'conflicting targets';
     case 'target-not-favorite':
       return 'target is not a saved favorite';
+    case 'invalid-daybreak':
+      return '"daybreak" must be true or false';
   }
 }
 
@@ -103,8 +107,8 @@ export function describeModelAliasRejection(reason: ModelAliasRejectionReason): 
  * Produce the lowercase alias view consumed by patching and routing.
  *
  * Equivalent duplicates collapse to their first occurrence. If one canonical
- * name points at multiple targets, every occurrence is rejected so array order
- * cannot silently choose a route.
+ * name points at multiple targets — or at one target with and without Daybreak —
+ * every occurrence is rejected so array order cannot silently choose a route.
  */
 export function normalizeModelAliases(value: unknown): NormalizedModelAliases {
   if (value === undefined) {
@@ -149,10 +153,16 @@ export function normalizeModelAliases(value: unknown): NormalizedModelAliases {
       continue;
     }
 
-    const normalized = {
+    if (source.daybreak !== undefined && typeof source.daybreak !== 'boolean') {
+      candidate.rejectionReason = 'invalid-daybreak';
+      continue;
+    }
+
+    const normalized: ModelAlias = {
       name: canonicalModelAliasName(source.name),
       providerId: source.providerId,
       modelId: source.modelId,
+      ...(source.daybreak === true ? { daybreak: true } : {}),
     };
 
     if (!isModelAliasNameSyntax(normalized.name)) {
@@ -178,6 +188,7 @@ export function normalizeModelAliases(value: unknown): NormalizedModelAliases {
     const targets = new Set(
       group.map(candidate => (
         `${candidate.normalized!.providerId}\0${candidate.normalized!.modelId}`
+        + `\0${candidate.normalized!.daybreak === true}`
       )),
     );
     if (targets.size === 1) {

@@ -1,6 +1,7 @@
 import { MAX_MODEL_CATALOG } from '../constants.js';
 import { localModelToRoute } from '../catalog.js';
 import { isSdkMigratedNpm } from '../provider-factory.js';
+import { resolveAliasDaybreak, type AccessPrograms } from '../daybreak.js';
 import { claudeCodeClientModelId } from '../context-model-id.js';
 import type { ProxyRoute } from '../proxy.js';
 import {
@@ -43,6 +44,10 @@ export interface ResolvedHttpProxyAlias {
   displayName: string;
   /** Exact saved spellings represented by this canonical route. Never routed. */
   sourceNames?: string[];
+  /** Daybreak program this alias sends. */
+  accessPrograms?: AccessPrograms;
+  /** Why the alias answers with an error instead of routing (its Daybreak opt-in cannot be met). */
+  unavailableReason?: string;
 }
 
 /** Build a positive allowlist: only explicitly configured favorite routes can leave Anthropic's path. */
@@ -103,6 +108,7 @@ export function buildHttpProxyRoutes(
       continue;
     }
     const sourceNames = [...new Set(sources.map(source => source.name))];
+    const daybreak = resolveAliasDaybreak(alias, { ...route, modelId: alias.modelId });
     aliases.push({
       name: alias.name,
       routeId: route.aliasId,
@@ -112,6 +118,8 @@ export function buildHttpProxyRoutes(
           ? {}
           : { sourceNames }
       ),
+      ...(daybreak.kind === 'on' ? { accessPrograms: daybreak.accessPrograms } : {}),
+      ...(daybreak.kind === 'unavailable' ? { unavailableReason: daybreak.reason } : {}),
     });
   }
 

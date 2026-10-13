@@ -14,6 +14,7 @@ import {
   injectClaudeIdentity,
 } from './oauth/claude-identity.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
+import { withAccessPrograms, type AccessPrograms } from './daybreak.js';
 import { OLLAMA_CLOUD_PROVIDER_ID } from './data/ollama-cloud-models.js';
 import {
   transformOpenAiCompatibleRequestBody,
@@ -117,6 +118,8 @@ export interface ProviderModelSpec {
   preferWebSockets?: boolean;
   /** Provider-neutral per-model wire quirks. */
   compatibility?: ModelRuntimeCompatibility;
+  /** Responses `access_programs` for ChatGPT/Codex OAuth requests (a Daybreak alias). */
+  accessPrograms?: AccessPrograms;
   /** Optional debug logger (wired to the proxy trace log) for transport-level diagnostics. */
   onDebug?: (msg: string) => void;
   /** Optional privacy-safe structured WebSocket diagnostics. */
@@ -194,11 +197,14 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
           // same connection-local previous_response_id continuation cache.
           ...(useResponsesEndpoint
             ? {
-                fetch: createResponsesWebSocketFetch(CODEX_RESPONSES_LITE_WS_URL, spec.onDebug, {
-                  providerId: spec.providerId ?? 'openai',
-                  accountId,
-                  onDiagnostic: spec.onWebSocketDiagnostic,
-                }),
+                fetch: withAccessPrograms(
+                  createResponsesWebSocketFetch(CODEX_RESPONSES_LITE_WS_URL, spec.onDebug, {
+                    providerId: spec.providerId ?? 'openai',
+                    accountId,
+                    onDiagnostic: spec.onWebSocketDiagnostic,
+                  }),
+                  spec.accessPrograms,
+                ),
               }
             : {}),
         }

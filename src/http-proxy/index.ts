@@ -6,6 +6,8 @@ import { fetchProviderCatalog, resolveLocalProviderApiKey } from '../provider-ca
 import { providersForTarget } from '../target-compatibility.js';
 import type { ProxyRoute } from '../proxy.js';
 import { buildHttpProxyRoutes, type HttpProxyRouteResult } from './routes.js';
+import { daybreakProgramLabel, type AliasDaybreak } from '../daybreak.js';
+import type { FavoriteModel, LocalProvider, ModelAlias } from '../types.js';
 import { startHttpProxy, type HttpProxyHandle, type HttpProxyOptions } from './server.js';
 import { ensureHttpProxyCaBundle } from './ca.js';
 import { registerServerRuntimeState, unregisterServerRuntimeState } from '../server-runtime.js';
@@ -42,15 +44,32 @@ export async function loadHttpProxyRoutes(): Promise<LoadedHttpProxyRoutes> {
       favoriteCount: 0,
     };
   }
+  return {
+    ...buildHttpProxyRoutes(await loadHttpProxyProviders(), favorites, prefs.modelAliases),
+    favoriteCount: favorites.length,
+  };
+}
+
+async function loadHttpProxyProviders(): Promise<LocalProvider[]> {
   const rawCatalog = providersForTarget(await fetchProviderCatalog({ agent: 'claude' }), 'claude');
-  const catalog = await Promise.all(rawCatalog.map(async provider => ({
+  return Promise.all(rawCatalog.map(async provider => ({
     ...provider,
     apiKey: (await resolveLocalProviderApiKey(provider)) ?? '',
   })));
-  return {
-    ...buildHttpProxyRoutes(catalog, favorites, prefs.modelAliases),
-    favoriteCount: favorites.length,
-  };
+}
+
+/**
+ * What a Daybreak alias about to be saved would send, resolved exactly as the
+ * proxy resolves it at startup, so `--daybreak` accepts only what will work.
+ */
+export async function resolveDaybreakAliasCandidate(
+  alias: ModelAlias,
+): Promise<AliasDaybreak | { kind: 'no-route' }> {
+  const target: FavoriteModel = { providerId: alias.providerId, modelId: alias.modelId };
+  const resolved = buildHttpProxyRoutes(await loadHttpProxyProviders(), [target], [alias]).aliases[0];
+  if (!resolved) return { kind: 'no-route' };
+  if (resolved.unavailableReason !== undefined) return { kind: 'unavailable', reason: resolved.unavailableReason };
+  return resolved.accessPrograms ? { kind: 'on', accessPrograms: resolved.accessPrograms } : { kind: 'off' };
 }
 
 export function formatHttpProxyModelLines(
@@ -71,7 +90,9 @@ export function formatHttpProxyModelLines(
   return [
     ...aliases.map(alias => {
       const route = routesById.get(alias.routeId);
-      return `  ${alias.name}  ${pc.dim(`${alias.displayName}${contextLabel(route?.contextWindow)} → ${alias.routeId}`)}`;
+      const program = alias.accessPrograms ? ` · ${daybreakProgramLabel(alias.accessPrograms.cyber)}` : '';
+      const inactive = alias.unavailableReason ? ` ${pc.yellow(`(inactive: ${alias.unavailableReason})`)}` : '';
+      return `  ${alias.name}  ${pc.dim(`${alias.displayName}${contextLabel(route?.contextWindow)}${program} → ${alias.routeId}`)}${inactive}`;
     }),
     ...routes.map(route => `  ${route.aliasId}  ${pc.dim(`${route.displayName}${contextLabel(route.contextWindow)}`)}`),
   ];
@@ -109,6 +130,14 @@ export function reportSkippedHttpProxyFavorites(loaded: LoadedHttpProxyRoutes): 
       + loaded.unavailableAliases
         .map(alias => `  ${JSON.stringify(alias.name)} — ${reasonByAlias.get(alias) ?? 'target unavailable'}`)
         .join('\n'),
+    );
+  }
+  const inactiveAliases = loaded.aliases.filter(alias => alias.unavailableReason !== undefined);
+  if (inactiveAliases.length > 0) {
+    p.log.warn(
+      `${inactiveAliases.length} model alias${inactiveAliases.length === 1 ? '' : 'es'} inactive; `
+      + 'requests to them are refused.\n'
+      + inactiveAliases.map(alias => `  ${JSON.stringify(alias.name)} — ${alias.unavailableReason}`).join('\n'),
     );
   }
 }
