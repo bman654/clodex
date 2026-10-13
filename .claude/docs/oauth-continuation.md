@@ -53,8 +53,9 @@ from an in-process subagent and neither on the main agent's — present in every
 to 2.1.238, so nothing here is gated on a client version. The relay reads them in `proxy.ts` /
 `router.ts` (the MITM forwards them to the relay adapter alongside the session header), carries them
 through `withResponsesWebSocketDiagnosticContext`, and `responsesWebSocketPartitionKey` appends the
-agent id to the key material. `prompt_cache_key` is untouched, so siblings still share the
-server-side prefix cache; only the head lookup is per agent.
+agent id to the key material. `prompt_cache_key` is untouched, and it also rides each new
+socket's handshake as `session-id`, so siblings' fresh sockets still reach the server-side prefix
+cache the session warmed; only the head lookup is per agent.
 
 **What this closes is the one shape the gate above cannot.** A sibling whose opening turn differs
 from the turn in flight already keeps its own head — that is the gate's job. A sibling whose opening
