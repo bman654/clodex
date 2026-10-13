@@ -126,17 +126,22 @@ export function resolveCatalogModelAliases(
  * Daybreak aliases for a single-model launch. That launch answers every model id
  * it does not know with its one model, so without these entries a Daybreak alias
  * would be served without its program. An alias for the launched model gets its
- * program (or its refusal); one for any other model is refused. Other aliases
- * keep the single-model fallback they always had.
+ * program (or its refusal); one for any other model is refused, and so is a
+ * saved Daybreak name that normalization rejected (conflicting duplicates).
+ * Other aliases keep the single-model fallback they always had.
  */
 export function singleModelDaybreakAliases(
   modelAliases: unknown,
   route: ProxyRoute,
   target: FavoriteModel,
 ): ProxyModelAlias[] {
-  const daybreakNames = new Set(
-    normalizeModelAliases(modelAliases).aliases.filter(alias => alias.daybreak).map(alias => alias.name),
-  );
+  const normalized = normalizeModelAliases(modelAliases);
+  const daybreakNames = new Set([
+    ...normalized.aliases.filter(alias => alias.daybreak).map(alias => alias.name),
+    ...normalized.rejected
+      .filter(alias => alias.daybreak === true)
+      .map(alias => canonicalModelAliasName(alias.name)),
+  ]);
   if (daybreakNames.size === 0) return [];
   const resolveRoute = (providerId: string, modelId: string) => (
     providerId === target.providerId && modelId === target.modelId ? route : undefined

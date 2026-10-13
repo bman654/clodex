@@ -10,7 +10,7 @@ import { fetchProviderCatalog, resolveLocalProviderApiKey } from '../src/provide
 import { parseArgs, runClaudeCommand } from '../src/cli.js';
 import { savePreferences } from '../src/config.js';
 import type { CyberAccessProgram } from '../src/daybreak.js';
-import type { LocalProvider } from '../src/types.js';
+import type { LocalProvider, ModelAlias } from '../src/types.js';
 
 vi.mock('../src/launch.js', async original => ({
   ...await original<typeof import('../src/launch.js')>(),
@@ -77,15 +77,21 @@ function provider(lunaPrograms: CyberAccessProgram[]): LocalProvider {
   };
 }
 
+const SAVED_ALIASES: ModelAlias[] = [
+  { name: 'blue', providerId: 'openai-oauth', modelId: 'gpt-6-luna', daybreak: true },
+  { name: 'sol-blue', providerId: 'openai-oauth', modelId: 'gpt-6-sol', daybreak: true },
+  { name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-6-sol' },
+];
+
 /** Launch gpt-6-luna on its own and send one request for `model` from the child. */
-async function launchAndSend(lunaPrograms: CyberAccessProgram[], model: string): Promise<Reply> {
+async function launchAndSend(
+  lunaPrograms: CyberAccessProgram[],
+  model: string,
+  modelAliases: ModelAlias[] = SAVED_ALIASES,
+): Promise<Reply> {
   savePreferences({
     favoriteModels: [{ providerId: 'openai-oauth', modelId: 'gpt-6-luna' }],
-    modelAliases: [
-      { name: 'blue', providerId: 'openai-oauth', modelId: 'gpt-6-luna', daybreak: true },
-      { name: 'sol-blue', providerId: 'openai-oauth', modelId: 'gpt-6-sol', daybreak: true },
-      { name: 'sol', providerId: 'openai-oauth', modelId: 'gpt-6-sol' },
-    ],
+    modelAliases,
   });
   vi.mocked(fetchProviderCatalog).mockResolvedValue(
     Object.assign([provider(lunaPrograms)], { blockedProviders: new Map() }),
@@ -128,6 +134,18 @@ describe('Daybreak aliases on a single-model endpoint launch', () => {
     const reply = await launchAndSend(['standard', 'daybreak_blue'], 'sol-blue');
     expect(reply.status).toBe(400);
     expect(reply.body.error?.message).toContain('this launch serves only clodex:openai-oauth:gpt-6-luna');
+    expect(generateAnthropicResponse).not.toHaveBeenCalled();
+  }, 60_000);
+
+  // Saved spellings that disagree are all rejected; a request for that name
+  // must still be refused rather than fall back to the plain launched model.
+  it('refuse a Daybreak name whose saved spellings conflict', async () => {
+    const reply = await launchAndSend(['standard', 'daybreak_blue'], 'blue', [
+      { name: 'blue', providerId: 'openai-oauth', modelId: 'gpt-6-luna', daybreak: true },
+      { name: 'BLUE', providerId: 'openai-oauth', modelId: 'gpt-6-luna' },
+    ]);
+    expect(reply.status).toBe(400);
+    expect(reply.body.error?.message).toContain('conflicting targets');
     expect(generateAnthropicResponse).not.toHaveBeenCalled();
   }, 60_000);
 
