@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.21.0](https://github.com/bman654/clodex/compare/v2.20.0...v2.21.0) (2026-10-13)
+
+
+### Features
+
+* **models:** add Daybreak aliases for cybersecurity work on eligible ChatGPT models ([#327](https://github.com/bman654/clodex/issues/327)) ([c1f02eb](https://github.com/bman654/clodex/commit/c1f02eb21789289bea5d9e1f138bcb1b38d29201))
+
+
+### Bug Fixes
+
+* **oauth:** reuse ChatGPT's prompt cache for subagents and resumed chats ([#326](https://github.com/bman654/clodex/issues/326)) ([ad2f793](https://github.com/bman654/clodex/commit/ad2f7935b4534eb4252d72552e943f75e2e00cce))
+
 ## [2.20.0](https://github.com/bman654/clodex/compare/v2.19.0...v2.20.0) (2026-10-13)
 
 
