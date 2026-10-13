@@ -242,11 +242,37 @@ Manage favorite models (max 20) and short aliases. Favorites feed the endpoint-m
 | *(none)* | Interactive manager: search all providers or browse one at a time |
 | `--list` | Print the exact `clodex:<provider-id>:<model-id>` names (and aliases) without opening the manager |
 | `--alias <name=target>` | Save a short name for a favorite, e.g. `--alias sol=clodex:openai-oauth:gpt-6-sol` (the `clodex:` prefix is optional in the target) |
+| `--daybreak` | With `--alias`: send that alias's requests under OpenAI's Daybreak cybersecurity access program. See [Daybreak aliases](#daybreak-aliases) |
 | `--unalias <name>` | Remove a saved short name |
 | `--context <model=stop>` | Choose how much of a model's context window to use: `standard`, `max`, `default` to clear, or a token count such as `500k`. Applies to this run unless `--save` is given |
 | `--save` | With `--context`: store the stop as that model's default |
 | `--json` | Print resolved metadata for saved favorites as JSON (ids, aliases, context stop and windows, output limit, pricing boundary, effort levels). A model saved under several aliases lists them all in `aliases`, in saved order; `alias` is the first. Diagnostics go to stderr so stdout stays parseable |
 | `--help`, `--version` | Help / version |
+
+#### Daybreak aliases
+
+OpenAI's [Daybreak](https://developers.openai.com/api/docs/guides/daybreak) cybersecurity access
+programs are selected request by request. On a ChatGPT/Codex sign-in (`openai-oauth`), an alias
+saved with `--daybreak` selects one on every request it sends:
+
+```bash
+clodex models --alias luna-blue=clodex:openai-oauth:gpt-6-luna --daybreak
+```
+
+Requests through `luna-blue` then carry the Daybreak program; the same model under its `clodex:` id
+or another alias is unchanged. You don't choose the program: your account's model catalog lists the
+programs each model accepts, and clodex picks Daybreak Blue, or Daybreak Red when that is the only
+one offered — the same choice Codex makes.
+
+Eligibility depends on the model and your account. If the catalog doesn't offer Daybreak for the
+model, `--daybreak` refuses to save the alias. An alias saved earlier whose model later stops
+offering it is reported at startup, and its requests are refused with the reason rather than sent
+without Daybreak. A catalog saved by an older clodex has no Daybreak information until you run
+`clodex providers refresh-models`. `clodex models --list` shows which aliases send Daybreak. To turn
+it off, save the alias again without `--daybreak`.
+
+The dedicated Daybreak model (`gpt-daybreak-blue-latest`) needs no flag; OpenAI applies Daybreak
+Blue to it already.
 
 #### Context stops and the pricing boundary
 
