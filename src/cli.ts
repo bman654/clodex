@@ -27,12 +27,13 @@ import { loadRegistry } from './registry/io.js';
 import { projectProviderCachedModels } from './registry/materialize.js';
 import { needsFirstRunSetup, runFirstRunWizard } from './first-run.js';
 import { MAX_MODEL_CATALOG } from './constants.js';
-import { startProxy, startProxyCatalog } from './proxy.js';
+import { singleModelProxyRoute, startProxy, startProxyCatalog } from './proxy.js';
 import type { ProxyHandle, ProxyModelAlias, ProxyRoute } from './proxy.js';
 import {
   buildCatalogRoutes,
   makeRouteResolver,
   resolveCatalogModelAliases,
+  singleModelDaybreakAliases,
 } from './catalog.js';
 import { runServerCommand } from './server/index.js';
 import { loadPreferences, savePreferences, recordLaunchSelection, resolveBridgeMode } from './config.js';
@@ -1678,10 +1679,9 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
     );
   } else {
     try {
-      proxyHandle = await startProxy(
+      const route = singleModelProxyRoute(
         selectedModel.completionsUrl ?? '',
         selectedModel.id,
-        trace,
         selectedModel.contextWindow,
         {
           npm: selectedModel.npm,
@@ -1698,8 +1698,22 @@ export async function runClaudeCommand(parsed: ParsedArgs): Promise<number> {
           compatibility: selectedModel.compatibility,
           headers: activeProvider.headers,
           pricingBoundary: selectedModel.pricingBoundary,
+          cyberAccessPrograms: selectedModel.cyberAccessPrograms,
         },
         launchApiKey ?? '',
+      );
+      proxyHandle = await startProxyCatalog(
+        [route],
+        route.aliasId,
+        trace,
+        undefined,
+        undefined,
+        undefined,
+        singleModelDaybreakAliases(
+          prefs.modelAliases,
+          route,
+          { providerId: activeProvider.id, modelId: selectedModel.id },
+        ),
       );
       if (!isAgentStdoutMode()) {
         p.log.info(

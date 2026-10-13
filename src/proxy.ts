@@ -929,6 +929,7 @@ export interface SingleModelProxyOptions {
   headers?: Record<string, string>;
   /** Input size above which the provider bills the whole request at a higher rate. */
   pricingBoundary?: number;
+  cyberAccessPrograms?: CyberAccessProgram[];
 }
 
 /**
@@ -966,6 +967,7 @@ export function singleModelProxyRoute(
     preferWebSockets: sdk?.preferWebSockets,
     compatibility: sdk?.compatibility,
     headers: sdk?.headers,
+    cyberAccessPrograms: sdk?.cyberAccessPrograms,
   };
 }
 

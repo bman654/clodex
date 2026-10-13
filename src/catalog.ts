@@ -123,6 +123,34 @@ export function resolveCatalogModelAliases(
 }
 
 /**
+ * Daybreak aliases for a single-model launch. That launch answers every model id
+ * it does not know with its one model, so without these entries a Daybreak alias
+ * would be served without its program. An alias for the launched model gets its
+ * program (or its refusal); one for any other model is refused. Other aliases
+ * keep the single-model fallback they always had.
+ */
+export function singleModelDaybreakAliases(
+  modelAliases: unknown,
+  route: ProxyRoute,
+  target: FavoriteModel,
+): ProxyModelAlias[] {
+  const daybreakNames = new Set(
+    normalizeModelAliases(modelAliases).aliases.filter(alias => alias.daybreak).map(alias => alias.name),
+  );
+  if (daybreakNames.size === 0) return [];
+  const resolveRoute = (providerId: string, modelId: string) => (
+    providerId === target.providerId && modelId === target.modelId ? route : undefined
+  );
+  return resolveCatalogModelAliases(modelAliases, resolveRoute, [route])
+    .filter(alias => daybreakNames.has(alias.name))
+    .map(alias => (
+      alias.unavailableReason === 'target unavailable'
+        ? { ...alias, unavailableReason: `this launch serves only ${modelAliasTarget(target)}` }
+        : alias
+    ));
+}
+
+/**
  * Claude-specific catalog builder. Takes a `resolveRoute` function (not a
  * ResolveContext) and returns built ProxyRoute[] — does NOT delegate to
  * `buildFavoritesList` in `./favorites-resolver.ts` because the input/output
