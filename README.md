@@ -248,6 +248,20 @@ Manage favorite models (max 20) and short aliases. Favorites feed the endpoint-m
 | `--json` | Print resolved metadata for saved favorites as JSON (ids, aliases, context stop and windows, output limit, pricing boundary, effort levels). A model saved under several aliases lists them all in `aliases`, in saved order; `alias` is the first. Diagnostics go to stderr so stdout stays parseable |
 | `--help`, `--version` | Help / version |
 
+#### Per-alias OpenAI access programs
+
+A saved alias can carry an OpenAI Responses API [`access_programs`](https://developers.openai.com/api/docs/guides/daybreak) selection, for example to use a Daybreak cybersecurity program. Edit the alias in `~/.clodex/config.json`:
+
+```json
+{
+  "modelAliases": [
+    { "name": "sol", "providerId": "openai-oauth", "modelId": "gpt-5.6-sol", "accessPrograms": { "cyber": "daybreak_blue" } }
+  ]
+}
+```
+
+`cyber` accepts `standard`, `daybreak_blue` or `daybreak_red`. The field is added only to requests sent through that alias; the same model by its `clodex:` id or under another alias is unchanged. Missing or invalid values send no `access_programs` field at all, so OpenAI picks the program. The right value depends on the model and your account: a model without Daybreak access rejects it with HTTP 403, and a mismatched program returns HTTP 400 naming the one to use. It applies to OpenAI providers using the Responses API (ChatGPT/Codex OAuth and API key). `clodex models --alias` rewrites the alias and drops the setting, so re-add it afterwards.
+
 #### Context stops and the pricing boundary
 
 A context window is a cost dial as much as a capacity number. OpenAI prices GPT-5.5
