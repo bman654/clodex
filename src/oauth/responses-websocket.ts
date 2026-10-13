@@ -320,12 +320,13 @@ function hasResponsesLiteHeader(headers: Record<string, string>): boolean {
 
 /**
  * ChatGPT derives prompt-cache affinity from the handshake's `session-id`
- * header, not from the body's `prompt_cache_key`: without it a full resend on a
- * fresh socket misses the cache even when its whole prefix was just served.
- * Native Codex sends its prompt cache key there (openai/codex
- * `ModelClient::responses_session_id`). The handshake value holds for every
- * request a socket carries because `prompt_cache_key` is part of the partition
- * key, and a request without one never reuses a socket.
+ * header (openai/codex `ModelClient::responses_session_id`; a root Codex session
+ * sends its prompt cache key there). The body's `prompt_cache_key` alone did not
+ * keep fresh sockets on a warm cache: on Responses-Lite models a full resend on
+ * a new socket mostly missed without the header and mostly hit with it. The
+ * handshake value holds for every request a socket carries because
+ * `prompt_cache_key` is part of the partition key, and a request without one
+ * never reuses a socket.
  */
 function addCacheAffinityHeader(headers: Record<string, string>, payload: JsonObject): void {
   const promptCacheKey = payload.prompt_cache_key;

@@ -13,7 +13,9 @@ class FakeWebSocket extends EventEmitter {
   constructor(url: string, options: { headers?: Record<string, string> }) {
     super();
     this.url = url;
-    this.options = options;
+    // Copy, as `ws` does when it builds the upgrade request: a header added to
+    // the record after the socket exists never reaches the handshake.
+    this.options = { ...options, headers: { ...options.headers } };
     fakeSockets.push(this);
   }
 }
@@ -156,12 +158,16 @@ describe('Responses WebSocket cache-affinity header', () => {
     await response.text();
   });
 
-  it('sends no session-id when the request has no prompt_cache_key', async () => {
+  it.each([
+    ['no', {}],
+    ['an empty', { prompt_cache_key: '' }],
+    ['a non-string', { prompt_cache_key: 7 }],
+  ])('sends no session-id when the request has %s prompt_cache_key', async (_label, cacheKey) => {
     const wsFetch = createResponsesWebSocketFetch(WS_URL);
     await wsFetch('https://x', {
       method: 'POST',
       headers: { Authorization: 'Bearer tok' },
-      body: JSON.stringify({ model: 'gpt-5.6-sol', input: [] }),
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: [], ...cacheKey }),
     });
 
     expect(Object.keys(handshakeHeaders(fakeSockets.at(-1)!)).map(key => key.toLowerCase()))
