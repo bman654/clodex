@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.20.0](https://github.com/bman654/clodex/compare/v2.19.0...v2.20.0) (2026-10-13)
+
+
+### Features
+
+* **providers:** add Ollama Cloud so its Kimi, GLM and DeepSeek models can run in Claude Code ([#320](https://github.com/bman654/clodex/issues/320)) ([c93a42d](https://github.com/bman654/clodex/commit/c93a42dacde0dd393f2df2b30df21140e849e3a1))
+
 ## [2.19.0](https://github.com/bman654/clodex/compare/v2.18.10...v2.19.0) (2026-10-10)
 
 
