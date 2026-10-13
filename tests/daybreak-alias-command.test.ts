@@ -35,8 +35,13 @@ vi.mock('../src/provider-catalog.js', async original => ({
   resolveLocalProviderApiKey: vi.fn(async () => 'tok'),
 }));
 
+vi.mock('../src/registry/models-dev.js', async original => ({
+  ...await original<typeof import('../src/registry/models-dev.js')>(),
+  refreshModelsDevCacheAsync: vi.fn(),
+}));
+
 const { loadPreferences, savePreferences } = await import('../src/config.js');
-const { parseArgs, runModelsCommand } = await import('../src/cli.js');
+const { main, parseArgs, runModelsCommand } = await import('../src/cli.js');
 
 let tempHome: string;
 
@@ -91,5 +96,33 @@ describe('clodex models --alias … --daybreak', () => {
     const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
     expect(await runModelsCommand({ list: true, daybreak: true })).toBe(1);
     expect(error).toHaveBeenCalledWith('--daybreak applies to --alias.');
+  });
+
+  it('saves the opt-in from the command line as a user types it', async () => {
+    vi.spyOn(p.log, 'success').mockImplementation(() => {});
+    expect(await main(['models', '--alias', 'blue=clodex:openai-oauth:gpt-6-luna', '--daybreak'])).toBe(0);
+    expect(loadPreferences().modelAliases).toEqual([
+      { name: 'blue', providerId: 'openai-oauth', modelId: 'gpt-6-luna', daybreak: true },
+    ]);
+  });
+
+  // The endpoint server answers its own model ids before saved aliases, so a
+  // Daybreak alias with such a name would be served there without Daybreak.
+  it('refuses an alias name the endpoint server answers as a model id', async () => {
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+    expect(await runModelsCommand({ alias: 'gpt-6-luna=openai-oauth:gpt-6-luna', daybreak: true })).toBe(1);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('the endpoint server answers that name as a model id'));
+    expect(loadPreferences().modelAliases).toBeUndefined();
+  });
+
+  it.each([
+    ['--json', { json: true }],
+    ['--context', { contextAssignments: [{ label: 'x', providerId: 'openai-oauth', modelId: 'gpt-6-luna', stop: 'max' as const }], saveContext: true }],
+  ])('refuses to combine an alias change with %s instead of skipping it', async (_flag, extra) => {
+    const error = vi.spyOn(p.log, 'error').mockImplementation(() => {});
+    expect(await runModelsCommand({ alias: 'blue=openai-oauth:gpt-6-luna', daybreak: true, ...extra })).toBe(1);
+    expect(error).toHaveBeenCalledWith('--alias/--unalias run on their own, without --json or --context.');
+    expect(loadPreferences().modelAliases).toBeUndefined();
+    expect(loadPreferences().modelContextModes).toBeUndefined();
   });
 });

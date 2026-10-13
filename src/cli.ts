@@ -35,7 +35,7 @@ import {
   resolveCatalogModelAliases,
   singleModelDaybreakAliases,
 } from './catalog.js';
-import { runServerCommand } from './server/index.js';
+import { endpointServerAnswersModelId, runServerCommand } from './server/index.js';
 import { loadPreferences, savePreferences, recordLaunchSelection, resolveBridgeMode } from './config.js';
 import { pickLocalModel } from './prompts.js';
 import { fetchProviderCatalog, providersForPicker, resolveLocalProviderApiKey } from './provider-catalog.js';
@@ -916,6 +916,10 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
     return 1;
   }
   const assignments = opts.contextAssignments ?? [];
+  if (changesAlias && (opts.json || assignments.length > 0)) {
+    p.log.error('--alias/--unalias run on their own, without --json or --context.');
+    return 1;
+  }
   if (opts.saveContext && assignments.length === 0) {
     p.log.error('--save applies to --context assignments; none were given.');
     return 1;
@@ -954,6 +958,13 @@ export async function runModelsCommand(opts: FavoritesCommandOptions = {}): Prom
     }
     const alias: ModelAlias = opts.daybreak ? { ...parsed, daybreak: true } : parsed;
     let programLabel = '';
+    if (alias.daybreak && await endpointServerAnswersModelId(alias.name)) {
+      p.log.error(
+        `Daybreak can't be enabled on ${alias.name}: the endpoint server answers that name as a model id, `
+        + 'so requests there would not use Daybreak. Choose another alias name.',
+      );
+      return 1;
+    }
     if (alias.daybreak) {
       const daybreak = await resolveDaybreakAliasCandidate(alias);
       if (daybreak.kind !== 'on') {

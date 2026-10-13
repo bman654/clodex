@@ -72,11 +72,15 @@ vi.mock('../src/server/router.js', async original => {
   };
 });
 
-function post(port: number, model: string): Promise<{ status: number; body: string }> {
+function post(
+  port: number,
+  model: string,
+  path = '/anthropic/v1/messages',
+): Promise<{ status: number; body: string }> {
   const body = JSON.stringify({ model, max_tokens: 16, stream: false, messages: [{ role: 'user', content: 'hi' }] });
   return new Promise((resolve, reject) => {
     const req = request({
-      hostname: '127.0.0.1', port, path: '/anthropic/v1/messages', method: 'POST',
+      hostname: '127.0.0.1', port, path, method: 'POST',
       headers: { 'content-type': 'application/json', 'anthropic-version': '2023-06-01', 'x-api-key': 'anything' },
     }, res => {
       const chunks: Buffer[] = [];
@@ -121,9 +125,19 @@ describe('clodex server --endpoint with Daybreak aliases', () => {
       }
       expect(state.frames.map(frame => frame.access_programs)).toEqual([undefined, { cyber: 'daybreak_blue' }, undefined]);
 
-      const refused = await post(port, 'sol-blue');
-      expect(refused.status).toBe(400);
-      expect(state.frames).toHaveLength(3);
+      // The OpenAI-format route shares the gateway and its model cache.
+      for (const model of ['plain', 'blue', 'clodex:openai-oauth:gpt-6-luna']) {
+        expect((await post(port, model, '/openai/v1/chat/completions')).status).toBe(200);
+      }
+      expect(state.frames.slice(3).map(frame => frame.access_programs))
+        .toEqual([undefined, { cyber: 'daybreak_blue' }, undefined]);
+
+      for (const path of ['/anthropic/v1/messages', '/openai/v1/chat/completions']) {
+        const refused = await post(port, 'sol-blue', path);
+        expect(refused.status).toBe(400);
+        expect(refused.body).toContain("Daybreak isn't available for gpt-6.1-sol on this ChatGPT account");
+      }
+      expect(state.frames).toHaveLength(6);
     } finally {
       process.emit('SIGINT');
       await expect(exited).resolves.toBe(0);

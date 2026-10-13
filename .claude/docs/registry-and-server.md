@@ -119,11 +119,14 @@ not read the response body — see `.claude/docs/claude-code-internals.md`.
 **Daybreak aliases (`daybreak: true`, `src/daybreak.ts`).** The ChatGPT Codex catalog's
 per-account `available_access_programs.cyber` is stored as `cyberAccessPrograms` on the cached
 model and carried onto routes and server models; `resolveAliasDaybreak` turns an alias's opt-in into
-the program to send (Blue before Red, as Codex chooses) or a reason it cannot be met. All three
-alias resolvers call it — `buildHttpProxyRoutes` (proxy mode), `resolveCatalogModelAliases`
-(endpoint switch menu) and `createGatewayModelCatalog` (endpoint server) — so the modes cannot
-diverge. An alias that opts in never silently sends nothing: an unmet opt-in makes the alias
-inactive with that reason. The program travels on a **copy** of the target route or server model,
-never the shared one, and the server's language-model cache key includes it; without that, whichever
-of an alias and its plain target is asked for first decides what both send.
+the program to send (Blue before Red, as Codex chooses) or a reason it cannot be met. Every alias
+resolver calls it — `buildHttpProxyRoutes` (proxy mode), `resolveCatalogModelAliases` (endpoint
+switch menu), `singleModelDaybreakAliases` (explicit/print-mode endpoint launch, which otherwise
+answers unknown ids with its one model) and `createGatewayModelCatalog` (endpoint server). An alias
+that opts in never silently sends nothing: an unmet opt-in is refused with its reason (the gateway's
+`ModelCatalog.refusal`). The one hole is a name the endpoint server answers as its own model id —
+exact ids win over aliases there — so `models --alias … --daybreak` refuses such names at save time.
+The program travels on a **copy** of the target route or server model, never the shared one, and
+the server's language-model cache key includes it; without that, whichever of an alias and its plain
+target is asked for first decides what both send.
 

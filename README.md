@@ -264,12 +264,21 @@ or another alias is unchanged. You don't choose the program: your account's mode
 programs each model accepts, and clodex picks Daybreak Blue, or Daybreak Red when that is the only
 one offered — the same choice Codex makes.
 
-Eligibility depends on the model and your account. If the catalog doesn't offer Daybreak for the
-model, `--daybreak` refuses to save the alias. An alias saved earlier whose model later stops
-offering it is reported at startup, and its requests are refused with the reason rather than sent
-without Daybreak. A catalog saved by an older clodex has no Daybreak information until you run
-`clodex providers refresh-models`. `clodex models --list` shows which aliases send Daybreak. To turn
-it off, save the alias again without `--daybreak`.
+Eligibility depends on the model and your account, as recorded in your saved model catalog:
+
+- `--daybreak` refuses to save the alias if the catalog doesn't offer Daybreak for the model, or if
+  the alias name is one the endpoint server already answers as a model id (such as `gpt-6-luna`).
+- A catalog saved by an older clodex has no Daybreak information until you run
+  `clodex providers refresh-models`.
+- If a refresh later shows the model no longer offers Daybreak, the alias becomes inactive.
+  `clodex models --list` and server startup say why, and its requests are refused with that reason
+  rather than sent without Daybreak. Machine-readable `clodex claude` launches skip the startup
+  report, so check `clodex models --list`.
+- Until you refresh, a model whose Daybreak access was withdrawn fails with OpenAI's HTTP 403, which
+  Claude Code shows as an authentication error.
+
+`clodex models --list` shows which aliases send Daybreak. To turn it off, save the alias again
+without `--daybreak`.
 
 The dedicated Daybreak model (`gpt-daybreak-blue-latest`) needs no flag; OpenAI applies Daybreak
 Blue to it already.

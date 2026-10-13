@@ -72,6 +72,8 @@ export interface ServerModelInfo {
 export interface ModelCatalog {
   get: (id: string) => ServerModelInfo | undefined;
   list: () => ServerModelInfo[];
+  /** Why a saved alias this catalog will not serve is refused, if it is one. */
+  refusal?: (id: string) => string | undefined;
 }
 
 const CREATED_AT_ISO = '2025-01-01T00:00:00Z';
@@ -170,7 +172,7 @@ export function formatGatewayAnthropicModels(models: ServerModelInfo[], opts?: G
  *   4. saved short aliases from `clodex models --alias` (same alias table the
  *      proxy resolves) — anything else is a 400. A Daybreak alias resolves to
  *      a copy of its target carrying the program; one whose Daybreak opt-in
- *      cannot be met is not mapped (`gatewayAliasDaybreak` names why).
+ *      cannot be met is not mapped, and `refusal` names why.
  * Forms 3-4 are accepted INPUT only: `list()` (and every /models listing built
  * from it) still advertises exactly the canonical/masked ids it always did.
  */
@@ -193,6 +195,7 @@ export function createGatewayModelCatalog(
     const canonicalId = httpProxyModelId(gatewayProviderId(model), model.id);
     if (!byId.has(canonicalId)) byId.set(canonicalId, model);
   }
+  const refusals = new Map<string, string>();
   for (const alias of normalizeModelAliases(modelAliases).aliases) {
     if (byId.has(alias.name)) continue;
     const target = gatewayAliasTarget(models, alias);
@@ -200,11 +203,13 @@ export function createGatewayModelCatalog(
     const daybreak = gatewayAliasDaybreak(alias, target);
     if (daybreak.kind === 'on') byId.set(alias.name, { ...target, accessPrograms: daybreak.accessPrograms });
     else if (daybreak.kind === 'off') byId.set(alias.name, target);
+    else refusals.set(alias.name, daybreak.reason);
   }
 
   return {
     get: (id: string) => byId.get(id),
     list: () => [...models],
+    refusal: (id: string) => refusals.get(id),
   };
 }
 

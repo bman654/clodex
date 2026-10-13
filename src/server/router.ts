@@ -25,6 +25,7 @@ import {
 } from '../anthropic-endpoints.js';
 import { resolveProviderCredential } from '../env.js';
 import { reportPricingBoundaryCrossing } from '../pricing-boundary.js';
+import { routeUnavailableMessage } from '../route-unavailable.js';
 import {
   injectClaudeCodeBillingSystemLine,
   injectClaudeIdentity,
@@ -865,7 +866,10 @@ function lookupModel(res: ServerResponse, catalog: ModelCatalog, modelId: unknow
 
   const model = catalog.get(modelId);
   if (!model) {
-    sendJson(res, 400, { error: { message: `Unknown model: ${modelId}` } });
+    const refusal = catalog.refusal?.(modelId);
+    sendJson(res, 400, {
+      error: { message: refusal ? routeUnavailableMessage(modelId, refusal) : `Unknown model: ${modelId}` },
+    });
     return null;
   }
 
