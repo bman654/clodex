@@ -137,15 +137,20 @@ describe('Daybreak aliases on a single-model endpoint launch', () => {
     expect(generateAnthropicResponse).not.toHaveBeenCalled();
   }, 60_000);
 
-  // Saved spellings that disagree are all rejected; a request for that name
-  // must still be refused rather than fall back to the plain launched model.
-  it('refuse a Daybreak name whose saved spellings conflict', async () => {
-    const reply = await launchAndSend(['standard', 'daybreak_blue'], 'blue', [
+  // A rejected saved name that asked for Daybreak must still be refused rather
+  // than fall back to the plain launched model.
+  it.each([
+    ['spellings that conflict', [
       { name: 'blue', providerId: 'openai-oauth', modelId: 'gpt-6-luna', daybreak: true },
       { name: 'BLUE', providerId: 'openai-oauth', modelId: 'gpt-6-luna' },
-    ]);
+    ], 'conflicting targets'],
+    ['a daybreak value that is not a boolean', [
+      { name: 'blue', providerId: 'openai-oauth', modelId: 'gpt-6-luna', daybreak: 'true' },
+    ], '"daybreak" must be true or false'],
+  ])('refuse a Daybreak name with %s', async (_label, saved, reason) => {
+    const reply = await launchAndSend(['standard', 'daybreak_blue'], 'blue', saved as ModelAlias[]);
     expect(reply.status).toBe(400);
-    expect(reply.body.error?.message).toContain('conflicting targets');
+    expect(reply.body.error?.message).toContain(reason);
     expect(generateAnthropicResponse).not.toHaveBeenCalled();
   }, 60_000);
 

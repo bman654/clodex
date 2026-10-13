@@ -127,7 +127,8 @@ export function resolveCatalogModelAliases(
  * it does not know with its one model, so without these entries a Daybreak alias
  * would be served without its program. An alias for the launched model gets its
  * program (or its refusal); one for any other model is refused, and so is a
- * saved Daybreak name that normalization rejected (conflicting duplicates).
+ * saved name that normalization rejected while it asked for Daybreak in any
+ * form (conflicting duplicates, a non-boolean `daybreak`).
  * Other aliases keep the single-model fallback they always had.
  */
 export function singleModelDaybreakAliases(
@@ -139,7 +140,7 @@ export function singleModelDaybreakAliases(
   const daybreakNames = new Set([
     ...normalized.aliases.filter(alias => alias.daybreak).map(alias => alias.name),
     ...normalized.rejected
-      .filter(alias => alias.daybreak === true)
+      .filter(alias => alias.daybreak !== undefined && alias.daybreak !== false)
       .map(alias => canonicalModelAliasName(alias.name)),
   ]);
   if (daybreakNames.size === 0) return [];
