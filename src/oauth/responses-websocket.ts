@@ -33,6 +33,7 @@ import {
 } from './ws-upgrade-pacer.js';
 
 const RESPONSES_LITE_HEADER = 'x-openai-internal-codex-responses-lite';
+const SESSION_ID_HEADER = 'session-id';
 const TERMINAL_EVENT_TYPES = new Set(['response.completed', 'response.failed', 'response.incomplete']);
 const FAILURE_EVENT_TYPES = new Set(['error', 'response.failed', 'response.incomplete']);
 
@@ -315,6 +316,22 @@ function hasResponsesLiteHeader(headers: Record<string, string>): boolean {
   return Object.entries(headers).some(
     ([key, value]) => key.toLowerCase() === RESPONSES_LITE_HEADER && value.toLowerCase() === 'true',
   );
+}
+
+/**
+ * ChatGPT derives prompt-cache affinity from the handshake's `session-id`
+ * header, not from the body's `prompt_cache_key`: without it a full resend on a
+ * fresh socket misses the cache even when its whole prefix was just served.
+ * Native Codex sends its prompt cache key there (openai/codex
+ * `ModelClient::responses_session_id`). The handshake value holds for every
+ * request a socket carries because `prompt_cache_key` is part of the partition
+ * key, and a request without one never reuses a socket.
+ */
+function addCacheAffinityHeader(headers: Record<string, string>, payload: JsonObject): void {
+  const promptCacheKey = payload.prompt_cache_key;
+  if (typeof promptCacheKey !== 'string' || !promptCacheKey) return;
+  if (Object.keys(headers).some(key => key.toLowerCase() === SESSION_ID_HEADER)) return;
+  headers[SESSION_ID_HEADER] = promptCacheKey;
 }
 
 function authorizationHeaderFingerprint(headers: Record<string, string>): string {
@@ -2606,6 +2623,7 @@ export function createResponsesWebSocketFetch(
       payload = {};
     }
     if (hasResponsesLiteHeader(headers)) payload = applyResponsesLiteShape(payload);
+    addCacheAffinityHeader(headers, payload);
 
     const authorizationFingerprint = authorizationHeaderFingerprint(headers);
     const diagnosticCorrelation = diagnosticContext.getStore();
