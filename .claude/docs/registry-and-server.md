@@ -123,9 +123,13 @@ the program to send (Blue before Red, as Codex chooses) or a reason it cannot be
 resolver calls it — `buildHttpProxyRoutes` (proxy mode), `resolveCatalogModelAliases` (endpoint
 switch menu), `singleModelDaybreakAliases` (explicit/print-mode endpoint launch, which otherwise
 answers unknown ids with its one model) and `createGatewayModelCatalog` (endpoint server). An alias
-that opts in never silently sends nothing: an unmet opt-in is refused with its reason (the gateway's
-`ModelCatalog.refusal`). The one hole is a name the endpoint server answers as its own model id —
-exact ids win over aliases there — so `models --alias … --daybreak` refuses such names at save time.
+that opts in never sends its target without the program: an unmet opt-in is refused with its reason
+(the gateway's `ModelCatalog.refusal`). A name the endpoint server answers as one of its own model
+ids is different — exact ids win over aliases there, so that name reaches the model that owns (and
+advertises) it, and the alias is reported inactive at startup like any catalog-colliding alias.
+`models --alias … --daybreak` refuses such names at save time; a provider added or refreshed later
+can still introduce one, and then that general rule applies. Do not make a Daybreak alias override
+or reserve an exact id: the name is advertised in `/openai/v1/models`.
 The program travels on a **copy** of the target route or server model, never the shared one, and
 the server's language-model cache key includes it; without that, whichever of an alias and its plain
 target is asked for first decides what both send.

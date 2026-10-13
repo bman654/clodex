@@ -268,6 +268,8 @@ Eligibility depends on the model and your account, as recorded in your saved mod
 
 - `--daybreak` refuses to save the alias if the catalog doesn't offer Daybreak for the model, or if
   the alias name is one the endpoint server already answers as a model id (such as `gpt-6-luna`).
+  If a provider you add later has a model with exactly that id, `clodex server --endpoint` serves
+  that model under the name instead and reports the alias inactive at startup.
 - A catalog saved by an older clodex has no Daybreak information until you run
   `clodex providers refresh-models`.
 - If a refresh later shows the model no longer offers Daybreak, the alias becomes inactive.
