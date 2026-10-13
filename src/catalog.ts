@@ -94,6 +94,7 @@ export function resolveCatalogModelAliases(
             : { sourceNames }
         ),
         routeId: route?.aliasId ?? modelAliasTarget(alias),
+        ...(alias.accessPrograms ? { accessPrograms: alias.accessPrograms } : {}),
         ...(
           collidesWithCatalog
             ? { unavailableReason: 'conflicts with a catalog model id' }

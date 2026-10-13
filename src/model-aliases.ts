@@ -1,4 +1,5 @@
 import type { ModelAlias } from './types.js';
+import { normalizeAccessPrograms } from './access-programs.js';
 import { stripOneMContextSuffix } from './context-model-id.js';
 
 const MODEL_ALIAS_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
@@ -33,6 +34,7 @@ export interface StoredModelAlias {
   name: string;
   providerId?: unknown;
   modelId?: unknown;
+  accessPrograms?: unknown;
 }
 
 export interface NormalizedModelAliasSource {
@@ -149,10 +151,12 @@ export function normalizeModelAliases(value: unknown): NormalizedModelAliases {
       continue;
     }
 
-    const normalized = {
+    const accessPrograms = normalizeAccessPrograms(source.accessPrograms);
+    const normalized: ModelAlias = {
       name: canonicalModelAliasName(source.name),
       providerId: source.providerId,
       modelId: source.modelId,
+      ...(accessPrograms ? { accessPrograms } : {}),
     };
 
     if (!isModelAliasNameSyntax(normalized.name)) {

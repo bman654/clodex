@@ -1,6 +1,7 @@
 // src/proxy.ts — Local Anthropic-to-OpenAI translation proxy
 // Adapted from cucoleadan/opencode-cowork-proxy (MIT)
 import { createServer } from 'node:http';
+import type { AccessPrograms } from './access-programs.js';
 import type { ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { appendFileSync, openSync, writeSync, closeSync } from 'node:fs';
@@ -263,6 +264,8 @@ export interface ProxyRoute {
   compatibility?: ModelRuntimeCompatibility;
   /** Static headers sent on every upstream request (e.g. a plan/auth-tracking header a custom endpoint requires). */
   headers?: Record<string, string>;
+  /** OpenAI Responses `access_programs`; set only on routes reached through a configured alias. */
+  accessPrograms?: AccessPrograms;
 }
 
 /**
@@ -291,6 +294,7 @@ export interface ProxyModelAlias {
   sourceNames?: string[];
   routeId?: string;
   unavailableReason?: string;
+  accessPrograms?: AccessPrograms;
 }
 
 function configuredAliasLookupNames(alias: ProxyModelAlias): string[] {
@@ -337,7 +341,11 @@ export async function startProxyCatalog(
     if (alias.routeId === undefined || alias.unavailableReason !== undefined) continue;
     const route = lookupRoute(byAlias, alias.routeId);
     const aliasId = normalizeRouteLookupId(alias.name);
-    if (route && !byAlias.has(aliasId)) byAlias.set(aliasId, route);
+    if (route && !byAlias.has(aliasId)) {
+      // Access programs are alias-scoped: the alias gets its own route copy so the
+      // underlying model id (and other aliases of it) stays unchanged.
+      byAlias.set(aliasId, alias.accessPrograms ? { ...route, accessPrograms: alias.accessPrograms } : route);
+    }
   }
   const defaultRoute = lookupRoute(byAlias, defaultAliasId) ?? routes[0]!;
 
@@ -678,6 +686,7 @@ export async function startProxyCatalog(
             useResponsesLite: route.useResponsesLite,
             preferWebSockets: route.preferWebSockets,
             compatibility: route.compatibility,
+            accessPrograms: route.accessPrograms,
             onDebug: (msg: string) => plog(() => msg),
             onWebSocketDiagnostic: webSocketDiagnosticsLogPath
               ? event => writeWebSocketDiagnosticLog(webSocketDiagnosticsLogPath, event)

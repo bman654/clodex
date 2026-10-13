@@ -14,6 +14,7 @@ import {
   injectClaudeIdentity,
 } from './oauth/claude-identity.js';
 import { isCredentialBearingHeader } from './credential-headers.js';
+import { withAccessPrograms, type AccessPrograms } from './access-programs.js';
 import { OLLAMA_CLOUD_PROVIDER_ID } from './data/ollama-cloud-models.js';
 import {
   transformOpenAiCompatibleRequestBody,
@@ -117,6 +118,8 @@ export interface ProviderModelSpec {
   preferWebSockets?: boolean;
   /** Provider-neutral per-model wire quirks. */
   compatibility?: ModelRuntimeCompatibility;
+  /** OpenAI Responses `access_programs` to add to each request body (per-alias config). */
+  accessPrograms?: AccessPrograms;
   /** Optional debug logger (wired to the proxy trace log) for transport-level diagnostics. */
   onDebug?: (msg: string) => void;
   /** Optional privacy-safe structured WebSocket diagnostics. */
@@ -194,11 +197,14 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
           // same connection-local previous_response_id continuation cache.
           ...(useResponsesEndpoint
             ? {
-                fetch: createResponsesWebSocketFetch(CODEX_RESPONSES_LITE_WS_URL, spec.onDebug, {
-                  providerId: spec.providerId ?? 'openai',
-                  accountId,
-                  onDiagnostic: spec.onWebSocketDiagnostic,
-                }),
+                fetch: withAccessPrograms(
+                  createResponsesWebSocketFetch(CODEX_RESPONSES_LITE_WS_URL, spec.onDebug, {
+                    providerId: spec.providerId ?? 'openai',
+                    accountId,
+                    onDiagnostic: spec.onWebSocketDiagnostic,
+                  }),
+                  spec.accessPrograms,
+                ),
               }
             : {}),
         }
@@ -212,7 +218,14 @@ export async function createLanguageModel(spec: ProviderModelSpec): Promise<Lang
         // Muse Spark and GPT-6 Luna on /v1/responses) must reach THAT host.
         // Without the base URL the SDK defaults to api.openai.com and sends
         // the provider's key there.
-        : { apiKey, ...(baseURL ? { baseURL } : {}), ...(spec.headers ? { headers: spec.headers } : {}) };
+        : {
+            apiKey,
+            ...(baseURL ? { baseURL } : {}),
+            ...(spec.headers ? { headers: spec.headers } : {}),
+            ...(useResponsesEndpoint && spec.accessPrograms?.cyber
+              ? { fetch: withAccessPrograms(fetch, spec.accessPrograms) }
+              : {}),
+          };
     const openai = createOpenAI(oauthOptions);
     return useResponsesEndpoint ? openai.responses(modelId) : openai.chat(modelId);
   }

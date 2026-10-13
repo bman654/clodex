@@ -1,4 +1,5 @@
 import { MAX_MODEL_CATALOG } from '../constants.js';
+import type { AccessPrograms } from '../access-programs.js';
 import { localModelToRoute } from '../catalog.js';
 import { isSdkMigratedNpm } from '../provider-factory.js';
 import { claudeCodeClientModelId } from '../context-model-id.js';
@@ -43,6 +44,7 @@ export interface ResolvedHttpProxyAlias {
   displayName: string;
   /** Exact saved spellings represented by this canonical route. Never routed. */
   sourceNames?: string[];
+  accessPrograms?: AccessPrograms;
 }
 
 /** Build a positive allowlist: only explicitly configured favorite routes can leave Anthropic's path. */
@@ -107,6 +109,7 @@ export function buildHttpProxyRoutes(
       name: alias.name,
       routeId: route.aliasId,
       displayName: route.displayName,
+      ...(alias.accessPrograms ? { accessPrograms: alias.accessPrograms } : {}),
       ...(
         sourceNames.length === 1 && sourceNames[0] === alias.name
           ? {}

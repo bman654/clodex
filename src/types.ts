@@ -1,3 +1,4 @@
+import type { AccessPrograms } from './access-programs.js';
 // src/types.ts
 
 import type { FreeStatus } from './free-models.js';
@@ -77,6 +78,8 @@ export interface FavoriteModel {
 /** Short model name accepted by Claude HTTP-proxy mode for a saved favorite. */
 export interface ModelAlias extends FavoriteModel {
   name: string;
+  /** Optional OpenAI Responses `access_programs` sent only for requests made via this alias. */
+  accessPrograms?: AccessPrograms;
 }
 
 export type BridgeMode = 'endpoint' | 'proxy';
