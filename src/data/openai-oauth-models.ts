@@ -37,7 +37,7 @@ interface OAuthModelSeed {
 /**
  * GPT-5.6 prices prompts above this input size at 2x input and 1.5x output for the
  * full request, not just the overage. That is why the Codex-reported window sits
- * here rather than at the model ceiling.
+ * here rather than at the model ceiling, except for the models exempted below.
  */
 const GPT_HIGH_CONTEXT_PRICING_BOUNDARY = 272_000;
 const GPT_HIGH_CONTEXT_PRICING_NOTE =
@@ -59,13 +59,14 @@ export const CHATGPT_CODEX_UNSUPPORTED_MODELS = new Set<string>([
 // A model with no ceiling here has none above its default window.
 // Minimum client versions and transport flags checked against the live catalog on 2026-09-24.
 const OPENAI_OAUTH_MODEL_SEEDS: OAuthModelSeed[] = [
-  // GPT-6.1 Sol: the 272K window and 872K ceiling are what the live Codex catalog
-  // returned on 2026-09-29; a request near 872K has not been tried. The output limit
+  // GPT-6.1 Sol: the 500K window and 872K ceiling are what the live Codex catalog
+  // returned on 2026-10-13 (the window was 272K until then); a request near 872K has
+  // not been tried. The output limit
   // is the model card's. The catalog reports minimal_client_version 0.153.0, but on a
   // Plus account versions through 0.158.0 were refused and 0.159.0 worked (#298), so
   // this seed records that observed gate. A live refresh stores the catalog's value
   // instead. CODEX_RESPONSES_LITE_VERSION must stay at or above this.
-  { id: 'gpt-6.1-sol',          name: 'GPT-6.1 Sol',       contextWindow: 272_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.159.0' },
+  { id: 'gpt-6.1-sol',          name: 'GPT-6.1 Sol',       contextWindow: 500_000, maxContextWindow: 872_000, maxOutputTokens: 128_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.159.0' },
   // GPT-6 family. The window, ceiling and Responses-Lite flags are what the live
   // Codex catalog returned (Astra on 2026-09-04, Sol and Luna on 2026-09-22) and are
   // deliberately NOT the published API numbers: the model cards list a 1,050,000
@@ -119,7 +120,8 @@ function hasPricingBoundary(id: string): boolean {
 }
 
 /**
- * Pricing-band metadata for OpenAI model ids on both API keys and Codex plans.
+ * Pricing-band metadata for OpenAI model ids at API-key rates; Codex-plan routes go
+ * through openAiOAuthPricingMetadata, which removes the plan's exemptions.
  * Applied to discovered models too so models outside the seed report their boundary.
  */
 export function openAiPricingMetadata(
@@ -130,6 +132,19 @@ export function openAiPricingMetadata(
     pricingBoundary: GPT_HIGH_CONTEXT_PRICING_BOUNDARY,
     pricingBoundaryNote: GPT_HIGH_CONTEXT_PRICING_NOTE,
   };
+}
+
+/**
+ * Models a ChatGPT/Codex plan runs without the long-context rate. OpenAI raised
+ * GPT-6.1 Sol's Codex default window to 500K on 2026-10-13 with no long-context fees
+ * for usage from a ChatGPT subscription; API keys still pay the higher rate above
+ * 272K, so the exemption is OAuth-only. Every other model keeps its band on both.
+ */
+const CHATGPT_PLAN_LONG_CONTEXT_FEE_EXEMPT = new Set<string>(['gpt-6.1-sol']);
+
+/** Pricing-band metadata for a model reached through a ChatGPT/Codex sign-in. */
+export function openAiOAuthPricingMetadata(id: string): ReturnType<typeof openAiPricingMetadata> {
+  return CHATGPT_PLAN_LONG_CONTEXT_FEE_EXEMPT.has(id) ? {} : openAiPricingMetadata(id);
 }
 
 /**
@@ -169,7 +184,12 @@ function migratedEffectiveContextPercent(cached: number | undefined): number | u
  * Only absent fields are filled, so live discovery always wins; without this a stale
  * cache reports no reachable ceiling, collapsing the larger stop onto the standard one.
  *
- * `reasoning` is the one field a seed OVERRIDES rather than merely fills. The Codex
+ * The pricing band is not read from the cache at all. The Codex catalog never reports
+ * one, so a cached band is only what clodex derived when it last refreshed, and keeping
+ * it would leave the higher-rate warnings on a model OpenAI has since exempted until the
+ * user happened to refresh again.
+ *
+ * `reasoning` is the other field a seed OVERRIDES rather than merely fills. The Codex
  * catalog has never reported it: a cached value was written by whatever id guess the
  * installed clodex made at refresh time, so a stale `false` is a stale guess, not
  * user data or a provider answer. Leaving it authoritative meant a user who had
@@ -192,16 +212,14 @@ export function applyOAuthSeedContextMetadata(models: CachedModel[]): CachedMode
   const seedById = new Map(buildOpenAiOAuthModels().map(model => [model.id, model]));
   return models.map(model => {
     const seed = seedById.get(model.id);
-    const pricing = openAiPricingMetadata(model.id);
+    const pricing = openAiOAuthPricingMetadata(model.id);
     return {
       ...model,
       contextWindow: model.contextWindow ?? seed?.contextWindow,
       maxContextWindow: model.maxContextWindow ?? seed?.maxContextWindow,
       effectiveContextPercent: migratedEffectiveContextPercent(model.effectiveContextPercent),
-      pricingBoundary: model.pricingBoundary ?? seed?.pricingBoundary ?? pricing.pricingBoundary,
-      pricingBoundaryNote: model.pricingBoundaryNote
-        ?? seed?.pricingBoundaryNote
-        ?? pricing.pricingBoundaryNote,
+      pricingBoundary: seed?.pricingBoundary ?? pricing.pricingBoundary,
+      pricingBoundaryNote: seed?.pricingBoundaryNote ?? pricing.pricingBoundaryNote,
       maxOutputTokens: model.maxOutputTokens ?? seed?.maxOutputTokens,
       reasoning: seed?.reasoning ?? model.reasoning,
       useResponsesLite: model.useResponsesLite ?? seed?.useResponsesLite,
@@ -214,7 +232,7 @@ export function applyOAuthSeedContextMetadata(models: CachedModel[]): CachedMode
 export function buildOpenAiOAuthModels(): CachedModel[] {
   return OPENAI_OAUTH_MODEL_SEEDS.map(seed => {
     const prefix = seed.id.split('-')[0] ?? seed.id;
-    const pricing = openAiPricingMetadata(seed.id);
+    const pricing = openAiOAuthPricingMetadata(seed.id);
     return {
       id: seed.id,
       name: seed.name,

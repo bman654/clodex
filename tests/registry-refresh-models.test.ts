@@ -630,6 +630,49 @@ describe('registry/refresh-models', () => {
       expect(review?.maxContextWindow).toBeUndefined();
     });
 
+    // ChatGPT plans run GPT-6.1 Sol at its 500K window with no long-context fee, so the
+    // refreshed row must not carry the API-key band; GPT-6 Sol keeps it.
+    it('stores GPT-6.1 Sol at the live window with no higher-rate band', async () => {
+      const mockRegistry: ProviderRegistry = {
+        version: 1,
+        providers: [{
+          id: 'openai-oauth',
+          templateId: 'openai',
+          name: 'OpenAI (ChatGPT)',
+          enabled: true,
+          authRef: 'keyring',
+          authType: 'oauth',
+          api: {},
+        }],
+      };
+      vi.mocked(io.loadRegistryStrict).mockReturnValue(mockRegistry);
+
+      vi.mocked(global.fetch).mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          models: [
+            { slug: 'gpt-6.1-sol', title: 'GPT-6.1 Sol', context_window: 500_000, max_context_window: 872_000 },
+            { slug: 'gpt-6-sol', title: 'GPT-6 Sol', context_window: 272_000, max_context_window: 872_000 },
+            // Not the exempt model: a later Sol 6.1 variant and a same-version sibling.
+            { slug: 'gpt-6.1-sol-unreleased', title: 'GPT-6.1 Sol Next', context_window: 500_000 },
+            { slug: 'gpt-6.1-luna', title: 'GPT-6.1 Luna', context_window: 500_000 },
+          ],
+        }),
+      } as Response);
+
+      await refreshProviderModels('openai-oauth', 'mock_token', mockRegistry);
+
+      const saved = vi.mocked(io.saveRegistry).mock.calls[0]?.[0] as ProviderRegistry;
+      const models = saved.providers[0]?.modelsCache?.models ?? [];
+      const sol61 = models.find(m => m.id === 'gpt-6.1-sol');
+      expect(sol61?.contextWindow).toBe(500_000);
+      expect(sol61?.pricingBoundary).toBeUndefined();
+      expect(sol61?.pricingBoundaryNote).toBeUndefined();
+      for (const id of ['gpt-6-sol', 'gpt-6.1-sol-unreleased', 'gpt-6.1-luna']) {
+        expect(models.find(m => m.id === id)?.pricingBoundary, id).toBe(272_000);
+      }
+    });
+
     it('takes the live ceiling and headroom over the seed when the catalog reports them', async () => {
       const mockRegistry: ProviderRegistry = {
         version: 1,

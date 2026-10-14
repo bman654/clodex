@@ -1,7 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import { materializeRegistry, projectProviderCachedModels } from '../src/registry/materialize.js';
 import { buildOpenAiOAuthModels } from '../src/data/openai-oauth-models.js';
-import { resetContextStops, setSessionContextStops } from '../src/context-modes.js';
+import {
+  pricingBoundaryWarning,
+  resetContextStops,
+  resolveContextStop,
+  setSessionContextStops,
+} from '../src/context-modes.js';
 import type { CachedModel, ProviderRegistry, RegistryProvider } from '../src/registry/types.js';
 
 /**
@@ -52,9 +57,9 @@ describe('legacy OAuth cache overlay', () => {
     expect(sol?.maxOutputTokens).toBe(128_000);
   });
 
-  // The overlay is a backfill, never an override: a catalog that reports its own
+  // Context limits are backfilled, never overridden: a catalog that reports its own
   // values is the authority, and a stale seed must not quietly replace them.
-  it('leaves values the cache already carries alone', () => {
+  it('leaves context limits the cache already carries alone', () => {
     const provider = providerWithLegacyCache();
     const cached = provider.modelsCache?.models[0];
     if (cached) {
@@ -200,7 +205,7 @@ describe('legacy OAuth cache overlay', () => {
     expect(windows.get('o3')).toBe(200_000);
     expect(windows.get('o1-mini')).toBe(128_000);
     expect(windows.get('gpt-6-astra')).toBe(272_000);
-    expect(windows.get('gpt-6.1-sol')).toBe(272_000);
+    expect(windows.get('gpt-6.1-sol')).toBe(500_000);
     expect(windows.get('gpt-6-sol')).toBe(272_000);
     expect(windows.get('gpt-6-luna')).toBe(272_000);
     // Not declared, but a heuristic rule claims it.
@@ -209,19 +214,20 @@ describe('legacy OAuth cache overlay', () => {
     expect([...windows.values()].every(w => typeof w === 'number' && w > 0)).toBe(true);
   });
 
-  it('includes GPT-6.1 Sol with its published output limit and higher-rate boundary', () => {
+  it('includes GPT-6.1 Sol with its published output limit and no higher-rate boundary', () => {
     const sol = buildOpenAiOAuthModels().find(model => model.id === 'gpt-6.1-sol');
     expect(sol).toMatchObject({
       name: 'GPT-6.1 Sol',
       maxOutputTokens: 128_000,
       reasoning: true,
-      pricingBoundary: 272_000,
       useResponsesLite: true,
       preferWebSockets: true,
       minimalClientVersion: '0.159.0',
-      contextWindow: 272_000,
+      contextWindow: 500_000,
       maxContextWindow: 872_000,
     });
+    expect(sol?.pricingBoundary).toBeUndefined();
+    expect(sol?.pricingBoundaryNote).toBeUndefined();
   });
 
   // The builder reads `lookupKnownContextWindow`, which reports `undefined` rather than
@@ -317,7 +323,7 @@ describe('Responses-Lite fields missing from an older cache', () => {
     const [local] = materializeRegistry(registry, () => 'oauth-token');
     const sol = local?.models.find(model => model.id === 'gpt-6.1-sol');
     expect(sol).toMatchObject({
-      contextWindow: 272_000,
+      contextWindow: 500_000,
       useResponsesLite: true,
       preferWebSockets: true,
     });
@@ -431,5 +437,60 @@ describe('Responses-Lite fields missing from an older cache', () => {
     const [sol] = projectProviderCachedModels(provider);
     expect(sol?.useResponsesLite).toBeUndefined();
     expect(sol?.contextWindow).toBeUndefined();
+  });
+});
+
+/**
+ * OpenAI dropped the long-context fee for GPT-6.1 Sol on ChatGPT plans (2026-10-13), but
+ * API keys still pay 2x input and 1.5x output above 272K and no other model changed.
+ * Installs that refreshed before this release stored the band on the row, so the rows
+ * below carry it exactly as a real pre-upgrade cache does.
+ */
+const STALE_BAND = {
+  pricingBoundary: 272_000,
+  pricingBoundaryNote: 'Above it, OpenAI prices the full request at 2x input and 1.5x output.',
+};
+
+describe('GPT-6.1 Sol long-context pricing on a ChatGPT plan', () => {
+  it('drops the band a pre-upgrade cache stored from projection, --context notices and launch', () => {
+    const provider = providerWithRows([bareRow('gpt-6.1-sol', {
+      contextWindow: 500_000, maxContextWindow: 872_000, ...STALE_BAND,
+    })]);
+    const [projected] = projectProviderCachedModels(provider);
+    expect(projected?.pricingBoundary).toBeUndefined();
+    expect(projected?.pricingBoundaryNote).toBeUndefined();
+    // The `--context` notice, at both the default stop and the ceiling.
+    for (const stop of ['standard', 'max'] as const) {
+      expect(pricingBoundaryWarning('sol', projected!, resolveContextStop(projected!, stop))).toBeNull();
+    }
+    // The launch model the proxy route and its per-request notice read.
+    const registry = { schemaVersion: 4, providers: [provider] } as unknown as ProviderRegistry;
+    const sol = materializeRegistry(registry, () => 'oauth-token')[0]?.models[0];
+    expect(sol).toMatchObject({ id: 'gpt-6.1-sol', contextWindow: 500_000 });
+    expect(sol?.pricingBoundary).toBeUndefined();
+  });
+
+  // The exemption is one exact id: a later Sol 6.1 variant or a same-version sibling has
+  // no announced exemption and keeps the band.
+  it.each(['gpt-6.1-sol-unreleased', 'gpt-6.1-luna'])('keeps the band on %s', id => {
+    const provider = providerWithRows([bareRow(id, { contextWindow: 500_000 })]);
+    expect(projectProviderCachedModels(provider)[0]?.pricingBoundary).toBe(272_000);
+  });
+
+  it.each([...RESPONSES_LITE_IDS, 'gpt-5.5'])('keeps the band on %s, cached or derived', id => {
+    const provider = providerWithRows([bareRow(id, STALE_BAND), bareRow(`${id}-unreleased`)]);
+    expect(projectProviderCachedModels(provider).map(model => model.pricingBoundary))
+      .toEqual([272_000, 272_000]);
+    expect(buildOpenAiOAuthModels().find(model => model.id === id)?.pricingBoundary).toBe(272_000);
+  });
+
+  it('keeps the band for GPT-6.1 Sol through an API key', () => {
+    const provider = providerWithLegacyCache({
+      id: 'openai',
+      authType: 'api',
+      api: { npm: '@ai-sdk/openai' },
+      modelsCache: { fetchedAt: '2026-10-13T00:00:00.000Z', models: [bareRow('gpt-6.1-sol')] },
+    });
+    expect(projectProviderCachedModels(provider)[0]).toMatchObject(STALE_BAND);
   });
 });

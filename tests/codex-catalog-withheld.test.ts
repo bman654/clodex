@@ -281,7 +281,7 @@ describe('refresh at the request version -> persisted marker -> selectable OAuth
     for (const release of ['0.156.1', '0.159.0']) {
       pin.override = release;
       expect(offeredIds(), release).toEqual(['gpt-6.1-sol', 'gpt-6-sol', 'gpt-5.5']);
-      expect(buildDesiredPatchConfig().metaById[favorite]?.contextWindow, release).toBe(272_000);
+      expect(buildDesiredPatchConfig().metaById[favorite]?.contextWindow, release).toBe(500_000);
     }
     expect(vi.mocked(fetch).mock.calls.length).toBe(fetches);
     expect(saved('gpt-6.1-sol')?.withheldAtClientVersion).toBe('0.156.0');

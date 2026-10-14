@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadPreferences, savePreferences } from '../src/config.js';
-import { emptyRegistry, saveRegistry } from '../src/registry/io.js';
+import { emptyRegistry, loadRegistry, saveRegistry } from '../src/registry/io.js';
 import { withRegistryWriteLockSync } from '../src/registry/lock.js';
 import { resetContextStops } from '../src/context-modes.js';
 import { main, runModelsCommand } from '../src/cli.js';
@@ -178,6 +178,41 @@ describe('--context assignments', () => {
       cap.restore();
     }
     expect(cap.stderr.join('\n')).toMatch(/272,000-token pricing boundary|pricing boundary/);
+  });
+
+  // GPT-6.1 Sol has no long-context fee on a ChatGPT plan, so even its ceiling earns no
+  // warning. The row carries the band exactly as a cache refreshed before the change did.
+  it('does not warn for GPT-6.1 Sol on a ChatGPT plan, even at max', async () => {
+    const registry = loadRegistry();
+    registry.providers[0]!.modelsCache!.models.push({
+      id: 'gpt-6.1-sol',
+      name: 'GPT-6.1 Sol',
+      upstreamModelId: 'gpt-6.1-sol',
+      contextWindow: 500_000,
+      maxContextWindow: 872_000,
+      pricingBoundary: 272_000,
+      pricingBoundaryNote: 'Above it, OpenAI prices the full request at 2x input and 1.5x output.',
+      modelFormat: 'openai',
+      npm: '@ai-sdk/openai',
+    });
+    withRegistryWriteLockSync(() => saveRegistry(registry));
+    savePreferences({
+      favoriteModels: [{ providerId: 'openai-oauth', modelId: 'gpt-6.1-sol' }],
+      modelAliases: [{ name: 'sol61', providerId: 'openai-oauth', modelId: 'gpt-6.1-sol' }],
+    });
+
+    const cap = captureJson();
+    try {
+      expect(await main(['models', '--context', 'sol61=max', '--json'])).toBe(0);
+    } finally {
+      cap.restore();
+    }
+    const reported = cap.stderr.join('\n');
+    expect(reported).toContain('872,000');
+    expect(reported).not.toContain('pricing boundary');
+    const [sol] = JSON.parse(cap.stdout.join('')) as Array<Record<string, unknown>>;
+    expect((sol!['context'] as Record<string, unknown>)['effective']).toBe(872_000);
+    expect(sol).not.toHaveProperty('pricingBoundary');
   });
 
   // The reported bug: `clodex models --context <model>=1m --save` on a model whose

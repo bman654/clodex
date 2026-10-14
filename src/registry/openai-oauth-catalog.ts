@@ -6,7 +6,7 @@ import type { CachedModel } from './types.js';
 import {
   buildOpenAiOAuthModels,
   CHATGPT_CODEX_UNSUPPORTED_MODELS,
-  openAiPricingMetadata,
+  openAiOAuthPricingMetadata,
 } from '../data/openai-oauth-models.js';
 import { deriveBrand } from '../models.js';
 import { lookupKnownContextWindow } from '../context-window.js';
@@ -140,7 +140,7 @@ function buildDynamicOAuthModel(
     // Code already reserves a flat 33,000 tokens below whatever it is told.
     effectiveContextPercent: entry.effective_context_window_percent,
     maxOutputTokens: entry.max_output_tokens,
-    ...openAiPricingMetadata(id),
+    ...openAiOAuthPricingMetadata(id),
     modelFormat: 'openai' as const,
     npm: '@ai-sdk/openai',
     // Assume a model from the Codex listing reasons. That endpoint reports no
