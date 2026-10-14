@@ -37,7 +37,7 @@ interface OAuthModelSeed {
 /**
  * GPT-5.6 prices prompts above this input size at 2x input and 1.5x output for the
  * full request, not just the overage. That is why the Codex-reported window sits
- * here rather than at the model ceiling, except for the models exempted below.
+ * here rather than at the model ceiling, except where a ChatGPT plan moves the band below.
  */
 const GPT_HIGH_CONTEXT_PRICING_BOUNDARY = 272_000;
 const GPT_HIGH_CONTEXT_PRICING_NOTE =
@@ -121,7 +121,7 @@ function hasPricingBoundary(id: string): boolean {
 
 /**
  * Pricing-band metadata for OpenAI model ids at API-key rates; Codex-plan routes go
- * through openAiOAuthPricingMetadata, which removes the plan's exemptions.
+ * through openAiOAuthPricingMetadata, which applies the plan's own bands.
  * Applied to discovered models too so models outside the seed report their boundary.
  */
 export function openAiPricingMetadata(
@@ -135,16 +135,24 @@ export function openAiPricingMetadata(
 }
 
 /**
- * Models a ChatGPT/Codex plan runs without the long-context rate. OpenAI raised
- * GPT-6.1 Sol's Codex default window to 500K on 2026-10-13 with no long-context fees
- * for usage from a ChatGPT subscription; API keys still pay the higher rate above
- * 272K, so the exemption is OAuth-only. Every other model keeps its band on both.
+ * Bands a ChatGPT/Codex plan sets differently from API keys. OpenAI raised GPT-6.1
+ * Sol's Codex default window to 500K on 2026-10-13 with no long-context fees for
+ * usage from a ChatGPT subscription; API keys still pay the higher rate above 272K,
+ * so this is OAuth-only. The waiver is read as covering the new 500K default and no
+ * more, so the band moves to 500K rather than disappearing: a larger stop still
+ * warns. Every other model keeps its band on both paths.
  */
-const CHATGPT_PLAN_LONG_CONTEXT_FEE_EXEMPT = new Set<string>(['gpt-6.1-sol']);
+const CHATGPT_PLAN_PRICING_BANDS: ReadonlyMap<string, ReturnType<typeof openAiPricingMetadata>> =
+  new Map([
+    ['gpt-6.1-sol', {
+      pricingBoundary: 500_000,
+      pricingBoundaryNote: 'Above it, ChatGPT plan usage may be charged long-context fees.',
+    }],
+  ]);
 
 /** Pricing-band metadata for a model reached through a ChatGPT/Codex sign-in. */
 export function openAiOAuthPricingMetadata(id: string): ReturnType<typeof openAiPricingMetadata> {
-  return CHATGPT_PLAN_LONG_CONTEXT_FEE_EXEMPT.has(id) ? {} : openAiPricingMetadata(id);
+  return CHATGPT_PLAN_PRICING_BANDS.get(id) ?? openAiPricingMetadata(id);
 }
 
 /**
@@ -186,7 +194,7 @@ function migratedEffectiveContextPercent(cached: number | undefined): number | u
  *
  * The pricing band is not read from the cache at all. The Codex catalog never reports
  * one, so a cached band is only what clodex derived when it last refreshed, and keeping
- * it would leave the higher-rate warnings on a model OpenAI has since exempted until the
+ * it would leave the old warnings on a model whose band has since moved until the
  * user happened to refresh again.
  *
  * `reasoning` is the other field a seed OVERRIDES rather than merely fills. The Codex

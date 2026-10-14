@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { materializeRegistry, projectProviderCachedModels } from '../src/registry/materialize.js';
 import { buildOpenAiOAuthModels } from '../src/data/openai-oauth-models.js';
+import { reportPricingBoundaryCrossing } from '../src/pricing-boundary.js';
 import {
   pricingBoundaryWarning,
   resetContextStops,
@@ -214,7 +215,7 @@ describe('legacy OAuth cache overlay', () => {
     expect([...windows.values()].every(w => typeof w === 'number' && w > 0)).toBe(true);
   });
 
-  it('includes GPT-6.1 Sol with its published output limit and no higher-rate boundary', () => {
+  it('includes GPT-6.1 Sol with its published output limit and its ChatGPT-plan boundary', () => {
     const sol = buildOpenAiOAuthModels().find(model => model.id === 'gpt-6.1-sol');
     expect(sol).toMatchObject({
       name: 'GPT-6.1 Sol',
@@ -226,8 +227,8 @@ describe('legacy OAuth cache overlay', () => {
       contextWindow: 500_000,
       maxContextWindow: 872_000,
     });
-    expect(sol?.pricingBoundary).toBeUndefined();
-    expect(sol?.pricingBoundaryNote).toBeUndefined();
+    expect(sol?.pricingBoundary).toBe(500_000);
+    expect(sol?.pricingBoundaryNote).toContain('ChatGPT plan');
   });
 
   // The builder reads `lookupKnownContextWindow`, which reports `undefined` rather than
@@ -441,8 +442,9 @@ describe('Responses-Lite fields missing from an older cache', () => {
 });
 
 /**
- * OpenAI dropped the long-context fee for GPT-6.1 Sol on ChatGPT plans (2026-10-13), but
- * API keys still pay 2x input and 1.5x output above 272K and no other model changed.
+ * OpenAI dropped the long-context fee for GPT-6.1 Sol's new 500K default on ChatGPT plans
+ * (2026-10-13), so its band there moves from 272K to 500K. API keys still pay 2x input
+ * and 1.5x output above 272K, and no other model changed.
  * Installs that refreshed before this release stored the band on the row, so the rows
  * below carry it exactly as a real pre-upgrade cache does.
  */
@@ -452,26 +454,33 @@ const STALE_BAND = {
 };
 
 describe('GPT-6.1 Sol long-context pricing on a ChatGPT plan', () => {
-  it('drops the band a pre-upgrade cache stored from projection, --context notices and launch', () => {
+  it('moves a pre-upgrade cached band to 500K for projection, --context notices and launch', () => {
     const provider = providerWithRows([bareRow('gpt-6.1-sol', {
       contextWindow: 500_000, maxContextWindow: 872_000, ...STALE_BAND,
     })]);
     const [projected] = projectProviderCachedModels(provider);
-    expect(projected?.pricingBoundary).toBeUndefined();
-    expect(projected?.pricingBoundaryNote).toBeUndefined();
-    // The `--context` notice, at both the default stop and the ceiling.
-    for (const stop of ['standard', 'max'] as const) {
-      expect(pricingBoundaryWarning('sol', projected!, resolveContextStop(projected!, stop))).toBeNull();
-    }
+    expect(projected?.pricingBoundary).toBe(500_000);
+    expect(projected?.pricingBoundaryNote).toContain('ChatGPT plan');
+    expect(projected?.pricingBoundaryNote).not.toContain('2x input');
+    // The `--context` notice: silent at the 500K default and at 272K-500K, warns past it.
+    expect(pricingBoundaryWarning('sol', projected!, resolveContextStop(projected!))).toBeNull();
+    expect(pricingBoundaryWarning('sol', projected!, resolveContextStop(projected!, 400_000))).toBeNull();
+    expect(pricingBoundaryWarning('sol', projected!, resolveContextStop(projected!, 'max')))
+      .toContain('872,000-token window can grow past the 500,000-token pricing boundary');
     // The launch model the proxy route and its per-request notice read.
     const registry = { schemaVersion: 4, providers: [provider] } as unknown as ProviderRegistry;
     const sol = materializeRegistry(registry, () => 'oauth-token')[0]?.models[0];
-    expect(sol).toMatchObject({ id: 'gpt-6.1-sol', contextWindow: 500_000 });
-    expect(sol?.pricingBoundary).toBeUndefined();
+    expect(sol).toMatchObject({ id: 'gpt-6.1-sol', contextWindow: 500_000, pricingBoundary: 500_000 });
+    const crossing = (inputTokens: number) => reportPricingBoundaryCrossing(
+      { modelKey: `sol61:${inputTokens}`, modelLabel: 'sol', pricingBoundary: sol?.pricingBoundary, inputTokens },
+      () => {},
+    );
+    expect(crossing(400_000)).toBe(false);
+    expect(crossing(500_001)).toBe(true);
   });
 
-  // The exemption is one exact id: a later Sol 6.1 variant or a same-version sibling has
-  // no announced exemption and keeps the band.
+  // The 500K band is one exact id: a later Sol 6.1 variant or a same-version sibling has
+  // no announced waiver and keeps the 272K band.
   it.each(['gpt-6.1-sol-unreleased', 'gpt-6.1-luna'])('keeps the band on %s', id => {
     const provider = providerWithRows([bareRow(id, { contextWindow: 500_000 })]);
     expect(projectProviderCachedModels(provider)[0]?.pricingBoundary).toBe(272_000);

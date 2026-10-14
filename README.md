@@ -295,11 +295,11 @@ after this was written is covered without a clodex update. For ChatGPT/Codex-pla
 models whose catalog reports that window, the default `standard` stop stays at the
 line and a larger window is something you ask for. GPT-6.1 Sol through a ChatGPT/Codex
 sign-in is the exception: its catalog reports a 500,000 window and OpenAI charges ChatGPT
-plans no long-context fee for it, so clodex shows it no pricing boundary at any stop.
-Through an API key it keeps the boundary. **OpenAI API-key models retain
-their full API context window by default**, so their `standard` stop can already
-exceed the pricing boundary. Choose a smaller numeric stop if you want to limit
-exposure to the higher rate, for example
+plans no long-context fee up to it, so clodex puts its boundary at 500,000 and warns only
+for a larger stop such as `max`. Through an API key it keeps the 272,000 boundary.
+**OpenAI API-key models retain their full API context window by default**, so their
+`standard` stop can already exceed the pricing boundary. Choose a smaller numeric stop
+if you want to limit exposure to the higher rate, for example
 `clodex models --context clodex:openai:gpt-6-sol=250k --save`.
 
 ```sh

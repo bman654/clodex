@@ -630,9 +630,9 @@ describe('registry/refresh-models', () => {
       expect(review?.maxContextWindow).toBeUndefined();
     });
 
-    // ChatGPT plans run GPT-6.1 Sol at its 500K window with no long-context fee, so the
-    // refreshed row must not carry the API-key band; GPT-6 Sol keeps it.
-    it('stores GPT-6.1 Sol at the live window with no higher-rate band', async () => {
+    // ChatGPT plans run GPT-6.1 Sol's 500K window with no long-context fee, so the
+    // refreshed row carries a 500K band, not the API-key 272K one; GPT-6 Sol keeps 272K.
+    it('stores GPT-6.1 Sol at the live window with its ChatGPT-plan band', async () => {
       const mockRegistry: ProviderRegistry = {
         version: 1,
         providers: [{
@@ -666,8 +666,8 @@ describe('registry/refresh-models', () => {
       const models = saved.providers[0]?.modelsCache?.models ?? [];
       const sol61 = models.find(m => m.id === 'gpt-6.1-sol');
       expect(sol61?.contextWindow).toBe(500_000);
-      expect(sol61?.pricingBoundary).toBeUndefined();
-      expect(sol61?.pricingBoundaryNote).toBeUndefined();
+      expect(sol61?.pricingBoundary).toBe(500_000);
+      expect(sol61?.pricingBoundaryNote).not.toContain('2x input');
       for (const id of ['gpt-6-sol', 'gpt-6.1-sol-unreleased', 'gpt-6.1-luna']) {
         expect(models.find(m => m.id === id)?.pricingBoundary, id).toBe(272_000);
       }

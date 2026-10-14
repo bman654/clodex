@@ -3,7 +3,7 @@
 // whole request. Codex catalogs reporting a 272,000-token default keep standard at
 // that line and make larger windows opt-in; API-key defaults can exceed the boundary.
 // Which models carry a boundary on which provider is decided where the catalog is
-// built (GPT-6.1 Sol has none on a ChatGPT plan); this module only applies it.
+// built (GPT-6.1 Sol's sits at 500,000 on a ChatGPT plan); this module only applies it.
 // The field shape mirrors the Codex model catalog.
 
 import { DEFAULT_CONTEXT_WINDOW } from './context-window.js';
