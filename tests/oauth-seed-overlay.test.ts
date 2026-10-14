@@ -460,8 +460,11 @@ describe('GPT-6.1 Sol long-context pricing on a ChatGPT plan', () => {
     })]);
     const [projected] = projectProviderCachedModels(provider);
     expect(projected?.pricingBoundary).toBe(500_000);
-    expect(projected?.pricingBoundaryNote).toContain('ChatGPT plan');
-    expect(projected?.pricingBoundaryNote).not.toContain('2x input');
+    // The waiver's end is read from the announcement, not a published price, so the
+    // note stays conditional.
+    expect(projected?.pricingBoundaryNote).toBe(
+      'Above it, ChatGPT plan usage may be charged long-context fees.',
+    );
     // The `--context` notice: silent at the 500K default and at 272K-500K, warns past it.
     expect(pricingBoundaryWarning('sol', projected!, resolveContextStop(projected!))).toBeNull();
     expect(pricingBoundaryWarning('sol', projected!, resolveContextStop(projected!, 400_000))).toBeNull();
@@ -471,12 +474,16 @@ describe('GPT-6.1 Sol long-context pricing on a ChatGPT plan', () => {
     const registry = { schemaVersion: 4, providers: [provider] } as unknown as ProviderRegistry;
     const sol = materializeRegistry(registry, () => 'oauth-token')[0]?.models[0];
     expect(sol).toMatchObject({ id: 'gpt-6.1-sol', contextWindow: 500_000, pricingBoundary: 500_000 });
+    const notices: string[] = [];
     const crossing = (inputTokens: number) => reportPricingBoundaryCrossing(
       { modelKey: `sol61:${inputTokens}`, modelLabel: 'sol', pricingBoundary: sol?.pricingBoundary, inputTokens },
-      () => {},
+      message => notices.push(message),
     );
     expect(crossing(400_000)).toBe(false);
     expect(crossing(500_001)).toBe(true);
+    expect(notices).toEqual([expect.stringContaining(
+      'above the 500,000-token pricing boundary. The provider may price the full request',
+    )]);
   });
 
   // The 500K band is one exact id: a later Sol 6.1 variant or a same-version sibling has

@@ -653,7 +653,7 @@ describe('registry/refresh-models', () => {
           models: [
             { slug: 'gpt-6.1-sol', title: 'GPT-6.1 Sol', context_window: 500_000, max_context_window: 872_000 },
             { slug: 'gpt-6-sol', title: 'GPT-6 Sol', context_window: 272_000, max_context_window: 872_000 },
-            // Not the exempt model: a later Sol 6.1 variant and a same-version sibling.
+            // Not the model whose band moved: a later Sol 6.1 variant and a same-version sibling.
             { slug: 'gpt-6.1-sol-unreleased', title: 'GPT-6.1 Sol Next', context_window: 500_000 },
             { slug: 'gpt-6.1-luna', title: 'GPT-6.1 Luna', context_window: 500_000 },
           ],
