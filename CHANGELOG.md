@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.21.1](https://github.com/bman654/clodex/compare/v2.21.0...v2.21.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **models:** stop false long-context fee warnings for GPT-6.1 Sol on ChatGPT plans ([#329](https://github.com/bman654/clodex/issues/329)) ([58b656a](https://github.com/bman654/clodex/commit/58b656ab4906db3ef6caecc632507aa6b8c8b330))
+
 ## [2.21.0](https://github.com/bman654/clodex/compare/v2.20.0...v2.21.0) (2026-10-13)
 
 
