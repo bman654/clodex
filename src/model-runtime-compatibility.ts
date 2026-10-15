@@ -33,6 +33,13 @@ export interface ModelRuntimeCompatibility {
    * endpoint that does implement it is unaffected.
    */
   supportsCountTokens?: boolean;
+  /**
+   * Whether the upstream sends a streamed usage chunk only when the request
+   * carries `stream_options: {"include_usage": true}`. Unset keeps upstream's
+   * per-provider scoping, so existing providers are unaffected until their
+   * catalog opts in.
+   */
+  supportsStreamUsage?: boolean;
 }
 
 export type OpenAiCompatibleRequestBody = Record<string, unknown>;

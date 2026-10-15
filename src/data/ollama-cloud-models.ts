@@ -51,6 +51,10 @@ const CATALOG: OllamaCloudModel[] = ([
     maxTokensField: 'max_tokens' as const,
     // Effort mapping is unverified against ollama.com; send none.
     supportsReasoningEffort: false,
+    // ollama.com sends a streamed usage chunk only when the request carries
+    // stream_options.include_usage (observed 2026-10-13); without it every
+    // streamed turn reports output_tokens 0.
+    supportsStreamUsage: true,
   },
 }));
 
