@@ -38,6 +38,8 @@ export interface AddCustomEndpointInput {
   allowInsecureLocal?: boolean;
   /** Static headers this endpoint requires on every request (e.g. a plan/auth-tracking header). */
   headers?: Record<string, string>;
+  /** Opt this openai-compatible endpoint into stream_options.include_usage on streamed requests. */
+  supportsStreamUsage?: boolean;
 }
 
 export interface AddCustomEndpointResult {
@@ -249,6 +251,9 @@ export async function addCustomEndpointProvider(input: AddCustomEndpointInput): 
               modelFormat: modelFormatForKind(input.kind),
               npm,
               apiUrl: fetched.baseUrl,
+              ...(input.supportsStreamUsage
+                ? { compatibility: { ...m.compatibility, supportsStreamUsage: true } }
+                : {}),
             })),
           },
         };
