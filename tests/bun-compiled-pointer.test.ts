@@ -67,9 +67,21 @@ function buildElf(
   pointerVaddr: number,
   extraPointerVaddrs: number[] = [],
   bun: { offset: number; size: number } = { offset: BUN_OFFSET, size: BUN_SIZE },
-  { segSize = SEG_SIZE, decoySegment = false, phnum = 1, trailingWritableSegment = false }: {
+  {
+    segSize = SEG_SIZE,
+    segShift = 0,
+    decoySegment = false,
+    phnum = 1,
+    trailingWritableSegment = false,
+  }: {
     /** Grow the writable segment past one `SCAN_CHUNK`, so the sweep's chunking loop runs twice. */
     segSize?: number;
+    /**
+     * Start the writable segment this many bytes past `SEG_OFFSET`, in the file and in memory
+     * alike. A shift that is not a multiple of 8 lets an aligned pointer straddle the census's
+     * FIRST chunk boundary, which no aligned pointer can on an aligned segment.
+     */
+    segShift?: number;
     /** Add an earlier PT_LOAD whose vaddr range also covers the pointer but not the stand-in. */
     decoySegment?: boolean;
     /** `e_phnum`. 0xffff is PN_XNUM, which says the real count lives in the section table. */
@@ -81,6 +93,8 @@ function buildElf(
     trailingWritableSegment?: boolean;
   } = {},
 ): Buffer {
+  const segOffset = SEG_OFFSET + segShift;
+  const segVaddr = SEG_VADDR + segShift;
   const shstrtab = Buffer.from(SECTION_NAMES.join('\0') + '\0', 'utf8');
   const nameOffsets = new Map<string, number>();
   let at = 0;
@@ -88,7 +102,7 @@ function buildElf(
     nameOffsets.set(name, at);
     at += name.length + 1;
   }
-  const shoff = SEG_OFFSET + segSize;
+  const shoff = segOffset + segSize;
   const shstrOffset = shoff + 4 * 64;
   const buf = Buffer.alloc(shstrOffset + shstrtab.length, 0);
 
@@ -106,8 +120,8 @@ function buildElf(
   // The one PT_LOAD, writable.
   buf.writeUInt32LE(1, 0x40); // p_type = PT_LOAD
   buf.writeUInt32LE(6, 0x44); // p_flags = R|W
-  buf.writeBigUInt64LE(BigInt(SEG_OFFSET), 0x48);
-  buf.writeBigUInt64LE(BigInt(SEG_VADDR), 0x50);
+  buf.writeBigUInt64LE(BigInt(segOffset), 0x48);
+  buf.writeBigUInt64LE(BigInt(segVaddr), 0x50);
   buf.writeBigUInt64LE(BigInt(segSize), 0x60); // p_filesz
 
   if (decoySegment) {
@@ -117,9 +131,9 @@ function buildElf(
     buf.writeUInt16LE(2, 0x38);
     buf.writeUInt32LE(1, 0x78);
     buf.writeUInt32LE(6, 0x7c);
-    buf.writeBigUInt64LE(BigInt(SEG_OFFSET), 0x80);
-    buf.writeBigUInt64LE(BigInt(SEG_VADDR), 0x88);
-    buf.writeBigUInt64LE(BigInt(FIRST_SCANNED - SEG_VADDR + 0x1000), 0x98);
+    buf.writeBigUInt64LE(BigInt(segOffset), 0x80);
+    buf.writeBigUInt64LE(BigInt(segVaddr), 0x88);
+    buf.writeBigUInt64LE(BigInt(FIRST_SCANNED - segVaddr + 0x1000), 0x98);
   }
 
   if (trailingWritableSegment) {
@@ -128,8 +142,8 @@ function buildElf(
     buf.writeUInt16LE(2, 0x38);
     buf.writeUInt32LE(1, 0x78);
     buf.writeUInt32LE(6, 0x7c);
-    buf.writeBigUInt64LE(BigInt(SEG_OFFSET), 0x80);
-    buf.writeBigUInt64LE(BigInt(SEG_VADDR + segSize + 0x100000), 0x88);
+    buf.writeBigUInt64LE(BigInt(segOffset), 0x80);
+    buf.writeBigUInt64LE(BigInt(segVaddr + segSize + 0x100000), 0x88);
     buf.writeBigUInt64LE(BigInt(0x1000), 0x98);
   }
 
@@ -141,15 +155,15 @@ function buildElf(
     buf.writeBigUInt64LE(BigInt(size), base + 32);
   };
   section(1, '.shstrtab', 0, shstrOffset, shstrtab.length);
-  section(2, '.data', SEG_VADDR, SEG_OFFSET, bun.offset - SEG_OFFSET);
-  section(3, '.bun', SEG_VADDR + (bun.offset - SEG_OFFSET), bun.offset, bun.size);
+  section(2, '.data', segVaddr, segOffset, bun.offset - segOffset);
+  section(3, '.bun', segVaddr + (bun.offset - segOffset), bun.offset, bun.size);
   shstrtab.copy(buf, shstrOffset);
 
   // A filler that can never be mistaken for an address.
-  buf.fill(0xaa, SEG_OFFSET, SEG_OFFSET + segSize);
-  const bunVaddr = SEG_VADDR + (bun.offset - SEG_OFFSET);
+  buf.fill(0xaa, segOffset, segOffset + segSize);
+  const bunVaddr = segVaddr + (bun.offset - segOffset);
   for (const vaddr of [pointerVaddr, ...extraPointerVaddrs]) {
-    buf.writeBigUInt64LE(BigInt(bunVaddr), SEG_OFFSET + (vaddr - SEG_VADDR));
+    buf.writeBigUInt64LE(BigInt(bunVaddr), segOffset + (vaddr - segVaddr));
   }
   return buf;
 }
@@ -285,7 +299,53 @@ describe('the Bun blob pointer stand-in', () => {
     writeFileSync(file, buildElf(FIRST_SCANNED + 0x758, [FIRST_SCANNED + 0x900]));
 
     expect(() => shimBunCompiledPointer(file))
-      .toThrow("cannot locate Bun's blob pointer: 2 candidates");
+      .toThrow("cannot locate Bun's blob pointer: 2 aligned candidates");
+  });
+
+  // The 2.1.308 linux-x64 shape. `.bun` landed at 0x7000000, whose bytes are
+  // `00 00 00 07 00 00 00 00`, so every ordinary 64-bit 7 preceded by three zero bytes holds a copy
+  // five bytes into the word before it. That build carries twelve such copies in `.data`,
+  // `.data.rel.ro` and `.dynamic`, all at `vaddr % 8 === 5`, and one real, aligned global. Counting
+  // the copies refused every patch of that build with "13 candidates".
+  describe('when copies of the address straddle ordinary words', () => {
+    const POINTER = FIRST_SCANNED + 0x758;
+    const UNALIGNED = [SEG_VADDR + 0x45, FIRST_SCANNED + 0x905, FIRST_SCANNED + 0x1e15];
+
+    it('takes the one aligned copy as the pointer', () => {
+      for (const vaddr of UNALIGNED) expect(vaddr % 8, 'copy must be unaligned').toBe(5);
+      expect(POINTER % 8).toBe(0);
+      writeFileSync(file, buildElf(POINTER, UNALIGNED));
+
+      const shim = shimBunCompiledPointer(file);
+
+      expect(shim).not.toBeNull();
+      expect(shim!.pointerVaddr).toBe(BigInt(POINTER));
+    });
+
+    // Every unaligned residue, not just the 5 that 2.1.308 happened to produce: a census that
+    // only rejected `% 8 === 5`, or only demanded 4-byte alignment, would pass the tests above.
+    it.each([1, 2, 3, 4, 5, 6, 7])('ignores a copy at vaddr %% 8 === %i', residue => {
+      const copy = FIRST_SCANNED + 0x900 + residue;
+      writeFileSync(file, buildElf(POINTER, [copy]));
+      expect(shimBunCompiledPointer(file)!.pointerVaddr, 'the copy must not make it ambiguous')
+        .toBe(BigInt(POINTER));
+
+      writeFileSync(file, buildElf(copy));
+      const before = readFileSync(file);
+      expect(() => shimBunCompiledPointer(file), 'nor be taken for the pointer when it is alone')
+        .toThrow("cannot locate Bun's blob pointer: 0 aligned candidates");
+      expect(readFileSync(file).equals(before)).toBe(true);
+    });
+
+    // An unaligned copy is never the pointer, even when it is the only copy there is.
+    it('refuses when every copy outside the blob is unaligned', () => {
+      writeFileSync(file, buildElf(UNALIGNED[1]!, UNALIGNED));
+      const before = readFileSync(file);
+
+      expect(() => shimBunCompiledPointer(file))
+        .toThrow("cannot locate Bun's blob pointer: 0 aligned candidates");
+      expect(readFileSync(file).equals(before), 'a refusal must not have written anything').toBe(true);
+    });
   });
 
   // The "exactly one candidate" rule has to govern the NO-OP path too, and for a while it did not:
@@ -325,7 +385,7 @@ describe('the Bun blob pointer stand-in', () => {
 
       expect(tweakccScan(file, BigInt(BUN_VADDR))).toBe(FIRST_SCANNED);
       expect(() => shimBunCompiledPointer(file))
-        .toThrow("cannot locate Bun's blob pointer: 2 candidates");
+        .toThrow("cannot locate Bun's blob pointer: 2 aligned candidates");
     });
   });
 
@@ -348,19 +408,32 @@ describe('the Bun blob pointer stand-in', () => {
   // chunk, so the sweep's loop body runs once and the overlap that stitches chunks together is
   // unobservable — a pointer that straddles a boundary would be missed, or found twice and refused
   // as ambiguous, with every other test still green.
+  //
+  // Only an 8-byte-aligned pointer counts, and on a segment that starts on an 8-byte boundary no
+  // aligned pointer can straddle the first chunk boundary at all. So these start the segment 3
+  // bytes off one — legal ELF, not seen on a real build — and put each pointer at `delta ≡ 5`
+  // (mod 8) from it, which is an aligned address.
   const SCAN_CHUNK = 1 << 20;
   const BIG_SEG = 3 * SCAN_CHUNK;
+  const SHIFT = 3;
 
   it.each([
-    { where: 'wholly inside the first chunk', delta: SCAN_CHUNK - 8 },
-    { where: 'straddling the first boundary', delta: SCAN_CHUNK - 4 },
-    { where: 'first byte past the first boundary', delta: SCAN_CHUNK - 7 },
-    { where: 'straddling the second boundary', delta: 2 * (SCAN_CHUNK - 7) - 3 },
-    { where: 'in the last chunk', delta: 2 * SCAN_CHUNK + 0x40 },
-  ])('finds a pointer $where of the segment sweep', ({ delta }) => {
-    const pointer = SEG_VADDR + delta;
+    { where: 'wholly inside the first chunk', shift: SHIFT, delta: SCAN_CHUNK - 11 },
+    { where: 'straddling the first boundary', shift: SHIFT, delta: SCAN_CHUNK - 3 },
+    { where: 'just past the first boundary', shift: SHIFT, delta: SCAN_CHUNK + 5 },
+    { where: 'straddling the second boundary', shift: SHIFT, delta: 2 * (SCAN_CHUNK - 7) + 3 },
+    { where: 'in the last chunk', shift: SHIFT, delta: 2 * SCAN_CHUNK + 0x45 },
+    // The overlap must be exactly 7. One less misses this pointer: it starts on the first byte
+    // the next chunk shares with this one.
+    { where: 'on the first byte of the overlap', shift: 7, delta: SCAN_CHUNK - 7 },
+    // One more counts this one twice — it sits wholly in both chunks — and refuses it as
+    // ambiguous. Unshifted, as every real segment is.
+    { where: 'as the last word of the first chunk', shift: 0, delta: SCAN_CHUNK - 8 },
+  ])('finds a pointer $where of the segment sweep', ({ shift, delta }) => {
+    const pointer = SEG_VADDR + shift + delta;
+    expect(pointer % 8, 'the pointer must be aligned, or the census rightly ignores it').toBe(0);
     const bun = { offset: SEG_OFFSET + BIG_SEG - 0x8000, size: 0x8000 };
-    writeFileSync(file, buildElf(pointer, [], bun, { segSize: BIG_SEG }));
+    writeFileSync(file, buildElf(pointer, [], bun, { segSize: BIG_SEG, segShift: shift }));
 
     const shim = shimBunCompiledPointer(file);
 
@@ -538,19 +611,17 @@ describe('the Bun blob pointer stand-in', () => {
       expect(shimBunCompiledPointer(file), 'tweakcc can reach this one unaided').toBeNull();
       expect(readFileSync(file).equals(before)).toBe(true);
     });
+  });
 
-    it('does not borrow a slot that overlaps the real pointer', () => {
-      // The global 4 bytes past a boundary: the first slot the stand-in would pick overlaps it, so
-      // planting there would corrupt the very address the restore then reads.
-      const pointer = FIRST_SCANNED + 4;
-      writeFileSync(file, buildElf(pointer));
+  // The blob's range is half-open: its first byte is inside it, the byte after its last is not.
+  it('excludes a copy at the blob\'s first byte and counts one just past its end', () => {
+    writeFileSync(file, buildElf(FIRST_SCANNED + 0x758, [BUN_VADDR]));
+    expect(shimBunCompiledPointer(file)!.pointerVaddr).toBe(BigInt(FIRST_SCANNED + 0x758));
 
-      const shim = shimBunCompiledPointer(file)!;
-
-      expect(shim.standInVaddr).not.toBe(BigInt(FIRST_SCANNED));
-      expect(shim.standInVaddr).toBe(BigInt(FIRST_SCANNED + STRIDE));
-      expect(read8(file, pointer), 'the real pointer must survive planting').toBe(BigInt(BUN_VADDR));
-    });
+    const pastEnd = BUN_VADDR + BUN_SIZE;
+    expect(pastEnd % STRIDE, 'tweakcc must not reach it unaided').not.toBe(0);
+    writeFileSync(file, buildElf(pastEnd));
+    expect(shimBunCompiledPointer(file)!.pointerVaddr).toBe(BigInt(pastEnd));
   });
 
   it('ignores candidates inside the blob itself', () => {

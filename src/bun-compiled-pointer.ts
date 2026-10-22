@@ -29,11 +29,16 @@
 // pristine repack in exactly one place: the global, holding the value it was always meant to hold.
 //
 // Two things make that safe rather than clever, and both are checked rather than assumed:
-//   * the real global is identified, not guessed: the ONE 8-byte occurrence of `.bun`'s address
-//     inside the writable segment and outside `.bun`'s own payload. Matches inside the payload are
-//     coincidences in compressed JavaScript — up to five on the arm64 builds measured — and are
-//     excluded by range. Anything other than exactly one candidate is refused, loudly, instead of
-//     patched.
+//   * the real global is identified, not guessed: the ONE 8-byte-aligned occurrence of `.bun`'s
+//     address inside the writable segment and outside `.bun`'s own payload. Matches inside the
+//     payload are coincidences in compressed JavaScript — up to five on the arm64 builds measured —
+//     and are excluded by range. Unaligned matches are excluded too: the global is a pointer, and
+//     every one measured sits on an 8-byte boundary (and tweakcc only ever reads aligned words).
+//     That rule stopped being academic on 2.1.308 linux-x64, whose `.bun` landed at 0x7000000:
+//     its address in bytes is `00 00 00 07 00 00 00 00`, so every ordinary 64-bit 7 preceded by
+//     three zero bytes matches five bytes into the word before it. Twelve did, all at
+//     `vaddr % 8 === 5`, beside the one real global. Anything other than exactly one candidate is
+//     refused, loudly, instead of patched.
 //   * it is a NO-OP wherever tweakcc already lands on that same address. So an older release, and
 //     any future release that goes back to being aligned, takes the path it always took. Note the
 //     order: the census above runs FIRST and the no-op defers to it, so tweakcc settling on some
@@ -227,7 +232,10 @@ function tweakccWouldFind(fd: number, segment: ElfSegment, needle: Buffer): bigi
   return null;
 }
 
-/** Every offset in `[from, to)` holding `needle`, excluding those inside `[skipFrom, skipTo)`. */
+/**
+ * Every offset in `[from, to)` holding `needle`, excluding those inside `[skipFrom, skipTo)` and
+ * those whose virtual address — `offset + loadBias` — is not a multiple of 8.
+ */
 function scanForNeedle(
   fd: number,
   from: number,
@@ -235,6 +243,7 @@ function scanForNeedle(
   needle: Buffer,
   skipFrom: number,
   skipTo: number,
+  loadBias: bigint,
 ): number[] {
   const hits: number[] = [];
   // Overlap by 7 so a match straddling a chunk boundary is not missed.
@@ -247,7 +256,8 @@ function scanForNeedle(
       const found = chunk.indexOf(needle, at);
       if (found < 0) break;
       const offset = start + found;
-      if (offset < skipFrom || offset >= skipTo) hits.push(offset);
+      const aligned = (BigInt(offset) + loadBias) % 8n === 0n;
+      if (aligned && (offset < skipFrom || offset >= skipTo)) hits.push(offset);
       at = found + 1;
     }
   }
@@ -294,11 +304,13 @@ export function shimBunCompiledPointer(path: string): BunCompiledPointerShim | n
     // builds is unaligned; on 2.1.252 the one aligned hit IS the global, which is why standing
     // aside was right there), and this is what keeps that a measured fact rather than an
     // assumption.
-    const candidates = scanForNeedle(fd, segmentStart, segmentEnd, needle, bunStart, bunEnd);
+    const candidates = scanForNeedle(
+      fd, segmentStart, segmentEnd, needle, bunStart, bunEnd, segment.vaddr - segment.offset,
+    );
     if (candidates.length !== 1) {
       throw new Error(
-        `cannot locate Bun's blob pointer: ${candidates.length} candidates in the writable segment `
-        + `(expected 1). Refusing to repack a binary whose Bun global would be left stale.`,
+        `cannot locate Bun's blob pointer: ${candidates.length} aligned candidates in the writable `
+        + `segment (expected 1). Refusing to repack a binary whose Bun global would be left stale.`,
       );
     }
     const pointerOffset = candidates[0]!;
@@ -325,6 +337,9 @@ export function shimBunCompiledPointer(path: string): BunCompiledPointerShim | n
     for (let vaddr = first; vaddr <= last; vaddr += TWEAKCC_SCAN_STRIDE) {
       const at = Number(segment.offset + (vaddr - segment.vaddr));
       if (at + 8 > bunStart && at < bunEnd) continue;
+      // Unreachable while the census admits only aligned candidates: an aligned pointer overlaps
+      // an aligned slot only by BEING it, and then tweakcc finds it and this never runs. Kept so
+      // that relaxing the census cannot quietly plant the stand-in over the global it corrects.
       if (at + 8 > pointerOffset && at < pointerOffset + 8) continue;
       standInVaddr = vaddr;
       break;
