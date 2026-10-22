@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.21.3](https://github.com/bman654/clodex/compare/v2.21.2...v2.21.3) (2026-10-22)
+
+
+### Bug Fixes
+
+* **patch:** let clodex patch Claude Code 2.1.308 on Linux x64 instead of refusing it ([#334](https://github.com/bman654/clodex/issues/334)) ([35126da](https://github.com/bman654/clodex/commit/35126dac45e88879e0f36adf9ca2f430fedbb348))
+
 ## [2.21.2](https://github.com/bman654/clodex/compare/v2.21.1...v2.21.2) (2026-10-20)
 
 
