@@ -201,7 +201,8 @@ A Bun standalone ELF keeps the virtual address of its `.bun` section in an 8-byt
 global. `repackELFSection` moves `.bun` to a fresh page past the end of the file and rewrites that
 global to match — and it finds it by scanning the first
 writable `PT_LOAD` for eight bytes equal to `.bun`'s current address, **only at addresses that are
-multiples of 16384**. tweakcc 4.3.0 and 4.3.3 both do this, so bumping the pin does not help.
+multiples of 16384**. tweakcc 4.3.0 and 4.3.3 both do this. (4.4.0, which clodex does not pin,
+reworked this path: it takes the writable `PT_LOAD` that contains `.bun` instead of the first one.)
 
 Through Claude Code 2.1.252 the global happened to land on a 16 KiB boundary on every ELF build
 (measured on 2.1.246 and 2.1.252, x64 and arm64, glibc and musl — all at `vaddr % 16384 == 0`).
@@ -237,8 +238,28 @@ unaided repack in exactly one place: the global, holding the value it was always
   No shipped build does — on all four 2.1.257 ELF builds every occurrence is unaligned, and on
   2.1.252 the single aligned hit *is* the global — and the ordering is what keeps that a measured
   fact rather than an assumption.
+- **tweakcc must work on `.bun`'s own segment, and since 2.1.314 that is not always the first
+  writable one.** tweakcc 4.3.3 uses the first writable `PT_LOAD` twice over: it scans that segment
+  for the global, and it extends that segment to hold the moved `.bun`. Through 2.1.312 the first
+  writable `PT_LOAD` held `.bun` on every ELF build the canary passed; the one 2.1.312 build dumped
+  (linux-x64) has a single writable `PT_LOAD`, at `0x6df9860`. The 2.1.314 glibc builds have two: a
+  RELRO-only one first, whose program header matches `PT_GNU_RELRO` exactly (`0x70cc770` on
+  linux-x64, `0x6fad070` on linux-arm64; its file image runs from `.tdata` to `.got.plt`), then the
+  one holding `.data`, the global and `.bun`. The census mirrored tweakcc's choice, found nothing in
+  the RELRO segment, and refused both builds with `0 aligned candidates`. Read from tweakcc's code,
+  not observed: past the census it would have extended the RELRO segment, the one it had picked, to
+  hold the moved `.bun`. The musl builds still have one writable segment. So
+  every writable `PT_LOAD` ahead of `.bun`'s has its write bit cleared in the private candidate for
+  the length of the repack, and the restore puts it back after checking the segment is still the
+  one it was. The census now sweeps every writable segment, and the global must be in `.bun`'s.
+  Measured on 2.1.314 linux-x64: the published binary differs from the pristine one before `.bun`
+  only in the global, the header fields that grow the segment and move the section table, and the
+  dynamic-linking tables LIEF rebuilds on every ELF write (`.dynsym`, `.dynstr`, the hash and
+  symbol-version tables, `.rela.dyn`, `.rela.plt`, `.dynamic`; the musl repack, which hides
+  nothing, rewrites the same set). The linux-arm64 container leg runs the result.
 - **The restore verifies rather than assumes:** the stand-in must have changed, must agree with
-  where `.bun` actually ended up, and both writes must read back.
+  where `.bun` actually ended up, and both writes must read back. Where a segment was hidden but no
+  stand-in was needed, the global must hold `.bun`'s new address.
 
 **What a wrong answer actually costs.** Not a binary that fails to start. That was this section's
 original claim and it is wrong: on published 2.1.257 linux-x64 and linux-x64-musl, reverting *only*

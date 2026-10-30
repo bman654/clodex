@@ -30,7 +30,7 @@
 //
 // Two things make that safe rather than clever, and both are checked rather than assumed:
 //   * the real global is identified, not guessed: the ONE 8-byte-aligned occurrence of `.bun`'s
-//     address inside the writable segment and outside `.bun`'s own payload. Matches inside the
+//     address inside the writable segments and outside `.bun`'s own payload. Matches inside the
 //     payload are coincidences in compressed JavaScript — up to five on the arm64 builds measured —
 //     and are excluded by range. Unaligned matches are excluded too: the global is a pointer, and
 //     every one measured sits on an 8-byte boundary (and tweakcc only ever reads aligned words).
@@ -45,6 +45,11 @@
 //     OTHER aligned copy is refused rather than waved through.
 // The restore reads back both addresses and refuses a binary where either did not take.
 //
+// WHICH SEGMENT. tweakcc scans, and extends, the FIRST writable `PT_LOAD`. Through 2.1.312 that
+// was the segment holding `.bun` on every ELF build. The 2.1.314 glibc builds put a RELRO-only
+// writable segment first, so the write bit of every writable segment ahead of `.bun`'s is cleared
+// for the repack and put back by the restore. See `shimBunCompiledPointer`.
+//
 // WHAT A WRONG ANSWER COSTS. Not a binary that fails to start — that was this file's original
 // claim and it is wrong. Measured on published 2.1.257 linux-x64 and linux-x64-musl: revert only
 // the global to its pre-repack value and `claude --version` still works, so Bun locates the blob
@@ -58,7 +63,7 @@ import { closeSync, fstatSync, openSync, readSync, writeSync } from 'node:fs';
 /** tweakcc's `repackELFSection` only inspects addresses at this stride. Mirrored, not chosen. */
 const TWEAKCC_SCAN_STRIDE = 16384n;
 
-/** Chunk used to sweep the writable segment for the pointer. Any size ≥ 8 is correct. */
+/** Chunk used to sweep the writable segments for the pointer. Any size ≥ 8 is correct. */
 const SCAN_CHUNK = 1 << 20;
 
 const ELF_MAGIC = 0x464c457f;
@@ -75,6 +80,8 @@ interface ElfSection {
 }
 
 interface ElfSegment {
+  /** File offset of this segment's program header, where `p_flags` is written. */
+  headerOffset: number;
   type: number;
   flags: number;
   offset: bigint;
@@ -87,16 +94,30 @@ interface ElfLayout {
   segments: ElfSegment[];
 }
 
+/** A writable `PT_LOAD` ahead of `.bun`'s, write-protected for the length of the repack. */
+interface HiddenWritableLoad {
+  /** Index in the program-header table. */
+  index: number;
+  vaddr: bigint;
+  offset: bigint;
+  /** `p_flags` as published, put back verbatim after the repack. */
+  flags: number;
+}
+
 /** What `shimBunCompiledPointer` has to hand back for the restore to finish the job. */
 export interface BunCompiledPointerShim {
   /** Address of the real Bun global. Its FILE offset is re-derived from the repacked binary. */
   pointerVaddr: bigint;
-  /** Address of the aligned slot tweakcc will find and rewrite instead. */
-  standInVaddr: bigint;
-  /** The eight bytes the stand-in displaced, put back verbatim after the repack. */
-  displaced: Buffer;
   /** `.bun`'s address before the repack — what the planted copy holds. */
   bunVaddr: bigint;
+  /** The aligned slot tweakcc will find and rewrite instead, or null when it finds the global. */
+  standIn: {
+    vaddr: bigint;
+    /** The eight bytes the stand-in displaced, put back verbatim after the repack. */
+    displaced: Buffer;
+  } | null;
+  /** Writable segments tweakcc would otherwise take for `.bun`'s. Empty before 2.1.314. */
+  hiddenLoads: HiddenWritableLoad[];
 }
 
 function readAt(fd: number, length: number, position: number): Buffer {
@@ -177,6 +198,7 @@ function readElfLayout(fd: number): ElfLayout | null {
   for (let i = 0; i < phnum; i++) {
     const at = i * phentsize;
     segments.push({
+      headerOffset: Number(phoff) + at,
       type: phTable.readUInt32LE(at),
       flags: phTable.readUInt32LE(at + 4),
       offset: phTable.readBigUInt64LE(at + 8),
@@ -191,9 +213,15 @@ function alignUp(value: bigint, to: bigint): bigint {
   return ((value + to - 1n) / to) * to;
 }
 
-/** The segment tweakcc searches: the first writable `PT_LOAD`. Same predicate, same order. */
-function writableLoad(layout: ElfLayout): ElfSegment | undefined {
-  return layout.segments.find(segment => segment.type === PT_LOAD && (segment.flags & PF_W) !== 0);
+function isWritableLoad(segment: ElfSegment): boolean {
+  return segment.type === PT_LOAD && (segment.flags & PF_W) !== 0;
+}
+
+/** The writable `PT_LOAD` whose address range holds `.bun`, or null when none or several do. */
+function bunHomeLoad(layout: ElfLayout, bun: ElfSection): ElfSegment | null {
+  const homes = layout.segments.filter(segment =>
+    isWritableLoad(segment) && bun.addr >= segment.vaddr && bun.addr < segment.vaddr + segment.filesz);
+  return homes.length === 1 ? homes[0]! : null;
 }
 
 /**
@@ -278,6 +306,14 @@ function scanForNeedle(
  * alternative is guessing WHICH eight bytes to rewrite, and every address in range is live data:
  * the stand-in slot alone lands in `.data` on the glibc builds and in `.tdata`, the TLS
  * initialisation image, on the musl ones.
+ *
+ * tweakcc 4.3.3 repacks around the FIRST writable `PT_LOAD`: it scans that one for the global, and
+ * it extends that one to hold the moved `.bun`. Through 2.1.312 that was the segment holding `.bun`
+ * on every ELF build the canary passed. The 2.1.314 glibc builds put a RELRO-only writable segment
+ * first (its program header matches `PT_GNU_RELRO` exactly) and `.data`, the global and `.bun` in a
+ * second one, so tweakcc would scan the wrong segment and, by its code, extend the wrong one too.
+ * Every writable `PT_LOAD` ahead of `.bun`'s therefore has its write bit cleared for the
+ * repack, so tweakcc's first writable segment is `.bun`'s own, and the restore puts the bit back.
  */
 export function shimBunCompiledPointer(path: string): BunCompiledPointerShim | null {
   const fd = openSync(path, 'r+');
@@ -286,8 +322,18 @@ export function shimBunCompiledPointer(path: string): BunCompiledPointerShim | n
     if (!layout) return null;
     const bun = layout.sections.find(section => section.name === '.bun');
     if (!bun || bun.size === 0n) return null;
-    const segment = writableLoad(layout);
-    if (!segment) return null;
+    if (!layout.segments.some(isWritableLoad)) return null;
+    // Refused rather than left to tweakcc: with `.bun` outside every writable segment its repack
+    // would move the section relative to a segment that never held it.
+    const segment = bunHomeLoad(layout, bun);
+    if (!segment) {
+      throw new Error("cannot repack Bun's blob: no single writable ELF segment holds the .bun section");
+    }
+    const homeIndex = layout.segments.indexOf(segment);
+    const hiddenLoads: HiddenWritableLoad[] = layout.segments
+      .map((load, index) => ({ load, index }))
+      .filter(({ load, index }) => index < homeIndex && isWritableLoad(load))
+      .map(({ load, index }) => ({ index, vaddr: load.vaddr, offset: load.offset, flags: load.flags }));
 
     const needle = Buffer.alloc(8);
     needle.writeBigUInt64LE(bun.addr);
@@ -303,20 +349,32 @@ export function shimBunCompiledPointer(path: string): BunCompiledPointerShim | n
     // would report success. No shipped build reaches it (every occurrence on the four 2.1.257 ELF
     // builds is unaligned; on 2.1.252 the one aligned hit IS the global, which is why standing
     // aside was right there), and this is what keeps that a measured fact rather than an
-    // assumption.
-    const candidates = scanForNeedle(
-      fd, segmentStart, segmentEnd, needle, bunStart, bunEnd, segment.vaddr - segment.offset,
-    );
+    // assumption. It sweeps EVERY writable segment, not only `.bun`'s: the global has to be the one
+    // copy in writable memory, and on 2.1.314 glibc the RELRO segment ahead of it holds none.
+    const candidates: number[] = [];
+    for (const load of layout.segments.filter(isWritableLoad)) {
+      const loadStart = Number(load.offset);
+      candidates.push(...scanForNeedle(
+        fd, loadStart, Number(load.offset + load.filesz), needle, bunStart, bunEnd, load.vaddr - load.offset,
+      ));
+    }
     if (candidates.length !== 1) {
       throw new Error(
         `cannot locate Bun's blob pointer: ${candidates.length} aligned candidates in the writable `
-        + `segment (expected 1). Refusing to repack a binary whose Bun global would be left stale.`,
+        + `segments (expected 1). Refusing to repack a binary whose Bun global would be left stale.`,
       );
     }
     const pointerOffset = candidates[0]!;
+    if (pointerOffset < segmentStart || pointerOffset + 8 > segmentEnd) {
+      throw new Error(
+        "Bun's blob pointer is not in the writable segment that holds .bun, which is the only one "
+        + "tweakcc's ELF repack rewrites. Refusing to repack a binary whose Bun global would be left stale.",
+      );
+    }
     const pointerVaddr = segment.vaddr + BigInt(pointerOffset) - segment.offset;
 
     const wouldFind = tweakccWouldFind(fd, segment, needle);
+    let standIn: BunCompiledPointerShim['standIn'] = null;
     if (wouldFind !== null) {
       if (wouldFind !== pointerVaddr) {
         throw new Error(
@@ -325,47 +383,58 @@ export function shimBunCompiledPointer(path: string): BunCompiledPointerShim | n
           + 'would be left stale.',
         );
       }
-      return null;
+      if (hiddenLoads.length === 0) return null;
+    } else {
+      // The slot tweakcc will land on: the lowest address its scan visits that overlaps neither the
+      // blob it is about to move nor the global we are about to correct. Its previous contents are
+      // restored below, so "free" is not required of it — only "not something the repack rereads".
+      const first = alignUp(segment.vaddr, TWEAKCC_SCAN_STRIDE);
+      const last = segment.vaddr + segment.filesz - 8n;
+      let standInVaddr: bigint | null = null;
+      for (let vaddr = first; vaddr <= last; vaddr += TWEAKCC_SCAN_STRIDE) {
+        const at = Number(segment.offset + (vaddr - segment.vaddr));
+        if (at + 8 > bunStart && at < bunEnd) continue;
+        // Unreachable while the census admits only aligned candidates: an aligned pointer overlaps
+        // an aligned slot only by BEING it, and then tweakcc finds it and this never runs. Kept so
+        // that relaxing the census cannot quietly plant the stand-in over the global it corrects.
+        if (at + 8 > pointerOffset && at < pointerOffset + 8) continue;
+        standInVaddr = vaddr;
+        break;
+      }
+      if (standInVaddr === null) {
+        throw new Error("no address tweakcc's ELF repack scans is usable for Bun's blob pointer");
+      }
+      const standInOffset = Number(segment.offset + (standInVaddr - segment.vaddr));
+      const displaced = readAt(fd, 8, standInOffset);
+      if (displaced.length !== 8) throw new Error("could not read the bytes Bun's blob pointer displaces");
+      standIn = { vaddr: standInVaddr, displaced };
     }
 
-    // The slot tweakcc will land on: the lowest address its scan visits that overlaps neither the
-    // blob it is about to move nor the global we are about to correct. Its previous contents are
-    // restored below, so "free" is not required of it — only "not something the repack rereads".
-    const first = alignUp(segment.vaddr, TWEAKCC_SCAN_STRIDE);
-    const last = segment.vaddr + segment.filesz - 8n;
-    let standInVaddr: bigint | null = null;
-    for (let vaddr = first; vaddr <= last; vaddr += TWEAKCC_SCAN_STRIDE) {
-      const at = Number(segment.offset + (vaddr - segment.vaddr));
-      if (at + 8 > bunStart && at < bunEnd) continue;
-      // Unreachable while the census admits only aligned candidates: an aligned pointer overlaps
-      // an aligned slot only by BEING it, and then tweakcc finds it and this never runs. Kept so
-      // that relaxing the census cannot quietly plant the stand-in over the global it corrects.
-      if (at + 8 > pointerOffset && at < pointerOffset + 8) continue;
-      standInVaddr = vaddr;
-      break;
+    // Every check is behind us, so nothing below is left half-done by a refusal.
+    if (standIn) {
+      writeSync(fd, needle, 0, 8, Number(segment.offset + (standIn.vaddr - segment.vaddr)));
     }
-    if (standInVaddr === null) {
-      throw new Error("no address tweakcc's ELF repack scans is usable for Bun's blob pointer");
+    for (const hidden of hiddenLoads) {
+      const flags = Buffer.alloc(4);
+      flags.writeUInt32LE(hidden.flags & ~PF_W);
+      writeSync(fd, flags, 0, 4, layout.segments[hidden.index]!.headerOffset + 4);
     }
-
-    const standInOffset = Number(segment.offset + (standInVaddr - segment.vaddr));
-    const displaced = readAt(fd, 8, standInOffset);
-    if (displaced.length !== 8) throw new Error("could not read the bytes Bun's blob pointer displaces");
-    writeSync(fd, needle, 0, 8, standInOffset);
-    return { pointerVaddr, standInVaddr, displaced, bunVaddr: bun.addr };
+    return { pointerVaddr, bunVaddr: bun.addr, standIn, hiddenLoads };
   } finally {
     closeSync(fd);
   }
 }
 
 /**
- * Move the address tweakcc wrote into the stand-in over to the real Bun global, and put the
- * displaced bytes back. Throws if either address no longer resolves to exactly one place in the
- * repacked image, if the repack did not rewrite the stand-in, or if it disagrees with where `.bun`
- * actually ended up — each of which means the eight bytes about to be written are not the eight
- * this run identified, and the displaced live data would not go back where it came from. (The
- * readbacks below confirm the writes landed. They read the offsets they just wrote, so they cannot
- * vouch for the offsets themselves; `fileOffsetOf` is what does that.)
+ * Move the address tweakcc wrote into the stand-in over to the real Bun global, put the displaced
+ * bytes back, and give every write-protected segment its write bit back. Throws if either address
+ * no longer resolves to exactly one place in the repacked image, if the repack did not rewrite the
+ * stand-in, or if it disagrees with where `.bun` actually ended up — each of which means the eight
+ * bytes about to be written are not the eight this run identified, and the displaced live data
+ * would not go back where it came from. Throws too if a write-protected segment is no longer the
+ * segment it was, so its flags would land on another. (The readbacks below confirm the writes
+ * landed. They read the offsets they just wrote, so they cannot vouch for the offsets themselves;
+ * `fileOffsetOf` is what does that.)
  */
 export function restoreBunCompiledPointer(path: string, shim: BunCompiledPointerShim): void {
   const fd = openSync(path, 'r+');
@@ -375,41 +444,70 @@ export function restoreBunCompiledPointer(path: string, shim: BunCompiledPointer
     const bun = layout.sections.find(section => section.name === '.bun');
     if (!bun) throw new Error('the repacked binary has no .bun section');
 
-    const standInOffset = fileOffsetOf(layout, shim.standInVaddr, 8n);
     const pointerOffset = fileOffsetOf(layout, shim.pointerVaddr, 8n);
-    if (standInOffset === null || pointerOffset === null) {
+    const standInOffset = shim.standIn ? fileOffsetOf(layout, shim.standIn.vaddr, 8n) : null;
+    if (pointerOffset === null || (shim.standIn && standInOffset === null)) {
       throw new Error(
         "the repack left Bun's blob pointer outside the loaded image, or in more than one segment of it",
       );
     }
-    // `readAt` hands back a SHORT buffer rather than throwing, and this is the one consumer that
-    // would then index past its end — a raw `RangeError: Attempt to access memory outside buffer
-    // bounds` in place of a diagnostic naming the binary. Every other caller length-checks or
-    // compares with `.equals`, which is false on a short buffer and lands on the right message.
-    const standIn = readAt(fd, 8, standInOffset);
-    if (standIn.length !== 8) {
-      throw new Error('the repacked binary ends before the stand-in for Bun\'s blob pointer');
-    }
-    const written = standIn.readBigUInt64LE(0);
-    if (written === shim.bunVaddr) {
-      throw new Error("the repack did not rewrite Bun's blob pointer — the stand-in was not used");
-    }
-    if (written !== bun.addr) {
-      throw new Error(
-        `the repack pointed Bun at 0x${written.toString(16)} but put .bun at 0x${bun.addr.toString(16)}`,
-      );
+    for (const hidden of shim.hiddenLoads) {
+      const now = layout.segments[hidden.index];
+      if (!now || now.type !== PT_LOAD || now.vaddr !== hidden.vaddr || now.offset !== hidden.offset
+        || now.flags !== (hidden.flags & ~PF_W)) {
+        throw new Error(
+          `the repack moved or rewrote the write-protected ELF segment at 0x${hidden.vaddr.toString(16)}`,
+        );
+      }
     }
 
-    const value = Buffer.alloc(8);
-    value.writeBigUInt64LE(written);
-    writeSync(fd, value, 0, 8, pointerOffset);
-    writeSync(fd, shim.displaced, 0, 8, standInOffset);
+    if (shim.standIn && standInOffset !== null) {
+      // `readAt` hands back a SHORT buffer rather than throwing, and this is the one consumer that
+      // would then index past its end — a raw `RangeError: Attempt to access memory outside buffer
+      // bounds` in place of a diagnostic naming the binary. Every other caller length-checks or
+      // compares with `.equals`, which is false on a short buffer and lands on the right message.
+      const standIn = readAt(fd, 8, standInOffset);
+      if (standIn.length !== 8) {
+        throw new Error('the repacked binary ends before the stand-in for Bun\'s blob pointer');
+      }
+      const written = standIn.readBigUInt64LE(0);
+      if (written === shim.bunVaddr) {
+        throw new Error("the repack did not rewrite Bun's blob pointer — the stand-in was not used");
+      }
+      if (written !== bun.addr) {
+        throw new Error(
+          `the repack pointed Bun at 0x${written.toString(16)} but put .bun at 0x${bun.addr.toString(16)}`,
+        );
+      }
 
-    if (!readAt(fd, 8, pointerOffset).equals(value)) {
-      throw new Error("Bun's blob pointer did not take the repacked address");
+      const value = Buffer.alloc(8);
+      value.writeBigUInt64LE(written);
+      writeSync(fd, value, 0, 8, pointerOffset);
+      writeSync(fd, shim.standIn.displaced, 0, 8, standInOffset);
+
+      if (!readAt(fd, 8, pointerOffset).equals(value)) {
+        throw new Error("Bun's blob pointer did not take the repacked address");
+      }
+      if (!readAt(fd, 8, standInOffset).equals(shim.standIn.displaced)) {
+        throw new Error('the bytes the stand-in displaced were not restored');
+      }
+    } else {
+      // tweakcc found the global itself. With a segment hidden from it that is still worth
+      // proving, because the hiding is what pointed its scan at the right segment.
+      const pointer = readAt(fd, 8, pointerOffset);
+      if (pointer.length !== 8 || pointer.readBigUInt64LE(0) !== bun.addr) {
+        throw new Error("the repack did not point Bun's blob pointer at where it put .bun");
+      }
     }
-    if (!readAt(fd, 8, standInOffset).equals(shim.displaced)) {
-      throw new Error('the bytes the stand-in displaced were not restored');
+
+    for (const hidden of shim.hiddenLoads) {
+      const flags = Buffer.alloc(4);
+      flags.writeUInt32LE(hidden.flags);
+      const at = layout.segments[hidden.index]!.headerOffset + 4;
+      writeSync(fd, flags, 0, 4, at);
+      if (!readAt(fd, 4, at).equals(flags)) {
+        throw new Error('a write-protected ELF segment did not get its write bit back');
+      }
     }
   } finally {
     closeSync(fd);

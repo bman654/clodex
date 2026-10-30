@@ -88,7 +88,8 @@ function buildElf(
     phnum?: number;
     /**
      * Add a LATER writable PT_LOAD holding none of the pointer occurrences. tweakcc takes the
-     * FIRST writable `PT_LOAD`; a mirror that took the last would scan this one instead.
+     * FIRST writable `PT_LOAD`, which here is `.bun`'s; a mirror that took the last would plant
+     * its stand-in in this one instead.
      */
     trailingWritableSegment?: boolean;
   } = {},
@@ -253,20 +254,20 @@ describe('the Bun blob pointer stand-in', () => {
 
       expect(shim).not.toBeNull();
       expect(shim!.pointerVaddr).toBe(BigInt(POINTER));
-      expect(tweakccScan(file, BigInt(BUN_VADDR))).toBe(Number(shim!.standInVaddr));
+      expect(tweakccScan(file, BigInt(BUN_VADDR))).toBe(Number(shim!.standIn!.vaddr));
       expect(read8(file, POINTER)).toBe(BigInt(BUN_VADDR));
     });
 
     it('moves the repacked address onto the real pointer and puts the displaced bytes back', () => {
       const shim = shimBunCompiledPointer(file)!;
-      const displacedAt = Number(shim.standInVaddr);
+      const displacedAt = Number(shim.standIn!.vaddr);
       const before = read8(file, displacedAt);
 
       simulateRepack(file, displacedAt, NEW_BUN_VADDR);
       restoreBunCompiledPointer(file, shim);
 
       expect(read8(file, POINTER)).toBe(BigInt(NEW_BUN_VADDR));
-      expect(read8(file, displacedAt)).toBe(shim.displaced.readBigUInt64LE(0));
+      expect(read8(file, displacedAt)).toBe(shim.standIn!.displaced.readBigUInt64LE(0));
       expect(before, 'the stand-in really did displace something').toBe(BigInt(BUN_VADDR));
     });
 
@@ -284,7 +285,7 @@ describe('the Bun blob pointer stand-in', () => {
       const shim = shimBunCompiledPointer(file)!;
       const buf = readFileSync(file);
       // The stand-in says one address, the section header says another.
-      buf.writeBigUInt64LE(BigInt(NEW_BUN_VADDR), SEG_OFFSET + (Number(shim.standInVaddr) - SEG_VADDR));
+      buf.writeBigUInt64LE(BigInt(NEW_BUN_VADDR), SEG_OFFSET + (Number(shim.standIn!.vaddr) - SEG_VADDR));
       buf.writeBigUInt64LE(BigInt(NEW_BUN_VADDR + 0x1000), SHOFF + 3 * 64 + 16);
       writeFileSync(file, buf);
 
@@ -451,7 +452,7 @@ describe('the Bun blob pointer stand-in', () => {
     const shim = shimBunCompiledPointer(file)!;
     // Re-lay the same bytes with the overlapping decoy segment, keeping the stand-in tweakcc wrote.
     const withDecoy = buildElf(pointer, [], { offset: BUN_OFFSET, size: BUN_SIZE }, { decoySegment: true });
-    withDecoy.writeBigUInt64LE(BigInt(0x90000), SEG_OFFSET + (Number(shim.standInVaddr) - SEG_VADDR));
+    withDecoy.writeBigUInt64LE(BigInt(0x90000), SEG_OFFSET + (Number(shim.standIn!.vaddr) - SEG_VADDR));
     withDecoy.writeBigUInt64LE(BigInt(0x90000), SHOFF + 3 * 64 + 16);
     writeFileSync(file, withDecoy);
 
@@ -536,7 +537,7 @@ describe('the Bun blob pointer stand-in', () => {
     it('refuses when the blob pointer does not read back', () => {
       writeFileSync(file, buildElf(POINTER));
       const shim = shimBunCompiledPointer(file)!;
-      simulateRepack(file, Number(shim.standInVaddr), NEW_BUN_VADDR);
+      simulateRepack(file, Number(shim.standIn!.vaddr), NEW_BUN_VADDR);
 
       // Drop only the write to the real global. Everything else — the shim, the repack, the
       // displaced-bytes write — is exactly what production does.
@@ -552,7 +553,7 @@ describe('the Bun blob pointer stand-in', () => {
     it('names the binary when the repacked file ends before the stand-in', () => {
       writeFileSync(file, buildElf(POINTER));
       const shim = shimBunCompiledPointer(file)!;
-      simulateRepack(file, Number(shim.standInVaddr), NEW_BUN_VADDR);
+      simulateRepack(file, Number(shim.standIn!.vaddr), NEW_BUN_VADDR);
 
       // Only NOW inflate `p_filesz`, so the census above ran against a sane file: the segment
       // claims bytes the file does not have, which is what a truncated binary looks like.
@@ -561,18 +562,18 @@ describe('the Bun blob pointer stand-in', () => {
       writeFileSync(file, poked);
 
       const beyond = BigInt(SEG_VADDR + SEG_SIZE + 0x8000);
-      expect(() => restoreBunCompiledPointer(file, { ...shim, standInVaddr: beyond }))
+      expect(() => restoreBunCompiledPointer(file, { ...shim, standIn: { ...shim.standIn!, vaddr: beyond } }))
         .toThrow("the repacked binary ends before the stand-in for Bun's blob pointer");
     });
 
     it('refuses when the displaced bytes do not read back', () => {
       writeFileSync(file, buildElf(POINTER));
       const shim = shimBunCompiledPointer(file)!;
-      simulateRepack(file, Number(shim.standInVaddr), NEW_BUN_VADDR);
+      simulateRepack(file, Number(shim.standIn!.vaddr), NEW_BUN_VADDR);
 
       // Drop only the write that puts the borrowed bytes back. The pointer write lands, so this
       // cannot pass by tripping the first guard instead.
-      droppedWrite.atPosition = SEG_OFFSET + (Number(shim.standInVaddr) - SEG_VADDR);
+      droppedWrite.atPosition = SEG_OFFSET + (Number(shim.standIn!.vaddr) - SEG_VADDR);
 
       expect(() => restoreBunCompiledPointer(file, shim))
         .toThrow('the bytes the stand-in displaced were not restored');
@@ -584,9 +585,11 @@ describe('the Bun blob pointer stand-in', () => {
   // away from what tweakcc actually does is the whole reason `clodex patch` broke on 2.1.257, which
   // is why they are pinned here rather than left to a comment.
   describe('mirrors tweakcc exactly, in ways no shipped build exercises', () => {
-    it('scans the FIRST writable PT_LOAD, as tweakcc does', () => {
+    it('works in .bun\'s writable PT_LOAD, not a later one', () => {
       // A later writable segment carrying no occurrence of the address. tweakcc takes the first
-      // one; taking the last would sweep an empty range and refuse with "0 candidates".
+      // writable one, which here is `.bun`'s; working in the last would plant the stand-in where
+      // tweakcc never looks. (A writable segment AHEAD of `.bun`'s is
+      // tests/bun-compiled-pointer-relro.test.ts.)
       const pointer = FIRST_SCANNED + 0x758;
       writeFileSync(file, buildElf(pointer, [], undefined, { trailingWritableSegment: true }));
 
@@ -594,6 +597,8 @@ describe('the Bun blob pointer stand-in', () => {
 
       expect(shim).not.toBeNull();
       expect(shim!.pointerVaddr).toBe(BigInt(pointer));
+      expect(shim!.hiddenLoads).toEqual([]);
+      expect(tweakccScan(file, BigInt(BUN_VADDR))).toBe(Number(shim!.standIn!.vaddr));
     });
 
     it('visits the last address tweakcc visits, not one short of it', () => {

@@ -151,6 +151,29 @@ changes what `--version` prints. A real `clodex patch` of the same build, run ag
 stand-in endpoint, sends every clodex alias in the `Agent` tool's `model` enum where a pristine
 copy sends four.
 
+## The Agent tool's model enum is a shared constant (verified 2.1.314, all eight builds)
+
+Through 2.1.312 the Agent tool's schema carried its model list inline:
+`model:N(["sonnet","opus","haiku","fable"]).optional().describe(…)`. 2.1.314 moved the strings
+into a module of their own, `export`ed beside the tool's other description strings:
+`…,lmi="A short (3-5 word) description of the task",dmi=["sonnet","opus","haiku","fable"],nQo="Name
+for the spawned agent.",…` on darwin-arm64. The schema module imports it and passes it by name,
+`model:F(dmi).optional().describe(\`Optional model override for this agent…` on darwin-arm64. Both
+names are minified per build — `F(dmi)` on both darwin builds, `F(Tpi)` on linux-x64 and
+linux-x64-musl, `U(Tpi)` on linux-arm64, `U(Tfi)` on linux-arm64-musl, `U(Ppi)` on win32-arm64 and
+`H(Ppi)` on win32-x64. On every build the constant holds the same four names. On darwin-arm64 the
+constant has exactly one importer, the schema.
+
+Agent and skill frontmatter `model:` is not validated against this enum in 2.1.314: the agent
+markdown parser and the skill parser accept any non-empty string (normalizing `inherit`) on all
+eight builds, so clodex identities in frontmatter do not depend on PATCH 1.
+
+The other model-name lists PATCH 3 and friends key on are still inline literals in 2.1.314.
+PATCH 1 now rewrites the call to spread the constant, `F([...dmi,"sol",…])`. Measured on a
+patched darwin-arm64 run against a stand-in endpoint: the request's `Agent` tool carries
+every clodex identity in `input_schema.properties.model.enum`, and a pristine copy carries
+the four built-ins.
+
 ## The entry module's name is not stable (renamed in 2.1.229)
 
 The bundle lived in a Bun data blob as one module among ~15 (see the code-split section above for
