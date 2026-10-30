@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.21.5](https://github.com/bman654/clodex/compare/v2.21.4...v2.21.5) (2026-10-30)
+
+
+### Bug Fixes
+
+* **patch:** make clodex patch work on Claude Code 2.1.314 instead of failing on every platform ([#339](https://github.com/bman654/clodex/issues/339)) ([803b26e](https://github.com/bman654/clodex/commit/803b26e62b90146176c8825fee5db3bd2fa40d27))
+
 ## [2.21.4](https://github.com/bman654/clodex/compare/v2.21.3...v2.21.4) (2026-10-24)
 
 
