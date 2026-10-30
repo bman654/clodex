@@ -29,7 +29,11 @@ function hoisted(ref = 'dmi'): string {
 function enumValues(source: string, ref = 'dmi'): string[] {
   const call = source.match(/model:F\((\[[^\]]*\]|[\w$]+)\)\.optional\(\)\.describe\(`Optional model override/);
   expect(call, 'the Agent tool enum call must still be there').not.toBeNull();
-  const definition = source.match(new RegExp(`var ${ref.replace(/\$/g, '\\$')}=(\\[[^\\]]*\\]);`))![1];
+  // A plain string search: the constant's name may hold `$`, and nothing here needs a pattern.
+  const head = `var ${ref}=`;
+  const start = source.indexOf(head);
+  expect(start, `the ${ref} definition must still be there`).toBeGreaterThanOrEqual(0);
+  const definition = source.slice(start + head.length, source.indexOf('];', start) + 1);
   return new Function(`const ${ref}=${definition};const F=v=>v;return F(${call![1]});`)() as string[];
 }
 
