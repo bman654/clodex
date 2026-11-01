@@ -5,7 +5,10 @@
 #
 set -Eeuo pipefail
 
-CANARY="${1:-$HOME/.local/bin/clodex-patch-canary.sh}"
+# The canary next to this file, so a checkout tests its own copy rather than the installed one.
+# BASH_SOURCE does not follow the ~/.local/bin symlink, so the installed self-test still tests the
+# installed canary.
+CANARY="${1:-$(dirname "${BASH_SOURCE[0]}")/clodex-patch-canary.sh}"
 CANARY_SOURCE_ONLY=1 . "$CANARY"
 
 TMP="$(mktemp -d)"
@@ -157,43 +160,145 @@ else
   fail=$((fail + 1)); printf 'FAIL %s — got: %s\n' "baseline regression is detected" "$REG"
 fi
 
-# 8. The session-liveness rule the whole deferral depends on, driven through the real
-#    inflight_status() against a stand-in `claude agents --json`.
-FAKE="$TMP/fake-claude"
+# 8. The thread-liveness rule the whole deferral depends on, driven through the real
+#    inflight_status() against a stand-in `t3cli list --format json`.
+FAKE="$TMP/fake-t3cli"
 cat > "$FAKE" <<'FAKEEOF'
 #!/usr/bin/env bash
-printf '%s\n' "$FAKE_AGENTS_JSON"
+printf '%s\n' "$FAKE_THREADS_JSON"
 FAKEEOF
 chmod +x "$FAKE"
-CLAUDE_BIN="$FAKE"
+T3CLI_BIN="$FAKE"
 
-liveness() { # liveness <label> <expected> <agents-json>
+liveness() { # liveness <label> <expected> <threads-json>
   local label="$1" want="$2" got
-  export FAKE_AGENTS_JSON="$3"   # must be exported: the stand-in reads it from its environment
-  got="$(inflight_status "inv-session" "abc123")"
-  if [ "$got" = "$want" ]; then pass=$((pass + 1)); printf 'ok   liveness %-28s -> %s\n' "$label" "$got"
+  export FAKE_THREADS_JSON="$3"   # must be exported: the stand-in reads it from its environment
+  got="$(inflight_status "abc123")"
+  if [ "$got" = "$want" ]; then pass=$((pass + 1)); printf 'ok   liveness %-32s -> %s\n' "$label" "$got"
   else fail=$((fail + 1)); printf 'FAIL liveness %s -> %s (want %s)\n' "$label" "$got" "$want"; fi
 }
 
-liveness "running session"        working  '[{"id":"abc123","name":"inv-session","state":"working","status":"busy"}]'
-liveness "finished session"       finished '[{"id":"abc123","name":"inv-session","state":"done","status":"idle"}]'
-liveness "killed session"         stopped  '[{"id":"abc123","name":"inv-session","state":"stopped"}]'
-liveness "unrecognised state"     working  '[{"id":"abc123","name":"inv-session","state":"compacting"}]'
-liveness "no state field"         working  '[{"id":"abc123","name":"inv-session"}]'
-liveness "matched by name only"   working  '[{"id":"zzz","name":"inv-session","state":"working"}]'
-liveness "session really gone"    missing  '[{"id":"other","name":"something-else","state":"working"}]'
-liveness "empty session list"     missing  '[]'
+liveness "running thread"           working  '[{"id":"abc123","status":"running"}]'
+liveness "queued thread"            working  '[{"id":"abc123","status":"queued"}]'
+liveness "thread waiting on answer" working  '[{"id":"abc123","status":"waiting"}]'
+liveness "idle thread"              finished '[{"id":"abc123","status":"idle"}]'
+liveness "completed run"            finished '[{"id":"abc123","status":"completed"}]'
+liveness "interrupted run"          stopped  '[{"id":"abc123","status":"interrupted"}]'
+liveness "cancelled run"            stopped  '[{"id":"abc123","status":"cancelled"}]'
+liveness "failed run"               failed   '[{"id":"abc123","status":"failed","lastError":"boom"}]'
+liveness "usage-limited run"        working  '[{"id":"abc123","status":"failed","usageLimitResetAt":"2026-10-31T00:00:00Z"}]'
+liveness "unrecognised status"      working  '[{"id":"abc123","status":"compacting"}]'
+liveness "no status field"          working  '[{"id":"abc123"}]'
+liveness "deleted thread"           missing  '[{"id":"abc123","status":"idle","deletedAt":"2026-10-30T00:00:00Z"}]'
+liveness "thread really gone"       missing  '[{"id":"other","status":"running"}]'
+liveness "empty thread list"        missing  '[]'
 # The important one: a failed/garbled query must NOT read as "the investigation ended".
-liveness "query returned garbage" unknown  'not json at all'
-liveness "query returned nothing" unknown  ''
-liveness "query returned an error object" unknown '{"error":"daemon unavailable"}'
+liveness "query returned garbage"   unknown  'not json at all'
+liveness "query returned nothing"   unknown  ''
+liveness "query returned an error object" unknown '{"error":"T3 Code is not running"}'
 
-CLAUDE_BIN="$TMP/definitely-not-here"
-if [ "$(inflight_status "inv-session" "abc123")" = "unknown" ]; then
-  pass=$((pass + 1)); printf 'ok   liveness %-28s -> unknown\n' "no claude binary"
+if [ "$(inflight_status "")" = "unknown" ]; then
+  pass=$((pass + 1)); printf 'ok   liveness %-32s -> unknown\n' "no thread id recorded"
 else
-  fail=$((fail + 1)); printf 'FAIL liveness no claude binary did not report unknown\n'
+  fail=$((fail + 1)); printf 'FAIL liveness no thread id recorded did not report unknown\n'
 fi
+T3CLI_BIN="$TMP/definitely-not-here"
+if [ "$(inflight_status "abc123")" = "unknown" ]; then
+  pass=$((pass + 1)); printf 'ok   liveness %-32s -> unknown\n' "no t3cli binary"
+else
+  fail=$((fail + 1)); printf 'FAIL liveness no t3cli binary did not report unknown\n'
+fi
+
+# 8b. A failed release is re-tested once a canary fix PR merges that its failing test did not
+#     include. The merge does not wake the investigation thread, so this lookup is the only thing
+#     that notices. Driven through the real merged_canary_fix_pr() with curl stood in for GitHub
+#     and a real clone deciding ancestry: an old fix the tested commit contains, the tested commit,
+#     and a fix that merged after it (as if while the matrix was still running).
+FIX_REPO="$TMP/fix-repo"
+git -C "$TMP" init -q fix-repo
+git -C "$FIX_REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m old-fix
+OLD_FIX_SHA="$(git -C "$FIX_REPO" rev-parse HEAD)"
+git -C "$FIX_REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m tested
+TESTED_SHA="$(git -C "$FIX_REPO" rev-parse HEAD)"
+git -C "$FIX_REPO" -c user.name=t -c user.email=t@t commit -q --allow-empty -m new-fix
+NEW_FIX_SHA="$(git -C "$FIX_REPO" rev-parse HEAD)"
+UNFETCHED_SHA=0123456789abcdef0123456789abcdef01234567
+CURL_LOG="$TMP/curl.log"
+fix_case() { # fix_case <label> <expected-url-or-EMPTY> <state-json> <api-response|FAIL> [repo-url]
+  local got want="$2" state_fixture="$3" api="$4"
+  rm -f "$CURL_LOG"
+  got="$( state_read() { printf '%s\n' "$state_fixture"; }
+          curl() { printf '%s\n' "$@" > "$CURL_LOG"; [ "$api" != FAIL ] || return 22; printf '%s\n' "$api"; }
+          REPO_DIR="$FIX_REPO" CANARY_REPO_URL="${5:-https://github.com/bman654/clodex.git}" \
+            CANARY_BRANCH=main merged_canary_fix_pr 9.9.9 )"
+  [ "$want" != EMPTY ] || want=""
+  if [ "$got" = "$want" ]; then pass=$((pass + 1)); printf 'ok   %s\n' "$1"
+  else fail=$((fail + 1)); printf 'FAIL %s -> "%s" (want "%s")\n' "$1" "$got" "$want"; fi
+}
+FAILED_ON="$(jq -n -c --arg sha "$TESTED_SHA" '{versions: {"9.9.9": {status: "fail", clodexSha: $sha}}}')"
+pr() { # pr <number> <head-ref> <merged_at|null> <merge-sha>
+  jq -n -c --arg n "$1" --arg ref "$2" --arg m "$3" --arg sha "$4" \
+    '{html_url: "https://github.com/bman654/clodex/pull/\($n)", head: {ref: $ref}, merge_commit_sha: $sha,
+      merged_at: (if $m == "null" then null else $m end)}'
+}
+URL() { printf 'https://github.com/bman654/clodex/pull/%s' "$1"; }
+fix_case "a fix merged after the tested commit is found" "$(URL 3)" "$FAILED_ON" \
+  "[$(pr 2 fix/patch-cc-9.9.8 2026-10-29T09:00:00Z "$OLD_FIX_SHA"),$(pr 3 fix/patch-cc-9.9.9 2026-10-30T11:00:00Z "$NEW_FIX_SHA")]"
+if grep -qx 'state=closed' "$CURL_LOG" && grep -qx 'base=main' "$CURL_LOG" &&
+   grep -qx 'https://api.github.com/repos/bman654/clodex/pulls' "$CURL_LOG"; then
+  pass=$((pass + 1)); printf 'ok   %s\n' "the lookup asks for closed PRs into main"
+else
+  fail=$((fail + 1)); printf 'FAIL %s — curl got:\n%s\n' "the lookup asks for closed PRs into main" "$(cat "$CURL_LOG" 2>/dev/null)"
+fi
+fix_case "an ssh remote resolves to the same repository" "$(URL 3)" "$FAILED_ON" \
+  "[$(pr 3 fix/patch-cc-9.9.9 2026-10-30T11:00:00Z "$NEW_FIX_SHA")]" "git@github.com:bman654/clodex.git"
+fix_case "a fix the clone has never fetched is new" "$(URL 4)" "$FAILED_ON" \
+  "[$(pr 4 fix/patch-cc-9.9.8 2026-10-30T12:00:00Z "$UNFETCHED_SHA")]"
+fix_case "a fix the tested commit already contains is not new" EMPTY "$FAILED_ON" \
+  "[$(pr 2 fix/patch-cc-9.9.9 2026-10-31T09:00:00Z "$OLD_FIX_SHA")]"
+fix_case "the tested commit itself is not a new fix" EMPTY "$FAILED_ON" \
+  "[$(pr 5 fix/patch-cc-9.9.9 2026-10-31T09:00:00Z "$TESTED_SHA")]"
+fix_case "a merged PR from a non-canary branch is not a fix" EMPTY "$FAILED_ON" \
+  "[$(pr 6 feature/other 2026-10-30T13:00:00Z "$NEW_FIX_SHA")]"
+fix_case "a canary PR closed without merging is not a fix" EMPTY "$FAILED_ON" \
+  "[$(pr 1 fix/patch-cc-9.9.9 null "$NEW_FIX_SHA")]"
+fix_case "no closed PRs is not a fix"         EMPTY "$FAILED_ON" '[]'
+fix_case "an unreachable GitHub is not a fix" EMPTY "$FAILED_ON" FAIL
+fix_case "a GitHub error object is not a fix" EMPTY "$FAILED_ON" '{"message":"API rate limit exceeded"}'
+fix_case "a passed release is not looked up"  EMPTY \
+  "$(jq -n -c --arg sha "$TESTED_SHA" '{versions: {"9.9.9": {status: "pass", clodexSha: $sha}}}')" \
+  "[$(pr 3 fix/patch-cc-9.9.9 2026-10-30T11:00:00Z "$NEW_FIX_SHA")]"
+[ ! -e "$CURL_LOG" ] && r=0 || r=1
+if [ "$r" -eq 0 ]; then pass=$((pass + 1)); printf 'ok   %s\n' "a passed release costs no GitHub request"
+else fail=$((fail + 1)); printf 'FAIL %s\n' "a passed release costs no GitHub request"; fi
+fix_case "a failure with no tested commit is not looked up" EMPTY '{"versions":{"9.9.9":{"status":"fail"}}}' \
+  "[$(pr 3 fix/patch-cc-9.9.9 2026-10-30T11:00:00Z "$NEW_FIX_SHA")]"
+
+# ... and re-opening goes through the real state file, exactly as --retriage would.
+reopen_case() { # reopen_case <label> <prev> <merged-pr-or-empty> <version-record-json> <inflight-json> <want-prev> <want-status>
+  local got_prev got_status
+  read -r got_prev got_status < <(
+    STATE_DIR="$TMP/reopen"; STATE_FILE="$STATE_DIR/state.json"; mkdir -p "$STATE_DIR"
+    jq -n -c --argjson rec "$4" --argjson inf "$5" '{versions: {"9.9.9": $rec}, inflight: $inf}' > "$STATE_FILE"
+    merged_canary_fix_pr() { printf '%s' "$FIX_STUB"; }
+    log() { :; }
+    PREV="$2" FIX_STUB="$3"
+    reopen_failed_release 9.9.9
+    printf '%s %s\n' "$PREV" "$(jq -r '.versions["9.9.9"].status' "$STATE_FILE")")
+  if [ "$got_prev" = "$6" ] && [ "$got_status" = "$7" ]; then pass=$((pass + 1)); printf 'ok   %s\n' "$1"
+  else fail=$((fail + 1)); printf 'FAIL %s -> PREV=%s status=%s (want %s %s)\n' "$1" "$got_prev" "$got_status" "$6" "$7"; fi
+}
+FAILREC='{"status":"fail"}'
+HELDREC='{"status":"fail","investigation":"suppressed","investigationHeldBy":"9.9.8"}'
+reopen_case "a merged fix re-opens the failed release for testing" fail https://x/pull/2 "$FAILREC" null retriage retriage
+reopen_case "an unmerged fix leaves the failed release closed"      fail ""               "$FAILREC" null fail     fail
+reopen_case "only a failed release is re-opened"                    pass https://x/pull/2 "$FAILREC" null pass     fail
+reopen_case "a release held back by another investigation re-opens once it is over" \
+  fail "" "$HELDREC" null retriage retriage
+reopen_case "a release held back by another investigation waits while it still runs" \
+  fail "" "$HELDREC" '{"version":"9.9.8","threadId":"t-1"}' fail fail
+reopen_case "a release held back by its own investigation does not get a second one" \
+  fail "" '{"status":"fail","investigation":"suppressed","investigationHeldBy":"9.9.9"}' null fail fail
 
 # ---------------------------------------------------------- the platform matrix
 #
@@ -674,7 +779,28 @@ MAIN_SUBJECT="test canary"
 BASE_VERSION=2.1.998
 WORK="$TMP/triage-work"
 REPO_DIR="$TMP/triage-repo"
-TRIAGE_PROMPT="$(investigation_prompt "$VERSION" "- $MARKER_REASON" "$TMP/run.log" </dev/null 2>/dev/null)"
+TRIAGE_PROMPT="$(investigation_prompt "$VERSION" "- $MARKER_REASON" "$TMP/run.log" \
+                   "$TMP/clodex-canary-$VERSION" "fix/patch-cc-$VERSION" </dev/null 2>/dev/null)"
+prompt_has() { # prompt_has <label> <substring>
+  case "$TRIAGE_PROMPT" in
+    *"$2"*) pass=$((pass + 1)); printf 'ok   %s\n' "$1" ;;
+    *) fail=$((fail + 1)); printf 'FAIL %s — prompt lacks: %s\n' "$1" "$2" ;;
+  esac
+}
+prompt_has "the prompt names the worktree the thread was started in" \
+  "already runs in a git worktree made for it: $TMP/clodex-canary-$VERSION, on branch
+  fix/patch-cc-$VERSION, at the exact origin/main commit the canary tested ($MAIN_SHA)"
+prompt_has "the verification loop runs against that worktree" \
+  "do $WORK/repro.sh \$p $TMP/clodex-canary-$VERSION; done"
+prompt_has "the prompt keeps the branch prefix the merge is looked up by" \
+  "the fix/patch-cc- prefix, and once one merges it re-tests the newest Claude Code"
+prompt_has "the PR's Slack message comes before the turn-ending watch" \
+  "open a PR against main with \`gh pr create\`, and send the Slack message with its"
+prompt_has "watching the PR is the last action of the turn" \
+  "Then, as your last action, \`watch_pull_request\` and end"
+prompt_has "the prompt leaves the re-test to the canary" "Do not
+   run the canary yourself;"
+prompt_has "the prompt forbids archiving the thread" "Never archive or settle this thread"
 case "$TRIAGE_PROMPT" in
   *"for p in darwin-arm64 win32-x64;"*)
     pass=$((pass + 1)); printf 'ok   %s\n' "the generated verification loop includes every downloaded matrix row" ;;
@@ -859,86 +985,173 @@ hang_case() { # hang_case <name> <started-marker-exists> <expect>
 hang_case "a patch that started and hung is a failure" yes fail
 hang_case "a container that never started is an error" no  error
 
-# 23. The investigation prompt must actually REACH Claude Code.
-#     `--add-dir <directories...>` is VARIADIC. A prompt passed after it is silently swallowed as
-#     one more directory: the session starts idle, does nothing, and — because it still counts as
-#     in-flight — blocks every later investigation until the 24h escape hatch fires. That happened
-#     for real on Claude Code 2.1.238. Every other test here mocks `claude` with a script that
-#     accepts any argv, which is exactly why none of them could see it. This fake emulates
-#     commander's variadic rule instead, so it can.
-ARGV_LOG="$TMP/argv.log"; export ARGV_LOG
-FAKECC="$TMP/fake-claude-argv"
-cat > "$FAKECC" <<'FAKEEOF'
+# 23. The investigation must actually START, with its prompt, in the worktree made for it. Under
+#     `claude --bg` the variadic --add-dir once swallowed the prompt: the session sat idle and blocked
+#     every later investigation for 24h. A T3 thread with no prompt would instead read as finished,
+#     leaving the release failing with nobody on it. The prompt now goes in on stdin, and this
+#     stand-in records exactly what reached it.
+ARGV_LOG="$TMP/argv.log"; STDIN_LOG="$TMP/stdin.log"; export ARGV_LOG STDIN_LOG
+FAKET3="$TMP/fake-t3cli-start"
+LOST_THREADS="$TMP/lost-threads.json"; export LOST_THREADS
+cat > "$FAKET3" <<'FAKEEOF'
 #!/usr/bin/env bash
+if [ "$1" = list ]; then
+  if [ "${FAKE_T3_MODE:-ok}" = fail ]; then exit 1; fi
+  cat "$LOST_THREADS" 2>/dev/null || printf '[]\n'; exit 0
+fi
 : > "$ARGV_LOG"
-prompt=""; endopts=0
-while [ $# -gt 0 ]; do
-  if [ "$endopts" -eq 1 ]; then printf 'POSITIONAL %s\n' "$1" >> "$ARGV_LOG"; prompt="$1"; shift; continue; fi
-  case "$1" in
-    --) endopts=1; shift ;;
-    --add-dir) shift
-      # variadic: swallow every following non-flag argument
-      while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do printf 'ADDDIR %s\n' "$1" >> "$ARGV_LOG"; shift; done ;;
-    --name|--model|--effort) shift 2 ;;
-    -*) shift ;;
-    *) printf 'POSITIONAL %s\n' "$1" >> "$ARGV_LOG"; prompt="$1"; shift ;;
-  esac
-done
-if [ -z "$prompt" ]; then printf 'backgrounded · deadbeef · sess (idle — send a prompt to start)\n'
-else printf 'backgrounded · deadbeef · sess\n'; fi
+for a in "$@"; do printf '%s\n' "$a" >> "$ARGV_LOG"; done
+cat > "$STDIN_LOG"
+title=""; while [ $# -gt 0 ]; do [ "$1" = --title ] && title="$2"; shift; done
+case "${FAKE_T3_MODE:-ok}" in
+  ok)   printf '{"messageId":"m-1","project":{"id":"p-1"},"threadId":"t-123"}\n' ;;
+  noid) printf '{}\n' ;;
+  fail) printf 'cannot reach T3 Code\n' >&2; exit 1 ;;
+  refused) printf 'start refused\n' >&2; exit 1 ;;
+  # T3 Code created the thread, then the reply was lost.
+  lost) jq -n -c --arg t "$title" '[{id: "t-lost", title: $t, status: "running"}]' > "$LOST_THREADS"
+        printf 'connection lost\n' >&2; exit 1 ;;
+esac
 FAKEEOF
-chmod +x "$FAKECC"
+chmod +x "$FAKET3"
 
-MARKER="PROMPT-MUST-SURVIVE-ARGV"
-CLAUDE_BIN="$FAKECC"
-CLODEX_WORKING_COPY="$TMP"
+# A working copy, and a canary clone one commit ahead of it: the commit under test is not in the
+# working copy until the launch fetches it, as on a real run.
+LAUNCH_ROOT="$TMP/launch"; mkdir -p "$LAUNCH_ROOT"
+git -C "$LAUNCH_ROOT" init -q clodex
+git -C "$LAUNCH_ROOT/clodex" -c user.name=t -c user.email=t@t commit -q --allow-empty -m base
+git clone -q "$LAUNCH_ROOT/clodex" "$LAUNCH_ROOT/canary-clone"
+git -C "$LAUNCH_ROOT/canary-clone" -c user.name=t -c user.email=t@t commit -q --allow-empty -m tested
+
+MARKER="PROMPT-MUST-SURVIVE"
+T3CLI_BIN="$FAKET3"
+CLODEX_WORKING_COPY="$LAUNCH_ROOT/clodex"
+REPO_DIR="$LAUNCH_ROOT/canary-clone"
+MAIN_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"
+STATE_LOG="$TMP/state-update.log"
 opt_launch=1
 investigation_prompt() { printf '%s\n' "$MARKER"; }
 state_read()   { printf '{}\n'; }
-state_update() { :; }
+state_update() { printf '%s\n' "$*" >> "$STATE_LOG"; }
 slack()        { LAST_SLACK="$*"; return 0; }
 log()          { :; }
 
+# Each condition is folded into r with `&& r=0 || r=1`, never tested through `$?` after a bare
+# `[ ]`: under set -e a failing bare test would end the self-test instead of reporting the failure.
+launch_check() { # launch_check <label> <0-if-it-held>
+  if [ "$2" -eq 0 ]; then pass=$((pass + 1)); printf 'ok   %s\n' "$1"
+  else fail=$((fail + 1)); printf 'FAIL %s\n' "$1"; fi
+}
+argv_pair() { grep -A1 -x -- "$1" "$ARGV_LOG" 2>/dev/null | sed -n 2p; }
+
+WT="$LAUNCH_ROOT/clodex-canary-9.9.9"
+# What a human last fetched in the working copy is theirs; creating the worktree must not move it.
+git -C "$CLODEX_WORKING_COPY" fetch -q "$REPO_DIR" HEAD:refs/heads/human-topic 2>/dev/null || true
+git -C "$CLODEX_WORKING_COPY" fetch -q "$CLODEX_WORKING_COPY" HEAD
+HUMAN_FETCH_HEAD="$(git -C "$CLODEX_WORKING_COPY" rev-parse FETCH_HEAD)"
 set +e
-LAUNCH_OUT="$(launch_investigation 9.9.9 "some reason" "$TMP/x.log" 2>&1)"; LAUNCH_RC=$?
+launch_investigation 9.9.9 "some reason" "$TMP/x.log" >/dev/null 2>&1; LAUNCH_RC=$?
 set -e
+launch_check "a clean launch reports success" "$LAUNCH_RC"
+[ "$(cat "$STDIN_LOG" 2>/dev/null)" = "$MARKER" ] && r=0 || r=1; launch_check "the prompt reaches t3cli intact on stdin" "$r"
+grep -qx -- --stdin "$ARGV_LOG" && r=0 || r=1; launch_check "t3cli is told to read the prompt from stdin" "$r"
+[ "$(argv_pair --project)" = "$CLODEX_WORKING_COPY" ] && r=0 || r=1; launch_check "the thread is started in the clodex project" "$r"
+[ "$(argv_pair --worktree)" = "$WT" ] && r=0 || r=1; launch_check "the thread is bound to the investigation worktree" "$r"
+[ "$(git -C "$WT" rev-parse HEAD 2>/dev/null)" = "$MAIN_SHA" ] && r=0 || r=1
+launch_check "the worktree is at the exact commit the canary tested" "$r"
+[ "$(git -C "$WT" branch --show-current 2>/dev/null)" = "fix/patch-cc-9.9.9" ] && r=0 || r=1
+launch_check "the worktree is on its own fix branch" "$r"
+[ "$(git -C "$CLODEX_WORKING_COPY" rev-parse FETCH_HEAD)" = "$HUMAN_FETCH_HEAD" ] && r=0 || r=1
+launch_check "creating the worktree leaves the working copy's FETCH_HEAD alone" "$r"
+[ "$THREAD_ID" = "t-123" ] && grep -q -- '--arg i t-123' "$STATE_LOG" && grep -q -- "--arg w $WT" "$STATE_LOG" && r=0 || r=1
+launch_check "the thread id and worktree are recorded as in flight" "$r"
 
-if grep -q "^POSITIONAL $MARKER\$" "$ARGV_LOG" 2>/dev/null; then
-  pass=$((pass + 1)); printf 'ok   %s\n' "the prompt reaches claude as a positional, not as an --add-dir path"
-else
-  fail=$((fail + 1)); printf 'FAIL %s — argv was:\n%s\n' "the prompt reaches claude as a positional" "$(cat "$ARGV_LOG" 2>/dev/null)"
-fi
+# The same release failing again after a re-triage finds its first investigation's names taken.
+set +e
+launch_investigation 9.9.9 "again" "$TMP/x.log" >/dev/null 2>&1; LAUNCH_RC=$?
+set -e
+WT2="$(argv_pair --worktree)"
+[ "$LAUNCH_RC" -eq 0 ] && [ "${WT2#"$WT"-}" != "$WT2" ] && [ -d "$WT2" ] &&
+  [ "$(git -C "$WT2" branch --show-current)" = "fix/patch-cc-9.9.9${WT2#"$WT"}" ] && r=0 || r=1
+launch_check "a second investigation of one release gets a worktree and branch of its own" "$r"
 
-if grep -q "^ADDDIR $MARKER\$" "$ARGV_LOG" 2>/dev/null; then
-  fail=$((fail + 1)); printf 'FAIL %s\n' "the prompt was swallowed by --add-dir"
-else
-  pass=$((pass + 1)); printf 'ok   %s\n' "the prompt is not swallowed by the variadic --add-dir"
-fi
-
-# An empty prompt must be refused outright rather than starting a do-nothing session.
+# An empty prompt must be refused outright, before any worktree or thread exists.
 investigation_prompt() { printf '   \n'; }
-LAST_SLACK=""
-if launch_investigation 9.9.9 "r" "$TMP/x.log" >/dev/null 2>&1; then
-  fail=$((fail + 1)); printf 'FAIL %s\n' "an empty prompt is refused"
-else
-  case "$LAST_SLACK" in *EMPTY*) pass=$((pass + 1)); printf 'ok   %s\n' "an empty prompt is refused and reported" ;;
-    *) fail=$((fail + 1)); printf 'FAIL %s — slack said: %s\n' "an empty prompt is refused and reported" "$LAST_SLACK" ;; esac
-fi
-
-# A session that comes up idle must read as a launch FAILURE, not be recorded as in-flight.
+LAST_SLACK=""; rm -f "$ARGV_LOG"
+if launch_investigation 9.9.8 "r" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
+[ "$LAUNCH_RC" -eq 1 ] && case "$LAST_SLACK" in *EMPTY*) true ;; *) false ;; esac &&
+  [ ! -e "$ARGV_LOG" ] && [ ! -e "$LAUNCH_ROOT/clodex-canary-9.9.8" ] && r=0 || r=1
+launch_check "an empty prompt is refused and reported, and nothing is created" "$r"
 investigation_prompt() { printf '%s\n' "$MARKER"; }
-cat > "$FAKECC" <<'FAKEEOF'
-#!/usr/bin/env bash
-printf 'backgrounded · deadbeef · sess (idle — send a prompt to start)\n'
-FAKEEOF
-chmod +x "$FAKECC"
+
+# A start that fails, or succeeds without a thread id, must not be recorded as in flight.
+LAST_SLACK=""; rm -f "$STATE_LOG"; WORK="$TMP/launch-sandbox"
+if FAKE_T3_MODE=fail launch_investigation 9.9.7 "r" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
+[ "$LAUNCH_RC" -eq 1 ] && [ "$LAUNCH_OUTCOME" = uncertain ] &&
+  grep -q '^.uncertainLaunch = ' "$STATE_LOG" && grep -q -- "--arg s $WORK " "$STATE_LOG" &&
+  ! grep -q '^.inflight = ' "$STATE_LOG" &&
+  case "$LAST_SLACK" in *"t3cli start exit 1"*"could not be asked"*) true ;; *) false ;; esac && r=0 || r=1
+launch_check "a failed start T3 Code cannot be asked about is marked uncertain, not in flight" "$r"
+LAST_SLACK=""; rm -f "$STATE_LOG"
+if FAKE_T3_MODE=refused launch_investigation 9.9.2 "r" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
+[ "$LAUNCH_RC" -eq 1 ] && [ ! -e "$STATE_LOG" ] && [ "$LAUNCH_OUTCOME" = "not started" ] &&
+  case "$LAST_SLACK" in *"t3cli start exit 1"*) true ;; *) false ;; esac && r=0 || r=1
+launch_check "a failed start with no thread to show for it is reported as not started" "$r"
 LAST_SLACK=""
-if launch_investigation 9.9.9 "r" "$TMP/x.log" >/dev/null 2>&1; then
-  fail=$((fail + 1)); printf 'FAIL %s\n' "an idle session is treated as a failed launch"
-else
-  case "$LAST_SLACK" in *"NO PROMPT"*) pass=$((pass + 1)); printf 'ok   %s\n' "an idle session is treated as a failed launch" ;;
-    *) fail=$((fail + 1)); printf 'FAIL %s — slack said: %s\n' "an idle session is treated as a failed launch" "$LAST_SLACK" ;; esac
-fi
+if FAKE_T3_MODE=noid launch_investigation 9.9.6 "r" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
+[ "$LAUNCH_RC" -eq 1 ] && [ ! -e "$STATE_LOG" ] && [ "$LAUNCH_OUTCOME" = uncertain ] &&
+  case "$LAST_SLACK" in *"no thread id"*) true ;; *) false ;; esac && r=0 || r=1
+launch_check "a start with no thread id is reported and nothing is recorded" "$r"
+
+# A start whose reply was lost, for a thread T3 Code did create, is found by its title and tracked.
+rm -f "$STATE_LOG" "$LOST_THREADS"; THREAD_ID=""
+if FAKE_T3_MODE=lost launch_investigation 9.9.3 "r" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
+rm -f "$LOST_THREADS"
+[ "$LAUNCH_RC" -eq 0 ] && [ "$THREAD_ID" = "t-lost" ] && grep -q -- '--arg i t-lost' "$STATE_LOG" && r=0 || r=1
+launch_check "a thread whose start reply was lost is found by its title and tracked" "$r"
+
+# A worktree that cannot be made (here: the tested commit is not in the canary clone) is reported,
+# and no thread is started without one.
+LAST_SLACK=""; rm -f "$ARGV_LOG" "$STATE_LOG"
+REAL_MAIN_SHA="$MAIN_SHA"; MAIN_SHA=0123456789abcdef0123456789abcdef01234567
+if launch_investigation 9.9.4 "r" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
+MAIN_SHA="$REAL_MAIN_SHA"
+[ "$LAUNCH_RC" -eq 1 ] && [ ! -e "$ARGV_LOG" ] && [ ! -e "$STATE_LOG" ] &&
+  case "$LAST_SLACK" in *"creating the worktree"*) true ;; *) false ;; esac && r=0 || r=1
+launch_check "a worktree that cannot be created is reported and no thread is started" "$r"
+
+# An earlier launch nobody could confirm blocks the next one until T3 Code can say what happened.
+PENDING='{"uncertainLaunch":{"version":"9.9.0","threadTitle":"clodex-patch-canary 9.9.0 202610300000","worktree":"/w","branch":"b"}}'
+pending_case() { # pending_case <label> <fake-mode> <list-json-or-empty> <want-rc> <want-start yes|no> <state-update-pattern-or-NONE>
+  local rc started=no
+  rm -f "$ARGV_LOG" "$STATE_LOG"
+  if [ -n "$3" ]; then printf '%s\n' "$3" > "$LOST_THREADS"; else rm -f "$LOST_THREADS"; fi
+  state_read() { printf '%s\n' "$PENDING"; }
+  if FAKE_T3_MODE="$2" launch_investigation "9.9.1$RANDOM" "r" "$TMP/x.log" >/dev/null 2>&1; then rc=0; else rc=1; fi
+  state_read() { printf '{}\n'; }
+  rm -f "$LOST_THREADS"
+  [ -e "$ARGV_LOG" ] && started=yes
+  [ "$rc" -eq "$4" ] && [ "$started" = "$5" ] &&
+    { [ "$6" = NONE ] && [ ! -e "$STATE_LOG" ] || grep -q -- "$6" "$STATE_LOG" 2>/dev/null; } && r=0 || r=1
+  launch_check "$1" "$r"
+}
+pending_case "an unconfirmed launch blocks the next while T3 Code still cannot be asked" fail "" 1 no NONE
+pending_case "an unconfirmed launch that did start and still runs is adopted, not duplicated" ok \
+  '[{"id":"t-was-lost","title":"clodex-patch-canary 9.9.0 202610300000","status":"running"}]' 1 no \
+  '^.inflight = (.uncertainLaunch + {threadId: $i}) | del(.uncertainLaunch) --arg i t-was-lost$'
+pending_case "an unconfirmed launch that is already over is cleared and the next goes ahead" ok \
+  '[{"id":"t-was-lost","title":"clodex-patch-canary 9.9.0 202610300000","status":"completed"}]' 0 yes \
+  '^del(.uncertainLaunch)$'
+pending_case "an unconfirmed launch that never happened is cleared and the next goes ahead" ok '[]' 0 yes \
+  '^del(.uncertainLaunch)$'
+
+# One investigation at a time: a tracked one blocks the launch before anything is created.
+state_read() { printf '{"inflight":{"version":"1.0.0","threadId":"t-0"}}\n'; }
+rm -f "$ARGV_LOG"
+if launch_investigation 9.9.5 "r" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
+[ "$LAUNCH_RC" -eq 1 ] && [ ! -e "$ARGV_LOG" ] && [ ! -e "$LAUNCH_ROOT/clodex-canary-9.9.5" ] && r=0 || r=1
+launch_check "a tracked investigation blocks a second launch" "$r"
+state_read() { printf '{}\n'; }
 
 
 # ---------------------------------------------------------------- coverage_gap_action
@@ -1315,6 +1528,197 @@ else
   fail=$((fail + 1))
   printf 'FAIL %s — win32-x64 mode is %s\n' "a platform absent from this run keeps its previous baseline entry" "$GOT"
 fi
+
+# ------------------------------------------------------------------ the hourly flow, end to end
+#
+# The helpers above are tested one by one, which cannot show that a real run ever reaches them:
+# disconnecting the post-merge re-test from the main flow left every case above green. These cases
+# run the script's own option parsing and main flow in a child shell, with every external effect
+# (registry, build, platform matrix, Slack, GitHub, T3 Code, git) replaced by a stand-in.
+MAINFLOW="$TMP/mainflow.sh"
+cat > "$MAINFLOW" <<'MAINEOF'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+ROOT="$1" TARGET="$2"; shift 2
+export CANARY_STATE_DIR="$ROOT/state" CANARY_CACHE_DIR="$ROOT/cache"
+export CLODEX_WORKING_COPY="$ROOT/wc" T3CLI_BIN="$ROOT/t3cli" PROBE_ROOT="$ROOT"
+CANARY_SOURCE_ONLY=1 . "$TARGET"
+unset CANARY_SOURCE_ONLY
+REAL_CLODEX_HOME="$ROOT/no-clodex"; REAL_TWEAKCC_DIR="$ROOT/no-tweakcc"
+preflight() { :; }
+validate_platforms() { :; }
+acquire_lock() { :; }
+housekeeping() { :; }
+cleanup() { :; }
+slack() { printf 'SLACK %s\n' "$*" >> "$ROOT/slack.log"; }
+registry_doc() { printf '{"dist-tags":{"latest":"%s"}}\n' "$MF_VERSION"; }
+real_state_fingerprint() { printf stable; }
+sync_repo() { MAIN_SHA=0123456789abcdef0123456789abcdef01234567; MAIN_SUBJECT=fixture; }
+resolve_node_bin_dir() { dirname "$(command -v node)"; }
+build_repo() { printf 'BUILD\n' >> "$ROOT/calls.log"; }
+prepare_sandbox() { WORK="$(mktemp -d "$CACHE_DIR/work.XXXXXX")"; CONFIG_FP=fixture; }
+run_platform_matrix() {
+  MATRIX="$WORK/matrix.jsonl"
+  local p mode st
+  for p in darwin-arm64 darwin-x64 linux-x64 linux-x64-musl linux-arm64 linux-arm64-musl win32-arm64 win32-x64; do
+    mode=probe; st=pass
+    case "$p" in darwin-arm64) mode=host ;; linux-arm64|linux-arm64-musl) mode=container ;; esac
+    [ "$p" != win32-arm64 ] || st="$MF_VERDICT"
+    jq -nc --arg p "$p" --arg m "$mode" --arg s "$st" \
+      '{platform: $p, mode: $m, status: $s, sites: {}, markers: [], downgraded: false,
+        reasons: (if $s == "fail" then "- patch anchor missing" else "" end), detail: {}}' >> "$MATRIX"
+  done
+}
+write_repro_script() { :; }
+investigation_prompt() { printf 'fixture investigation prompt\n'; }
+create_investigation_worktree() { mkdir -p "$INVESTIGATION_WORKTREE"; }
+announce_verdict() { printf 'ANNOUNCE\n' >> "$ROOT/calls.log"; printf '%s\n' "${NEXT_STEP:-}" > "$ROOT/next-step.txt"; }
+curl() { printf 'CURL\n' >> "$ROOT/calls.log"; printf '%s\n' "${MF_PRS:-[]}"; }
+cat > "$T3CLI_BIN" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$1" >> "$PROBE_ROOT/t3calls.log"
+case "$1" in
+  list) [ "${MF_LIST_FAIL:-0}" != 1 ] || exit 1; cat "$PROBE_ROOT/threads.json" ;;
+  thread)
+    [ "${MF_INTERRUPT_FAIL:-0}" != 1 ] || exit 1
+    jq 'map(.status = "interrupted")' "$PROBE_ROOT/threads.json" > "$PROBE_ROOT/threads.tmp"
+    mv "$PROBE_ROOT/threads.tmp" "$PROBE_ROOT/threads.json" ;;
+  start)
+    cat > /dev/null
+    title=""; while [ $# -gt 0 ]; do [ "$1" != --title ] || title="$2"; shift; done
+    id="new-$(jq length "$PROBE_ROOT/threads.json")"
+    jq --arg id "$id" --arg t "$title" '. + [{id: $id, title: $t, status: "running"}]' \
+      "$PROBE_ROOT/threads.json" > "$PROBE_ROOT/threads.tmp"
+    mv "$PROBE_ROOT/threads.tmp" "$PROBE_ROOT/threads.json"
+    [ "${MF_START_LOST:-0}" != 1 ] || exit 1   # created, but the reply never arrives
+    printf '{"threadId":"%s"}\n' "$id" ;;
+  *) exit 1 ;;
+esac
+FAKE
+chmod +x "$T3CLI_BIN"
+. <(sed -n '/^while \[ \$# -gt 0 \]; do/,$p' "$TARGET")
+MAINEOF
+
+mf_run() { # mf_run <name> <state-json|KEEP> <threads-json|KEEP> -- sets MF_ROOT; env MF_* configures it
+  MF_ROOT="$TMP/mf-$1"; mkdir -p "$MF_ROOT/state" "$MF_ROOT/cache" "$MF_ROOT/wc"
+  [ -d "$MF_ROOT/cache/repo" ] || cp -R "$FIX_REPO" "$MF_ROOT/cache/repo"   # for the fix-ancestry check
+  [ "$2" = KEEP ] || printf '%s\n' "$2" > "$MF_ROOT/state/state.json"
+  [ "$3" = KEEP ] || printf '%s\n' "$3" > "$MF_ROOT/threads.json"
+  : > "$MF_ROOT/calls.log"; : > "$MF_ROOT/t3calls.log"; : > "$MF_ROOT/slack.log"
+  MF_RC=0
+  bash "$MAINFLOW" "$MF_ROOT" "$CANARY" > "$MF_ROOT/out.log" 2>&1 || MF_RC=$?
+}
+mf_check() { # mf_check <label> <0-if-it-held>
+  if [ "$2" -eq 0 ]; then pass=$((pass + 1)); printf 'ok   %s\n' "$1"
+  else fail=$((fail + 1)); printf 'FAIL %s — run log:\n%s\n' "$1" "$(tail -20 "$MF_ROOT/out.log")"; fi
+}
+mf_state() { jq -r "$1" "$MF_ROOT/state/state.json"; }
+NOW_EPOCH="$(date +%s)"
+FAILED_STATE="$(jq -n -c --arg sha "$TESTED_SHA" '{versions: {"9.9.9": {status: "fail", at: "2026-10-30T10:00:00Z",
+                                                     atEpoch: 1, clodexSha: $sha}},
+                                          baseline: null, inflight: null, deferred: {}, pending: {}}')"
+
+MF_VERSION=9.9.9 MF_VERDICT=pass MF_PRS="[$(pr 7 fix/patch-cc-9.9.9 2026-10-30T12:00:00Z "$UNFETCHED_SHA")]" \
+  mf_run reopen "$FAILED_STATE" '[]'
+[ "$MF_RC" -eq 0 ] && grep -qx BUILD "$MF_ROOT/calls.log" && grep -qx ANNOUNCE "$MF_ROOT/calls.log" &&
+  [ "$(mf_state '.versions["9.9.9"].status')" = pass ] && r=0 || r=1
+mf_check "an hourly run re-tests the failing newest release once a canary fix has merged" "$r"
+
+MF_VERSION=9.9.9 MF_VERDICT=pass MF_PRS="[$(pr 7 fix/patch-cc-9.9.9 2026-10-31T12:00:00Z "$OLD_FIX_SHA")]" \
+  mf_run stale-fix "$FAILED_STATE" '[]'
+[ "$MF_RC" -eq 0 ] && grep -qx CURL "$MF_ROOT/calls.log" && ! grep -qx BUILD "$MF_ROOT/calls.log" &&
+  [ "$(mf_state '.versions["9.9.9"].status')" = fail ] && r=0 || r=1
+mf_check "an hourly run leaves the release failing when no fix merged since" "$r"
+
+STUCK_STATE="$(jq -n -c --argjson e "$((NOW_EPOCH - 25 * 3600))" \
+  '{versions: {"9.9.8": {status: "fail", at: "2026-10-29T10:00:00Z", atEpoch: 1}},
+    baseline: null, deferred: {}, pending: {},
+    inflight: {version: "9.9.8", threadTitle: "old investigation", threadId: "old", startedEpoch: $e}}')"
+MF_VERSION=9.9.9 MF_VERDICT=fail MF_INTERRUPT_FAIL=1 \
+  mf_run stuck "$STUCK_STATE" '[{"id":"old","status":"running"}]'
+[ "$MF_RC" -eq 0 ] && [ "$(mf_state '.inflight.threadId')" = old ] && ! grep -qx start "$MF_ROOT/t3calls.log" &&
+  grep -q 'stopping it could not be confirmed' "$MF_ROOT/slack.log" &&
+  [ "$(mf_state '.versions["9.9.9"].status')" = fail ] && r=0 || r=1
+mf_check "a 24h investigation that cannot be stopped stays recorded and blocks a second one" "$r"
+[ "$(mf_state '.versions["9.9.9"].investigation')" = suppressed ] &&
+  [ "$(mf_state '.versions["9.9.9"].investigationHeldBy')" = 9.9.8 ] &&
+  grep -q 'No second investigation was started' "$MF_ROOT/next-step.txt" &&
+  grep -q 'old investigation' "$MF_ROOT/next-step.txt" && ! grep -q 'Nobody is working' "$MF_ROOT/next-step.txt" &&
+  r=0 || r=1
+mf_check "the failure alert names the investigation still running instead of saying nobody is" "$r"
+
+# The sweep keeps only the newest sandboxes, except any an investigation is or may be reading.
+# work.0 belongs to an unconfirmed launch, work.1 to an adopted in-flight thread whose version record
+# a later run replaced (it now points at work.2), and work.3 to nobody. work.4 and .5 are newest.
+SWEEP="$TMP/sweep"; mkdir -p "$SWEEP/cache" "$SWEEP/state/logs"
+for n in 0 1 2 3 4 5; do mkdir "$SWEEP/cache/work.$n"; touch -t "20261030000$n" "$SWEEP/cache/work.$n"; done
+( CACHE_DIR="$SWEEP/cache" LOG_DIR="$SWEEP/state/logs" CANARY_KEEP_SANDBOXES=2 CANARY_KEEP_LOGS=200
+  state_read() { jq -n -c --arg m "$SWEEP/cache/work.0" --arg i "$SWEEP/cache/work.1" --arg v "$SWEEP/cache/work.2" \
+    '{versions: {"9.9.7": {sandbox: $v}}, inflight: {version: "9.9.7", sandbox: $i},
+      uncertainLaunch: {sandbox: $m}}'; }
+  log() { :; }
+  housekeeping )
+[ -d "$SWEEP/cache/work.0" ] && [ -d "$SWEEP/cache/work.1" ] && [ -d "$SWEEP/cache/work.2" ] &&
+  [ ! -e "$SWEEP/cache/work.3" ] && [ -d "$SWEEP/cache/work.4" ] && [ -d "$SWEEP/cache/work.5" ] && r=0 || r=1
+mf_check "the sandbox sweep keeps the in-flight and the unconfirmed investigation's evidence" "$r"
+
+MF_VERSION=9.9.9 MF_VERDICT=fail \
+  mf_run stopped "$STUCK_STATE" '[{"id":"old","status":"running"}]'
+[ "$MF_RC" -eq 0 ] && grep -qx thread "$MF_ROOT/t3calls.log" && grep -qx start "$MF_ROOT/t3calls.log" &&
+  [ "$(mf_state '.inflight.version')" = 9.9.9 ] && [ "$(mf_state '.inflight.threadId')" != old ] &&
+  [ "$(jq -r '.[] | select(.id == "old") | .status' "$MF_ROOT/threads.json")" = interrupted ] && r=0 || r=1
+mf_check "a 24h investigation confirmed stopped makes way for the next one" "$r"
+
+HELD_STATE="$(jq -n -c --arg sha "$TESTED_SHA" '{versions: {"9.9.9": {status: "fail", at: "2026-10-30T10:00:00Z",
+                                       atEpoch: 1, clodexSha: $sha, investigation: "suppressed",
+                                       investigationHeldBy: "9.9.8"}},
+                    baseline: null, inflight: null, deferred: {}, pending: {}}')"
+MF_VERSION=9.9.9 MF_VERDICT=fail mf_run held "$HELD_STATE" '[]'
+[ "$MF_RC" -eq 0 ] && grep -qx start "$MF_ROOT/t3calls.log" && [ "$(mf_state '.inflight.version')" = 9.9.9 ] &&
+  [ "$(mf_state '.versions["9.9.9"].investigation')" = started ] && r=0 || r=1
+mf_check "a failure held back by a stuck investigation gets its own once the slot frees" "$r"
+
+# A launch T3 Code accepted but whose reply was lost, while T3 Code could not be asked either, must
+# not let the next failing release start a second thread beside it.
+EMPTY_STATE='{"versions":{},"baseline":null,"inflight":null,"deferred":{},"pending":{}}'
+MF_VERSION=9.9.8 MF_VERDICT=fail MF_START_LOST=1 MF_LIST_FAIL=1 mf_run lost "$EMPTY_STATE" '[]'
+LOST_RC="$MF_RC"
+LOST_SANDBOX="$(mf_state '.uncertainLaunch.sandbox // ""')"
+[ "$LOST_RC" -eq 0 ] && [ -d "$LOST_SANDBOX" ] && [ "$LOST_SANDBOX" = "$(mf_state '.versions["9.9.8"].sandbox')" ] &&
+  r=0 || r=1
+mf_check "an unconfirmed launch's marker keeps the path of the evidence it was given" "$r"
+MF_VERSION=9.9.9 MF_VERDICT=fail mf_run lost KEEP KEEP
+[ "$LOST_RC" -eq 0 ] && [ "$MF_RC" -eq 0 ] &&
+  [ "$(jq '[.[] | select(.status == "running")] | length' "$MF_ROOT/threads.json")" = 1 ] &&
+  [ "$(mf_state '.inflight.threadId')" = new-0 ] && [ "$(mf_state '.uncertainLaunch')" = null ] &&
+  [ "$(mf_state '.inflight.sandbox')" = "$LOST_SANDBOX" ] &&
+  [ "$(mf_state '.versions["9.9.9"] // "untested"')" = untested ] && r=0 || r=1
+mf_check "a lost launch nobody could confirm is adopted later, and newer releases wait on it" "$r"
+
+# While T3 Code stays unreachable, a release held back by the unconfirmed launch is not re-tested
+# every hour; once T3 Code answers and that launch never happened, the release gets its own.
+MARKED_STATE="$(jq -n -c --arg sha "$TESTED_SHA" '{versions: {"9.9.9": {status: "fail", at: "2026-10-30T10:00:00Z",
+                                       atEpoch: 1, clodexSha: $sha, investigation: "suppressed",
+                                       investigationHeldBy: "9.9.8"}},
+                    uncertainLaunch: {version: "9.9.8", threadTitle: "clodex-patch-canary 9.9.8 202610300000"},
+                    baseline: null, inflight: null, deferred: {}, pending: {}}')"
+MF_VERSION=9.9.9 MF_VERDICT=fail MF_LIST_FAIL=1 mf_run marked "$MARKED_STATE" '[]'
+[ "$MF_RC" -eq 0 ] && ! grep -qx BUILD "$MF_ROOT/calls.log" && ! grep -qx start "$MF_ROOT/t3calls.log" &&
+  [ "$(mf_state '.uncertainLaunch.version')" = 9.9.8 ] && r=0 || r=1
+mf_check "a release held back by an unconfirmed launch is not re-tested while T3 Code is unreachable" "$r"
+MF_VERSION=9.9.9 MF_VERDICT=fail mf_run marked KEEP KEEP
+[ "$MF_RC" -eq 0 ] && grep -qx BUILD "$MF_ROOT/calls.log" && grep -qx start "$MF_ROOT/t3calls.log" &&
+  [ "$(mf_state '.uncertainLaunch')" = null ] && [ "$(mf_state '.inflight.version')" = 9.9.9 ] && r=0 || r=1
+mf_check "once T3 Code answers and the launch never happened, the held release gets its own" "$r"
+
+MF_VERSION=9.9.9 MF_VERDICT=fail MF_LIST_FAIL=1 mf_run marked-new \
+  "$(printf '%s' "$MARKED_STATE" | jq -c 'del(.versions["9.9.9"])')" '[]'
+[ "$MF_RC" -eq 0 ] && ! grep -qx start "$MF_ROOT/t3calls.log" &&
+  [ "$(mf_state '.versions["9.9.9"].investigationHeldBy')" = 9.9.8 ] &&
+  grep -q 'could not be confirmed' "$MF_ROOT/next-step.txt" && ! grep -q 'still recorded as running' "$MF_ROOT/next-step.txt" &&
+  r=0 || r=1
+mf_check "a failure held back by an unconfirmed launch says so, without calling it running" "$r"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

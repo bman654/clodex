@@ -8,8 +8,6 @@ set -euo pipefail
 # launchd clobbers HOME to match WorkingDirectory on macOS; force it back.
 export HOME="/Users/brandon"
 export PATH="/opt/homebrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
-# Route the investigation session's subagents through clodex, same as the PR-queue job.
-export CLAUDE_CODE_PROCESS_WRAPPER="$HOME/.local/bin/clodex-claude"
 
 # launchd appends to this file forever and rotates nothing.
 # Truncate in place rather than renaming: launchd opened this path before starting us and keeps

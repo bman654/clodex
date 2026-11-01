@@ -2,7 +2,7 @@
 
 Scripts that automate monitoring `clodex patch` against new Claude Code releases: every hour they
 download the newest release for **every** published platform into a throwaway sandbox, run
-`clodex patch` against it, and raise a Slack alert plus a background investigation session when a
+`clodex patch` against it, and raise a Slack alert plus a T3 Code investigation thread when a
 release does not patch cleanly.
 
 They live here so they are versioned like everything else. They run from `~/.local/bin`, which
@@ -19,6 +19,58 @@ symlinks to this folder.
 State lives outside the repo: `~/.local/state/clodex-patch-canary/` (triage record `state.json` and
 one log per run) and `~/.cache/clodex-patch-canary/` (a private clone hard-reset to `origin/main`
 each run, plus sandboxes — removed on success, kept on failure for the investigation).
+
+## The investigation thread
+
+A failing release starts **one** T3 Code thread (`t3cli start`), in the clodex project, on
+`claude-opus-5-5` at high effort and full access. It runs in a worktree the canary creates first:
+`../clodex-canary-<version>` on branch `fix/patch-cc-<version>` (with a timestamp suffix if those
+names are taken), at the exact `origin/main` commit the canary tested. That commit is fetched from the
+canary's own clone, so creating the worktree needs no GitHub credentials under launchd. `t3cli start`
+cannot create a worktree itself; it only binds a thread to an existing one.
+
+The thread first checks for an open PR from an earlier investigation that already fixes the break,
+then diagnoses, fixes, runs a review panel, opens a PR, and Slacks as it goes. It ends its turn by
+linking and watching the PR, so T3 Code wakes it for failing checks or review feedback. It never
+archives or settles itself.
+
+While the thread is working, the canary holds off on newer releases. It reads the thread's status
+from `t3cli list --all --project <working copy>`: running, queued or waiting means working; idle or
+completed means finished (watching a PR does not count as working); interrupted or cancelled means
+stopped; failed means failed, unless the failure was a usage limit that will reset, which still counts
+as working; a thread that is gone means missing. If T3 Code cannot be asked at all, that is
+*unknown*, which keeps the deferral in place.
+
+A thread still working after `CANARY_MAX_INFLIGHT_HOURS` (24) is interrupted. Only an interrupt the
+thread list then confirms releases it. If the stop cannot be confirmed, newer releases are tested
+anyway, but the thread stays recorded, so a failing one cannot start a second investigation. A
+warning repeats on the usual escalation cadence until the thread is stopped.
+
+**The re-test after the fix is automatic, for the newest release.** A failed release is never
+re-tested on its own. So while the newest release is recorded as failing, each run asks GitHub (one
+unauthenticated request) for canary fix PRs merged into `main`. A canary fix PR is one whose branch
+starts with `fix/patch-cc-`; it does not have to come from this release's own investigation. If one
+merged that the failing test did not include, that run re-tests the release and posts the verdict.
+"Did not include" is decided by git ancestry against the commit the release failed on, not by time,
+so a fix that merged while the failing run's matrix was still going still counts. T3 Code does not
+wake a watching thread when its PR merges (only when it is closed unmerged), so the canary checks
+instead of the thread.
+
+A failure whose investigation was held back only because another release's investigation still held
+the slot is re-tested once that one is over, so it gets an investigation of its own.
+
+An older failing release that a newer one has superseded is not re-tested; the newer one is tested on
+current `main` anyway. Neither is a release fixed by a PR from some other branch. `--retriage VER`
+covers both.
+
+If `t3cli start` fails and T3 Code cannot even be asked whether a thread appeared, the canary records
+an `uncertainLaunch` marker, not an in-flight investigation. The likeliest cause is T3 Code not
+running, and an in-flight record nobody can resolve would hold off every newer release. The marker
+holds only the investigation slot, and it keeps its sandbox safe from the sweep. Every run starts by
+looking the earlier thread up by its title. If it is still running, it becomes the tracked
+investigation; if it is over or never existed, the marker is dropped and the slot is free. A failure
+held back by the marker is then re-tested, as above. While T3 Code still cannot be asked, newer
+releases are tested, but no new thread starts and a held-back failure is not re-tested.
 
 ## The three legs, and what each one actually proves
 
@@ -78,8 +130,8 @@ A `--platforms` run is deduplicated before the matrix is built, and completeness
 platform names rather than row counts — otherwise naming one build eight times would reach the
 published-platform count and be announced as a clean pass over seven builds nobody looked at.
 
-A **failure** alert has no such line — it leads with which platforms broke and what a background
-investigation session is doing about it. What it does share is the disclosure that a `--platforms`
+A **failure** alert has no such line — it leads with which platforms broke and what the
+investigation thread is doing about it. What it does share is the disclosure that a `--platforms`
 run tested only a subset, because otherwise "breaks `clodex patch` on 1 of 1 builds" reads as a
 statement about the release rather than about one hand-picked build.
 
@@ -105,14 +157,18 @@ Pause without unloading: uncomment the `exit 0` near the top of `clodex-patch-ca
 ## Before changing anything here
 
 ```bash
-./canary/clodex-patch-canary-selftest.sh     # must be green
+./canary/clodex-patch-canary-selftest.sh     # must be green; tests the canary next to it
 ./canary/clodex-patch-canary.sh --status     # triage state
 ```
 
 The selftest drives the real functions against fixtures and stand-ins, so it needs no network and
-touches no real install. It mocks the `claude` binary, which means it cannot see bugs in how the
-canary invokes the *real* CLI — the argv tests exist because one such bug (a prompt silently
-swallowed by the variadic `--add-dir`) shipped and cost a day of coverage.
+touches no real install. Besides the helpers, it runs the real hourly flow end to end with every
+external effect stood in. It mocks `t3cli` and GitHub, which means it cannot see bugs in how the
+canary invokes the *real* CLI. The launch tests record exactly what reached the stand-in (the prompt
+on stdin, the worktree it is bound to) because one such bug shipped: under `claude --bg`, the
+variadic `--add-dir` swallowed the prompt and cost a day of coverage. The thread-status mapping was
+checked against a real T3 Code thread (running, completed, interrupted, deleted) when it was written;
+re-check it after a T3 Code upgrade that changes thread statuses.
 
 The probe has automated coverage on both sides of the repo boundary:
 
