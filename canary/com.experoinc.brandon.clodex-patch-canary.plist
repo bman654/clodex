@@ -37,6 +37,8 @@
         <string>/opt/homebrew/bin:/Users/brandon/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
         <key>HOME</key>
         <string>/Users/brandon</string>
+        <key>CANARY_KEEP_SANDBOXES</key>
+        <string>1</string>
     </dict>
 </dict>
 </plist>
