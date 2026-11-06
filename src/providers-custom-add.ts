@@ -58,6 +58,18 @@ export async function runCustomEndpointAddFlow(
     return 0;
   }
 
+  // Servers that only report token usage on streamed replies when the request
+  // asks for it need stream_options.include_usage; without it every streamed
+  // turn reports output_tokens 0.
+  const streamUsage = await p.confirm({
+    message: 'Send stream_options.include_usage with streamed requests? (Needed when this server reports token usage only when the request asks for it.)',
+    initialValue: false,
+  });
+  if (p.isCancel(streamUsage)) {
+    p.cancel('Cancelled.');
+    return 0;
+  }
+
   const spinner = p.spinner();
   spinner.start('Testing connection...');
   const result = await addCustomEndpointProvider({
@@ -66,6 +78,7 @@ export async function runCustomEndpointAddFlow(
     apiKey: String(apiKey ?? '').trim(),
     kind: 'openai',
     allowInsecureLocal,
+    supportsStreamUsage: streamUsage === true,
   });
   spinner.stop('');
   onResult(result);
