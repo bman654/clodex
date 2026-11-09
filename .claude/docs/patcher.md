@@ -404,7 +404,8 @@ relocates the Bun section and strands its old copy; that is independent of the r
     steps over a nested return of some *other* variable. It is rename-resistant, not
     refactor-proof. It does NOT prove the match stopped on
     the function's own brace — the walk below does that.
-  Identity is carried by the passthrough early-out — `)return process.env;let <first>={` —
+  Identity is carried by the passthrough early-out — `)return process.env;let <first>={` (from
+  2.1.321, `let <first>=…{`, the initializer reaching its object literal over `[^;{},]`) —
   counted across the WHOLE bundle before the anchor runs, the same discipline PATCH 5 uses. Over
   29 real bundles (2.1.208 through all eight 2.1.239 builds) it occurs exactly once and exactly one
   head candidate precedes it; on the 21 pre-2.1.239 bundles the widened anchor's matched span is
@@ -470,8 +471,9 @@ relocates the Bun section and strands its old copy; that is independent of the r
   real 2.1.238 bundle, including its own `__export` map entry — but that builder reaches the env
   through a helper, `function JP(){let e=NDt(),…` where `NDt` is
   `return <mod>.getAgentProxyEnv?.()??{}`, so the builder spells it nowhere. Every measured builder
-  from 2.1.246 on spells it inline. Dropping the ternary would have refused 2.1.238 (measured on its
-  darwin-arm64 build, the only one on disk) and presumably everything older, which is not measured.
+  from 2.1.246 to 2.1.314 spells it inline (2.1.321 moved it into a helper; see below). Dropping the
+  ternary would refuse 2.1.238 and every measured release before it, 2.1.208 to 2.1.232: each of
+  those builders binds only through the ternary.
   The head run also tolerates the pin sitting inside a destructuring pattern, and an opening `let{`
   or `let[` with no space — 2.1.239 already made that move on the sibling property of the same
   registry entry, a minifier drops the space for a pattern of either kind (4784 `let{` and 2246
@@ -544,6 +546,38 @@ relocates the Bun section and strands its old copy; that is independent of the r
   injected values back in front of a child, so re-check every arg-passing call when the builder
   moves. Count callers with a scope-aware walk, not a text search: a lookbehind that excludes `.`
   skips the 18 spread calls (`...is()`) and the Bash tool's `...is(w)`.
+- **And the helper — the move the 2.1.260 entry predicted.** Claude Code 2.1.321 moved the
+  child-env builder's three env sources into a helper,
+  `function re(){let n=l.of(F().host);return{proxyEnv:n.getAgentProxyEnv?.()??{},settingsEnvForChildren:n.settingsEnvForChildren,ownEnv:process.env}}`,
+  and the builder opens by destructuring it (`function os(n){let{proxyEnv:e,settingsEnvForChildren:r,ownEnv:s}=re(),…`;
+  darwin-arm64 spellings). Three anchor checks refused at once, on all eight builds: the builder
+  spells no `getAgentProxyEnv` (head), no `...process.env` (body check — the base copy is now
+  `c={...n,...s}`), and the returned copy is chosen by a condition,
+  `let M={...e,...v},d=(N||a)&&x()!=="windows"?b:{...c};…return d}`, not opened with `{` (tail).
+  The head also accepts the destructured `proxyEnv:` key; the tail and the whole-bundle count
+  both accept an initializer that reaches its object literal over `[^;{},]`. **The anchor was not
+  the whole fix.** The parent env now reaches the copy through the `ownEnv` binding, not through a
+  `process.env` read, so rewriting `process.env` alone would have reported `OK` and left the bridge
+  values in every copy branch. The transform therefore rewrites the binding,
+  `ownEnv:s` → `_clodexOwnEnv:s=_clodexChildEnv` (the helper's object has no such key, so the
+  default always applies). It refuses unless the binding is exactly the shape every 2.1.321 build
+  has — the first declarator of the builder's opening `let`, a flat pattern destructuring a
+  zero-argument call — and unless a function of that call's name spells `ownEnv:process.env` in its
+  own body (bounded by the brace walk): the override is only equivalent to the helper's value while
+  it hands over `process.env`. That is a lexical check, not a proof of the returned value, and
+  minified names repeat across modules, so it finds a function of the name, not provably the one
+  called. A looser recognizer
+  matched `{ownEnv:s}===x`, an object literal that the rewrite turns into a silent assignment. Over 88 distinct measured bundles from
+  2.1.208 to 2.1.314 the whole `applyClodexPatches` output is byte-identical to version 17's, and
+  the count is exactly one in all 96 bundle files including 2.1.321's.
+  `.claude/harnesses/cc321-patch10-execute-real-builder` executes the REAL helper together with the
+  patched builder from all eight 2.1.321 bundles; its copy-branch scenarios are the ones a
+  `process.env`-only rewrite fails. The helper has one other caller,
+  `function I1s(n){…Object.values(re())…}`, which reads it unrestored, but only to ask whether a
+  set of `BASH_FUNC_…` names is defined anywhere — none of the network variables clodex reverts.
+  A text census of `...os(` and `os(` calls with arguments (a common minified name, so not
+  scope-aware) finds the same arg-passing callers 2.1.314 had: `spawnEnvKeys` reading
+  `Object.keys(os(this.#r))`, the Bash tool's `{...os(b),SHELL:…}`, and `{...os(<fn>(r,V,Ct))}`.
 - **Calibrate a patch-anchor weakness by corpus reachability and by which direction it fails, not
   by whether an attack can be constructed** — one always can, against every site we ship.
   PATCH 5's surviving hole needs upstream to make two coordinated changes at once (respell its own

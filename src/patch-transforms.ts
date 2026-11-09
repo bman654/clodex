@@ -130,8 +130,21 @@ import {
  * rescues nobody by itself: on all 81 measured bundles from 2.1.238 to 2.1.304
  * the output is byte-identical to version 16's, and a 2.1.314 install was
  * never patched. It is bumped because the anchor changed.
+ *
+ * 18 — PATCH 10 stopped recognising Claude Code 2.1.321 on all eight published
+ * builds. The child-env builder's three env sources moved into a helper that
+ * returns `{proxyEnv,settingsEnvForChildren,ownEnv:process.env}`, and the builder
+ * destructures them, so it spells neither `getAgentProxyEnv` (the head's pin) nor
+ * `...process.env` (the body check), and its returned copy is chosen by a
+ * condition rather than opened with `{` (the tail). The head now also accepts the
+ * destructured `proxyEnv:` key, the tail accepts a conditional initializer, and the
+ * destructured `ownEnv` binding is redirected to the restored env, because the
+ * parent env now reaches the copy through it rather than through a `process.env`
+ * read. On all 88 distinct measured bundles from 2.1.208 to 2.1.314 the output is
+ * byte-identical to version 17's, and a 2.1.321 install was never patched. It is
+ * bumped because the anchor and the replacement changed.
  */
-export const PATCH_TRANSFORMS_VERSION = 17;
+export const PATCH_TRANSFORMS_VERSION = 18;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -938,10 +951,20 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   //     bundle, including its own `__export` map entry — but that builder reaches
   //     the agent-proxy env through a plain call, `function JP(){let e=NDt(),…`,
   //     where `NDt` is `return <mod>.getAgentProxyEnv?.()??{}`, so the name appears
-  //     nowhere in the builder itself. Every measured builder from 2.1.246 on
-  //     spells it inline. Dropping the ternary would therefore have refused
-  //     2.1.238 — measured on its darwin-arm64 build, the only one on disk — and
-  //     presumably everything older, which is not measured at all.
+  //     nowhere in the builder itself. Every measured builder from 2.1.246 to
+  //     2.1.314 spells it inline. Dropping the ternary would therefore refuse
+  //     2.1.238 and every measured release before it (2.1.208 to 2.1.232): each of
+  //     those builders binds only through the ternary.
+  //
+  //     2.1.321 made exactly that move: a helper now reads `getAgentProxyEnv` and
+  //     returns it beside the other two env sources,
+  //     `return{proxyEnv:…,settingsEnvForChildren:…,ownEnv:process.env}`, and the
+  //     builder opens by destructuring them, `let{proxyEnv:e,…}=re()`. So the run may
+  //     also end at the destructured `proxyEnv:` key — the same env under the name
+  //     the helper gives it, a property name a minifier keeps. The lookbehind stops
+  //     it ending inside a longer name. On every 2.1.321 build that third
+  //     alternative adds exactly one head candidate, the builder; on all 88 earlier
+  //     bundles it adds none that changes the output.
   //
   //     The pair produced no extra candidates in the corpus. Over 27 real bundles
   //     (2.1.238, 2.1.246, 2.1.252, 2.1.257, 2.1.259 and all eight 2.1.260 builds)
@@ -983,8 +1006,14 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   //     retried: a FIRST declarator that is itself returned from a nested block
   //     ends the match early and refuses loudly, even if a later one would bind.
   //
+  //     2.1.321 picks the returned copy with a condition instead of opening it with
+  //     `{` — `let M={...e,...v},d=(N||a)&&x()!=="windows"?b:{...c};…return d}` —
+  //     so the declarator the tail ties to may now run up to its object literal
+  //     over `[^;{},]`, staying inside that one declarator. The count is widened by
+  //     the same run, and is still exactly one in all 96 measured bundle files.
+  //
   // Identity is carried by the passthrough early-out — `)return process.env;let
-  // <first>={` (the count also admits earlier declarators, the run the tail skips) —
+  // <first>=…{` (the count also admits earlier declarators, the run the tail skips) —
   // which reads as nothing but the shared child-env builder ("nothing
   // to change, so hand the parent's own env straight through, otherwise start a
   // copy"). It is counted across the WHOLE bundle before the anchor runs, so a
@@ -1017,6 +1046,38 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     // network variables clodex reverts, so which object it is read from cannot
     // change what the child sees.
     const requiredBodyLiterals = ['...process.env'];
+    // From 2.1.321 the builder no longer reads `process.env` for its base copy at
+    // all. A helper hands it the three envs it merges,
+    // `return{proxyEnv:…getAgentProxyEnv?.()??{},settingsEnvForChildren:…,ownEnv:process.env}`,
+    // and the builder destructures them (`let{proxyEnv:e,settingsEnvForChildren:r,ownEnv:s}=re()`)
+    // and spreads `s` where it used to spread `process.env`. Rewriting `process.env`
+    // in the body would leave that copy unrestored, so the binding is redirected too:
+    // `ownEnv:s` becomes `_clodexOwnEnv:s=_clodexChildEnv`. The helper's object has
+    // no `_clodexOwnEnv` key, so `s` always takes the default.
+    //
+    // That default stands in for the helper's own value, so two things are required.
+    // The binding must be exactly the shape every 2.1.321 build has: the FIRST
+    // declarator of the builder's opening `let`, a flat object pattern, destructuring
+    // a zero-argument call. Anything looser also matched shapes where the rewrite
+    // silently changes meaning — `{ownEnv:s}===x` parses as an object literal whose
+    // value assigns to `s` — so a different position refuses instead. And a function
+    // of the called name must spell `ownEnv:process.env` in its own body. That is a
+    // lexical check, not a proof of the value returned, and minified names repeat
+    // across modules, so it finds A function of that name, not provably the one the
+    // builder calls. It refuses a helper that spells anything else for `ownEnv`.
+    const ownEnvDestructure =
+      /^(let\{[^;{}]*?)(?<![\w$])ownEnv:([\w$]+)(?=[,}])([^;{}]*\}=)([\w$]+)\(\)/;
+    const ownEnvSource = /(?<![\w$])ownEnv:process\.env(?=[,}])/;
+    // A lexical check over the function's own body (the brace walk below bounds it),
+    // not a proof of what it returns.
+    const helperReturnsProcessEnv = (name: string): boolean => {
+      const head = 'function ' + name + '(){';
+      for (let at = source.indexOf(head); at >= 0; at = source.indexOf(head, at + 1)) {
+        const end = blockEndIndex(source, at + head.length - 1);
+        if (end >= 0 && ownEnvSource.test(source.slice(at, end + 1))) return true;
+      }
+      return false;
+    };
     // A smell test, NOT the identity proof. Identity is the whole-bundle count of
     // the passthrough early-out below, the name the head pins on, and the brace
     // walk proving the match spans exactly the function it started in.
@@ -1156,14 +1217,14 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       // tail could bind is counted. A count narrower than the anchor would let a
       // second site the count never sees take the match while the real builder fails
       // to — a silent wrong bind a review constructed against 2.1.290.
-      : (source.match(/\)return process\.env;let (?:(?:[^;{}]|\{[^;{}]*\})*?,)??[\w$]+=\{/g) ?? []).length;
+      : (source.match(/\)return process\.env;let (?:(?:[^;{}]|\{[^;{}]*\})*?,)??[\w$]+=[^;{},]*?\{/g) ?? []).length;
     if (passthroughSites !== 1) {
       log('FAIL', patchName, 'child env passthrough appears ' + passthroughSites + ' times (expected 1)');
       fail('clodex patch: required patch failed: ' + patchName);
     }
     applyOnce(
       patchName,
-      /(function [\w$]+\([\w$]*\)\{)(let[ {[](?:[^;{}]|\{[^;{}]*\})*?(?:\{[^;{}]*)?(?:getAgentProxyEnv|[\w$]+\(process\.env\.CLAUDE_CODE_REMOTE\)\?)(?:(?!\}\s*function )[\s\S])*?\)return process\.env;let (?:(?:[^;{}]|\{[^;{}]*\})*?,)??([\w$]+)=\{(?:(?!\}\s*function )[\s\S])*?return \3)(\})/,
+      /(function [\w$]+\([\w$]*\)\{)(let[ {[](?:[^;{}]|\{[^;{}]*\})*?(?:\{[^;{}]*)?(?:getAgentProxyEnv|[\w$]+\(process\.env\.CLAUDE_CODE_REMOTE\)\?|(?<![\w$])proxyEnv:)(?:(?!\}\s*function )[\s\S])*?\)return process\.env;let (?:(?:[^;{}]|\{[^;{}]*\})*?,)??([\w$]+)=[^;{},]*?\{(?:(?!\}\s*function )[\s\S])*?return \3)(\})/,
       (match, head, body, _copyVar, tail) => {
         // The tail is found lazily, so it can stop in the wrong place in EITHER
         // direction, and both are silent without this check:
@@ -1190,10 +1251,19 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         // Name the check that rejected it. "target validation failed" alone sends
         // the next person triaging a canary failure off to extract a 32 MB bundle
         // by hand to learn which of four unrelated conditions was the one.
-        const missingLiteral = requiredBodyLiterals.find(literal => !body!.includes(literal));
+        const ownEnvMentions = body!.split('ownEnv').length - 1;
+        const ownEnvBinding = ownEnvMentions > 0 ? ownEnvDestructure.exec(body!) : null;
+        const missingLiteral = ownEnvMentions > 0
+          ? undefined
+          : requiredBodyLiterals.find(literal => !body!.includes(literal));
         const scrubbedSeen = scrubbedEnvNames.filter(name => body!.includes(name));
         const why = missingLiteral !== undefined
           ? 'body does not contain ' + missingLiteral
+          : ownEnvMentions > 0 && (ownEnvMentions !== 1 || ownEnvBinding === null)
+            ? 'body reads ownEnv other than through one destructured binding opening the builder'
+          : ownEnvBinding !== null && !helperReturnsProcessEnv(ownEnvBinding[4]!)
+            ? 'body destructures ownEnv from ' + ownEnvBinding[4]
+              + '(), which does not return ownEnv:process.env'
           : scrubbedSeen.length < MIN_SCRUBBED_ENV_NAMES
             ? 'body spells only ' + scrubbedSeen.length + ' of the '
               + scrubbedEnvNames.length + ' known child-env names (expected at least '
@@ -1217,7 +1287,10 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
           log('FAIL', patchName, 'target validation failed: ' + why);
           fail('clodex patch: child network environment target validation failed: ' + why);
         }
-        const restoredBody = body!.replace(/process\.env/g, '_clodexChildEnv');
+        const restoredBody = body!
+          .replace(/process\.env/g, '_clodexChildEnv')
+          .replace(ownEnvDestructure, (_m, open: string, binding: string, close: string, helper: string) =>
+            open + '_clodexOwnEnv:' + binding + '=_clodexChildEnv' + close + helper + '()');
         const restore = marker
           + 'let _clodexChildEnv=process.env,_clodexNetworkRaw=_clodexChildEnv[' + contractVar + '];'
           + 'if(_clodexNetworkRaw!==void 0){_clodexChildEnv={..._clodexChildEnv};'
