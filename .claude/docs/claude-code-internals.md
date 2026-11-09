@@ -277,7 +277,7 @@ The models-list fetch validates only `{id, display_name, description}`. The serv
 lookup is unreachable anyway: it is gated on the Anthropic base URL being `api.anthropic.com`, and
 `src/env.ts` points the child at `127.0.0.1`.
 
-## The shared child-environment builder (verified 2.1.221, re-verified 2.1.239, 2.1.260, 2.1.290 and 2.1.304)
+## The shared child-environment builder (verified 2.1.221, re-verified 2.1.239, 2.1.260, 2.1.290, 2.1.304 and 2.1.321)
 
 The shared child-env builder — `pH()` in 2.1.221, with 14 call sites there and 16 in every 2.1.239
 build. The split that matters for bridge isolation:
@@ -299,11 +299,17 @@ the typed env accessor instead (`i=a.CLAUDE_CODE_REMOTE===!0`), and `us()` (darw
 the returned copy (`let Z={...r,...m},E={...i};…return E}`), and `is(e)` in all eight builds of
 2.1.304, which took an optional base env the parent's env is spread over
 (`if(_||e!==void 0){i={...e,...process.env};…}`) and passes through only when it is absent
-(`if(e===void 0&&…)return process.env`). That is why PATCH 10's anchor
+(`if(e===void 0&&…)return process.env`), and `os(n)` (darwin-arm64) in 2.1.321, which reads its
+three env sources from a helper returning
+`{proxyEnv:…getAgentProxyEnv?.()??{},settingsEnvForChildren:…,ownEnv:process.env}` and destructures
+them, spreads the destructured `ownEnv` where it used to spread `process.env`
+(`c={...n,...s}`), and picks its returned copy with a condition
+(`d=(N||a)&&x()!=="windows"?b:{...c}`). That is why PATCH 10's anchor
 identifies the function by landmarks inside its body that survive all of that — the agent-proxy env
-it folds in (`getAgentProxyEnv`, spelled inline by every measured builder from 2.1.246 on, with the
+it folds in (`getAgentProxyEnv`, spelled inline by every measured builder from 2.1.246 to 2.1.314,
+and the destructured `proxyEnv:` key from 2.1.321, with the
 `CLAUDE_CODE_REMOTE` ternary the measured 2.1.238 builder uses still accepted as the alternative),
-the passthrough early-out `)return process.env;let <first>={` (counted across the
+the passthrough early-out `)return process.env;let <first>=…{` (counted across the
 whole bundle), the `return <copy>}` tail back-referenced to a declarator of that statement, and the
 required-literal, nested-function
 and brace-balance checks — rather than by counting bindings or by naming a statement upstream is
@@ -322,6 +328,19 @@ clodex sets neither that nor `SSL_CERT_FILE` (it sets only `HTTPS_PROXY`, `HTTP_
 `NODE_EXTRA_CA_CERTS`), so both gates need the user's own environment. It is **not** fixable by
 moving PATCH 10's anchor — the gate and the copy both read `process.env` outside the builder's
 matched span — and would need its own patch site or a launch-side guard.
+
+**A third overlay, also outside the builder: the forwarded and served hook env merge** (2.1.314
+`ASt`, 2.1.321 `qOt`, darwin-arm64). `qOt({attached,beforeSettings,ownEnv,childrenSee})` takes each
+key from `ownEnv` (the settings env here, not `process.env`) if present, else keeps `attached` (the
+builder's restored env) only where it equals `beforeSettings`, a `{...process.env}` snapshot taken
+before settings are applied — and otherwise takes the snapshot's value. Under clodex that snapshot
+holds the injected proxy, so an external proxy the builder restored is swapped back for the bridge.
+A review executed both releases' real merge over the real patched builder output and got the same
+result from each, so this is not a regression of any PATCH 10 version. Reachability: only hooks run
+for calls served to a cloud session and device-hook forwarding, both opt-in and gated, and only when
+the user's launch env already had an external proxy (an injected key with no original is deleted
+from `attached` and never re-enters the merge). Ordinary local hooks go through the builder alone.
+Fixing it needs its own site; moving PATCH 10's anchor cannot reach it.
 
 - **Shell-mediated** (reachable from a `.zshenv`-style user snippet): the Bash tool, hooks, subagent
   status line, the shell snapshot/env probe.
