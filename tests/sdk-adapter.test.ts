@@ -19,6 +19,7 @@ import {
   silenceSdkWarnings,
 } from '../src/sdk-adapter.js';
 import { installParentNoticeSink } from '../src/parent-notice.js';
+import { readFileSync } from 'node:fs';
 
 describe('sdkTranslationErrorSignature', () => {
   it('classifies missing stream parts without exposing their dynamic ids', () => {
@@ -1220,6 +1221,30 @@ describe('translateRequest', () => {
       }, '@ai-sdk/openai', { openAiOAuth: true });
       expect(manual.toolChoice).toBe('none');
     }
+  });
+
+  // 2.1.323 moved the header's opening into a constant and interpolates it, so the
+  // sentence the guard keys on is no longer one literal in the bundle. Run that
+  // release's own builder code and prove the prompt it sends still trips the guard.
+  it('disables tools for the compact prompt that the 2.1.323 builders render', () => {
+    const builders = readFileSync(
+      new URL('./fixtures/claude-code-2.1.323-compact-builders.txt', import.meta.url),
+      'utf8',
+    );
+    const render = new Function(
+      `${builders}\nreturn Uxn(Yut)+"Your task is to create a detailed summary of the conversation so far."+Wxn(Yut);`,
+    ) as () => string;
+    const prompt = render();
+    expect(prompt.startsWith('CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n')).toBe(true);
+
+    const params = translateRequest({
+      model: 'gpt-5.6-sol',
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+      tools: shellSessionTools,
+      tool_choice: { type: 'auto' },
+    }, '@ai-sdk/openai', { openAiOAuth: true });
+
+    expect(params.toolChoice).toBe('none');
   });
 
   it('ignores a compact envelope that is quoted rather than issued', () => {

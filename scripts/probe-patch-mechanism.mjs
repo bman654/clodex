@@ -340,7 +340,9 @@ try {
   // The runtime text-only guard intentionally keys on Claude Code's exact prompt. Check those same
   // bytes in each platform's own extracted bundle so upstream wording drift fails the release
   // canary instead of silently disabling the guard in production.
-  const compactPromptMarkers = checkClaudeCodeCompactPromptMarkers(source);
+  const compactPromptMarkers = checkClaudeCodeCompactPromptMarkers(
+    bundle ? bundle.modules.map(module => module.source) : [source],
+  );
   info.compactPromptMarkers = { missing: compactPromptMarkers.missing };
   record(
     'compact-prompt-markers',
@@ -352,7 +354,9 @@ try {
         + "compaction prompt, which stops clodex's text-only guard from firing; auto-compaction "
         + 'then fails on OpenAI models and long sessions die with "Prompt is too long". First '
         + 'confirm the extracted source still contains both compaction builders, because a '
-        + 'bundle-reader omission has the same symptom. Then update the markers in '
+        + 'bundle-reader omission has the same symptom. Then read what text the builders RENDER: '
+        + 'a marker assembled from constants renders unchanged and calls for teaching the check '
+        + 'that spelling, not for a new marker. Otherwise update the markers in '
         + 'src/claude-code-compact-prompt.ts to the new wording from this bundle.',
     ],
   );

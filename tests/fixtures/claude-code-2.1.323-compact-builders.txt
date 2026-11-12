@@ -1,0 +1,12 @@
+var Hxn="CRITICAL: Respond with TEXT ONLY",Yut="an <analysis> block followed by a <summary> block",BKr="a <summary> block";
+function Uxn(e){return`${Hxn}. Do NOT call any tools.
+
+- Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool.
+- You already have all the context you need in the conversation above.
+- Tool calls will be REJECTED and will waste your only turn \u2014 you will fail the task.
+- Your entire response must be plain text: ${e}.
+
+`}
+function Wxn(e){return`
+
+REMINDER: Do NOT call any tools. Respond with plain text only \u2014 `+`${e}. Tool calls will be rejected and you will fail the task.`}

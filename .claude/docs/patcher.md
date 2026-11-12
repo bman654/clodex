@@ -341,8 +341,14 @@ relocates the Bun section and strands its old copy; that is independent of the r
   through the probe and not through the real command. A `compact-prompt-markers` failure is not a
   broken patch site. On a complete extraction it means Claude Code changed the prompt wording and
   the text-only guard stopped matching; first confirm the bundle reader still exposes both builders,
-  then update `src/claude-code-compact-prompt.ts` from their extracted wording. Presence catches
-  removal or in-place rewording of today's strings, not a new builder that leaves both old strings.
+  then read the text they *render*. Claude Code 2.1.323 hoisted the header's opening into a constant
+  (`Hxn="CRITICAL: Respond with TEXT ONLY"`, interpolated as `${Hxn}. Do NOT call any tools.`): the
+  sent prompt was unchanged and the guard still fired, but the sentence was no longer one literal.
+  The check now follows exactly that spelling — a string constant declared first in a
+  `var`/`let`/`const` statement, holding a prefix of the marker and interpolated in front of the
+  rest, both in the same bundle module (minified names repeat across modules). Only a real rewording
+  calls for updating `src/claude-code-compact-prompt.ts` from the extracted wording. Presence catches removal or
+  in-place rewording of today's strings, not a new builder that leaves both old strings.
 
   `tests/probe-patch-sites.test.ts` pins the probe's synthetic config and its expected-site list
   against the real transform set — so a new or renamed `PATCH` site reddens `pnpm test` rather than
