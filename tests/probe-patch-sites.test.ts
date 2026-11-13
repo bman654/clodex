@@ -139,29 +139,86 @@ describe('the canary probe against Claude Code compact prompt drift', () => {
     const end = 'REMINDER: Do NOT call any tools. Respond with plain text only';
     const healthy = ['bundle prefix', start, 'summary instructions', end, 'bundle suffix'].join('\n');
 
-    expect(checkClaudeCodeCompactPromptMarkers(healthy)).toEqual({
+    expect(checkClaudeCodeCompactPromptMarkers([healthy])).toEqual({
       ok: true,
       missing: [],
       detail: 'both strict compaction prompt markers are present',
     });
-    expect(checkClaudeCodeCompactPromptMarkers(
+    expect(checkClaudeCodeCompactPromptMarkers([
       healthy.replace(start, 'REWORDED COMPACT START'),
-    )).toEqual({
+    ])).toEqual({
       ok: false,
       missing: ['start'],
       detail: 'missing strict compaction prompt marker(s): start',
     });
-    expect(checkClaudeCodeCompactPromptMarkers(
+    expect(checkClaudeCodeCompactPromptMarkers([
       healthy.replace(end, 'REWORDED COMPACT END'),
-    )).toEqual({
+    ])).toEqual({
       ok: false,
       missing: ['end'],
       detail: 'missing strict compaction prompt marker(s): end',
     });
-    expect(checkClaudeCodeCompactPromptMarkers('both prompt markers were reworded')).toEqual({
+    expect(checkClaudeCodeCompactPromptMarkers(['both prompt markers were reworded'])).toEqual({
       ok: false,
       missing: ['start', 'end'],
       detail: 'missing strict compaction prompt marker(s): start, end',
+    });
+  });
+
+  // 2.1.323 hoisted the header's opening into a constant that another prompt quotes, and the
+  // builder interpolates it. The rendered prompt is unchanged, so this is not drift; the check
+  // must follow the interpolation instead of failing every build. Source excerpts are verbatim
+  // from the 2.1.323 darwin-arm64 bundle; the other builds differ only in minified names.
+  describe('when the header opening is a shared constant', () => {
+    const constant = 'var Hxn="CRITICAL: Respond with TEXT ONLY",Yut="an <analysis> block followed by a <summary> block";';
+    const builder = 'function Uxn(e){return`${Hxn}. Do NOT call any tools.\\n\\n- Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool.\\n`}';
+    const reminder = 'function Wxn(e){return`\\n\\nREMINDER: Do NOT call any tools. Respond with plain text only \\\\u2014 `+`${e}.`}';
+    /** One bundle module holding every part. */
+    const bundle = (...parts: string[]) => [['module prefix', ...parts, 'module suffix'].join('\n')];
+
+    it('accepts the constant interpolated in front of the rest of the marker', () => {
+      expect(checkClaudeCodeCompactPromptMarkers(bundle(constant, builder, reminder))).toEqual({
+        ok: true,
+        missing: [],
+        detail: 'both strict compaction prompt markers are present (start assembled from constant Hxn)',
+      });
+    });
+
+    it('still reports drift when the text after the constant was reworded', () => {
+      const reworded = builder.replace('. Do NOT call any tools.', '. Avoid tools where you can.');
+      expect(checkClaudeCodeCompactPromptMarkers(bundle(constant, reworded, reminder)).missing)
+        .toEqual(['start']);
+    });
+
+    it('does not accept an interpolation of some other constant', () => {
+      const otherName = builder.replace('${Hxn}', '${Kxn}');
+      expect(checkClaudeCodeCompactPromptMarkers(bundle(constant, otherName, reminder)).missing)
+        .toEqual(['start']);
+    });
+
+    // Minified names repeat across modules: 2.1.323 itself has an unrelated `function Hxn` in
+    // another chunk. A constant in one module says nothing about an interpolation in another.
+    it('does not accept a constant declared in a different module from the interpolation', () => {
+      expect(checkClaudeCodeCompactPromptMarkers([constant, [builder, reminder].join('\n')]).missing)
+        .toEqual(['start']);
+    });
+
+    it('does not accept a property or parameter that merely shares the name', () => {
+      for (const notDeclared of [
+        'o.Hxn="CRITICAL: Respond with TEXT ONLY";',
+        'function f(Hxn="CRITICAL: Respond with TEXT ONLY"){}',
+        'function f(a,Hxn="CRITICAL: Respond with TEXT ONLY"){}',
+        'function f(a,b,Hxn="CRITICAL: Respond with TEXT ONLY"){}',
+      ]) {
+        expect(checkClaudeCodeCompactPromptMarkers(bundle(notDeclared, builder, reminder)).missing)
+          .toEqual(['start']);
+      }
+    });
+
+    it('does not accept a constant that is not a prefix of the marker', () => {
+      const notPrefix = constant.replace('"CRITICAL: Respond with TEXT ONLY"', '"CRITICAL: Respond with BLAH ONLY"');
+      expect(checkClaudeCodeCompactPromptMarkers(bundle(notPrefix, builder, reminder)).missing)
+        .toEqual(['start']);
     });
   });
 });

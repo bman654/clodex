@@ -679,8 +679,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 18,
-      digest: '8b4d53e1e51375be6eac6d706ef5baa50da31279a53f934ae6622f6de9ea2d93',
+      version: 19,
+      digest: '3b29767874664272cbca7ffd84fa43a49b2c88dd512a0b7b526428f4fe968205',
     });
   });
 });
@@ -3923,6 +3923,151 @@ describe('patch script identity naming', () => {
       const resolve = resolverFrom(updated.content);
       expect(resolve('clodex:openai:mystery')).toBe(131_072);
       expect(resolve('sol')).toBe(272_000);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // PATCH 8a against the effort gate Claude Code 2.1.323 ships.
+  //
+  // 2.1.323 let the plain effort gate take a `{model,capabilities}` entry as well
+  // as a model id, so the gate binds the id before its denylist check. The old
+  // anchor required the denylist check to open the body and reported "anchor not
+  // found" on all eight published builds, which made `clodex patch` refuse the
+  // install. The xhigh and max gates kept the old shape in the same release.
+  // ---------------------------------------------------------------------------
+  describe('PATCH 8a against a gate that normalizes its model argument first', () => {
+    // Verbatim from the 2.1.323 darwin-arm64 bundle, up to the override lookup; the
+    // rest of the body is the fixture's usual fall-through. The other seven builds
+    // differ only in minified names.
+    const NORMALIZING_GATE = 'function db(e){let n=hge(e);if(Gqr(n))return!1;let r=Bqe(n,"effort");'
+      + 'if(r!==void 0)return r;return!1}';
+    const PLAIN_GATE = 'function OI(e){if(SNr(e))return!1;let t=Ede(e,"effort");if(t!==void 0)return t;return!1}';
+    // The normalizer, verbatim from the same bundle.
+    const NORMALIZER = 'function hge(e){return typeof e==="string"?e:e.model}';
+    const source = CLAUDE_FIXTURE.replace(PLAIN_GATE, `${NORMALIZER}\n${NORMALIZING_GATE}`);
+
+    /** The patched gate, pulled back out of the bundle and RUN against stubbed callees. */
+    function gateFrom(patched: string, denied: ReadonlySet<string> = new Set()): (model: unknown) => unknown {
+      const declaration = patched
+        .split('\n')
+        .find(line => line.startsWith('function db(') && line.includes('/*ccpatch:effort*/'));
+      expect(declaration).toBeDefined();
+      const make = new Function('hge', 'Gqr', 'Bqe', `${declaration}; return db;`) as (
+        hge: (entry: unknown) => unknown,
+        Gqr: (model: unknown) => boolean,
+        Bqe: (model: unknown, capability: string) => unknown,
+      ) => (model: unknown) => unknown;
+      // hge is 2.1.323's own normalizer; Bqe answers "native" so a fall-through is visible.
+      return make(
+        entry => (typeof entry === 'string' ? entry : (entry as { model: unknown }).model),
+        model => denied.has(String(model)),
+        () => 'native',
+      );
+    }
+
+    it('applies, and reads the model id the gate binds rather than its raw argument', () => {
+      expect(source, 'the fixture must carry the 2.1.323 gate').toContain(NORMALIZING_GATE);
+
+      const patched = applyClodexPatches(source, config);
+
+      expect(patched.results).toContainEqual({ status: 'OK', name: 'PATCH 8a: effort capability' });
+      expect(patched.content).toContain(
+        'function db(e){let n=hge(e);if(Gqr(n))return!1;/*ccpatch:effort*/',
+      );
+      const gate = gateFrom(patched.content);
+      expect(gate('sol')).toBe(true);
+      expect(gate('  SOL  ')).toBe(true);
+      // The case the raw argument gets wrong: String(entry) is "[object Object]".
+      expect(gate({ model: 'sol', capabilities: {} })).toBe(true);
+      expect(gate('clodex:openai:mystery')).toBe(false);
+      expect(gate({ model: 'sonnet' })).toBe('native');
+    });
+
+    it('still lets the native denylist refuse a model before the table is consulted', () => {
+      const gate = gateFrom(applyClodexPatches(source, config).content, new Set(['sol']));
+      expect(gate('sol')).toBe(false);
+      expect(gate({ model: 'sol' })).toBe(false);
+    });
+
+    // What pins the site once a leading statement is allowed is that the binding is made from
+    // the parameter and that the denylist check and the override lookup both read it. Each
+    // decoy below breaks exactly one of those links. Alongside the real gate it must neither be
+    // patched nor make the site ambiguous.
+    it.each([
+      {
+        link: 'the denylist check reads the binding',
+        decoy: 'function Dcy(e){let n=hge(e);if(Gqr(e))return!1;let r=Bqe(n,"effort");',
+      },
+      {
+        link: 'the override lookup reads the binding',
+        decoy: 'function Dcy(e){let n=hge(e);if(Gqr(n))return!1;let r=Bqe(e,"effort");',
+      },
+      {
+        link: 'the binding is made from the parameter',
+        decoy: 'function Dcy(e){let n=hge(x);if(Gqr(n))return!1;let r=Bqe(n,"effort");',
+      },
+    ])('does not bind a lookalike that breaks the rule that $link', ({ decoy: head }) => {
+      const decoy = `${head}if(r!==void 0)return r;return!1}`;
+      const patched = applyClodexPatches(`${source}\n${decoy}`, config);
+
+      expect(patched.results).toContainEqual({ status: 'OK', name: 'PATCH 8a: effort capability' });
+      expect(patched.content).toContain(decoy);
+      expect(patched.content.match(/\/\*ccpatch:effort\*\//g)).toHaveLength(1);
+    });
+
+    // 2.1.323 normalizes only the plain effort gate, but the xhigh and max gates share the
+    // anchor builder, so the same shape there must patch the same way.
+    it('patches an xhigh gate of the same shape through its binding', () => {
+      const plainXhigh = 'function I_e(e){if(SNr(e))return!1;let t=Ede(e,"xhigh_effort");'
+        + 'if(t!==void 0)return t;return!1}';
+      const normalizedXhigh = 'function I_e(e){let n=hge(e);if(SNr(n))return!1;let t=Ede(n,"xhigh_effort");'
+        + 'if(t!==void 0)return t;return!1}';
+      expect(source).toContain(plainXhigh);
+
+      const patched = applyClodexPatches(source.replace(plainXhigh, normalizedXhigh), config);
+
+      expect(patched.results).toContainEqual({ status: 'OK', name: 'PATCH 8b: xhigh effort capability' });
+      expect(patched.content).toMatch(
+        /function I_e\(e\)\{let n=hge\(e\);if\(SNr\(n\)\)return!1;\/\*ccpatch:xhigh-effort\*\/var _ccv=[^;]*\[String\(n\|\|""\)/,
+      );
+    });
+
+    // The same 2.1.323 module also ships the opposite helper, `cqn`, which turns an id INTO an
+    // entry. A gate bound through that would key the table on an object and never match, while
+    // the site still reported OK. It has to fail instead, so the release canary sees it.
+    it('refuses a gate whose binding comes from a helper that does not return the id', () => {
+      const entryNormalizer = source
+        .replace(NORMALIZER, 'function cqn(e){return typeof e==="string"?{model:e,canonical:at(e)}:e}')
+        .replace('let n=hge(e);', 'let n=cqn(e);');
+      expect(entryNormalizer).toContain('let n=cqn(e);');
+
+      const patched = applyClodexPatches(entryNormalizer, config);
+
+      expect(patched.results).toContainEqual({
+        status: 'FAIL',
+        name: 'PATCH 8a: effort capability',
+        extra: 'cqn is not a model-id normalizer',
+      });
+      expect(patched.content).not.toContain('/*ccpatch:effort*/');
+    });
+
+    it('keeps reading the bound id when a later run refreshes the table', () => {
+      const once = applyClodexPatches(source, config).content;
+      const updated = applyClodexPatches(once, {
+        ...config,
+        'clodex:openai:mystery': {
+          ...config['clodex:openai:mystery'],
+          effort: { levels: ['low', 'medium', 'high'], defaultLevel: 'high' },
+        },
+      });
+
+      expect(updated.results).toContainEqual({
+        status: 'OK',
+        name: 'PATCH 8a: effort capability (refresh)',
+      });
+      const gate = gateFrom(updated.content);
+      expect(gate({ model: 'clodex:openai:mystery' })).toBe(true);
+      expect(gate({ model: 'sol' })).toBe(true);
     });
   });
 

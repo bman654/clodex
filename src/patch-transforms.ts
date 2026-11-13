@@ -143,8 +143,19 @@ import {
  * read. On all 88 distinct measured bundles from 2.1.208 to 2.1.314 the output is
  * byte-identical to version 17's, and a 2.1.321 install was never patched. It is
  * bumped because the anchor and the replacement changed.
+ *
+ * 19 — PATCH 8a stopped recognising Claude Code 2.1.323 on all eight published
+ * builds, and because it is a required effort patch `clodex patch` refused the
+ * install. The plain effort gate now accepts a `{model,capabilities}` entry as
+ * well as an id, so it binds the id first (`let n=hge(e);if(Gqr(n))return!1;`),
+ * and the anchor required the denylist check to open the body. The three effort
+ * anchors now also accept that leading binding when its normalizer returns the id,
+ * and the injected lookup reads the binding, because `String(entry)` would miss
+ * the table. On all 96 distinct measured bundles from 2.1.208 to 2.1.321 the
+ * output is byte-identical to version 18's, and a 2.1.323 install was never
+ * patched. It is bumped because the anchor and the replacement changed.
  */
-export const PATCH_TRANSFORMS_VERSION = 18;
+export const PATCH_TRANSFORMS_VERSION = 19;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -826,11 +837,46 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
       return;
     }
 
+    // The lookup keys on the binding as a string, so a normalizer that returned an
+    // entry would patch "OK" and then never match. Refuse it loudly instead.
+    const normalizer = anchor.exec(js)?.[5];
+    if (normalizer !== undefined && !returnsModelId(normalizer)) {
+      log('FAIL', name, `${normalizer} is not a model-id normalizer`);
+      return;
+    }
+
     applyOnce(
       name,
       anchor,
-      (_m, head, arg, body) => head! + snippet(arg!) + body!,
+      (_m, open, param, normalizedGuard, normalizedId, _normalizer, normalizedBody, plainGuard, plainBody) =>
+        open! + (normalizedGuard ?? plainGuard!) + snippet(normalizedId ?? param!)
+        + (normalizedBody ?? plainBody!),
       { required: false },
+    );
+  }
+
+  /** Whether the bundle defines `name` as 2.1.323's "an id, or an entry's model" helper. */
+  function returnsModelId(name: string): boolean {
+    return new RegExp(
+      'function ' + reEsc(name) + '\\(([\\w$]+)\\)\\{return typeof \\1==="string"\\?\\1:\\1\\.model\\}',
+    ).test(js);
+  }
+
+  // A gate opens with the native denylist check and then the capability-override
+  // lookup, both on the model id. Claude Code 2.1.323 let the plain effort gate
+  // accept a `{model,capabilities}` entry as well as an id string, so it first
+  // binds the id (`let n=hge(e);`) and runs both checks on that binding. The
+  // lookup has to read the binding too: `String(entry)` is "[object Object]",
+  // which would miss the table and fall through without anything reporting it.
+  // Requiring the denylist check and the override lookup to share the binding is
+  // what keeps this from matching a function that merely starts with a call, and
+  // the binding's normalizer (group 5) is checked by content before patching.
+  function effortCapabilityAnchor(capability: string): RegExp {
+    const lookup = (id: string) => `let [\\w$]+=[\\w$]+\\(${id},"${capability}"\\);`;
+    return new RegExp(
+      '(function [\\w$]+\\(([\\w$]+)\\)\\{)(?:'
+      + '(let ([\\w$]+)=([\\w$]+)\\(\\2\\);if\\([\\w$]+\\(\\4\\)\\)return!1;)(' + lookup('\\4') + ')'
+      + '|(if\\([\\w$]+\\(\\2\\)\\)return!1;)(' + lookup('\\2') + '))',
     );
   }
 
@@ -838,19 +884,19 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
     'effort',
     '/*ccpatch:effort*/',
     'PATCH 8a: effort capability',
-    /(function [\w$]+\(([\w$]+)\)\{if\([\w$]+\(\2\)\)return!1;)(let [\w$]+=[\w$]+\(\2,"effort"\);)/,
+    effortCapabilityAnchor('effort'),
   );
   patchEffortCapability(
     'xhigh_effort',
     '/*ccpatch:xhigh-effort*/',
     'PATCH 8b: xhigh effort capability',
-    /(function [\w$]+\(([\w$]+)\)\{if\([\w$]+\(\2\)\)return!1;)(let [\w$]+=[\w$]+\(\2,"xhigh_effort"\);)/,
+    effortCapabilityAnchor('xhigh_effort'),
   );
   patchEffortCapability(
     'max_effort',
     '/*ccpatch:max-effort*/',
     'PATCH 8c: max effort capability',
-    /(function [\w$]+\(([\w$]+)\)\{if\([\w$]+\(\2\)\)return!1;)(let [\w$]+=[\w$]+\(\2,"max_effort"\);)/,
+    effortCapabilityAnchor('max_effort'),
   );
 
   // ---------------------------------------------------------------------------
