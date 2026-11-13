@@ -154,8 +154,23 @@ import {
  * the table. On all 96 distinct measured bundles from 2.1.208 to 2.1.321 the
  * output is byte-identical to version 18's, and a 2.1.323 install was never
  * patched. It is bumped because the anchor and the replacement changed.
+ *
+ * 20 — PATCH 7 stopped recognising Claude Code 2.1.325 on all eight published
+ * builds, and because it is required `clodex patch` refused the install. The
+ * context-window resolver was split: the inner function now reads the env
+ * override itself, and the function every consumer calls became a
+ * three-parameter wrapper whose defaulted options object feeds the
+ * long-context-credits clamp. The anchor now also accepts that wrapper and
+ * injects at its top, which keeps the lookup ahead of both the env override and
+ * the clamp, as before. The clamp's second application, which used to re-run the
+ * unpatched inner resolver, now reads the window stored in the model-facts
+ * record, and both the compaction window and the hard blocking limit go through
+ * it; beside the wrapper, PATCH 7 now also exempts table models there. On all 104 distinct measured
+ * bundles from 2.1.208 to 2.1.323 the output is byte-identical to version 19's,
+ * and a 2.1.325 install was never patched. It is bumped because the anchor and
+ * the replacement changed.
  */
-export const PATCH_TRANSFORMS_VERSION = 19;
+export const PATCH_TRANSFORMS_VERSION = 20;
 
 export interface PatchScriptModelEntry {
   alias?: string;
@@ -758,18 +773,68 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
   //
   // The injected lookup reads the model string out of the FIRST parameter, so
   // the snippet has to be built around whatever this build named it.
+  //
+  // Claude Code 2.1.325 split that resolver in two. The inner function now reads
+  // the env override itself and takes a third argument, and the outer one — the
+  // function every consumer calls — takes an options object with a default and
+  // applies the long-context-credits clamp to the inner one's result:
+  //   function Bg(e,n,r={context1mBeta:oat(e),longContextCredits:XDe()}){
+  //     let s=T1(e,n,r.context1mBeta);return qYs(s,r.longContextCredits)?cD:s}
+  // The lookup goes at the top of that OUTER function, which is the old
+  // resolver's place in the call graph: ahead of the env override and ahead of
+  // the clamp, which a lookup in the inner function would land behind. The two
+  // option keys are object properties, not minified names, and the body must
+  // thread all three parameters and the bound result unchanged.
   // ---------------------------------------------------------------------------
   if (Object.keys(CONTEXT_BY_KEY).length) {
     const MARKER = '/*ccpatch:ctx*/';
+    const table = JSON.stringify(CONTEXT_BY_KEY);
     const snippetFor = (modelParam: string) =>
-      MARKER + 'var _ccw=(' + JSON.stringify(CONTEXT_BY_KEY) + ')[String(' + modelParam + '||"").trim().toLowerCase()];if(_ccw!==void 0)return _ccw;';
+      MARKER + 'var _ccw=(' + table + ')[String(' + modelParam + '||"").trim().toLowerCase()];if(_ccw!==void 0)return _ccw;';
+
+    // Claude Code applies the long-context-credits clamp a second time. Through
+    // 2.1.323 that check re-ran the unpatched inner resolver; from 2.1.325 it
+    // reads the window stored in a model-facts record — the table's window, once
+    // patched — through one adapter:
+    //   function SFt(e){return qYs(pTn(e))}
+    // where pTn picks `e.modelContextWindow` or `…WithoutContext1m` off the
+    // record and qYs is the clamp the wrapper calls. The compaction threshold and
+    // the hard blocking limit both read the window through it, so once Anthropic
+    // has refused a 1M-context request for credits, a table window over 200,000
+    // would compact and block as if it were 200,000. The adapter is told that a
+    // table model is never clamped. It exists only beside the 2.1.325 wrapper, so
+    // it is patched only when the wrapper is, and is then required.
+    const CREDITS_MARKER = '/*ccpatch:ctx-credits*/';
+    const creditsSnippetFor = (factsParam: string) =>
+      CREDITS_MARKER + 'if((' + table + ')[String(' + factsParam + '.model||"").trim().toLowerCase()]!==void 0)return!1;';
+    const creditsRefresh = /\/\*ccpatch:ctx-credits\*\/if\(\(\{[^{}]*\}\)\[String\(([\w$]+)\.model\|\|""\)\.trim\(\)\.toLowerCase\(\)\]!==void 0\)return!1;/g;
+    const creditsAdapterFor = (clamp: string): RegExp | string => {
+      const selectors = [...js.matchAll(
+        /function ([\w$]+)\(([\w$]+)\)\{return [\w$]+\(\2\.model\)\?\2\.modelContextWindowWithoutContext1m:\2\.modelContextWindow\}/g,
+      )];
+      if (selectors.length !== 1) return 'facts window selector matched ' + selectors.length + ' times (expected 1)';
+      const adapter = new RegExp(
+        '(function [\\w$]+\\(([\\w$]+)\\)\\{)(return ' + reEsc(clamp) + '\\(' + reEsc(selectors[0]![1]!) + '\\(\\2\\)\\)\\})',
+        'g',
+      );
+      const count = (js.match(adapter) ?? []).length;
+      return count === 1 ? adapter : 'credits clamp adapter matched ' + count + ' times (expected 1)';
+    };
 
     if (js.includes(MARKER)) {
       // Re-patching an already-patched binary: refresh the baked table in place
       // so a MODEL_CONFIG edit takes effect without a restore first. The name in
       // the snippet already there is the one this binary's resolver declares —
       // reusing it is what keeps a refresh from rewriting `n` back to `e` and
-      // leaving a lookup on an identifier that is not in scope.
+      // leaving a lookup on an identifier that is not in scope. The adapter's
+      // copy of the table is refreshed with it; a binary patched before the
+      // resolver split carries none.
+      const credits = (js.match(creditsRefresh) ?? []).length;
+      if (credits > 1) {
+        log('FAIL', 'PATCH 7: per-model context window (refresh)', 'credits clamp exemption found ' + credits + ' times (expected 0 or 1)');
+        fail('clodex patch: ambiguous anchor: PATCH 7: per-model context window (refresh)');
+      }
+      js = js.replace(creditsRefresh, (_m, factsParam: string) => creditsSnippetFor(factsParam));
       applyOnce(
         'PATCH 7: per-model context window (refresh)',
         /\/\*ccpatch:ctx\*\/var _ccw=\(\{[^{}]*\}\)\[String\(([\w$]+)\|\|""\)\.trim\(\)\.toLowerCase\(\)\];if\(_ccw!==void 0\)return _ccw;/,
@@ -777,12 +842,31 @@ export function applyClodexPatches(source: string, config: PatchScriptModelConfi
         { required: true, noopIsSkip: true }
       );
     } else {
+      // One regex, two alternatives, so applyOnce's exactly-one count spans both
+      // shapes: groups 1-4 are the pre-2.1.325 resolver, 5-11 the 2.1.325 wrapper.
+      const resolver = /(function [\w$]+\(([\w$]+),([\w$]+)\)\{)(let [\w$]+=[\w$]+\(\);if\([\w$]+!==void 0\)return [\w$]+;if\([\w$]+\(\2,\3\)\)return [\w$]+;return [\w$]+\(\2,\3\)\})|(function [\w$]+\(([\w$]+),([\w$]+),([\w$]+)=\{context1mBeta:[^{}]*,longContextCredits:[^{}]*\}\)\{)(let ([\w$]+)=[\w$]+\(\6,\7,\8\.context1mBeta\);return ([\w$]+)\(\10,\8\.longContextCredits\)\?[\w$]+:\10\})/g;
+      // Settle the adapter first, so a split resolver without one is reported as a
+      // PATCH 7 failure rather than a PATCH 7 success followed by a second entry.
+      const shapes = [...js.matchAll(resolver)];
+      const clamp = shapes.length === 1 ? shapes[0]![11] : undefined;
+      const adapter = clamp === undefined ? undefined : creditsAdapterFor(clamp);
+      if (typeof adapter === 'string') {
+        log('FAIL', 'PATCH 7: per-model context window', adapter);
+        fail('clodex patch: required patch failed: PATCH 7: per-model context window');
+      }
       applyOnce(
         'PATCH 7: per-model context window',
-        /(function [\w$]+\(([\w$]+),([\w$]+)\)\{)(let [\w$]+=[\w$]+\(\);if\([\w$]+!==void 0\)return [\w$]+;if\([\w$]+\(\2,\3\)\)return [\w$]+;return [\w$]+\(\2,\3\)\})/,
-        (_m, head, modelParam, _windowParam, body) => head! + snippetFor(modelParam!) + body!,
+        resolver,
+        (_m, head, modelParam, _windowParam, body, wrapperHead, wrapperModel, _wrapperBetas, _wrapperOpts, wrapperBody) =>
+          head !== undefined
+            ? head + snippetFor(modelParam!) + body!
+            : wrapperHead! + snippetFor(wrapperModel!) + wrapperBody!,
         { required: true }
       );
+      if (adapter instanceof RegExp) {
+        js = js.replace(adapter, (_m, head: string, factsParam: string, body: string) =>
+          head + creditsSnippetFor(factsParam) + body);
+      }
     }
   }
 

@@ -164,6 +164,14 @@ export function captureBuiltInPatchProofs(
     'PATCH 7: per-model context window',
     /\/\*ccpatch:ctx\*\/var _ccw=\(\{[^{}]*\}\)\[[^\]]*\];if\(_ccw!==void 0\)return _ccw;/,
   );
+  // PATCH 7 writes this second snippet only on a bundle whose resolver is split (2.1.325+).
+  if (protectsResult(results, 'PATCH 7: per-model context window') && source.includes('/*ccpatch:ctx-credits*/')) {
+    proofs.push(capturePattern(
+      source,
+      'PATCH 7: per-model context window (credits clamp)',
+      /\/\*ccpatch:ctx-credits\*\/if\(\(\{[^{}]*\}\)\[[^\]]*\]!==void 0\)return!1;/,
+    ));
+  }
   addPattern(
     'PATCH 8a: effort capability',
     effortProofPattern('/*ccpatch:effort*/'),

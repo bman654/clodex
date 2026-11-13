@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { readBunModuleTable, tweakccRecognizesModuleName } from '../src/bun-module-table.js';
 import { BUNDLE_MODULE_SEPARATOR } from '../src/bun-bundle.js';
 import {
@@ -679,8 +679,8 @@ describe('PATCH_TRANSFORMS_VERSION', () => {
       .join('\n');
     const digest = createHash('sha256').update(source).digest('hex');
     expect({ version: PATCH_TRANSFORMS_VERSION, digest }).toEqual({
-      version: 19,
-      digest: '3b29767874664272cbca7ffd84fa43a49b2c88dd512a0b7b526428f4fe968205',
+      version: 20,
+      digest: '6419bf1d7b5833afab36a68f9d48b4eb2fd563edfd5577c02ebf2ea0a325acf4',
     });
   });
 });
@@ -3923,6 +3923,336 @@ describe('patch script identity naming', () => {
       const resolve = resolverFrom(updated.content);
       expect(resolve('clodex:openai:mystery')).toBe(131_072);
       expect(resolve('sol')).toBe(272_000);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // PATCH 7 against the resolver split Claude Code 2.1.325 ships.
+  //
+  // 2.1.325 moved the env override into the inner resolver and left the function
+  // every consumer calls as a three-parameter wrapper whose defaulted options
+  // object feeds the long-context-credits clamp. The two-parameter anchor matched
+  // nothing and `clodex patch` refused all eight published builds.
+  // ---------------------------------------------------------------------------
+  describe('PATCH 7 against a resolver split into a wrapper and an inner function', () => {
+    // Verbatim from the 2.1.325 darwin-arm64 bundle. The inner function is cut
+    // down to its env-override head and a native-window fall-through; the other
+    // seven builds differ only in minified names.
+    const WRAPPER = 'function Bg(e,n,r={context1mBeta:oat(e),longContextCredits:XDe()}){'
+      + 'let s=T1(e,n,r.context1mBeta);return qYs(s,r.longContextCredits)?cD:s}';
+    const INNER = 'function T1(e,n,r){let s=IC();if(s!==void 0)return s;return xC(e,r)}';
+    // The model-facts adapter that applies the same clamp to a stored window, with the
+    // selector it reads through and the one consumer between them. Verbatim from the
+    // same bundle, where the three are adjacent.
+    const ADAPTER = 'function pTn(e){return oat(e.model)?e.modelContextWindowWithoutContext1m:e.modelContextWindow}'
+      + 'function Cj(e){return SFt(e)?cD:pTn(e)}function SFt(e){return qYs(pTn(e))}';
+    const source = CLAUDE_FIXTURE.replace(CONTEXT_RESOLVER, `${WRAPPER}\n${INNER}\n${ADAPTER}`);
+    // Every test below reuses `source`; without this, a fixture edit that stopped the
+    // substitution from landing would leave them testing the old resolver shape.
+    beforeAll(() => {
+      expect(source, 'the fixture must carry the 2.1.325 resolver').toContain(WRAPPER);
+      expect(source).not.toContain(CONTEXT_RESOLVER);
+    });
+
+    /** The patched wrapper, pulled back out of the bundle and RUN against stubbed callees. */
+    function wrapperFrom(patched: string, inner: (...a: unknown[]) => number) {
+      const declaration = patched
+        .split('\n')
+        .find(line => line.startsWith('function Bg(') && line.includes('/*ccpatch:ctx*/'));
+      expect(declaration).toBeDefined();
+      const make = new Function('oat', 'XDe', 'T1', 'qYs', 'cD', `${declaration}; return Bg;`) as (
+        oat: () => boolean,
+        XDe: () => boolean,
+        T1: (...a: unknown[]) => number,
+        qYs: (window: number, blocked: boolean) => boolean,
+        cD: number,
+      ) => (model: unknown, betas?: unknown, opts?: unknown) => unknown;
+      // Credits blocked, and 2.1.325's clamp: anything over 200k comes back as 200k.
+      return make(() => false, () => true, inner, (w, blocked) => blocked && w > 200_000, 200_000);
+    }
+
+    it('applies at the wrapper, ahead of the env override and the credits clamp', () => {
+      const patched = applyClodexPatches(source, config);
+
+      expect(patched.results).toContainEqual({ status: 'OK', name: 'PATCH 7: per-model context window' });
+      expect(patched.content).toContain(
+        'function Bg(e,n,r={context1mBeta:oat(e),longContextCredits:XDe()}){/*ccpatch:ctx*/',
+      );
+      expect(patched.content).toContain(INNER);
+      const calls: unknown[][] = [];
+      const resolve = wrapperFrom(patched.content, (...a) => { calls.push(a); return 400_000; });
+      // A baked window wins even though the clamp would have cut it to 200k.
+      expect(resolve('sol', [])).toBe(272_000);
+      expect(resolve('  SOL  ', [])).toBe(272_000);
+      expect(resolve('clodex:openai:mystery', [])).toBe(128_000);
+      expect(calls).toHaveLength(0);
+      // An unbaked model is Claude Code's business, clamp included.
+      expect(resolve('claude-sonnet-4-6', [])).toBe(200_000);
+      expect(resolve('claude-sonnet-4-6', [], { context1mBeta: false, longContextCredits: false })).toBe(400_000);
+      expect(calls).toEqual([
+        ['claude-sonnet-4-6', [], false],
+        ['claude-sonnet-4-6', [], false],
+      ]);
+    });
+
+    it('reads the model from whatever this build named the first parameter', () => {
+      const renamed = source.replace(
+        WRAPPER,
+        'function Hg(a,i,o={context1mBeta:Vit(a),longContextCredits:VDe()}){'
+          + 'let u=N1(a,i,o.context1mBeta);return h7s(u,o.longContextCredits)?lD:u}',
+      ).replace('function SFt(e){return qYs(pTn(e))}', 'function uUt(a){return h7s(pTn(a))}');
+      const once = applyClodexPatches(renamed, config).content;
+      expect(once).toContain('{/*ccpatch:ctx*/var _ccw=');
+      expect(once).toContain('[String(a||"").trim().toLowerCase()]');
+      expect(once).toContain('function uUt(a){/*ccpatch:ctx-credits*/');
+      expect(once).toContain('[String(a.model||"").trim().toLowerCase()]');
+
+      const updated = applyClodexPatches(once, {
+        ...config,
+        'clodex:openai:mystery': { context: 131_072, display: 'Mystery (OpenAI)' },
+      });
+      expect(updated.results).toContainEqual({
+        status: 'OK',
+        name: 'PATCH 7: per-model context window (refresh)',
+      });
+      expect(updated.content.match(/\/\*ccpatch:ctx\*\//g)).toHaveLength(1);
+      expect(updated.content).toContain('[String(a||"").trim().toLowerCase()]');
+      expect(updated.content).toContain('"clodex:openai:mystery":131072');
+      expect(updated.content).toContain('function uUt(a){/*ccpatch:ctx-credits*/');
+      expect(updated.content).toContain('[String(a.model||"").trim().toLowerCase()]');
+      expect(updated.content).not.toContain('String(e.model');
+    });
+
+    // What pins the wrapper is that all three parameters reach the inner call
+    // unchanged, the clamp reads the bound result and the options object, the
+    // unclamped branch returns the bound result, and the two option keys are the
+    // ones Claude Code spells. Each decoy breaks exactly one of those links; beside
+    // the real wrapper it must neither be patched nor make the site ambiguous.
+    it.each([
+      {
+        link: 'the model reaches the inner call',
+        decoy: 'function Dcy(e,n,r={context1mBeta:oat(e),longContextCredits:XDe()}){'
+          + 'let s=T1(n,n,r.context1mBeta);return qYs(s,r.longContextCredits)?cD:s}',
+      },
+      {
+        link: 'the betas reach the inner call',
+        decoy: 'function Dcy(e,n,r={context1mBeta:oat(e),longContextCredits:XDe()}){'
+          + 'let s=T1(e,e,r.context1mBeta);return qYs(s,r.longContextCredits)?cD:s}',
+      },
+      {
+        link: 'the options object feeds the inner call',
+        decoy: 'function Dcy(e,n,r={context1mBeta:oat(e),longContextCredits:XDe()}){'
+          + 'let s=T1(e,n,q.context1mBeta);return qYs(s,r.longContextCredits)?cD:s}',
+      },
+      {
+        link: 'the clamp reads the bound result',
+        decoy: 'function Dcy(e,n,r={context1mBeta:oat(e),longContextCredits:XDe()}){'
+          + 'let s=T1(e,n,r.context1mBeta);return qYs(t,r.longContextCredits)?cD:s}',
+      },
+      {
+        link: 'the clamp reads the options object',
+        decoy: 'function Dcy(e,n,r={context1mBeta:oat(e),longContextCredits:XDe()}){'
+          + 'let s=T1(e,n,r.context1mBeta);return qYs(s,q.longContextCredits)?cD:s}',
+      },
+      {
+        link: 'the unclamped branch returns the bound result',
+        decoy: 'function Dcy(e,n,r={context1mBeta:oat(e),longContextCredits:XDe()}){'
+          + 'let s=T1(e,n,r.context1mBeta);return qYs(s,r.longContextCredits)?cD:t}',
+      },
+      {
+        link: 'the default names context1mBeta',
+        decoy: 'function Dcy(e,n,r={context2mBeta:oat(e),longContextCredits:XDe()}){'
+          + 'let s=T1(e,n,r.context1mBeta);return qYs(s,r.longContextCredits)?cD:s}',
+      },
+      {
+        link: 'the default names longContextCredits',
+        decoy: 'function Dcy(e,n,r={context1mBeta:oat(e),shortContextCredits:XDe()}){'
+          + 'let s=T1(e,n,r.context1mBeta);return qYs(s,r.longContextCredits)?cD:s}',
+      },
+      {
+        link: 'the inner call reads context1mBeta',
+        decoy: 'function Dcy(e,n,r={context1mBeta:oat(e),longContextCredits:XDe()}){'
+          + 'let s=T1(e,n,r.context2mBeta);return qYs(s,r.longContextCredits)?cD:s}',
+      },
+      {
+        link: 'the clamp reads longContextCredits',
+        decoy: 'function Dcy(e,n,r={context1mBeta:oat(e),longContextCredits:XDe()}){'
+          + 'let s=T1(e,n,r.context1mBeta);return qYs(s,r.shortContextCredits)?cD:s}',
+      },
+    ])('does not bind a lookalike in which $link fails', ({ decoy }) => {
+      const patched = applyClodexPatches(`${source}\n${decoy}`, config);
+
+      expect(patched.results).toContainEqual({ status: 'OK', name: 'PATCH 7: per-model context window' });
+      expect(patched.content).toContain(decoy);
+      expect(patched.content.match(/\/\*ccpatch:ctx\*\//g)).toHaveLength(1);
+    });
+
+    /** The patched adapter and its consumer, RUN with the 2.1.325 clamp and selector. */
+    function adapterFrom(patched: string) {
+      const line = patched.split('\n').find(l => l.includes('function SFt(e){/*ccpatch:ctx-credits*/'));
+      expect(line).toBeDefined();
+      const make = new Function('oat', 'qYs', 'cD', `${line}; return { Cj, SFt };`) as (
+        oat: (model: unknown) => boolean,
+        qYs: (window: number) => boolean,
+        cD: number,
+      ) => { Cj: (facts: unknown) => number; SFt: (facts: unknown) => boolean };
+      // Credits blocked: the clamp fires for anything over 200k.
+      return make(() => false, w => w > 200_000, 200_000);
+    }
+
+    const facts = (model: string, window: number) => ({
+      model,
+      modelContextWindow: window,
+      modelContextWindowWithoutContext1m: window,
+    });
+
+    it('exempts a table model from the clamp applied to its stored window', () => {
+      const patched = applyClodexPatches(source, config);
+
+      expect(patched.content).toContain('function SFt(e){/*ccpatch:ctx-credits*/');
+      expect(patched.content.match(/\/\*ccpatch:ctx-credits\*\//g)).toHaveLength(1);
+      const { Cj, SFt } = adapterFrom(patched.content);
+      expect(SFt(facts('sol', 272_000))).toBe(false);
+      expect(Cj(facts('sol', 272_000))).toBe(272_000);
+      expect(Cj(facts('  SOL  ', 272_000))).toBe(272_000);
+      expect(Cj(facts('clodex:openai:mystery', 1_000_000))).toBe(1_000_000);
+      // Anything else is still Claude Code's to clamp.
+      expect(SFt(facts('claude-opus-4-7', 1_000_000))).toBe(true);
+      expect(Cj(facts('claude-opus-4-7', 1_000_000))).toBe(200_000);
+      expect(Cj(facts('claude-sonnet-4-6', 180_000))).toBe(180_000);
+    });
+
+    it('refreshes the adapter\'s copy of the table with the resolver\'s', () => {
+      const once = applyClodexPatches(source, config).content;
+      const updated = applyClodexPatches(once, {
+        ...config,
+        'clodex:openai:mystery': { context: 131_072, display: 'Mystery (OpenAI)' },
+      });
+
+      expect(updated.results).toContainEqual({ status: 'OK', name: 'PATCH 7: per-model context window (refresh)' });
+      expect(updated.content.match(/\/\*ccpatch:ctx-credits\*\//g)).toHaveLength(1);
+      const tables = [...updated.content.matchAll(/\/\*ccpatch:ctx(?:-credits)?\*\/(?:var _ccw=\(|if\(\()(\{[^{}]*\})\)/g)]
+        .map(m => JSON.parse(m[1]!) as Record<string, number>);
+      expect(tables).toHaveLength(2);
+      for (const t of tables) expect(t['clodex:openai:mystery']).toBe(131_072);
+
+      const unchanged = applyClodexPatches(updated.content, {
+        ...config,
+        'clodex:openai:mystery': { context: 131_072, display: 'Mystery (OpenAI)' },
+      });
+      expect(unchanged.results).toContainEqual({
+        status: 'SKIP',
+        name: 'PATCH 7: per-model context window (refresh)',
+        extra: 'already patched',
+      });
+      expect(unchanged.content).toBe(updated.content);
+    });
+
+    it('refuses to refresh a bundle that carries the adapter exemption twice', () => {
+      const once = applyClodexPatches(source, config).content;
+      const snippet = /\/\*ccpatch:ctx-credits\*\/[^;]*;/.exec(once)![0];
+      const doubled = once.replace(snippet, snippet + snippet);
+
+      expect(() => applyClodexPatches(doubled, config)).toThrow(
+        'clodex patch: ambiguous anchor: PATCH 7: per-model context window (refresh)',
+      );
+    });
+
+    it('protects the adapter exemption from local patches', () => {
+      const patched = applyClodexPatches(source, config);
+      const proofs = captureBuiltInPatchProofs(patched.content, config, patched.results);
+      const credits = proofs.filter(p => p.name === 'PATCH 7: per-model context window (credits clamp)');
+
+      expect(credits).toHaveLength(1);
+      expect(credits[0]!.protectedText).toMatch(/^\/\*ccpatch:ctx-credits\*\/if\(\(\{"sol":272000/);
+      expect(builtInPatchProofsChanged(patched.content, proofs)).toBe(false);
+      const stripped = patched.content.replace(/\/\*ccpatch:ctx-credits\*\/[^;]*;/, '');
+      expect(stripped).not.toBe(patched.content);
+      expect(builtInPatchProofsChanged(stripped, proofs)).toBe(true);
+      // An old-shape bundle carries no exemption and no proof of one.
+      const old = applyClodexPatches(CLAUDE_FIXTURE, config);
+      expect(captureBuiltInPatchProofs(old.content, config, old.results).map(p => p.name))
+        .not.toContain('PATCH 7: per-model context window (credits clamp)');
+    });
+
+    it('refuses a split resolver without its adapter rather than patch half of it', () => {
+      const bare = source.replace(ADAPTER, '');
+      expect(bare).not.toContain('function SFt(');
+
+      expect(() => applyClodexPatches(bare, config)).toThrow(
+        'clodex patch: required patch failed: PATCH 7: per-model context window',
+      );
+    });
+
+    it.each([
+      {
+        what: 'a second adapter',
+        extra: 'function Dcy(e){return qYs(pTn(e))}',
+      },
+      {
+        what: 'a second selector',
+        extra: 'function Sel(e){return oat(e.model)?e.modelContextWindowWithoutContext1m:e.modelContextWindow}',
+      },
+    ])('refuses $what rather than guess which one feeds the clamp', ({ extra }) => {
+      expect(() => applyClodexPatches(`${source}\n${extra}`, config)).toThrow(
+        'clodex patch: required patch failed: PATCH 7: per-model context window',
+      );
+    });
+
+    it.each([
+      { link: 'selector reads .model', from: 'oat(e.model)', to: 'oat(e.mode)' },
+      { link: 'selector .model is its param', from: 'oat(e.model)', to: 'oat(n.model)' },
+      {
+        link: 'selector reads ...WithoutContext1m',
+        from: '?e.modelContextWindowWithoutContext1m:',
+        to: '?e.modelContextWindowWithout1m:',
+      },
+      {
+        link: 'selector 1st window is its param',
+        from: '?e.modelContextWindowWithoutContext1m:',
+        to: '?n.modelContextWindowWithoutContext1m:',
+      },
+      { link: 'selector reads modelContextWindow', from: ':e.modelContextWindow}', to: ':e.contextWindow}' },
+      {
+        link: 'selector 2nd window is its param',
+        from: ':e.modelContextWindow}',
+        to: ':n.modelContextWindow}',
+      },
+    ])('binds no adapter unless $link', ({ from, to }) => {
+      const selector = 'function pTn(e){return oat(e.model)?e.modelContextWindowWithoutContext1m:e.modelContextWindow}';
+      const altered = source.replace(selector, selector.replace(from, to));
+      expect(altered).not.toContain(selector);
+
+      expect(() => applyClodexPatches(altered, config)).toThrow(
+        'clodex patch: required patch failed: PATCH 7: per-model context window',
+      );
+    });
+
+    it.each([
+      { link: 'it calls the wrapper\'s clamp', decoy: 'function SFt(e){return qZs(pTn(e))}' },
+      { link: 'it passes its own parameter', decoy: 'function SFt(e){return qYs(pTn(n))}' },
+      { link: 'it reads through the selector', decoy: 'function SFt(e){return qYs(pTm(e))}' },
+    ])('binds no adapter unless $link', ({ decoy }) => {
+      const altered = source.replace('function SFt(e){return qYs(pTn(e))}', decoy);
+      expect(altered).toContain(decoy);
+
+      expect(() => applyClodexPatches(altered, config)).toThrow(
+        'clodex patch: required patch failed: PATCH 7: per-model context window',
+      );
+    });
+
+    it('writes no adapter exemption on a bundle whose resolver is not split', () => {
+      const patched = applyClodexPatches(`${CLAUDE_FIXTURE}\n${ADAPTER}`, config);
+
+      expect(patched.results).toContainEqual({ status: 'OK', name: 'PATCH 7: per-model context window' });
+      expect(patched.content).not.toContain('/*ccpatch:ctx-credits*/');
+      expect(patched.content).toContain(ADAPTER);
+    });
+
+    it('refuses a bundle that carries both resolver shapes rather than guess', () => {
+      expect(() => applyClodexPatches(`${source}\n${CONTEXT_RESOLVER}`, config)).toThrow(
+        'clodex patch: ambiguous anchor: PATCH 7: per-model context window',
+      );
     });
   });
 

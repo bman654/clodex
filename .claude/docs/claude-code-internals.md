@@ -277,6 +277,66 @@ The models-list fetch validates only `{id, display_name, description}`. The serv
 lookup is unreachable anyway: it is gated on the Anthropic base URL being `api.anthropic.com`, and
 `src/env.ts` points the child at `127.0.0.1`.
 
+### The resolver split in two (verified 2.1.325, all eight builds)
+
+Through 2.1.323 the window came from one two-parameter function (`rg(e,n)` in 2.1.321): env
+override, then the long-context-credits clamp, then an inner resolver. 2.1.325 split it
+(darwin-arm64 names):
+
+```js
+function Bg(e,n,r={context1mBeta:oat(e),longContextCredits:XDe()}){
+  let s=T1(e,n,r.context1mBeta);return qYs(s,r.longContextCredits)?cD:s}
+function qYs(e,n=XDe()){return n&&IC()===void 0&&e>cD}   // the clamp, now on a NUMBER
+function T1(e,n,r){let s=IC();if(s!==void 0)return s; …}  // env override moved in here
+```
+
+Every consumer calls `Bg` (29 calls per build; other modules import it). `T1` is not exported and
+its only reference in its module besides its declaration is `Bg`'s call. PATCH 7 injects at the top
+of `Bg`, which keeps the lookup ahead of the env override and the clamp, as it was in `rg`. A lookup
+in `T1` would land behind the clamp.
+
+**The clamp has a second application, on the stored window.** The model-facts record (`kl()`)
+stores `Bg(…,{longContextCredits:!1})`, unclamped, and is then read through one adapter in another
+module, which imports the clamp from `Bg`'s module under the same name:
+
+```js
+function pTn(e){return oat(e.model)?e.modelContextWindowWithoutContext1m:e.modelContextWindow}
+function Cj(e){return SFt(e)?cD:pTn(e)}
+function SFt(e){return qYs(pTn(e))}
+```
+
+`Cj` feeds both the auto-compact window (`YS`/`$Es`, before any env or settings window override)
+and the hard blocking limit (`u_t` → `X8` → `Clt`, blocked at `Cj − min(maxOutputTokens, 20,000) −
+3,000`). Unpatched, a latched session therefore compacts at 167,000 and stops with "Prompt is too
+long" at 177,000 for any window over 200,000, a 1M one included. PATCH 7 also exempts every table
+model in `SFt` (`/*ccpatch:ctx-credits*/`), so on a patched 2.1.325 neither application of this
+clamp reaches a clodex model. The custom statusline JSON calls `Bg` with the default options, so it
+is clamped for unbaked models and, through the lookup, not for table models. A separate 200,000
+threshold applies to a first-party Claude.ai subscriber with extra usage disabled, which proxy mode
+can be (the "context room" check, `zd`); it predates
+2.1.325, PATCH 7 does not touch it, and its effect on a clodex model has not been examined.
+
+How the clodex window fared under that clamp before 2.1.325, by release:
+
+- **2.1.321:** the clamp check (`wSt`) re-ran the *unpatched* inner resolver, which answers 200,000
+  for a clodex id in default proxy mode (no served-catalog or baked entry, no
+  `CLAUDE_CODE_MAX_CONTEXT_TOKENS`: `oT` falls through to `SSt=200000`), so it never fired.
+- **2.1.323:** the inner resolver's unknown-model fallback became 1M (`return!PM()&&KC(e)?Uz:bvt`,
+  `Uz=1e6`), so the check fired for a clodex id once latched, and the default compaction window of
+  a table model under 1M was capped at 200,000. An explicit window override returned before the
+  check, and the hard limit (`Emt`) still read the unclamped `facts.contextWindow`. That release is
+  not covered by any patch.
+
+**The latch** (`XDe()`, `accountCreditLatches.longContext1mCreditsBlocked`) is set by exactly one
+caller: an HTTP 429 `APIError` whose message contains `Extra usage is required for long context` or
+`Usage credits are required for long context`, under Claude.ai OAuth or gateway auth. A 429 that an
+earlier branch already handles as a unified rate limit returns before the setter. The setter does
+not check the request's model, so an Anthropic `[1m]` request in proxy mode is the natural trigger.
+It lives on the in-memory host: it survives `/clear` and in-process resume, the class has a
+`reset()` with no caller, and a new process starts unset. Endpoint mode's launch auth (an API
+key, no Claude.ai OAuth or gateway token) does not satisfy the auth precondition, so by reading the
+gate it is not set there; that was not observed on a live session.
+
 ## The shared child-environment builder (verified 2.1.221, re-verified 2.1.239, 2.1.260, 2.1.290, 2.1.304 and 2.1.321)
 
 The shared child-env builder — `pH()` in 2.1.221, with 14 call sites there and 16 in every 2.1.239
