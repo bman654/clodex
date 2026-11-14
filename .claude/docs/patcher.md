@@ -624,8 +624,16 @@ relocates the Bun section and strands its old copy; that is independent of the r
   `moreAliases` array appended to its tuple as a seventh element only when the entry has one — so a
   config with one alias per model keeps its earlier hash, while giving a model a second alias
   changes the hash and marks the patch stale. The versioned local-module content identity is
-  appended only while local patches are enabled; disabled users retain the exact historical hash
-  shape. The manifest at `~/.clodex/patch-state.json` (binary path, claude version, config hash,
+  appended only while local patches are enabled, together with `BUILT_IN_PATCH_PROOFS_VERSION`
+  (`built-in-patch-proofs.ts`) — the proofs decide whether local patches publish, so a proof fix
+  must re-patch installs with local patches enabled; disabled users retain the exact historical
+  hash shape. Bump that version when a proof changes on its own; a `PATCH_TRANSFORMS_VERSION` bump
+  already re-patches everyone. A digest pin on the proofs file forces the decision. **When a
+  transform starts writing a new shape, its proof must accept it too:** PATCH 1's proof knew only
+  the inline enum array after 2.1.314 hoisted it into a constant and PATCH 1 began writing a spread
+  over that constant, so on every build from 2.1.314 on that clodex could patch, capture threw and
+  every enabled local patch was dropped while the built-ins still published.
+  The manifest at `~/.clodex/patch-state.json` (binary path, claude version, config hash,
   patched size/sha256, backup path, pristine sha256 — the last absent in pre-content-addressed
   manifests) drives `evaluatePatchState` → `unpatched | current | stale-config | stale-binary`.
 - **PATCH 10 isolates proxy-mode bridge settings from standard child commands.**

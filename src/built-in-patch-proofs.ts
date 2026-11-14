@@ -3,6 +3,24 @@ import type {
   PatchSiteResult,
 } from './patch-transforms.js';
 
+/**
+ * Version of the proof set below, folded into the patch config hash ONLY while local patches are
+ * enabled (`computePatchConfigHash`). Proofs decide whether local patches publish, so a proof fix
+ * changes what an install with local patches gets — and without a hash change that install stays
+ * `current` until something else re-patches it (a Claude Code update, a config change). Installs
+ * without local patches never run a proof, so their hash, and their patch, are left alone.
+ *
+ * Bump it when a proof changes on its own. A change that lands together with a
+ * `PATCH_TRANSFORMS_VERSION` bump needs no bump here, because that one already re-patches every
+ * install. A test pins this file's digest so the decision is made deliberately.
+ *
+ * 1 — first version. The PATCH 1 proof knew only the inline enum array, so from Claude Code
+ * 2.1.314, where PATCH 1 writes a spread over a hoisted constant, capture threw and every enabled
+ * local patch was dropped with "could not capture built-in postconditions". Adding the version
+ * changes every local-patch hash once, so those installs re-patch even if nothing else changed.
+ */
+export const BUILT_IN_PATCH_PROOFS_VERSION = 1;
+
 export interface BuiltInPatchProof {
   name: string;
   protectedText: string;
@@ -107,9 +125,14 @@ export function captureBuiltInPatchProofs(
     }
   };
 
+  // Both shapes PATCH 1 writes: the extended inline array, and — from 2.1.314, where the array is
+  // a constant passed by name — the spread `model:F([...dmi,"sol"])`. The spread shape is pinned to
+  // the Agent tool's description exactly as the transform's anchor is, because the spread alone
+  // says nothing about which enum it is. This proof knew only the inline shape until the spread one
+  // was added here, so on 2.1.314 and later capture threw and every enabled local patch was dropped.
   addPattern(
     'PATCH 1: Agent tool model enum',
-    /(?:\.enum|model:[A-Za-z_$][\w$]*)\(\["sonnet","opus","haiku"(?:,"[^"]+")*\]\)\.optional\(\)\.describe\(/,
+    /(?:\.enum|model:[A-Za-z_$][\w$]*)\(\["sonnet","opus","haiku"(?:,"[^"]+")*\]\)\.optional\(\)\.describe\(|model:[A-Za-z_$][\w$]*\(\[\.\.\.[A-Za-z_$][\w$]*(?:,"[^"]+")*\]\)\.optional\(\)\.describe\(`Optional model override for this agent/,
   );
   addPattern(
     'PATCH 3: known-alias validator list',
