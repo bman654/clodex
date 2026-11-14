@@ -832,6 +832,29 @@ describe('runPatchCommand local patches', () => {
     expect(readFileSync(readPatchManifest()!.backupPath)).toEqual(pristine);
   });
 
+  // Claude Code 2.1.314 and later pass the Agent tool's model enum a hoisted constant, which PATCH
+  // 1 rewrites to a spread. The built-in proof knew only the inline array, so capture threw and the
+  // local set was dropped with "could not capture built-in postconditions" on every such build.
+  it('applies local patches on a bundle whose Agent tool enum is a hoisted constant', async () => {
+    const inline = '.enum(["sonnet","opus","haiku","fable"])';
+    expect(PRISTINE_BUNDLE).toContain(inline);
+    const real = installClaude(
+      '2.1.314',
+      'var dmi=["sonnet","opus","haiku","fable"];\n' + PRISTINE_BUNDLE.replace(inline, 'model:F(dmi)'),
+    );
+    writeFileSync(join(clodexHome, 'local-patches.mjs'), `
+      export default [{
+        id: 'hoisted-site',
+        apply(source, { marker }) { return source + '\\n' + marker + 'hoisted-change'; },
+      }];
+    `);
+
+    expect(await runPatchCommand({ localPatches: true })).toBe(0);
+    expect(bundleOf(real)).toContain('model:F([...dmi,"sol"])');
+    expect(bundleOf(real)).toContain('/*clodex-local:hoisted-site*/hoisted-change');
+    expect(logs.join('\n')).not.toMatch(/could not capture built-in postconditions/);
+  });
+
   it('rebuilds a built-in-only patch when local execution is disabled', async () => {
     const real = installClaude('2.1.220');
     writeFileSync(join(clodexHome, 'local-patches.mjs'), `

@@ -60,6 +60,7 @@ import {
   type LocalPatchSource,
 } from './local-patches.js';
 import {
+  BUILT_IN_PATCH_PROOFS_VERSION,
   builtInPatchProofsChanged,
   captureBuiltInPatchProofs,
   type BuiltInPatchProof,
@@ -278,6 +279,7 @@ export function computePatchConfigHash(
   config: PatchScriptModelConfig,
   transformsVersion = PATCH_TRANSFORMS_VERSION,
   localPatchIdentity?: string,
+  proofsVersion = BUILT_IN_PATCH_PROOFS_VERSION,
 ): string {
   const canonical = Object.keys(config).sort().map(key => {
     const entry = config[key]!;
@@ -294,7 +296,8 @@ export function computePatchConfigHash(
   });
   const payload: unknown[] = [transformsVersion, canonical];
   if (localPatchIdentity !== undefined) {
-    payload.push(['local-patches', localPatchIdentity]);
+    // The proof set decides whether local patches publish, so its version joins only this entry.
+    payload.push(['local-patches', localPatchIdentity, proofsVersion]);
   }
   return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
 }

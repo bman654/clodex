@@ -45,6 +45,7 @@ import {
   type PatchScriptModelConfig,
 } from '../src/patch-transforms.js';
 import {
+  BUILT_IN_PATCH_PROOFS_VERSION,
   builtInPatchProofsChanged,
   captureBuiltInPatchProofs,
 } from '../src/built-in-patch-proofs.js';
@@ -645,6 +646,49 @@ describe('computePatchConfigHash', () => {
     expect(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION, 'v1:first')).not.toBe(
       computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION, 'v1:second'),
     );
+  });
+
+  // A proof fix changes what an install with local patches publishes, so those installs must read
+  // as stale after the upgrade or they keep the binary the old proof produced. Spelled out here
+  // rather than computed through the function, so a refactor cannot move both sides at once.
+  it('marks local-patch installs stale when the proof set changes, and no others', () => {
+    const config = { 'clodex:p:m1': { alias: 'x', context: 1000 } };
+    const canonical = [['clodex:p:m1', 'x', 1000, null, null, null]];
+    const sha = (payload: unknown) => createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+
+    expect(computePatchConfigHash(config)).toBe(sha([PATCH_TRANSFORMS_VERSION, canonical]));
+    // The shape every earlier clodex wrote for an install with local patches enabled.
+    expect(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION, 'v1:first')).not.toBe(
+      sha([PATCH_TRANSFORMS_VERSION, canonical, ['local-patches', 'v1:first']]),
+    );
+    expect(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION, 'v1:first')).toBe(
+      sha([PATCH_TRANSFORMS_VERSION, canonical, ['local-patches', 'v1:first', BUILT_IN_PATCH_PROOFS_VERSION]]),
+    );
+
+    // And every later bump does the same, without touching an install that has no local patches.
+    const next = BUILT_IN_PATCH_PROOFS_VERSION + 1;
+    expect(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION, 'v1:first', next)).not.toBe(
+      computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION, 'v1:first'),
+    );
+    expect(computePatchConfigHash(config, PATCH_TRANSFORMS_VERSION, undefined, next)).toBe(
+      computePatchConfigHash(config),
+    );
+  });
+});
+
+describe('BUILT_IN_PATCH_PROOFS_VERSION', () => {
+  // The same tripwire as PATCH_TRANSFORMS_VERSION's, for the file that decides whether local
+  // patches publish. WHEN THIS FAILS: a proof changed. If it changed on its own and alters what a
+  // local-patch install gets, bump BUILT_IN_PATCH_PROOFS_VERSION; if PATCH_TRANSFORMS_VERSION was
+  // bumped in the same change, or the edit is comment-only, leave it. Re-pin the digest either way.
+  it('is re-pinned deliberately whenever built-in-patch-proofs.ts changes', () => {
+    const source = readFileSync(new URL('../src/built-in-patch-proofs.ts', import.meta.url), 'utf8')
+      .replace(/\r\n/g, '\n');
+    const digest = createHash('sha256').update(source).digest('hex');
+    expect({ version: BUILT_IN_PATCH_PROOFS_VERSION, digest }).toEqual({
+      version: 1,
+      digest: 'c136cbbcb79a0bb92b1fbfc4c8cd7344e4d6a8aee5b67fa02ec45d2cbf32efef',
+    });
   });
 });
 
