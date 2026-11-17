@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.21.9](https://github.com/bman654/clodex/compare/v2.21.8...v2.21.9) (2026-11-17)
+
+
+### Bug Fixes
+
+* **models:** make GPT-6.2 models available on ChatGPT plans ([#348](https://github.com/bman654/clodex/issues/348)) ([df75807](https://github.com/bman654/clodex/commit/df7580742af6fb95c424af23bdbe8f20c316fabd))
+
 ## [2.21.8](https://github.com/bman654/clodex/compare/v2.21.7...v2.21.8) (2026-11-14)
 
 
