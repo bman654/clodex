@@ -199,8 +199,9 @@ async function fetchJsonWithAuth(
  * The Codex catalog filters on `client_version`, and its published
  * `minimal_client_version` can understate that filter: gpt-6.1-sol reported 0.153.0
  * but was omitted at 0.156.0 and 0.158.0, where its requests were also refused, and
- * listed and accepted at 0.159.0 (#298). Ask again at the version clodex sends and
- * mark each row that answer omits with that version.
+ * listed and accepted at 0.159.0 (#298). gpt-6.2-sol and gpt-6.2-astra publish
+ * 0.166.0 and were omitted at 0.159.0 (2026-11-17). Ask again at the version clodex
+ * sends and mark each row that answer omits with that version.
  * Projection hides a marked row only when it uses Responses-Lite (other requests omit
  * the version) and only while the bundled version is at or below the mark.
  *
