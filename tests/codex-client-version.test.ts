@@ -40,10 +40,12 @@ describe('offline seeded Codex version contract', () => {
     expect(compareCodexClientVersions(CODEX_RESPONSES_LITE_VERSION, '0.166.0')).toBeGreaterThanOrEqual(0);
   });
 
-  it('retains the GPT-6.2 minimums measured in the live catalog on 2026-11-17', () => {
+  it('retains the GPT-6.2 minimums and Responses-Lite flags measured in the live catalog on 2026-11-17', () => {
     const models = buildOpenAiOAuthModels();
     for (const id of ['gpt-6.2-sol', 'gpt-6.2-astra']) {
-      expect(models.find(model => model.id === id)?.minimalClientVersion, id).toBe('0.166.0');
+      const model = models.find(candidate => candidate.id === id);
+      expect(model?.minimalClientVersion, id).toBe('0.166.0');
+      expect(model?.useResponsesLite, id).toBe(true);
     }
   });
 
