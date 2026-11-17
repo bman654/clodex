@@ -309,7 +309,7 @@ describe('refresh at the request version -> persisted marker -> selectable OAuth
       + 'Update clodex to a release supporting their required version to use them.',
     );
 
-    const next: Row = { slug: 'next-model', gate: '0.160.0', minimal_client_version: '0.150.0', use_responses_lite: true };
+    const next: Row = { slug: 'next-model', gate: '0.167.0', minimal_client_version: '0.150.0', use_responses_lite: true };
     serveCatalog([future, next, SOL_6]);
     const mixed = await refresh();
     expect(mixed.reason).toContain(
@@ -390,7 +390,7 @@ describe('refresh at the request version -> persisted marker -> selectable OAuth
   });
   it('hides a withheld Responses-Lite model that publishes no minimum at all', async () => {
     persistProvider();
-    serveCatalog([{ slug: 'next-model', gate: '0.160.0', use_responses_lite: true }, SOL_6]);
+    serveCatalog([{ slug: 'next-model', gate: '0.167.0', use_responses_lite: true }, SOL_6]);
     const result = await refresh();
     expect(saved('next-model')).toMatchObject({ withheldAtClientVersion: CODEX_RESPONSES_LITE_VERSION });
     expect(saved('next-model')?.minimalClientVersion).toBeUndefined();

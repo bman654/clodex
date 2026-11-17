@@ -35,8 +35,18 @@ describe('Codex client version precedence', () => {
 });
 
 describe('offline seeded Codex version contract', () => {
-  it('advertises at least the client version verified with GPT-6.1 Sol', () => {
+  it('advertises at least the client versions verified with GPT-6.1 Sol and GPT-6.2', () => {
     expect(compareCodexClientVersions(CODEX_RESPONSES_LITE_VERSION, '0.159.0')).toBeGreaterThanOrEqual(0);
+    expect(compareCodexClientVersions(CODEX_RESPONSES_LITE_VERSION, '0.166.0')).toBeGreaterThanOrEqual(0);
+  });
+
+  it('retains the GPT-6.2 minimums and Responses-Lite flags measured in the live catalog on 2026-11-17', () => {
+    const models = buildOpenAiOAuthModels();
+    for (const id of ['gpt-6.2-sol', 'gpt-6.2-astra']) {
+      const model = models.find(candidate => candidate.id === id);
+      expect(model?.minimalClientVersion, id).toBe('0.166.0');
+      expect(model?.useResponsesLite, id).toBe(true);
+    }
   });
 
   it('retains the minimums measured in the live catalog on 2026-09-24', () => {

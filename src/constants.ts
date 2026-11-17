@@ -23,7 +23,10 @@ export const CODEX_RESPONSES_LITE_WS_URL = 'wss://chatgpt.com/backend-api/codex/
 // exceeds this pin or that was withheld at a version this pin does not exceed. Keep
 // this at or above every catalog minimum among use_responses_lite models and every
 // version measured as required.
-export const CODEX_RESPONSES_LITE_VERSION = '0.159.0';
+//
+// Raised to 0.166.0 on 2026-11-17: the catalog publishes minimal_client_version
+// 0.166.0 for gpt-6.2-sol and gpt-6.2-astra and omitted both at 0.159.0.
+export const CODEX_RESPONSES_LITE_VERSION = '0.166.0';
 // OpenAI-Beta opt-in for the WebSocket Responses transport.
 export const CODEX_RESPONSES_WEBSOCKETS_BETA = 'responses_websockets=2026-02-06';
 

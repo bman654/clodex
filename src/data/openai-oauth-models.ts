@@ -59,6 +59,13 @@ export const CHATGPT_CODEX_UNSUPPORTED_MODELS = new Set<string>([
 // A model with no ceiling here has none above its default window.
 // Minimum client versions and transport flags checked against the live catalog on 2026-09-24.
 const OPENAI_OAUTH_MODEL_SEEDS: OAuthModelSeed[] = [
+  // GPT-6.2 family. The windows and Responses-Lite flags are what the live Codex
+  // catalog returned on 2026-11-17. Both rows publish minimal_client_version 0.166.0
+  // and were omitted at 0.159.0; the catalog reports no output limit for them, so
+  // none is seeded rather than guessed. CODEX_RESPONSES_LITE_VERSION must stay at
+  // or above 0.166.0.
+  { id: 'gpt-6.2-sol',          name: 'GPT-6.2 Sol',       contextWindow: 500_000, maxContextWindow: 872_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.166.0' },
+  { id: 'gpt-6.2-astra',        name: 'GPT-6.2 Astra',     contextWindow: 272_000, maxContextWindow: 872_000, reasoning: true, useResponsesLite: true, preferWebSockets: true, minimalClientVersion: '0.166.0' },
   // GPT-6.1 Sol: the 500K window and 872K ceiling are what the live Codex catalog
   // returned on 2026-10-13 (the window was 272K until then); a request near 872K has
   // not been tried. The output limit
