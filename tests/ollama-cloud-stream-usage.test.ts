@@ -3,6 +3,7 @@ import { createServer } from 'node:http';
 import { createLanguageModel } from '../src/provider-factory.js';
 import { generateAnthropicResponse, streamAnthropicResponse } from '../src/sdk-adapter.js';
 import { buildOllamaCloudModels } from '../src/data/ollama-cloud-models.js';
+import type { ModelRuntimeCompatibility } from '../src/model-runtime-compatibility.js';
 
 /**
  * ollama.com emits a streamed usage chunk (`choices: []` plus `usage`) only when the
@@ -59,7 +60,10 @@ async function startListener(): Promise<Listener> {
   };
 }
 
-async function streamOnce(providerId: string): Promise<{
+async function streamOnce(
+  providerId: string,
+  compatOverride?: ModelRuntimeCompatibility,
+): Promise<{
   body: Record<string, unknown>;
   outputTokens: unknown;
 }> {
@@ -73,7 +77,7 @@ async function streamOnce(providerId: string): Promise<{
       baseURL: listener.baseUrl,
       providerId,
       authType: 'api',
-      compatibility: catalog.compatibility,
+      compatibility: compatOverride ?? catalog.compatibility,
     });
     let sse = '';
     await streamAnthropicResponse(
@@ -101,10 +105,24 @@ describe('Ollama Cloud streamed usage', () => {
     expect(outputTokens).toBe(USAGE.completion_tokens);
   });
 
+  it('asks for the usage chunk for any provider whose spec declares stream usage', async () => {
+    // The same ollama-cloud compatibility under a different provider id still
+    // sends stream_options: the flag on the catalog drives it, not the id.
+    const { body, outputTokens } = await streamOnce('openai');
+    expect(body.stream_options).toEqual({ include_usage: true });
+    expect(outputTokens).toBe(USAGE.completion_tokens);
+  });
+
   it.each(['opencode-go', 'custom-local', 'openai'])(
-    'leaves the %s request without stream_options',
+    'leaves the %s request without stream_options when its catalog does not opt in',
     async providerId => {
-      const { body } = await streamOnce(providerId);
+      // A catalog without supportsStreamUsage, like the real opencode-go one.
+      const { body } = await streamOnce(providerId, {
+        supportsStore: false,
+        supportsDeveloperRole: false,
+        maxTokensField: 'max_tokens' as const,
+        supportsReasoningEffort: false,
+      });
       expect(body.stream).toBe(true);
       expect(body).not.toHaveProperty('stream_options');
     },

@@ -130,8 +130,11 @@ describe('providers add: custom OpenAI-compatible server', () => {
       apiKey: 'sk-or-test',
       kind: 'openai',
       allowInsecureLocal: false,
+      supportsStreamUsage: false,
     });
-    expect(confirmMock).not.toHaveBeenCalled();
+    // Only the stream-usage confirm is asked on the https path; the plain-http
+    // one is not.
+    expect(confirmMock).toHaveBeenCalledTimes(1);
   });
 
   it('reports the provider name and how many models were found', async () => {
@@ -205,7 +208,8 @@ describe('providers add: custom OpenAI-compatible server', () => {
 
     await runProvidersAdd();
 
-    expect(confirmMock).toHaveBeenCalledTimes(1);
+    // Both confirms are asked now: plain http, then stream usage.
+    expect(confirmMock).toHaveBeenCalledTimes(2);
   });
 
   it('does not allow plain http when the user declines', async () => {
@@ -281,6 +285,16 @@ describe('providers add: custom OpenAI-compatible server', () => {
       answer: () => {
         textMock.mockResolvedValueOnce('LM Studio').mockResolvedValueOnce('http://localhost:1234/v1');
         confirmMock.mockResolvedValue(CANCEL);
+      },
+    },
+    {
+      at: 'the stream-usage confirmation',
+      answer: () => {
+        textMock.mockResolvedValueOnce('OpenRouter').mockResolvedValueOnce('https://openrouter.ai/api/v1');
+        passwordMock.mockResolvedValue('');
+        // On the https path the stream-usage confirm is the only confirm,
+        // so cancelling at it is the first confirm answer.
+        confirmMock.mockResolvedValueOnce(CANCEL);
       },
     },
   ])('cancelling at $at adds nothing and exits 0', async ({ answer }) => {

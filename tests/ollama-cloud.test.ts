@@ -242,6 +242,7 @@ describe('Ollama Cloud per-model metadata', () => {
           supportsDeveloperRole: false,
           maxTokensField: 'max_tokens',
           supportsReasoningEffort: false,
+          supportsStreamUsage: true,
         },
       });
     }
