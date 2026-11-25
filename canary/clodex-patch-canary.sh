@@ -51,7 +51,9 @@ CANARY_REGISTRY="${CANARY_REGISTRY:-https://registry.npmjs.org}"
 # The T3 Code project the investigation thread is started in: the real working copy, not the
 # canary clone. The thread itself works in a new worktree of it, never in the working copy.
 CLODEX_WORKING_COPY="${CLODEX_WORKING_COPY:-$HOME/dev/general/clodex}"
-T3CLI_BIN="${T3CLI_BIN:-$HOME/.local/bin/t3cli}"
+# The `t3` command T3 Code installs, which runs the CLI bundled in the app. It authenticates through
+# the local T3 Code data directory, so unlike a stored login it cannot expire under launchd.
+T3_BIN="${T3_BIN:-$HOME/.t3/bin/t3}"
 # Investigation branches are named <prefix><version>. A merged PR from any branch with this prefix is
 # what tells the canary a fix for a failing release has landed (see merged_canary_fix_pr).
 CANARY_FIX_BRANCH_PREFIX="fix/patch-cc-"
@@ -711,6 +713,10 @@ write_repro_script() {
     printf 'CANARY_HOST_PLATFORM=%q\n' "$(host_platform)"
     cat <<'REPRO_BODY'
 PLATFORM="${1:-$CANARY_HOST_PLATFORM}"
+if [ $# -ge 2 ] && [ -z "$2" ]; then
+  echo "repro.sh: the worktree argument is empty — run the command from inside your investigation worktree" >&2
+  exit 2
+fi
 REPO="${2:-$CANARY_REPO}"
 
 ENTRY="$(jq -s -c --arg p "$PLATFORM" 'map(select(.platform == $p)) | last // empty' \
@@ -839,8 +845,14 @@ REPRO_BODY
 
 # ------------------------------------------------------------------ investigate
 
-investigation_prompt() { # investigation_prompt <version> <reasons> <logfile> <worktree> <branch>
-  local version="$1" reasons="$2" logfile="$3" wt="$4" branch="$5"
+investigation_prompt() { # investigation_prompt <version> <reasons> <logfile> <branch>
+  local version="$1" reasons="$2" logfile="$3" branch="$4"
+  # T3 Code picks the worktree's path once the thread is already running, so the prompt cannot name
+  # it. Commands refer to it by this expression instead: run from anywhere inside the worktree it is
+  # that worktree's root; anywhere else it is empty, which repro.sh refuses rather than silently
+  # testing the canary's clone or another checkout.
+  local wt
+  wt="\"\$(git branch --show-current | grep -Fqx $(printf '%q' "$branch") && git rev-parse --show-toplevel)\""
   cat <<EOF
 You are triaging an automated canary failure. Be rigorous: this may end in a pull request that
 changes binary patching or updates clodex's exact knowledge of Claude Code.
@@ -932,9 +944,10 @@ HARD CONSTRAINTS
   Every patch invocation goes through $WORK/repro.sh or a copy of it.
 - NEVER write to ~/.local/bin/claude, ~/.local/share/claude, ~/.clodex or ~/.tweakcc by any other
   means either — no --restore, no cp, no chmod.
-- This thread already runs in a git worktree made for it: $wt, on branch
-  $branch, at the exact origin/main commit the canary tested ($MAIN_SHA). Do all work there.
-  It has no node_modules yet: run \`pnpm install --frozen-lockfile\` in it first.
+- This thread already runs in a git worktree T3 Code made for it — your starting directory — on
+  branch $branch, at the exact origin/main commit the canary tested ($MAIN_SHA). Do all work
+  there, and run every repro command from inside it. It has no node_modules yet: run
+  \`pnpm install --frozen-lockfile\` in it first.
 - Do NOT work in the $CLODEX_WORKING_COPY working copy — it belongs to a human and may hold
   unrelated in-progress work.
 
@@ -999,30 +1012,24 @@ compact_prompt_drift_impact() {
   printf '%s' 'long sessions can die with "Prompt is too long". clodex needs updated prompt markers.'
 }
 
-# Where the investigation thread works: a new worktree of the working copy, on a branch of its own.
-# Sets INVESTIGATION_WORKTREE and INVESTIGATION_BRANCH; creates nothing.
-choose_investigation_worktree() {
-  local version="$1" suffix=""
-  INVESTIGATION_WORKTREE="$(dirname "$CLODEX_WORKING_COPY")/clodex-canary-$version"
+# The investigation thread works in a new worktree of the working copy that T3 Code creates, on a
+# branch of its own. Sets INVESTIGATION_BRANCH; creates nothing.
+choose_investigation_branch() {
+  local version="$1"
   INVESTIGATION_BRANCH="$CANARY_FIX_BRANCH_PREFIX$version"
-  # A re-triaged release that fails again finds both names taken by its first investigation.
-  if [ -e "$INVESTIGATION_WORKTREE" ] ||
-     git -C "$CLODEX_WORKING_COPY" show-ref --verify --quiet "refs/heads/$INVESTIGATION_BRANCH"; then
-    suffix="-$(date +%Y%m%d%H%M)"
+  # A re-triaged release that fails again finds the name taken by its first investigation.
+  if git -C "$CLODEX_WORKING_COPY" show-ref --verify --quiet "refs/heads/$INVESTIGATION_BRANCH"; then
+    INVESTIGATION_BRANCH="$INVESTIGATION_BRANCH-$(date +%Y%m%d%H%M)"
   fi
-  INVESTIGATION_WORKTREE="$INVESTIGATION_WORKTREE$suffix"
-  INVESTIGATION_BRANCH="$INVESTIGATION_BRANCH$suffix"
 }
 
 # The worktree starts at the exact commit this run tested, fetched from the canary's own clone: the
 # thread begins from the code that failed rather than whatever main has become since, and nothing
-# here needs GitHub credentials, which a launchd job may not have. Nothing in the working copy itself
-# changes: the fetch only adds objects, and the new branch is checked out in the new worktree.
-create_investigation_worktree() {
+# here needs GitHub credentials, which a launchd job may not have. The fetch only adds objects, so
+# the working copy itself does not change; T3 Code then branches the new worktree from that commit.
+fetch_tested_commit() {
   # --no-write-fetch-head: the working copy is a human's, and its FETCH_HEAD is theirs.
-  git -C "$CLODEX_WORKING_COPY" fetch --quiet --no-tags --no-write-fetch-head "$REPO_DIR" "$MAIN_SHA" &&
-    git -C "$CLODEX_WORKING_COPY" worktree add --quiet -b "$INVESTIGATION_BRANCH" \
-      "$INVESTIGATION_WORKTREE" "$MAIN_SHA"
+  git -C "$CLODEX_WORKING_COPY" fetch --quiet --no-tags --no-write-fetch-head "$REPO_DIR" "$MAIN_SHA"
 }
 
 launch_investigation() {
@@ -1035,9 +1042,8 @@ launch_investigation() {
   # could not be confirmed) | not started. The failure alert tells the reader which.
   LAUNCH_OUTCOME="not started"
   LAUNCH_HELD_BY=""
-  choose_investigation_worktree "$version"
-  prompt="$(investigation_prompt "$version" "$reasons" "$logfile" \
-              "$INVESTIGATION_WORKTREE" "$INVESTIGATION_BRANCH")"
+  choose_investigation_branch "$version"
+  prompt="$(investigation_prompt "$version" "$reasons" "$logfile" "$INVESTIGATION_BRANCH")"
 
   if [ "$opt_launch" -ne 1 ]; then
     log "--no-launch: skipping the investigation thread. Prompt would have been:"
@@ -1058,9 +1064,9 @@ launch_investigation() {
     return 1
   fi
   reconcile_uncertain_launch "$version" "$logfile" || return 1
-  if [ ! -x "$T3CLI_BIN" ]; then
-    log "WARN: $T3CLI_BIN not executable — cannot start the investigation"
-    slack ":warning: clodex patch canary could not start an investigation for Claude Code $version — $T3CLI_BIN is missing. Log: $logfile" || true
+  if [ ! -x "$T3_BIN" ]; then
+    log "WARN: $T3_BIN not executable — cannot start the investigation"
+    slack ":warning: clodex patch canary could not start an investigation for Claude Code $version — $T3_BIN is missing. Log: $logfile" || true
     return 1
   fi
   # Under `claude --bg` a session that got no prompt sat idle yet counted as in flight, blocking every
@@ -1071,20 +1077,18 @@ launch_investigation() {
     slack ":warning: clodex patch canary built an EMPTY investigation prompt for Claude Code $version, so no thread was started. This is a canary bug. Log: $logfile" || true
     return 1
   fi
-  if ! create_investigation_worktree; then
-    log "WARN: could not create the investigation worktree $INVESTIGATION_WORKTREE"
-    slack ":warning: clodex patch canary could not start an investigation for Claude Code $version — creating the worktree \`$INVESTIGATION_WORKTREE\` failed. Log: $logfile" || true
+  if ! fetch_tested_commit; then
+    log "WARN: could not fetch the tested commit $MAIN_SHA into $CLODEX_WORKING_COPY"
+    slack ":warning: clodex patch canary could not start an investigation for Claude Code $version — fetching the tested commit into \`$CLODEX_WORKING_COPY\` failed, so there is nothing to branch the investigation's worktree from. Log: $logfile" || true
     return 1
   fi
-  log "created worktree $INVESTIGATION_WORKTREE on $INVESTIGATION_BRANCH at $MAIN_SHA"
 
   # The prompt goes in on stdin, never as an argument, so no option parsing can swallow it.
-  log "starting T3 Code thread: $thread_title"
+  log "starting T3 Code thread: $thread_title, in a new worktree on $INVESTIGATION_BRANCH at $MAIN_SHA"
   set +e
-  out="$(printf '%s\n' "$prompt" | "$T3CLI_BIN" start --project "$CLODEX_WORKING_COPY" \
-        --worktree "$INVESTIGATION_WORKTREE" --title "$thread_title" \
-        --provider claudeAgent --model claude-opus-5-5 --effort high \
-        --format json --stdin)"
+  out="$(printf '%s\n' "$prompt" | "$T3_BIN" thread start "$CLODEX_WORKING_COPY" - \
+        --worktree "$MAIN_SHA" --branch "$INVESTIGATION_BRANCH" --title "$thread_title" \
+        --provider claudeAgent --model claude-opus-5-5 --option effort=high --json)"
   rc=$?
   set -e
   printf '%s\n' "$out"
@@ -1095,35 +1099,31 @@ launch_investigation() {
   threads=""
   if [ -z "$thread_id" ]; then
     threads="$(t3_project_threads)"
-    thread_id="$(printf '%s' "${threads:-[]}" |
-      jq -r --arg t "$thread_title" 'map(select(.title == $t and .deletedAt == null)) | last | .id // empty' \
-      2>/dev/null || true)"
-    [ -z "$thread_id" ] || log "t3cli start did not report a thread id, but $thread_id exists with this launch's title — tracking it"
+    thread_id="$(thread_id_by_title "${threads:-[]}" "$thread_title")"
+    [ -z "$thread_id" ] || log "t3 thread start did not report a thread id, but $thread_id exists with this launch's title — tracking it"
   fi
-  # The worktree is left in place on failure: a thread T3 Code could not be asked about may still be
-  # using it, and removing a live thread's checkout would be worse than an empty one lying around.
   if [ -z "$thread_id" ] && [ $rc -ne 0 ]; then
-    log "WARN: t3cli start failed (exit $rc)"
+    log "WARN: t3 thread start failed (exit $rc)"
     if [ -n "$threads" ]; then
-      slack ":warning: clodex patch canary could not start an investigation for Claude Code $version (t3cli start exit $rc). Its worktree \`$INVESTIGATION_WORKTREE\` was left in place. Log: $logfile" || true
+      slack ":warning: clodex patch canary could not start an investigation for Claude Code $version (t3 thread start exit $rc). Log: $logfile" || true
     else
       # Not recorded as in flight: the likeliest reason neither call got through is T3 Code not
       # running, and an in-flight record nobody can resolve would hold off every newer release. A
       # separate marker instead blocks only the next launch, until reconcile_uncertain_launch has
       # seen whether the thread exists.
       LAUNCH_OUTCOME=uncertain
-      state_update '.uncertainLaunch = {version: $v, threadTitle: $n, worktree: $w, branch: $b,
+      state_update '.uncertainLaunch = {version: $v, threadTitle: $n, branch: $b,
                                         sandbox: $s, startedAt: $t, startedEpoch: $e, log: $l}' \
         --arg v "$version" --arg n "$thread_title" --arg s "${WORK:-}" \
-        --arg w "$INVESTIGATION_WORKTREE" --arg b "$INVESTIGATION_BRANCH" \
+        --arg b "$INVESTIGATION_BRANCH" \
         --arg t "$(now_iso)" --argjson e "$(now_epoch)" --arg l "$logfile"
-      slack ":warning: clodex patch canary could not start an investigation for Claude Code $version (t3cli start exit $rc), and T3 Code could not be asked whether a thread exists — is T3 Code running? If a thread \`$thread_title\` did start, no second investigation will start until the canary has seen it. Its worktree \`$INVESTIGATION_WORKTREE\` was left in place. Log: $logfile" || true
+      slack ":warning: clodex patch canary could not start an investigation for Claude Code $version (t3 thread start exit $rc), and T3 Code could not be asked whether a thread exists — is T3 Code running? If a thread \`$thread_title\` did start, no second investigation will start until the canary has seen it. Log: $logfile" || true
     fi
     return 1
   fi
   if [ -z "$thread_id" ]; then
-    log "WARN: t3cli start returned no thread id"
-    slack ":warning: clodex patch canary started an investigation for Claude Code $version but got no thread id back, so it cannot track it. A thread may be running in \`$INVESTIGATION_WORKTREE\` — check T3 Code. Log: $logfile" || true
+    log "WARN: t3 thread start returned no thread id"
+    slack ":warning: clodex patch canary started an investigation for Claude Code $version but got no thread id back, so it cannot track it. A thread \`$thread_title\` may be running on branch \`$INVESTIGATION_BRANCH\` — check T3 Code. Log: $logfile" || true
     LAUNCH_OUTCOME=uncertain
     return 1
   fi
@@ -1131,10 +1131,10 @@ launch_investigation() {
   LAUNCH_OUTCOME=started
   log "investigation thread id: $thread_id"
 
-  state_update '.inflight = {version: $v, threadTitle: $n, threadId: $i, worktree: $w, branch: $b,
+  state_update '.inflight = {version: $v, threadTitle: $n, threadId: $i, branch: $b,
                              startedAt: $t, startedEpoch: $e, log: $l}' \
     --arg v "$version" --arg n "$thread_title" --arg i "$thread_id" \
-    --arg w "$INVESTIGATION_WORKTREE" --arg b "$INVESTIGATION_BRANCH" \
+    --arg b "$INVESTIGATION_BRANCH" \
     --arg t "$(now_iso)" --argjson e "$(now_epoch)" --arg l "$logfile"
 }
 
@@ -1159,8 +1159,7 @@ resolve_uncertain_launch() {
     UNCERTAIN_RESOLUTION=kept
     return 0
   fi
-  id="$(printf '%s' "$threads" |
-    jq -r --arg t "$pn" 'map(select(.title == $t and .deletedAt == null)) | last | .id // empty' 2>/dev/null || true)"
+  id="$(thread_id_by_title "$threads" "$pn")"
   state="missing"
   [ -z "$id" ] || state="$(thread_state "$threads" "$id")"
   if [ "$state" = "working" ]; then
@@ -1191,14 +1190,20 @@ reconcile_uncertain_launch() { # reconcile_uncertain_launch <version> <logfile>
   return 1
 }
 
-# Every thread in the clodex project, active and archived, as a JSON array; empty when T3 Code cannot
-# be asked. One call takes ~10 s.
+# The clodex project's threads as a JSON array, newest first; empty when T3 Code cannot be asked.
+# `t3` lists neither archived nor deleted threads, so a thread a human archived reads as missing,
+# which ends the investigation just as stopping it would.
 t3_project_threads() {
   local raw
-  [ -x "$T3CLI_BIN" ] || return 0
-  raw="$("$T3CLI_BIN" list --all --project "$CLODEX_WORKING_COPY" --format json 2>/dev/null || true)"
+  [ -x "$T3_BIN" ] || return 0
+  raw="$("$T3_BIN" thread list --project "$CLODEX_WORKING_COPY" --json 2>/dev/null || true)"
   printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1 && printf '%s\n' "$raw"
   return 0
+}
+
+thread_id_by_title() { # thread_id_by_title <threads-json> <title> — the newest match, or nothing
+  printf '%s' "$1" | jq -r --arg t "$2" 'map(select(.title == $t)) | first | .threadId // empty' \
+    2>/dev/null || true
 }
 
 # Is the recorded investigation thread still working? Echoes one of:
@@ -1221,18 +1226,16 @@ inflight_status() {
 thread_state() { # thread_state <threads-json> <thread-id> — the mapping inflight_status documents
   local raw="$1" thread_id="$2" entry status
   entry="$(printf '%s' "$raw" |
-    jq -c --arg i "$thread_id" 'map(select(.id == $i and .deletedAt == null)) | last' 2>/dev/null ||
+    jq -c --arg i "$thread_id" 'map(select(.threadId == $i)) | first' 2>/dev/null ||
     echo null)"
   if [ -z "$entry" ] || [ "$entry" = "null" ]; then echo missing; return 0; fi
   status="$(printf '%s' "$entry" | jq -r '.status // ""')"
   case "$status" in
     idle|completed|rolled_back) echo finished ;;
     interrupted|cancelled) echo stopped ;;
-    # A run cut off by a usage limit reads as failed until it resumes after the reset. Keep
-    # deferring; the 24h escape hatch still applies.
-    failed)
-      if [ -n "$(printf '%s' "$entry" | jq -r '.usageLimitResetAt // empty')" ]; then echo working
-      else echo failed; fi ;;
+    # This includes a run cut off by a usage limit, which T3 Code resumes after the reset: `t3`
+    # does not report the limit, so it cannot be told apart from a run that really failed.
+    failed) echo failed ;;
     # Anything unrecognised is still working: an unknown status must not release the deferral.
     *) echo working ;;
   esac
@@ -1546,24 +1549,15 @@ Nothing is broken by this, you just will not hear whether *$NEXT* is safe until 
 
   IF_KEEP=0
   if [ "$IF_BUSY" -eq 1 ]; then
-    # The escape hatch from a wedged thread. Stop it rather than merely forgetting it: two live
-    # investigations at once is exactly what the deferral exists to prevent. Only a stop the thread
-    # list confirms releases the record. Otherwise newer releases are still tested, but the record
-    # stays, so none of them can start a second investigation alongside this one.
-    log "WARN: investigation for $IF_VER has run ${IF_AGE_H}h ($IF_STATE) — stopping it and moving on"
-    if [ -n "$IF_ID" ] && [ -x "$T3CLI_BIN" ]; then
-      "$T3CLI_BIN" thread interrupt --thread "$IF_ID" >/dev/null 2>&1 || log "could not stop thread $IF_ID"
-    fi
-    IF_STATE="$(inflight_status "$IF_ID")"
-    if [ "$IF_STATE" = "working" ] || [ "$IF_STATE" = "unknown" ]; then
-      IF_KEEP=1
-      log "WARN: the $IF_VER investigation thread could not be confirmed stopped ($IF_STATE) — keeping it recorded"
-      warn_persisting stuck-investigation \
-":warning: clodex patch canary: the investigation of Claude Code *$IF_VER* has run ${IF_AGE_H}h, and stopping it could not be confirmed (T3 Code thread \`$IF_NAME\`, $IF_STATE). Newer releases are still tested, but no new investigation will start until it is stopped — stop it in T3 Code." \
-":rotating_light: *clodex patch canary still cannot stop the Claude Code $IF_VER investigation*, {hours}h on (T3 Code thread \`$IF_NAME\`, since {since}). New releases are tested, but *a failing one gets no investigation* until that thread is stopped in T3 Code."
-    else
-      slack ":warning: clodex patch canary: the investigation of Claude Code *$IF_VER* ran ${IF_AGE_H}h without finishing, so it has been stopped (T3 Code thread \`$IF_NAME\`) and triage of newer releases resumes. *$IF_VER* stays recorded as failing. If a canary fix PR merges while it is still the newest release, it is re-tested on its own; otherwise run \`clodex-patch-canary.sh --retriage $IF_VER\` once it is fixed." || true
-    fi
+    # A thread that has run this long is probably wedged, but `t3` has no way to stop a thread, and
+    # merely forgetting it would let a second investigation run alongside it — exactly what the
+    # deferral exists to prevent. So newer releases are still tested, the record stays, and a human
+    # is asked to stop it. Stopping, archiving or deleting the thread releases the record next run.
+    IF_KEEP=1
+    log "WARN: investigation for $IF_VER has run ${IF_AGE_H}h ($IF_STATE) — testing newer releases, but keeping it recorded until it is stopped"
+    warn_persisting stuck-investigation \
+":warning: clodex patch canary: the investigation of Claude Code *$IF_VER* has run ${IF_AGE_H}h without finishing (T3 Code thread \`$IF_NAME\`, $IF_STATE), and the canary cannot stop it itself. Newer releases are still tested, but no new investigation will start until it is stopped — stop or archive it in T3 Code." \
+":rotating_light: *The Claude Code $IF_VER investigation is still holding the clodex patch canary*, {hours}h on (T3 Code thread \`$IF_NAME\`, since {since}). New releases are tested, but *a failing one gets no investigation* until that thread is stopped or archived in T3 Code."
   elif [ "$IF_STATE" = "stopped" ]; then
     log "investigation for $IF_VER was stopped before finishing — clearing"
     slack ":black_square_for_stop: clodex patch canary: the investigation of Claude Code *$IF_VER* was stopped before it finished (T3 Code thread \`$IF_NAME\`) — check it for a PR. *$IF_VER* stays recorded as failing. If a canary fix PR merges while it is still the newest release, it is re-tested on its own; otherwise run \`clodex-patch-canary.sh --retriage $IF_VER\` when you want another look." || true
@@ -1861,7 +1855,7 @@ else
     --argjson pstatus "$PLATFORM_STATUS_JSON"
 
   if [ "$INVESTIGATION_STATUS" = "started" ]; then
-    NEXT_STEP=":mag: *A T3 Code thread is now investigating* — \`$SESSION_NAME\` in the clodex project, working in \`$INVESTIGATION_WORKTREE\`.
+    NEXT_STEP=":mag: *A T3 Code thread is now investigating* — \`$SESSION_NAME\` in the clodex project, working in a new worktree on branch \`$INVESTIGATION_BRANCH\`.
 *No action needed from you* unless it stops without a PR: it will Slack a diagnosis, then again with the PR or the obstacle. Once its PR merges, the canary re-tests $VERSION on its own if it is still the newest release. Until the thread has opened that PR, the canary holds off on any newer release."
   elif [ "$INVESTIGATION_STATUS" = "suppressed" ] &&
        [ "$(state_read | jq -r '.inflight // "null"')" = "null" ]; then
@@ -1869,7 +1863,7 @@ else
   elif [ "$INVESTIGATION_STATUS" = "suppressed" ]; then
     NEXT_STEP=":hourglass_flowing_sand: *No second investigation was started* — the one into *$(state_read | jq -r '.inflight.version // "?"')* (T3 Code thread \`$(state_read | jq -r '.inflight.threadTitle // "?"')\`) is still recorded as running. Check whether it covers this break too."
   elif [ "$INVESTIGATION_STATUS" = "uncertain" ]; then
-    NEXT_STEP=":grey_question: *An investigation may have started, but the canary could not confirm it* — check T3 Code for the thread \`$SESSION_NAME\` in \`$INVESTIGATION_WORKTREE\`. The canary is not tracking it, so it will not hold off on newer releases."
+    NEXT_STEP=":grey_question: *An investigation may have started, but the canary could not confirm it* — check T3 Code for the thread \`$SESSION_NAME\` on branch \`$INVESTIGATION_BRANCH\`. The canary is not tracking it, so it will not hold off on newer releases."
   elif [ "$opt_launch" -ne 1 ]; then
     NEXT_STEP=":no_entry_sign: No investigation was started (--no-launch). Nothing else will happen unless you act."
   else

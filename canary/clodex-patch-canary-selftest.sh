@@ -161,14 +161,16 @@ else
 fi
 
 # 8. The thread-liveness rule the whole deferral depends on, driven through the real
-#    inflight_status() against a stand-in `t3cli list --format json`.
-FAKE="$TMP/fake-t3cli"
+#    inflight_status() against a stand-in `t3 thread list --json`.
+FAKE="$TMP/fake-t3"
+LIST_ARGV="$TMP/list-argv.log"; export LIST_ARGV
 cat > "$FAKE" <<'FAKEEOF'
 #!/usr/bin/env bash
+printf '%s\n' "$@" > "$LIST_ARGV"
 printf '%s\n' "$FAKE_THREADS_JSON"
 FAKEEOF
 chmod +x "$FAKE"
-T3CLI_BIN="$FAKE"
+T3_BIN="$FAKE"
 
 liveness() { # liveness <label> <expected> <threads-json>
   local label="$1" want="$2" got
@@ -178,19 +180,18 @@ liveness() { # liveness <label> <expected> <threads-json>
   else fail=$((fail + 1)); printf 'FAIL liveness %s -> %s (want %s)\n' "$label" "$got" "$want"; fi
 }
 
-liveness "running thread"           working  '[{"id":"abc123","status":"running"}]'
-liveness "queued thread"            working  '[{"id":"abc123","status":"queued"}]'
-liveness "thread waiting on answer" working  '[{"id":"abc123","status":"waiting"}]'
-liveness "idle thread"              finished '[{"id":"abc123","status":"idle"}]'
-liveness "completed run"            finished '[{"id":"abc123","status":"completed"}]'
-liveness "interrupted run"          stopped  '[{"id":"abc123","status":"interrupted"}]'
-liveness "cancelled run"            stopped  '[{"id":"abc123","status":"cancelled"}]'
-liveness "failed run"               failed   '[{"id":"abc123","status":"failed","lastError":"boom"}]'
-liveness "usage-limited run"        working  '[{"id":"abc123","status":"failed","usageLimitResetAt":"2026-10-31T00:00:00Z"}]'
-liveness "unrecognised status"      working  '[{"id":"abc123","status":"compacting"}]'
-liveness "no status field"          working  '[{"id":"abc123"}]'
-liveness "deleted thread"           missing  '[{"id":"abc123","status":"idle","deletedAt":"2026-10-30T00:00:00Z"}]'
-liveness "thread really gone"       missing  '[{"id":"other","status":"running"}]'
+liveness "running thread"           working  '[{"threadId":"abc123","status":"running"}]'
+liveness "preparing thread"         working  '[{"threadId":"abc123","status":"preparing"}]'
+liveness "queued thread"            working  '[{"threadId":"abc123","status":"queued"}]'
+liveness "thread waiting on answer" working  '[{"threadId":"abc123","status":"waiting"}]'
+liveness "idle thread"              finished '[{"threadId":"abc123","status":"idle"}]'
+liveness "completed run"            finished '[{"threadId":"abc123","status":"completed"}]'
+liveness "interrupted run"          stopped  '[{"threadId":"abc123","status":"interrupted"}]'
+liveness "cancelled run"            stopped  '[{"threadId":"abc123","status":"cancelled"}]'
+liveness "failed run"               failed   '[{"threadId":"abc123","status":"failed"}]'
+liveness "unrecognised status"      working  '[{"threadId":"abc123","status":"compacting"}]'
+liveness "no status field"          working  '[{"threadId":"abc123"}]'
+liveness "thread really gone"       missing  '[{"threadId":"other","status":"running"}]'
 liveness "empty thread list"        missing  '[]'
 # The important one: a failed/garbled query must NOT read as "the investigation ended".
 liveness "query returned garbage"   unknown  'not json at all'
@@ -202,11 +203,16 @@ if [ "$(inflight_status "")" = "unknown" ]; then
 else
   fail=$((fail + 1)); printf 'FAIL liveness no thread id recorded did not report unknown\n'
 fi
-T3CLI_BIN="$TMP/definitely-not-here"
-if [ "$(inflight_status "abc123")" = "unknown" ]; then
-  pass=$((pass + 1)); printf 'ok   liveness %-32s -> unknown\n' "no t3cli binary"
+if [ "$(paste -sd' ' "$LIST_ARGV")" = "thread list --project $CLODEX_WORKING_COPY --json" ]; then
+  pass=$((pass + 1)); printf 'ok   %s\n' "thread status is asked of the clodex project, as JSON"
 else
-  fail=$((fail + 1)); printf 'FAIL liveness no t3cli binary did not report unknown\n'
+  fail=$((fail + 1)); printf 'FAIL thread status asked with: %s\n' "$(paste -sd' ' "$LIST_ARGV")"
+fi
+T3_BIN="$TMP/definitely-not-here"
+if [ "$(inflight_status "abc123")" = "unknown" ]; then
+  pass=$((pass + 1)); printf 'ok   liveness %-32s -> unknown\n' "no t3 binary"
+else
+  fail=$((fail + 1)); printf 'FAIL liveness no t3 binary did not report unknown\n'
 fi
 
 # 8b. A failed release is re-tested once a canary fix PR merges that its failing test did not
@@ -780,18 +786,34 @@ BASE_VERSION=2.1.998
 WORK="$TMP/triage-work"
 REPO_DIR="$TMP/triage-repo"
 TRIAGE_PROMPT="$(investigation_prompt "$VERSION" "- $MARKER_REASON" "$TMP/run.log" \
-                   "$TMP/clodex-canary-$VERSION" "fix/patch-cc-$VERSION" </dev/null 2>/dev/null)"
+                   "fix/patch-cc-$VERSION" </dev/null 2>/dev/null)"
 prompt_has() { # prompt_has <label> <substring>
   case "$TRIAGE_PROMPT" in
     *"$2"*) pass=$((pass + 1)); printf 'ok   %s\n' "$1" ;;
     *) fail=$((fail + 1)); printf 'FAIL %s — prompt lacks: %s\n' "$1" "$2" ;;
   esac
 }
-prompt_has "the prompt names the worktree the thread was started in" \
-  "already runs in a git worktree made for it: $TMP/clodex-canary-$VERSION, on branch
-  fix/patch-cc-$VERSION, at the exact origin/main commit the canary tested ($MAIN_SHA)"
-prompt_has "the verification loop runs against that worktree" \
-  "do $WORK/repro.sh \$p $TMP/clodex-canary-$VERSION; done"
+prompt_has "the prompt names the branch and commit of the worktree the thread starts in" \
+  "already runs in a git worktree T3 Code made for it — your starting directory — on
+  branch fix/patch-cc-$VERSION, at the exact origin/main commit the canary tested ($MAIN_SHA)"
+# T3 Code picks the worktree's path after the thread starts, so the loop must find it from inside.
+# T3 Code picks the worktree's path after the thread starts, so the loop must find it from inside.
+prompt_has "the verification loop runs against the thread's own worktree" \
+  'do '"$WORK"'/repro.sh $p "$(git branch --show-current | grep -Fqx fix/patch-cc-'"$VERSION"' && git rev-parse --show-toplevel)"; done'
+LOOP_WT="$(printf '%s' "$TRIAGE_PROMPT" | sed -n 's/.*repro\.sh \$p \(.*\); done.*/\1/p')"
+WT_PROBE="$TMP/wt-probe"; git -C "$TMP" init -q wt-probe; mkdir -p "$WT_PROBE/src/deep"
+git -C "$WT_PROBE" checkout -q -b "fix/patch-cc-$VERSION"
+loop_wt_case() { # loop_wt_case <label> <dir> <expected>
+  local got
+  got="$(cd "$2" && eval "printf '%s' $LOOP_WT" 2>/dev/null)"
+  if [ "$got" = "$3" ]; then pass=$((pass + 1)); printf 'ok   %s\n' "$1"
+  else fail=$((fail + 1)); printf 'FAIL %s -> "%s" (want "%s")\n' "$1" "$got" "$3"; fi
+}
+loop_wt_case "the loop's worktree argument is the worktree root, from anywhere inside it" \
+  "$WT_PROBE/src/deep" "$(cd "$WT_PROBE" && pwd -P)"
+git -C "$WT_PROBE" checkout -q -b "fix/patch-cc-${VERSION}0"
+loop_wt_case "the loop's worktree argument is empty in a checkout on another branch" "$WT_PROBE" ""
+loop_wt_case "the loop's worktree argument is empty outside any checkout" "$(mktemp -d)" ""
 prompt_has "the prompt keeps the branch prefix the merge is looked up by" \
   "the fix/patch-cc- prefix, and once one merges it re-tests the newest Claude Code"
 prompt_has "the PR's Slack message comes before the turn-ending watch" \
@@ -864,6 +886,15 @@ case "$REPRO_OUTPUT" in
   *)
     fail=$((fail + 1)); printf 'FAIL probe reproduction leaked its environment — got: %s\n' "$REPRO_OUTPUT" ;;
 esac
+# Run from outside the worktree, the verification loop passes an empty worktree. Falling back to the
+# canary clone would report origin/main's result as the fix's.
+REPRO_RC=0
+REPRO_EMPTY="$(MODE=probe "$TMP/repro-marker/repro.sh" linux-arm64 "" 2>&1)" || REPRO_RC=$?
+if [ "$REPRO_RC" -eq 2 ] && case "$REPRO_EMPTY" in *"worktree argument is empty"*) true ;; *) false ;; esac; then
+  pass=$((pass + 1)); printf 'ok   %s\n' "a reproduction given an empty worktree refuses instead of testing the canary clone"
+else
+  fail=$((fail + 1)); printf 'FAIL empty-worktree reproduction rc=%s — got: %s\n' "$REPRO_RC" "$REPRO_EMPTY"
+fi
 
 # 19d. The whole incident, end to end at the matrix level: 2.1.238 lost PATCH 5 on the two arm64
 #      Linux builds AND on win32-arm64. All three must fail, as one grouped cause, and the run
@@ -985,31 +1016,40 @@ hang_case() { # hang_case <name> <started-marker-exists> <expect>
 hang_case "a patch that started and hung is a failure" yes fail
 hang_case "a container that never started is an error" no  error
 
-# 23. The investigation must actually START, with its prompt, in the worktree made for it. Under
+# 23. The investigation must actually START, with its prompt, in a worktree made for it. Under
 #     `claude --bg` the variadic --add-dir once swallowed the prompt: the session sat idle and blocked
 #     every later investigation for 24h. A T3 thread with no prompt would instead read as finished,
 #     leaving the release failing with nobody on it. The prompt now goes in on stdin, and this
-#     stand-in records exactly what reached it.
+#     stand-in records exactly what reached it. Like T3 Code, it makes the thread's worktree itself,
+#     branched from the commit it is given, so a commit the working copy lacks fails the start.
 ARGV_LOG="$TMP/argv.log"; STDIN_LOG="$TMP/stdin.log"; export ARGV_LOG STDIN_LOG
-FAKET3="$TMP/fake-t3cli-start"
+FAKET3="$TMP/fake-t3-start"
 LOST_THREADS="$TMP/lost-threads.json"; export LOST_THREADS
+FAKE_T3_WORKTREES="$TMP/t3-worktrees"; export FAKE_T3_WORKTREES
 cat > "$FAKET3" <<'FAKEEOF'
 #!/usr/bin/env bash
-if [ "$1" = list ]; then
+if [ "$1 $2" = "thread list" ]; then
   if [ "${FAKE_T3_MODE:-ok}" = fail ]; then exit 1; fi
   cat "$LOST_THREADS" 2>/dev/null || printf '[]\n'; exit 0
 fi
+[ "$1 $2" = "thread start" ] || exit 1
 : > "$ARGV_LOG"
 for a in "$@"; do printf '%s\n' "$a" >> "$ARGV_LOG"; done
 cat > "$STDIN_LOG"
-title=""; while [ $# -gt 0 ]; do [ "$1" = --title ] && title="$2"; shift; done
+project="$3" title="" base="" branch=""
+while [ $# -gt 0 ]; do
+  case "$1" in --title) title="$2" ;; --worktree) base="$2" ;; --branch) branch="$2" ;; esac
+  shift
+done
 case "${FAKE_T3_MODE:-ok}" in
-  ok)   printf '{"messageId":"m-1","project":{"id":"p-1"},"threadId":"t-123"}\n' ;;
+  ok)   git -C "$project" worktree add --quiet -b "$branch" "$FAKE_T3_WORKTREES/$branch" "$base" ||
+          { printf 'cannot create the worktree\n' >&2; exit 1; }
+        printf '{"threadId":"t-123","projectId":"p-1","runId":"r-1"}\n' ;;
   noid) printf '{}\n' ;;
-  fail) printf 'cannot reach T3 Code\n' >&2; exit 1 ;;
+  fail) printf 'No running T3 Code server\n' >&2; exit 1 ;;
   refused) printf 'start refused\n' >&2; exit 1 ;;
   # T3 Code created the thread, then the reply was lost.
-  lost) jq -n -c --arg t "$title" '[{id: "t-lost", title: $t, status: "running"}]' > "$LOST_THREADS"
+  lost) jq -n -c --arg t "$title" '[{threadId: "t-lost", title: $t, status: "running"}]' > "$LOST_THREADS"
         printf 'connection lost\n' >&2; exit 1 ;;
 esac
 FAKEEOF
@@ -1024,7 +1064,7 @@ git clone -q "$LAUNCH_ROOT/clodex" "$LAUNCH_ROOT/canary-clone"
 git -C "$LAUNCH_ROOT/canary-clone" -c user.name=t -c user.email=t@t commit -q --allow-empty -m tested
 
 MARKER="PROMPT-MUST-SURVIVE"
-T3CLI_BIN="$FAKET3"
+T3_BIN="$FAKET3"
 CLODEX_WORKING_COPY="$LAUNCH_ROOT/clodex"
 REPO_DIR="$LAUNCH_ROOT/canary-clone"
 MAIN_SHA="$(git -C "$REPO_DIR" rev-parse HEAD)"
@@ -1043,44 +1083,45 @@ launch_check() { # launch_check <label> <0-if-it-held>
   else fail=$((fail + 1)); printf 'FAIL %s\n' "$1"; fi
 }
 argv_pair() { grep -A1 -x -- "$1" "$ARGV_LOG" 2>/dev/null | sed -n 2p; }
+has_branch() { git -C "$CLODEX_WORKING_COPY" show-ref --verify --quiet "refs/heads/$1"; }
 
-WT="$LAUNCH_ROOT/clodex-canary-9.9.9"
-# What a human last fetched in the working copy is theirs; creating the worktree must not move it.
-git -C "$CLODEX_WORKING_COPY" fetch -q "$REPO_DIR" HEAD:refs/heads/human-topic 2>/dev/null || true
+WT="$FAKE_T3_WORKTREES/fix/patch-cc-9.9.9"
+# What a human last fetched in the working copy is theirs; fetching the tested commit must not move it.
 git -C "$CLODEX_WORKING_COPY" fetch -q "$CLODEX_WORKING_COPY" HEAD
 HUMAN_FETCH_HEAD="$(git -C "$CLODEX_WORKING_COPY" rev-parse FETCH_HEAD)"
-set +e
-launch_investigation 9.9.9 "some reason" "$TMP/x.log" >/dev/null 2>&1; LAUNCH_RC=$?
-set -e
+if launch_investigation 9.9.9 "some reason" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
 launch_check "a clean launch reports success" "$LAUNCH_RC"
-[ "$(cat "$STDIN_LOG" 2>/dev/null)" = "$MARKER" ] && r=0 || r=1; launch_check "the prompt reaches t3cli intact on stdin" "$r"
-grep -qx -- --stdin "$ARGV_LOG" && r=0 || r=1; launch_check "t3cli is told to read the prompt from stdin" "$r"
-[ "$(argv_pair --project)" = "$CLODEX_WORKING_COPY" ] && r=0 || r=1; launch_check "the thread is started in the clodex project" "$r"
-[ "$(argv_pair --worktree)" = "$WT" ] && r=0 || r=1; launch_check "the thread is bound to the investigation worktree" "$r"
-[ "$(git -C "$WT" rev-parse HEAD 2>/dev/null)" = "$MAIN_SHA" ] && r=0 || r=1
-launch_check "the worktree is at the exact commit the canary tested" "$r"
-[ "$(git -C "$WT" branch --show-current 2>/dev/null)" = "fix/patch-cc-9.9.9" ] && r=0 || r=1
+[ "$(cat "$STDIN_LOG" 2>/dev/null)" = "$MARKER" ] && r=0 || r=1; launch_check "the prompt reaches t3 intact on stdin" "$r"
+[ "$(sed -n 1,4p "$ARGV_LOG" | paste -sd' ' -)" = "thread start $CLODEX_WORKING_COPY -" ] && r=0 || r=1
+launch_check "the thread is started in the clodex project, reading its prompt from stdin" "$r"
+[ "$(argv_pair --worktree)" = "$MAIN_SHA" ] && r=0 || r=1
+launch_check "the worktree is branched from the exact commit the canary tested" "$r"
+[ "$(argv_pair --branch)" = "fix/patch-cc-9.9.9" ] && r=0 || r=1
 launch_check "the worktree is on its own fix branch" "$r"
+[ "$(argv_pair --provider)" = claudeAgent ] && [ "$(argv_pair --model)" = claude-opus-5-5 ] &&
+  [ "$(argv_pair --option)" = effort=high ] && grep -qx -- --json "$ARGV_LOG" && r=0 || r=1
+launch_check "the thread runs claude-opus-5-5 at high effort and reports as JSON" "$r"
+[ "$(git -C "$WT" rev-parse HEAD 2>/dev/null)" = "$MAIN_SHA" ] && r=0 || r=1
+launch_check "the tested commit reaches the working copy before the thread starts" "$r"
 [ "$(git -C "$CLODEX_WORKING_COPY" rev-parse FETCH_HEAD)" = "$HUMAN_FETCH_HEAD" ] && r=0 || r=1
-launch_check "creating the worktree leaves the working copy's FETCH_HEAD alone" "$r"
-[ "$THREAD_ID" = "t-123" ] && grep -q -- '--arg i t-123' "$STATE_LOG" && grep -q -- "--arg w $WT" "$STATE_LOG" && r=0 || r=1
-launch_check "the thread id and worktree are recorded as in flight" "$r"
+launch_check "fetching the tested commit leaves the working copy's FETCH_HEAD alone" "$r"
+[ "$THREAD_ID" = "t-123" ] && grep -q -- '--arg i t-123' "$STATE_LOG" &&
+  grep -q -- "--arg b fix/patch-cc-9.9.9" "$STATE_LOG" && r=0 || r=1
+launch_check "the thread id and branch are recorded as in flight" "$r"
 
-# The same release failing again after a re-triage finds its first investigation's names taken.
-set +e
-launch_investigation 9.9.9 "again" "$TMP/x.log" >/dev/null 2>&1; LAUNCH_RC=$?
-set -e
-WT2="$(argv_pair --worktree)"
-[ "$LAUNCH_RC" -eq 0 ] && [ "${WT2#"$WT"-}" != "$WT2" ] && [ -d "$WT2" ] &&
-  [ "$(git -C "$WT2" branch --show-current)" = "fix/patch-cc-9.9.9${WT2#"$WT"}" ] && r=0 || r=1
-launch_check "a second investigation of one release gets a worktree and branch of its own" "$r"
+# The same release failing again after a re-triage finds its first investigation's branch taken.
+if launch_investigation 9.9.9 "again" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
+B2="$(argv_pair --branch || true)"
+[ "$LAUNCH_RC" -eq 0 ] && [ "${B2#fix/patch-cc-9.9.9-}" != "$B2" ] &&
+  [ "$(git -C "$FAKE_T3_WORKTREES/$B2" branch --show-current 2>/dev/null)" = "$B2" ] && r=0 || r=1
+launch_check "a second investigation of one release gets a branch of its own" "$r"
 
-# An empty prompt must be refused outright, before any worktree or thread exists.
+# An empty prompt must be refused outright, before any branch or thread exists.
 investigation_prompt() { printf '   \n'; }
 LAST_SLACK=""; rm -f "$ARGV_LOG"
 if launch_investigation 9.9.8 "r" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
 [ "$LAUNCH_RC" -eq 1 ] && case "$LAST_SLACK" in *EMPTY*) true ;; *) false ;; esac &&
-  [ ! -e "$ARGV_LOG" ] && [ ! -e "$LAUNCH_ROOT/clodex-canary-9.9.8" ] && r=0 || r=1
+  [ ! -e "$ARGV_LOG" ] && ! has_branch fix/patch-cc-9.9.8 && r=0 || r=1
 launch_check "an empty prompt is refused and reported, and nothing is created" "$r"
 investigation_prompt() { printf '%s\n' "$MARKER"; }
 
@@ -1090,12 +1131,12 @@ if FAKE_T3_MODE=fail launch_investigation 9.9.7 "r" "$TMP/x.log" >/dev/null 2>&1
 [ "$LAUNCH_RC" -eq 1 ] && [ "$LAUNCH_OUTCOME" = uncertain ] &&
   grep -q '^.uncertainLaunch = ' "$STATE_LOG" && grep -q -- "--arg s $WORK " "$STATE_LOG" &&
   ! grep -q '^.inflight = ' "$STATE_LOG" &&
-  case "$LAST_SLACK" in *"t3cli start exit 1"*"could not be asked"*) true ;; *) false ;; esac && r=0 || r=1
+  case "$LAST_SLACK" in *"t3 thread start exit 1"*"could not be asked"*) true ;; *) false ;; esac && r=0 || r=1
 launch_check "a failed start T3 Code cannot be asked about is marked uncertain, not in flight" "$r"
 LAST_SLACK=""; rm -f "$STATE_LOG"
 if FAKE_T3_MODE=refused launch_investigation 9.9.2 "r" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
 [ "$LAUNCH_RC" -eq 1 ] && [ ! -e "$STATE_LOG" ] && [ "$LAUNCH_OUTCOME" = "not started" ] &&
-  case "$LAST_SLACK" in *"t3cli start exit 1"*) true ;; *) false ;; esac && r=0 || r=1
+  case "$LAST_SLACK" in *"t3 thread start exit 1"*) true ;; *) false ;; esac && r=0 || r=1
 launch_check "a failed start with no thread to show for it is reported as not started" "$r"
 LAST_SLACK=""
 if FAKE_T3_MODE=noid launch_investigation 9.9.6 "r" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
@@ -1110,18 +1151,18 @@ rm -f "$LOST_THREADS"
 [ "$LAUNCH_RC" -eq 0 ] && [ "$THREAD_ID" = "t-lost" ] && grep -q -- '--arg i t-lost' "$STATE_LOG" && r=0 || r=1
 launch_check "a thread whose start reply was lost is found by its title and tracked" "$r"
 
-# A worktree that cannot be made (here: the tested commit is not in the canary clone) is reported,
-# and no thread is started without one.
+# A tested commit that cannot be fetched (here: it is not in the canary clone) is reported, and no
+# thread is started without it.
 LAST_SLACK=""; rm -f "$ARGV_LOG" "$STATE_LOG"
 REAL_MAIN_SHA="$MAIN_SHA"; MAIN_SHA=0123456789abcdef0123456789abcdef01234567
 if launch_investigation 9.9.4 "r" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
 MAIN_SHA="$REAL_MAIN_SHA"
 [ "$LAUNCH_RC" -eq 1 ] && [ ! -e "$ARGV_LOG" ] && [ ! -e "$STATE_LOG" ] &&
-  case "$LAST_SLACK" in *"creating the worktree"*) true ;; *) false ;; esac && r=0 || r=1
-launch_check "a worktree that cannot be created is reported and no thread is started" "$r"
+  case "$LAST_SLACK" in *"fetching the tested commit"*) true ;; *) false ;; esac && r=0 || r=1
+launch_check "a tested commit that cannot be fetched is reported and no thread is started" "$r"
 
 # An earlier launch nobody could confirm blocks the next one until T3 Code can say what happened.
-PENDING='{"uncertainLaunch":{"version":"9.9.0","threadTitle":"clodex-patch-canary 9.9.0 202610300000","worktree":"/w","branch":"b"}}'
+PENDING='{"uncertainLaunch":{"version":"9.9.0","threadTitle":"clodex-patch-canary 9.9.0 202610300000","branch":"b"}}'
 pending_case() { # pending_case <label> <fake-mode> <list-json-or-empty> <want-rc> <want-start yes|no> <state-update-pattern-or-NONE>
   local rc started=no
   rm -f "$ARGV_LOG" "$STATE_LOG"
@@ -1137,10 +1178,10 @@ pending_case() { # pending_case <label> <fake-mode> <list-json-or-empty> <want-r
 }
 pending_case "an unconfirmed launch blocks the next while T3 Code still cannot be asked" fail "" 1 no NONE
 pending_case "an unconfirmed launch that did start and still runs is adopted, not duplicated" ok \
-  '[{"id":"t-was-lost","title":"clodex-patch-canary 9.9.0 202610300000","status":"running"}]' 1 no \
+  '[{"threadId":"t-was-lost","title":"clodex-patch-canary 9.9.0 202610300000","status":"running"}]' 1 no \
   '^.inflight = (.uncertainLaunch + {threadId: $i}) | del(.uncertainLaunch) --arg i t-was-lost$'
 pending_case "an unconfirmed launch that is already over is cleared and the next goes ahead" ok \
-  '[{"id":"t-was-lost","title":"clodex-patch-canary 9.9.0 202610300000","status":"completed"}]' 0 yes \
+  '[{"threadId":"t-was-lost","title":"clodex-patch-canary 9.9.0 202610300000","status":"completed"}]' 0 yes \
   '^del(.uncertainLaunch)$'
 pending_case "an unconfirmed launch that never happened is cleared and the next goes ahead" ok '[]' 0 yes \
   '^del(.uncertainLaunch)$'
@@ -1149,7 +1190,7 @@ pending_case "an unconfirmed launch that never happened is cleared and the next 
 state_read() { printf '{"inflight":{"version":"1.0.0","threadId":"t-0"}}\n'; }
 rm -f "$ARGV_LOG"
 if launch_investigation 9.9.5 "r" "$TMP/x.log" >/dev/null 2>&1; then LAUNCH_RC=0; else LAUNCH_RC=1; fi
-[ "$LAUNCH_RC" -eq 1 ] && [ ! -e "$ARGV_LOG" ] && [ ! -e "$LAUNCH_ROOT/clodex-canary-9.9.5" ] && r=0 || r=1
+[ "$LAUNCH_RC" -eq 1 ] && [ ! -e "$ARGV_LOG" ] && ! has_branch fix/patch-cc-9.9.5 && r=0 || r=1
 launch_check "a tracked investigation blocks a second launch" "$r"
 state_read() { printf '{}\n'; }
 
@@ -1541,7 +1582,7 @@ cat > "$MAINFLOW" <<'MAINEOF'
 set -Eeuo pipefail
 ROOT="$1" TARGET="$2"; shift 2
 export CANARY_STATE_DIR="$ROOT/state" CANARY_CACHE_DIR="$ROOT/cache"
-export CLODEX_WORKING_COPY="$ROOT/wc" T3CLI_BIN="$ROOT/t3cli" PROBE_ROOT="$ROOT"
+export CLODEX_WORKING_COPY="$ROOT/wc" T3_BIN="$ROOT/t3" PROBE_ROOT="$ROOT"
 CANARY_SOURCE_ONLY=1 . "$TARGET"
 unset CANARY_SOURCE_ONLY
 REAL_CLODEX_HOME="$ROOT/no-clodex"; REAL_TWEAKCC_DIR="$ROOT/no-tweakcc"
@@ -1571,24 +1612,21 @@ run_platform_matrix() {
 }
 write_repro_script() { :; }
 investigation_prompt() { printf 'fixture investigation prompt\n'; }
-create_investigation_worktree() { mkdir -p "$INVESTIGATION_WORKTREE"; }
+fetch_tested_commit() { :; }
 announce_verdict() { printf 'ANNOUNCE\n' >> "$ROOT/calls.log"; printf '%s\n' "${NEXT_STEP:-}" > "$ROOT/next-step.txt"; }
 curl() { printf 'CURL\n' >> "$ROOT/calls.log"; printf '%s\n' "${MF_PRS:-[]}"; }
-cat > "$T3CLI_BIN" <<'FAKE'
+cat > "$T3_BIN" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "$1" >> "$PROBE_ROOT/t3calls.log"
-case "$1" in
+[ "$1" = thread ] || exit 1
+printf '%s\n' "$2" >> "$PROBE_ROOT/t3calls.log"
+case "$2" in
   list) [ "${MF_LIST_FAIL:-0}" != 1 ] || exit 1; cat "$PROBE_ROOT/threads.json" ;;
-  thread)
-    [ "${MF_INTERRUPT_FAIL:-0}" != 1 ] || exit 1
-    jq 'map(.status = "interrupted")' "$PROBE_ROOT/threads.json" > "$PROBE_ROOT/threads.tmp"
-    mv "$PROBE_ROOT/threads.tmp" "$PROBE_ROOT/threads.json" ;;
   start)
     cat > /dev/null
     title=""; while [ $# -gt 0 ]; do [ "$1" != --title ] || title="$2"; shift; done
     id="new-$(jq length "$PROBE_ROOT/threads.json")"
-    jq --arg id "$id" --arg t "$title" '. + [{id: $id, title: $t, status: "running"}]' \
+    jq --arg id "$id" --arg t "$title" '[{threadId: $id, title: $t, status: "running"}] + .' \
       "$PROBE_ROOT/threads.json" > "$PROBE_ROOT/threads.tmp"
     mv "$PROBE_ROOT/threads.tmp" "$PROBE_ROOT/threads.json"
     [ "${MF_START_LOST:-0}" != 1 ] || exit 1   # created, but the reply never arrives
@@ -1596,7 +1634,7 @@ case "$1" in
   *) exit 1 ;;
 esac
 FAKE
-chmod +x "$T3CLI_BIN"
+chmod +x "$T3_BIN"
 . <(sed -n '/^while \[ \$# -gt 0 \]; do/,$p' "$TARGET")
 MAINEOF
 
@@ -1635,12 +1673,12 @@ STUCK_STATE="$(jq -n -c --argjson e "$((NOW_EPOCH - 25 * 3600))" \
   '{versions: {"9.9.8": {status: "fail", at: "2026-10-29T10:00:00Z", atEpoch: 1}},
     baseline: null, deferred: {}, pending: {},
     inflight: {version: "9.9.8", threadTitle: "old investigation", threadId: "old", startedEpoch: $e}}')"
-MF_VERSION=9.9.9 MF_VERDICT=fail MF_INTERRUPT_FAIL=1 \
-  mf_run stuck "$STUCK_STATE" '[{"id":"old","status":"running"}]'
+MF_VERSION=9.9.9 MF_VERDICT=fail \
+  mf_run stuck "$STUCK_STATE" '[{"threadId":"old","status":"running"}]'
 [ "$MF_RC" -eq 0 ] && [ "$(mf_state '.inflight.threadId')" = old ] && ! grep -qx start "$MF_ROOT/t3calls.log" &&
-  grep -q 'stopping it could not be confirmed' "$MF_ROOT/slack.log" &&
+  grep -q 'the canary cannot stop it itself' "$MF_ROOT/slack.log" &&
   [ "$(mf_state '.versions["9.9.9"].status')" = fail ] && r=0 || r=1
-mf_check "a 24h investigation that cannot be stopped stays recorded and blocks a second one" "$r"
+mf_check "a 24h investigation stays recorded, asks to be stopped, and blocks a second one" "$r"
 [ "$(mf_state '.versions["9.9.9"].investigation')" = suppressed ] &&
   [ "$(mf_state '.versions["9.9.9"].investigationHeldBy')" = 9.9.8 ] &&
   grep -q 'No second investigation was started' "$MF_ROOT/next-step.txt" &&
@@ -1663,12 +1701,17 @@ for n in 0 1 2 3 4 5; do mkdir "$SWEEP/cache/work.$n"; touch -t "20261030000$n" 
   [ ! -e "$SWEEP/cache/work.3" ] && [ -d "$SWEEP/cache/work.4" ] && [ -d "$SWEEP/cache/work.5" ] && r=0 || r=1
 mf_check "the sandbox sweep keeps the in-flight and the unconfirmed investigation's evidence" "$r"
 
+# Once a human acts on that warning — stopping the thread, or archiving it so `t3` no longer lists
+# it — the next run releases the record and a new failure gets its own investigation.
 MF_VERSION=9.9.9 MF_VERDICT=fail \
-  mf_run stopped "$STUCK_STATE" '[{"id":"old","status":"running"}]'
-[ "$MF_RC" -eq 0 ] && grep -qx thread "$MF_ROOT/t3calls.log" && grep -qx start "$MF_ROOT/t3calls.log" &&
-  [ "$(mf_state '.inflight.version')" = 9.9.9 ] && [ "$(mf_state '.inflight.threadId')" != old ] &&
-  [ "$(jq -r '.[] | select(.id == "old") | .status' "$MF_ROOT/threads.json")" = interrupted ] && r=0 || r=1
-mf_check "a 24h investigation confirmed stopped makes way for the next one" "$r"
+  mf_run stopped "$STUCK_STATE" '[{"threadId":"old","status":"interrupted"}]'
+[ "$MF_RC" -eq 0 ] && grep -qx start "$MF_ROOT/t3calls.log" &&
+  [ "$(mf_state '.inflight.version')" = 9.9.9 ] && [ "$(mf_state '.inflight.threadId')" != old ] && r=0 || r=1
+mf_check "a stuck investigation a human stopped makes way for the next one" "$r"
+MF_VERSION=9.9.9 MF_VERDICT=fail mf_run archived "$STUCK_STATE" '[]'
+[ "$MF_RC" -eq 0 ] && grep -qx start "$MF_ROOT/t3calls.log" &&
+  [ "$(mf_state '.inflight.version')" = 9.9.9 ] && [ "$(mf_state '.inflight.threadId')" != old ] && r=0 || r=1
+mf_check "a stuck investigation a human archived makes way for the next one" "$r"
 
 HELD_STATE="$(jq -n -c --arg sha "$TESTED_SHA" '{versions: {"9.9.9": {status: "fail", at: "2026-10-30T10:00:00Z",
                                        atEpoch: 1, clodexSha: $sha, investigation: "suppressed",
